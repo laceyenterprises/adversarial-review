@@ -2,10 +2,38 @@
   "version": 1,
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",
   "knownDeadEnds": [
-    {"state": "closer-lease.pending", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "closer-lease.dispatched", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "hammer-dispatch.dispatching", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
-    {"state": "hammer-dispatch.dispatched", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"}
+    {
+      "state": "closer-lease.pending",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "closer-lease.dispatched",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "hammer-dispatch.dispatching",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    },
+    {
+      "state": "hammer-dispatch.dispatched",
+      "condition": "Malformed timestamp or unreadable liveness/ownership evidence",
+      "proposedExitOwner": "watcher / closer operator",
+      "proposedMaxDurationSeconds": 1800,
+      "overdueRecipient": "adversarial-review operator",
+      "enforcement": "missing"
+    }
   ],
   "objects": [
     {
@@ -26,53 +54,317 @@
         "src/pollonce-phases.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "pending-upstream","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "reviewing","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "ci-blocked","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "posted","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "failed-orphan","terminal": true},
-        {"name": "malformed","terminal": true},
-        {"name": "unroutable-bot-author","terminal": true},
-        {"name": "argus-security-queued","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "skipped","terminal": true},
-        {"name": "fast_merge_skipped","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "pending-upstream",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "reviewing",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "ci-blocked",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "posted",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "failed-orphan",
+          "terminal": true
+        },
+        {
+          "name": "malformed",
+          "terminal": true
+        },
+        {
+          "name": "unroutable-bot-author",
+          "terminal": true
+        },
+        {
+          "name": "argus-security-queued",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "skipped",
+          "terminal": true
+        },
+        {
+          "name": "fast_merge_skipped",
+          "terminal": false,
+          "exitOwner": "watcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        }
       ],
       "transitions": [
-        {"id": "review-row.01","from": "[*]","to": "pending","trigger": "discover tagged subject","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.02","from": "[*]","to": "malformed","trigger": "title rejected","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.03","from": "[*]","to": "argus-security-queued","trigger": "route bot","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.04","from": "[*]","to": "unroutable-bot-author","trigger": "bot route disabled","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.05","from": "unroutable-bot-author","to": "argus-security-queued","trigger": "legacy bot recovery","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.06","from": "argus-security-queued","to": "argus-security-queued","trigger": "enqueue new head","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.07","from": "pending","to": "reviewing","trigger": "claim CAS (startup: recovery complete, drain inactive)","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.08","from": "pending-upstream","to": "reviewing","trigger": "claim after hold (startup: recovery complete, drain inactive)","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.09","from": "failed","to": "reviewing","trigger": "eligible retry CAS","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.10","from": "reviewing","to": "posted","trigger": "deliver review with matching session and recorded reviewed head","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.11","from": "reviewing","to": "failed","trigger": "dispatch or reviewer failure","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.12","from": "reviewing","to": "failed-orphan","trigger": "startup cannot prove recovery","codeSource": "src/watcher.mjs"},
-        {"id": "review-row.13","from": "reviewing","to": "pending","trigger": "operator reset after confirmed reviewer exit","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.14","from": "reviewing","to": "pending-upstream","trigger": "provider hold","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.15","from": "pending","to": "pending-upstream","trigger": "upstream outage","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.16","from": "pending-upstream","to": "pending","trigger": "provider recovery","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.17","from": "reviewing","to": "ci-blocked","trigger": "red CI without remediation","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.18","from": "ci-blocked","to": "pending","trigger": "confirmed current-head green CI","codeSource": "src/pollonce-phases.mjs"},
-        {"id": "review-row.19","from": "posted","to": "pending","trigger": "accepted rereview","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.20","from": "failed","to": "pending","trigger": "new head archives failure","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.21","from": "failed-orphan","to": "posted","trigger": "reconcile posted review with null-safe claim match and non-empty GitHub or stored head","codeSource": "src/orphan-post-reconcile.mjs"},
-        {"id": "review-row.22","from": "failed-orphan","to": "pending","trigger": "operator verified reset","codeSource": "src/review-state.mjs"},
-        {"id": "review-row.23","from": "posted","to": "posted","trigger": "closure maintenance","codeSource": "src/posted-review-row.mjs"},
-        {"id": "review-row.24","from": "pending","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.25","from": "pending-upstream","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.26","from": "reviewing","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.27","from": "[*]","to": "fast_merge_skipped","trigger": "authorized bypass","codeSource": "src/review-state-db.mjs"},
-        {"id": "review-row.28","from": "fast_merge_skipped","to": "pending","trigger": "authorization withdrawn or head moved","codeSource": "src/fast-merge-processing.mjs"},
-        {"id": "review-row.29","from": "reviewing","to": "pending","trigger": "stale head, missing reviewed head or lost claim match; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.30","from": "posted","to": "pending","trigger": "repair empty reviewed head at matching live revision once; no charge","codeSource": "src/posted-review-head-repair.mjs"},
-        {"id": "review-row.31","from": "failed","to": "pending","trigger": "recovered post cannot settle its reviewed head; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.32","from": "failed-orphan","to": "pending","trigger": "recovered post cannot match its claim; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.33","from": "reviewing","to": "reviewing","trigger": "defer rereview request while claim is in flight","codeSource": "src/review-state.mjs"}
+        {
+          "id": "review-row.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "discover tagged subject",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.02",
+          "from": "[*]",
+          "to": "malformed",
+          "trigger": "title rejected",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.03",
+          "from": "[*]",
+          "to": "argus-security-queued",
+          "trigger": "route bot",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.04",
+          "from": "[*]",
+          "to": "unroutable-bot-author",
+          "trigger": "bot route disabled",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.05",
+          "from": "unroutable-bot-author",
+          "to": "argus-security-queued",
+          "trigger": "legacy bot recovery",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.06",
+          "from": "argus-security-queued",
+          "to": "argus-security-queued",
+          "trigger": "enqueue new head",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.07",
+          "from": "pending",
+          "to": "reviewing",
+          "trigger": "claim CAS (startup: recovery complete, drain inactive)",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.08",
+          "from": "pending-upstream",
+          "to": "reviewing",
+          "trigger": "claim after hold (startup: recovery complete, drain inactive)",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.09",
+          "from": "failed",
+          "to": "reviewing",
+          "trigger": "eligible retry CAS",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.10",
+          "from": "reviewing",
+          "to": "posted",
+          "trigger": "deliver review with matching session and recorded reviewed head",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.11",
+          "from": "reviewing",
+          "to": "failed",
+          "trigger": "dispatch or reviewer failure",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.12",
+          "from": "reviewing",
+          "to": "failed-orphan",
+          "trigger": "startup cannot prove recovery",
+          "codeSource": "src/watcher.mjs"
+        },
+        {
+          "id": "review-row.13",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "operator reset after confirmed reviewer exit",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.14",
+          "from": "reviewing",
+          "to": "pending-upstream",
+          "trigger": "provider hold",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.15",
+          "from": "pending",
+          "to": "pending-upstream",
+          "trigger": "upstream outage",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.16",
+          "from": "pending-upstream",
+          "to": "pending",
+          "trigger": "provider recovery",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.17",
+          "from": "reviewing",
+          "to": "ci-blocked",
+          "trigger": "red CI without remediation",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.18",
+          "from": "ci-blocked",
+          "to": "pending",
+          "trigger": "confirmed current-head green CI",
+          "codeSource": "src/pollonce-phases.mjs"
+        },
+        {
+          "id": "review-row.19",
+          "from": "posted",
+          "to": "pending",
+          "trigger": "accepted rereview",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.20",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "new head archives failure",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.21",
+          "from": "failed-orphan",
+          "to": "posted",
+          "trigger": "reconcile posted review with null-safe claim match and non-empty GitHub or stored head",
+          "codeSource": "src/orphan-post-reconcile.mjs"
+        },
+        {
+          "id": "review-row.22",
+          "from": "failed-orphan",
+          "to": "pending",
+          "trigger": "operator verified reset",
+          "codeSource": "src/review-state.mjs"
+        },
+        {
+          "id": "review-row.23",
+          "from": "posted",
+          "to": "posted",
+          "trigger": "closure maintenance",
+          "codeSource": "src/posted-review-row.mjs"
+        },
+        {
+          "id": "review-row.24",
+          "from": "pending",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.25",
+          "from": "pending-upstream",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.26",
+          "from": "reviewing",
+          "to": "skipped",
+          "trigger": "PR already merged",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.27",
+          "from": "[*]",
+          "to": "fast_merge_skipped",
+          "trigger": "authorized bypass",
+          "codeSource": "src/review-state-db.mjs"
+        },
+        {
+          "id": "review-row.28",
+          "from": "fast_merge_skipped",
+          "to": "pending",
+          "trigger": "authorization withdrawn or head moved",
+          "codeSource": "src/fast-merge-processing.mjs"
+        },
+        {
+          "id": "review-row.29",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "stale head, missing reviewed head or lost claim match; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.30",
+          "from": "posted",
+          "to": "pending",
+          "trigger": "repair empty reviewed head at matching live revision once; no charge",
+          "codeSource": "src/posted-review-head-repair.mjs"
+        },
+        {
+          "id": "review-row.31",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "recovered post cannot settle its reviewed head; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.32",
+          "from": "failed-orphan",
+          "to": "pending",
+          "trigger": "recovered post cannot match its claim; no charge",
+          "codeSource": "src/review-state-statements.mjs"
+        },
+        {
+          "id": "review-row.33",
+          "from": "reviewing",
+          "to": "reviewing",
+          "trigger": "defer rereview request while claim is in flight",
+          "codeSource": "src/review-state.mjs"
+        }
       ]
     },
     {
@@ -83,31 +375,161 @@
         "src/follow-up-remediation.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "follow-up daemon","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "in_progress","terminal": false,"exitOwner": "follow-up daemon","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "completed","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "stopped","terminal": true},
-        {"name": "cancelled","terminal": true}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "follow-up daemon",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "in_progress",
+          "terminal": false,
+          "exitOwner": "follow-up daemon",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "stopped",
+          "terminal": true
+        },
+        {
+          "name": "cancelled",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "follow-up-job.01","from": "[*]","to": "pending","trigger": "create from delivered review","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.02","from": "pending","to": "in_progress","trigger": "claim and start round","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "clean or exhausted rounds","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.04","from": "pending","to": "failed","trigger": "claim failure","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.05","from": "pending","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.06","from": "in_progress","to": "completed","trigger": "validated worker reply","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.07","from": "in_progress","to": "failed","trigger": "worker failure","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.08","from": "in_progress","to": "stopped","trigger": "lifecycle or budget stop","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.09","from": "in_progress","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.10","from": "in_progress","to": "pending","trigger": "transient retry","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.16","from": "in_progress","to": "stopped","trigger": "operator-only findings after lifecycle admission: hold without spawning","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.17","from": "in_progress","to": "failed","trigger": "exited worker has a matching preservation-refusal sidecar","codeSource": "src/follow-up-remediation.mjs"}
+        {
+          "id": "follow-up-job.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "create from delivered review",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.02",
+          "from": "pending",
+          "to": "in_progress",
+          "trigger": "claim and start round",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.03",
+          "from": "pending",
+          "to": "stopped",
+          "trigger": "clean or exhausted rounds",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.04",
+          "from": "pending",
+          "to": "failed",
+          "trigger": "claim failure",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.05",
+          "from": "pending",
+          "to": "cancelled",
+          "trigger": "operator cancellation",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.06",
+          "from": "in_progress",
+          "to": "completed",
+          "trigger": "validated worker reply",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.07",
+          "from": "in_progress",
+          "to": "failed",
+          "trigger": "worker failure",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.08",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "lifecycle or budget stop",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.09",
+          "from": "in_progress",
+          "to": "cancelled",
+          "trigger": "operator cancellation",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.10",
+          "from": "in_progress",
+          "to": "pending",
+          "trigger": "transient retry",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.11",
+          "from": "completed",
+          "to": "pending",
+          "trigger": "next round",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.12",
+          "from": "failed",
+          "to": "pending",
+          "trigger": "explicit retrigger",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.13",
+          "from": "stopped",
+          "to": "pending",
+          "trigger": "allowlisted explicit retrigger",
+          "codeSource": "src/follow-up-jobs.mjs"
+        },
+        {
+          "id": "follow-up-job.14",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.15",
+          "from": "in_progress",
+          "to": "pending",
+          "trigger": "base evidence unreadable: budget-neutral delayed recheck",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.16",
+          "from": "in_progress",
+          "to": "stopped",
+          "trigger": "operator-only findings after lifecycle admission: hold without spawning",
+          "codeSource": "src/follow-up-remediation.mjs"
+        },
+        {
+          "id": "follow-up-job.17",
+          "from": "in_progress",
+          "to": "failed",
+          "trigger": "exited worker has a matching preservation-refusal sidecar",
+          "codeSource": "src/follow-up-remediation.mjs"
+        }
       ]
     },
     {
@@ -123,30 +545,159 @@
         "src/adapters/reviewer-runtime/fixture-stub/index.mjs"
       ],
       "states": [
-        {"name": "launching","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "spawned","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "heartbeating","terminal": false,"exitOwner": "reviewer runtime","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "completed","terminal": true},
-        {"name": "failed","terminal": true},
-        {"name": "cancelled","terminal": true}
+        {
+          "name": "launching",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "spawned",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "heartbeating",
+          "terminal": false,
+          "exitOwner": "reviewer runtime",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        },
+        {
+          "name": "failed",
+          "terminal": true
+        },
+        {
+          "name": "cancelled",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "reviewer-run.01","from": "[*]","to": "launching","trigger": "claim launch intent","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.02","from": "[*]","to": "spawned","trigger": "legacy record default","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.03","from": "[*]","to": "heartbeating","trigger": "adopt existing runtime","codeSource": "src/adapters/reviewer-runtime/agent-os-hq/index.mjs"},
-        {"id": "reviewer-run.04","from": "launching","to": "heartbeating","trigger": "PGID captured","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.05","from": "spawned","to": "heartbeating","trigger": "heartbeat","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.06","from": "heartbeating","to": "heartbeating","trigger": "heartbeat","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"},
-        {"id": "reviewer-run.07","from": "launching","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.08","from": "launching","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.09","from": "launching","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.10","from": "spawned","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.11","from": "spawned","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.12","from": "spawned","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.13","from": "heartbeating","to": "completed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.14","from": "heartbeating","to": "failed","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.15","from": "heartbeating","to": "cancelled","trigger": "settle subprocess","codeSource": "src/adapters/reviewer-runtime/run-state.mjs"},
-        {"id": "reviewer-run.16","from": "cancelled","to": "heartbeating","trigger": "recover adopted PGID","codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"}
+        {
+          "id": "reviewer-run.01",
+          "from": "[*]",
+          "to": "launching",
+          "trigger": "claim launch intent",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.02",
+          "from": "[*]",
+          "to": "spawned",
+          "trigger": "legacy record default",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.03",
+          "from": "[*]",
+          "to": "heartbeating",
+          "trigger": "adopt existing runtime",
+          "codeSource": "src/adapters/reviewer-runtime/agent-os-hq/index.mjs"
+        },
+        {
+          "id": "reviewer-run.04",
+          "from": "launching",
+          "to": "heartbeating",
+          "trigger": "PGID captured",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.05",
+          "from": "spawned",
+          "to": "heartbeating",
+          "trigger": "heartbeat",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.06",
+          "from": "heartbeating",
+          "to": "heartbeating",
+          "trigger": "heartbeat",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        },
+        {
+          "id": "reviewer-run.07",
+          "from": "launching",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.08",
+          "from": "launching",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.09",
+          "from": "launching",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.10",
+          "from": "spawned",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.11",
+          "from": "spawned",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.12",
+          "from": "spawned",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.13",
+          "from": "heartbeating",
+          "to": "completed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.14",
+          "from": "heartbeating",
+          "to": "failed",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.15",
+          "from": "heartbeating",
+          "to": "cancelled",
+          "trigger": "settle subprocess",
+          "codeSource": "src/adapters/reviewer-runtime/run-state.mjs"
+        },
+        {
+          "id": "reviewer-run.16",
+          "from": "cancelled",
+          "to": "heartbeating",
+          "trigger": "recover adopted PGID",
+          "codeSource": "src/adapters/reviewer-runtime/cli-direct/index.mjs"
+        }
       ]
     },
     {
@@ -156,22 +707,107 @@
         "src/ama/closer-lease.mjs"
       ],
       "states": [
-        {"name": "pending","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatched","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "handed-to-review","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
-        {"name": "terminal","terminal": true}
+        {
+          "name": "pending",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 1831.5,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "dispatched",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "handed-to-review",
+          "terminal": false,
+          "exitOwner": "watcher / closer",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."
+        },
+        {
+          "name": "terminal",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "closer-lease.01","from": "[*]","to": "pending","trigger": "exclusive acquisition","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.02","from": "pending","to": "dispatched","trigger": "launch receipt","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.03","from": "pending","to": "terminal","trigger": "terminal observed before launch","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.04","from": "dispatched","to": "terminal","trigger": "terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.05","from": "pending","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.06","from": "dispatched","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.07","from": "handed-to-review","to": "pending","trigger": "review completed; locked reclaim","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.08","from": "handed-to-review","to": "terminal","trigger": "external terminal outcome","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.09","from": "pending","to": "[*]","trigger": "expired pending lease reclaimed","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.10","from": "dispatched","to": "[*]","trigger": "expired dispatched lease reconciled","codeSource": "src/ama/closer-lease.mjs"}
+        {
+          "id": "closer-lease.01",
+          "from": "[*]",
+          "to": "pending",
+          "trigger": "exclusive acquisition",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.02",
+          "from": "pending",
+          "to": "dispatched",
+          "trigger": "launch receipt",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.03",
+          "from": "pending",
+          "to": "terminal",
+          "trigger": "terminal observed before launch",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.04",
+          "from": "dispatched",
+          "to": "terminal",
+          "trigger": "terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.05",
+          "from": "pending",
+          "to": "handed-to-review",
+          "trigger": "bounded review request accepted",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.06",
+          "from": "dispatched",
+          "to": "handed-to-review",
+          "trigger": "bounded review request accepted",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.07",
+          "from": "handed-to-review",
+          "to": "pending",
+          "trigger": "review completed; locked reclaim",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.08",
+          "from": "handed-to-review",
+          "to": "terminal",
+          "trigger": "external terminal outcome",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.09",
+          "from": "pending",
+          "to": "[*]",
+          "trigger": "expired pending lease reclaimed",
+          "codeSource": "src/ama/closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.10",
+          "from": "dispatched",
+          "to": "[*]",
+          "trigger": "expired dispatched lease reconciled",
+          "codeSource": "src/ama/closer-lease.mjs"
+        }
       ]
     },
     {
@@ -182,27 +818,118 @@
         "src/ama-closure-orchestration.mjs"
       ],
       "states": [
-        {"name": "close","terminal": true},
-        {"name": "page","terminal": true},
-        {"name": "wait","terminal": false,"exitOwner": "closure orchestrator","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "hammer","terminal": true},
-        {"name": "review","terminal": true},
-        {"name": "remediation","terminal": true},
-        {"name": "follow-up-drain","terminal": true},
-        {"name": "conflict-rebase","terminal": true},
-        {"name": "daemon-merge","terminal": true}
+        {
+          "name": "close",
+          "terminal": true
+        },
+        {
+          "name": "page",
+          "terminal": true
+        },
+        {
+          "name": "wait",
+          "terminal": false,
+          "exitOwner": "closure orchestrator",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "hammer",
+          "terminal": true
+        },
+        {
+          "name": "review",
+          "terminal": true
+        },
+        {
+          "name": "remediation",
+          "terminal": true
+        },
+        {
+          "name": "follow-up-drain",
+          "terminal": true
+        },
+        {
+          "name": "conflict-rebase",
+          "terminal": true
+        },
+        {
+          "name": "daemon-merge",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "closure-owner.01","from": "[*]","to": "close","trigger": "recompute ownership: close","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.02","from": "[*]","to": "page","trigger": "recompute ownership: page","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.03","from": "[*]","to": "wait","trigger": "recompute ownership: wait","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "recompute ownership: review","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.06","from": "[*]","to": "remediation","trigger": "recompute ownership: remediation","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.07","from": "[*]","to": "follow-up-drain","trigger": "recompute ownership: follow-up-drain","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.08","from": "[*]","to": "conflict-rebase","trigger": "recompute ownership: conflict-rebase","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.09","from": "[*]","to": "daemon-merge","trigger": "recompute ownership: daemon-merge","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.10","from": "wait","to": "[*]","trigger": "next bounded observation","codeSource": "src/ama/closure-owner.mjs"}
+        {
+          "id": "closure-owner.01",
+          "from": "[*]",
+          "to": "close",
+          "trigger": "recompute ownership: close",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.02",
+          "from": "[*]",
+          "to": "page",
+          "trigger": "recompute ownership: page",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.03",
+          "from": "[*]",
+          "to": "wait",
+          "trigger": "recompute ownership: wait",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.04",
+          "from": "[*]",
+          "to": "hammer",
+          "trigger": "recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.05",
+          "from": "[*]",
+          "to": "review",
+          "trigger": "recompute ownership: review",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.06",
+          "from": "[*]",
+          "to": "remediation",
+          "trigger": "recompute ownership: remediation",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.07",
+          "from": "[*]",
+          "to": "follow-up-drain",
+          "trigger": "recompute ownership: follow-up-drain",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.08",
+          "from": "[*]",
+          "to": "conflict-rebase",
+          "trigger": "recompute ownership: conflict-rebase",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.09",
+          "from": "[*]",
+          "to": "daemon-merge",
+          "trigger": "recompute ownership: daemon-merge",
+          "codeSource": "src/ama/closure-owner.mjs"
+        },
+        {
+          "id": "closure-owner.10",
+          "from": "wait",
+          "to": "[*]",
+          "trigger": "next bounded observation",
+          "codeSource": "src/ama/closure-owner.mjs"
+        }
       ]
     },
     {
@@ -214,46 +941,263 @@
         "src/ama-closure-orchestration.mjs"
       ],
       "states": [
-        {"name": "dispatching","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatched","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "launch-terminal","terminal": true},
-        {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher or watcher lane","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatch-deferred-transient","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Retries preserve budget; repeated transport failure has no unconditional elapsed-time exit."},
-        {"name": "dispatch-blocked-branch-holder","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."},
-        {"name": "dispatch-branch-holder-block-exhausted","terminal": true},
-        {"name": "dispatch-failed","terminal": true},
-        {"name": "dispatch-configuration-refused","terminal": true},
-        {"name": "no-dispatch","terminal": true},
-        {"name": "completed","terminal": true}
+        {
+          "name": "dispatching",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1831.5,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "dispatched",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "launch-terminal",
+          "terminal": true
+        },
+        {
+          "name": "deferred-by-drain",
+          "terminal": false,
+          "exitOwner": "closer dispatcher or watcher lane",
+          "maxDurationSeconds": 300,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
+        },
+        {
+          "name": "dispatch-deferred-transient",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Retries preserve budget; repeated transport failure has no unconditional elapsed-time exit."
+        },
+        {
+          "name": "dispatch-blocked-branch-holder",
+          "terminal": false,
+          "exitOwner": "closer dispatcher",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "missing",
+          "deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."
+        },
+        {
+          "name": "dispatch-branch-holder-block-exhausted",
+          "terminal": true
+        },
+        {
+          "name": "dispatch-failed",
+          "terminal": true
+        },
+        {
+          "name": "dispatch-configuration-refused",
+          "terminal": true
+        },
+        {
+          "name": "no-dispatch",
+          "terminal": true
+        },
+        {
+          "name": "completed",
+          "terminal": true
+        }
       ],
       "transitions": [
-        {"id": "hammer-dispatch.24","from": "dispatching","to": "deferred-by-drain","trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.25","from": "deferred-by-drain","to": "no-dispatch","trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.27","from": "dispatch-deferred-transient","to": "no-dispatch","trigger": "retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.26","from": "deferred-by-drain","to": "deferred-by-drain","trigger": "active drain status keeps deferral without attempt or no-progress charge","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.01","from": "[*]","to": "dispatching","trigger": "persist launch intent","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.02","from": "dispatching","to": "dispatched","trigger": "launch result: dispatched","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.03","from": "dispatching","to": "dispatch-deferred-transient","trigger": "launch result: dispatch-deferred-transient","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.04","from": "dispatching","to": "dispatch-blocked-branch-holder","trigger": "launch result: dispatch-blocked-branch-holder","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.05","from": "dispatching","to": "dispatch-branch-holder-block-exhausted","trigger": "launch result: dispatch-branch-holder-block-exhausted","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.06","from": "dispatching","to": "dispatch-failed","trigger": "launch failure or settled unlaunched closer refusal with matching reclaimable pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.07","from": "dispatching","to": "no-dispatch","trigger": "launch result: no-dispatch","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.08","from": "dispatching","to": "completed","trigger": "launch result: completed","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.10","from": "dispatched","to": "dispatch-failed","trigger": "failed outcome reconciled","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.11","from": "launch-terminal","to": "dispatching","trigger": "bounded same-head no-merge retry or changed context; merged success stays sticky","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.12","from": "dispatch-deferred-transient","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.13","from": "dispatch-blocked-branch-holder","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.14","from": "dispatch-failed","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.15","from": "no-dispatch","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.16","from": "dispatched","to": "no-dispatch","trigger": "foreign ticket retires mistaken ownership and charge","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.17","from": "launch-terminal","to": "no-dispatch","trigger": "foreign ticket corrects terminal launch attribution","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.18","from": "dispatching","to": "dispatch-configuration-refused","trigger": "repo_unregistered: release pending lease and page repository once","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.19","from": "dispatch-deferred-transient","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.20","from": "dispatch-failed","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due, re-probe dispatch, admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.22","from": "dispatching","to": "dispatched","trigger": "proven live retry restores same-head ownership and artifacts","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.23","from": "launch-terminal","to": "dispatched","trigger": "proven live retry restores original-head ownership","codeSource": "src/ama/dispatch-closer.mjs"}
+        {
+          "id": "hammer-dispatch.24",
+          "from": "dispatching",
+          "to": "deferred-by-drain",
+          "trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.25",
+          "from": "deferred-by-drain",
+          "to": "no-dispatch",
+          "trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.27",
+          "from": "dispatch-deferred-transient",
+          "to": "no-dispatch",
+          "trigger": "retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.26",
+          "from": "deferred-by-drain",
+          "to": "deferred-by-drain",
+          "trigger": "active drain status keeps deferral without attempt or no-progress charge",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.01",
+          "from": "[*]",
+          "to": "dispatching",
+          "trigger": "persist launch intent",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.02",
+          "from": "dispatching",
+          "to": "dispatched",
+          "trigger": "launch result: dispatched",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.03",
+          "from": "dispatching",
+          "to": "dispatch-deferred-transient",
+          "trigger": "launch result: dispatch-deferred-transient",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.04",
+          "from": "dispatching",
+          "to": "dispatch-blocked-branch-holder",
+          "trigger": "launch result: dispatch-blocked-branch-holder",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.05",
+          "from": "dispatching",
+          "to": "dispatch-branch-holder-block-exhausted",
+          "trigger": "launch result: dispatch-branch-holder-block-exhausted",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.06",
+          "from": "dispatching",
+          "to": "dispatch-failed",
+          "trigger": "launch failure or settled unlaunched closer refusal with matching reclaimable pending lease",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.07",
+          "from": "dispatching",
+          "to": "no-dispatch",
+          "trigger": "launch result: no-dispatch",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.08",
+          "from": "dispatching",
+          "to": "completed",
+          "trigger": "launch result: completed",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.09",
+          "from": "dispatched",
+          "to": "launch-terminal",
+          "trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.10",
+          "from": "dispatched",
+          "to": "dispatch-failed",
+          "trigger": "failed outcome reconciled",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.11",
+          "from": "launch-terminal",
+          "to": "dispatching",
+          "trigger": "bounded same-head no-merge retry or changed context; merged success stays sticky",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.12",
+          "from": "dispatch-deferred-transient",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.13",
+          "from": "dispatch-blocked-branch-holder",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.14",
+          "from": "dispatch-failed",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.15",
+          "from": "no-dispatch",
+          "to": "dispatching",
+          "trigger": "bounded retry or changed context",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.16",
+          "from": "dispatched",
+          "to": "no-dispatch",
+          "trigger": "foreign ticket retires mistaken ownership and charge",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.17",
+          "from": "launch-terminal",
+          "to": "no-dispatch",
+          "trigger": "foreign ticket corrects terminal launch attribution",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.18",
+          "from": "dispatching",
+          "to": "dispatch-configuration-refused",
+          "trigger": "repo_unregistered: release pending lease and page repository once",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.19",
+          "from": "dispatch-deferred-transient",
+          "to": "dispatch-configuration-refused",
+          "trigger": "reclassify legacy configuration refusal",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.20",
+          "from": "dispatch-failed",
+          "to": "dispatch-configuration-refused",
+          "trigger": "reclassify legacy configuration refusal",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.21",
+          "from": "dispatch-configuration-refused",
+          "to": "dispatching",
+          "trigger": "normal backoff due, re-probe dispatch, admission clears blocker",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.22",
+          "from": "dispatching",
+          "to": "dispatched",
+          "trigger": "proven live retry restores same-head ownership and artifacts",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        },
+        {
+          "id": "hammer-dispatch.23",
+          "from": "launch-terminal",
+          "to": "dispatched",
+          "trigger": "proven live retry restores original-head ownership",
+          "codeSource": "src/ama/dispatch-closer.mjs"
+        }
       ]
     }
   ],
@@ -269,7 +1213,7 @@
     "src/ama-closure-orchestration.mjs": "8df2a587d74b481e6a0764f1a9ce8d8b3b79d81721aab7bb1f946ee975563529",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "aa06c545c30ab683c9c5d74f837c9084e5d200ccbd1ad0b680c78ac291fed0c5",
+    "src/ama/dispatch-closer.mjs": "9e392ed7be1df283394292f3177d7f38836e0f475ab1ae22ea980b2278702de9",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",

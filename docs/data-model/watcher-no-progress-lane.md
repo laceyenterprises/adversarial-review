@@ -68,6 +68,16 @@ Optional `stalledEvent` field:
 
 ## Operational Contract
 
+- A current-head closer `deferred-by-drain` record, or a legacy transient
+  record with an exit-6 drain-in-effect diagnostic, bypasses lane backoff only
+  for 300 seconds after `updatedAt` (legacy fallback: `lastAttemptedAt`). A
+  confirmed active closer status poll refreshes the hint. Missing, malformed,
+  future or expired timestamps resume normal accounting, and the lane retires
+  expired hints as `no-dispatch` / `drain-wait-ended` without needing closure
+  to run. Either AMA kill switch retires hints too. Drain waits preserve all
+  existing debt and do not charge counters. Other heads and refusals retain
+  normal backoff. This lane never launches work itself.
+
 - The lane only changes how often a PR is re-walked; it never changes review,
   remediation, or merge eligibility decisions.
 - An unresolved, unpaged hammer evidence stop uses a five-minute interval

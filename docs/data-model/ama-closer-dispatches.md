@@ -92,7 +92,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `promptPath` | string or null | Prompt file handed to `hq dispatch`. |
 | `promptDir` | string or null | Directory holding durable AMA closer prompts. |
 | `hqRoot` | string or null | HQ root used for the dispatch. |
-| `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
+| `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |
@@ -114,7 +114,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
-| `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
+| `updatedAt` | optional string or null | ISO-8601 timestamp from the latest write when available. For drain deferrals, records the initial refusal or last confirmed active drain poll; lane hints expire after 300 seconds. Legacy drain records fall back to `lastAttemptedAt`. |
+| `drainEpoch` | optional string or null | Epoch parsed from an exit-6 drain-in-effect refusal. Diagnostic scheduling evidence; grants no launch or merge authority. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
 | `lastError` | string or null | Sanitized last error or recovery note. A hammer that ended `succeeded` with its PR still open records the same value as `outcome` here. `hammer-outcome-unconfirmed:<why>` means the live PR state (`live-pr-probe-failed`, `live-pr-state-unknown`) or, for an open PR without a local no-merge audit, its comments (`audit-comments-unreadable`) could not be read, so the launch was retained for another tick. |
 | `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` when a hammer ended `succeeded` with its PR still open: `failed-without-merge` (a terminal no-merge audit exists for the current head), `hammer-exited-without-close` (none does; HAMBG-02), or `no-merge:concurrent-writer`. Also written by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` only with matching-head AMA success audit, `no-merge:pr-closed-externally` after HQ cancellation), and by the stale-window reaper for an external merge (`no-merge:pr-merged-externally`). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
@@ -246,3 +247,54 @@ Legacy no-launch records whose last error names `repo_unregistered` are
 reclassified on observation, including records with an exhausted generic slow
 retry window. Only that configuration refusal bypasses generic prelaunch retry
 exhaustion; hammer launch/lifetime caps remain unchanged.
+
+## Deploy drain scheduling (DRAINDEFER-01)
+
+Exit 6 with an anchored `dispatch refused: drain in effect` line records
+`state: deferred-by-drain` and `drainEpoch`.
+`drainEpoch` preserves the complete non-whitespace epoch token up to a comma or
+closing parenthesis, including formatted or alphanumeric identifiers; absent
+epochs are null. Drain classification requires exit 6 and the anchored diagnostic.
+Incidental drain text or another exit code does not qualify for drain retries.
+No launch IDs means the pending
+lease is released, the retry budget is preserved, and inline transient retries
+are skipped. The drain lookup and hint retirement resolve the head from
+`prMetadata.headSha`, then `reviewState.headSha`, then
+`dispatchContext.reviewedSha`, then top-level `headSha`, using the first
+non-empty value. On each watcher pass the closer reads `hq dispatch drain-status
+--no-reap` for its HQ root (and ledger DB override when supplied). Any active
+drain, including a newer epoch, keeps the PR deferred. A clear drain re-enters
+ordinary live-head, eligibility, lease and capacity admission on that pass.
+Unreadable status falls back to ordinary dispatch, whose refusal is authoritative.
+
+The lane reads the current-head closer record before applying backoff. Only
+hints younger than 300 seconds bypass backoff and no-progress accounting.
+`updatedAt` records the initial drain refusal and each confirmed active status
+poll; legacy records fall back to `lastAttemptedAt`. Missing, malformed, future
+or expired timestamps do not bypass accounting. The lane retires expired hints
+independently of closer admission; either AMA kill switch retires them too.
+When autonomous execution is disabled and the live head is unavailable,
+orchestration retires the hint keyed to the reviewed head.
+Existing lane debt is preserved, including debt predating the drain. Legacy
+transient records with an exit-6 drain diagnostic obey the same freshness rule.
+This recovery does not consume decision reset credit. Background settlement of
+a drain refusal submits fresh work on the next pass instead of spending that pass applying an obsolete refusal.
+Other exit-6 causes retain ordinary classification, inline retries and budgets.
+
+Before ordinary admission resumes, the closer retires the drain scheduling hint
+as `no-dispatch`, reason `drain-wait-ended`, so a new eligibility blocker uses
+normal lane accounting. Hint cleanup is best effort and cannot refuse admission.
+Other exit-6 diagnostics include dispatch preflight timeouts and worker-class
+fallback refusals; these keep their existing transient/failure classification.
+
+The external producer contract was inspected in agent-os commit
+`071f52c62d802f03681ea69a5269a4384fa6cc93`:
+`modules/worker-pool/lib/python/cwp_dispatch/cli_drain.py` (`cmd_drain_status`
+and its parser) accepts `dispatch drain-status --no-reap --root <hqRoot>` and
+optional `--db-path <ledgerDbPath>`; `drain_state.py:DrainState.to_json` emits
+boolean `isDraining` and numeric `epoch`. The caller uses `cwd: AGENT_OS_ROOT`.
+Invalid JSON or a missing/non-boolean `isDraining` is unreadable status, never
+confirmed clearance. As with command failures, it falls back to authoritative
+ordinary dispatch, logging once per HQ root/recorded epoch per process (bounded
+to the latest 100 keys). Offline fixtures pin arguments, cwd and schema handling;
+this repository does not execute the external producer during tests.

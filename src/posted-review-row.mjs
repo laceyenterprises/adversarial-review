@@ -32,7 +32,13 @@ import {
   clearPendingAmaHammerDispatchForTerminalPr,
   readPendingAmaHammerDispatch,
 } from './ama-hammer-background-dispatch.mjs';
-import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
+import {
+  namedAmaNoDispatchReason,
+  readAmaCloserDispatchRecord,
+  isDrainDeferredAmaCloserRecord,
+  isFreshDrainDeferredAmaCloserRecord,
+  retireAmaCloserDrainHint,
+} from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
   HAMMER_EVIDENCE_RECHECK_INTERVAL_MS,
@@ -738,7 +744,9 @@ export async function handlePostedReviewRow({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
-        ...(operatorHoldReason ? { operatorHoldReason, amaClosureResult } : {}),
+        ...(operatorHoldReason || amaClosureResult?.reason === 'deferred-by-drain'
+          ? { amaClosureResult } : {}),
+        ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true
           && !operatorHoldReason ? { hammerRouteActive: true } : {}),
         gateDecision: gateProjection?.decision || null };
@@ -929,17 +937,24 @@ export function createNoProgressLaneGate({
   emitStalledEventFn = null,
   logger = console,
 } = {}) {
+  const freshDrainHint = (identity, observedAt) => {
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    const fresh = isFreshDrainDeferredAmaCloserRecord(record, observedAt);
+    if (!fresh && isDrainDeferredAmaCloserRecord(record)) retireAmaCloserDrainHint(rootDir, identity, { logger });
+    return fresh;
+  };
   return {
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
+      const observedAt = now();
+      const drainDeferred = freshDrainHint({ ...identity, headSha: handler.headSha }, observedAt);
       // Consult durable intent BEFORE the lane: an interrupted background call
       // must reach normal live-head/lease/retry/dedup guards on the first tick.
       const pending = readPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
       let decision = pending
         ? { lane: 'active', due: true, reason: 'hammer-dispatch-recovery', backoffTicks: 0 }
-        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
-      const observedAt = now();
+        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null, drainDeferred });
       let reviewedSha = null;
       try {
         reviewedSha = readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha ?? null;
@@ -986,6 +1001,11 @@ export function createNoProgressLaneGate({
       // Without a head there is no series to key on; skip the row read too.
       if (!handler.headSha) return null;
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+      if (!timedOut && !error && value?.outcome !== 'await-operator'
+        && !value?.operatorHoldReason && !value?.amaClosureResult?.needsOperator
+        && !isSafetyRecoveryHold(value?.amaClosureResult)
+        && (value?.amaClosureResult?.reason === 'deferred-by-drain'
+        || freshDrainHint({ ...identity, headSha: handler.headSha }, now()))) return null;
       let row = null;
       if (!timedOut) {
         try {

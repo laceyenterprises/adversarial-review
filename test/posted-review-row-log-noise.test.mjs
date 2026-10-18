@@ -1288,3 +1288,24 @@ test('GHSCOPE-01: an unrelated parent-poll rate limit does not suppress healthy 
   });
   assert.ok(readNoProgressLane(rootDir, identity));
 });
+
+
+test('DRAINDEFER-01: posted-review hub carries drain evidence without changing other refusal accounting', async () => {
+  const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
+  const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
+  for (const reason of ['deferred-by-drain', 'dispatch-deferred-transient']) {
+    const { args } = baseArgs({ repoPath: 'fixture/repo', prNumber: 7, currentRevisionRef: 'synthetic-head',
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome: 'ama-pending',
+        amaClosureResult: { dispatched: false, skipMergeAgent: true, reason, drainEpoch: reason === 'deferred-by-drain' ? '7' : null } }),
+    });
+    const result = await handlePostedReviewRow(args);
+    assert.equal(result.amaClosureResult?.reason, reason === 'deferred-by-drain' ? reason : undefined);
+    const gate = createNoProgressLaneGate({ rootDir: args.rootDir, logger: { warn() {}, log() {} },
+      readReviewRow: () => ({ review_status: 'posted' }) });
+    const handler = { repoPath: args.repoPath, prNumber: args.prNumber, headSha: args.currentRevisionRef };
+    for (let pass = 0; pass < 5; pass++) await gate.record(handler, { value: result });
+    const ledger = readNoProgressLane(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber });
+    if (reason === 'deferred-by-drain') assert.equal(ledger, null);
+    else assert.equal(ledger.lane, 'slow');
+  }
+});

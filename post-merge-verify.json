@@ -62,7 +62,11 @@
         "follow-up-job.03",
         "closure-owner.05",
         "hammer-dispatch.01",
-        "hammer-dispatch.02"
+        "hammer-dispatch.02",
+        "hammer-dispatch.24",
+        "hammer-dispatch.25",
+        "hammer-dispatch.26",
+        "hammer-dispatch.27"
       ],
       "budgetSeconds": 35,
       "acceptance": {

@@ -634,6 +634,7 @@ export function evaluateNoProgressLane(ledger, {
   maxBackoffTicks = DEFAULT_NO_PROGRESS_MAX_BACKOFF_TICKS,
   operatorBlockedRewalkTicks: operatorRewalkTicks = DEFAULT_OPERATOR_BLOCKED_REWALK_TICKS,
   rewalkCeilingTicks = DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS,
+  drainDeferred = false,
 } = {}) {
   const ceilingTicks = positiveIntOr(rewalkCeilingTicks, DEFAULT_NO_PROGRESS_REWALK_CEILING_TICKS);
   const head = normalizeHead(headSha);
@@ -646,6 +647,7 @@ export function evaluateNoProgressLane(ledger, {
     backoffTicks: 0,
     headSha: head,
   };
+  if (drainDeferred) return { ...base, reason: 'deferred-by-drain' };
   if (!ledger) return { ...base, reason: 'no-ledger' };
   if (!head || ledgerHead === null || ledgerHead !== head) {
     return { ...base, reason: 'head-changed' };

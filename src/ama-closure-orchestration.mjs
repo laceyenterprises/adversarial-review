@@ -983,6 +983,9 @@ async function dispatchAmaClosureFor({
   }
 
   if (!cfg?.enabled) {
+    amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
+      repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef || reviewStateRow?.revision_ref,
+    }, { logger });
     // AMA-06N — surface `amaEnabled` so the watcher's coexistence
     // decision (the call site of this helper) can branch on it. With
     // AMA off, the default `merge-agent-default` action falls through
@@ -1650,6 +1653,9 @@ async function dispatchAmaClosureFor({
       ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
+    amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
+      repo: repoPath, prNumber, headSha: currentPrHeadSha || reviewState?.headSha,
+    }, { logger });
     const hqRoot = resolveHqRoot(env);
     const disabledAudit = writeAutonomousMergeDisabledAuditImpl({
       hqRoot,
@@ -2493,7 +2499,7 @@ async function dispatchAmaClosureFor({
     // A settled classification wait is not a refusal. Submit fresh work in
     // this pass instead of spending a whole pass consuming the wait.
     if (backgroundSettled?.ok && ['operator-label-classification-pending',
-      'background-pr-state-unavailable'].includes(backgroundSettled.result?.reason)) {
+      'background-pr-state-unavailable', 'deferred-by-drain'].includes(backgroundSettled.result?.reason)) {
       backgroundSettled = null;
     }
     // A scoped request must observe the closer's gates before taking ownership.

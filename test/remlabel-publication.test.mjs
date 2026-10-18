@@ -101,9 +101,13 @@ test('REMLABEL-01: publisher refreshes a stale base before refusing restoration'
 test('REMLABEL-01: refusal artifact marks a remediation round failed without requesting review', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const priorEnv = { HQ_ROOT: process.env.HQ_ROOT, ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
+  const priorEnv = { HQ_ROOT: process.env.HQ_ROOT, AGENT_OS_DEPLOY_CHECKOUT: process.env.AGENT_OS_DEPLOY_CHECKOUT,
+    ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
     ADV_REPLIES_ROOT: process.env.ADV_REPLIES_ROOT, ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT };
   delete process.env.HQ_ROOT; delete process.env.ADV_WITH_HQ_INTEGRATION; delete process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT;
+  // Keep the fixture independent of the host's deployed checkout, including
+  // when its temporary root lives beneath that checkout.
+  process.env.AGENT_OS_DEPLOY_CHECKOUT = join(rootDir, 'fixture-deploy-checkout');
   process.env.ADV_REPLIES_ROOT = join(rootDir, 'replies');
   t.after(() => { for (const [key, value] of Object.entries(priorEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;

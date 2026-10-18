@@ -1777,6 +1777,7 @@ async function dispatchAmaClosureFor({
       repo: repoPath,
       prNumber,
       headSha: currentPrHeadSha || candidate?.headSha || '',
+      reviewedHeadSha: reviewState.headSha,
       ...(closerAuthoredStale.eligible
         ? { eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON, eligibility: { eligible: true, reasons: [] } }
         : { eligibility: disabledEligibility }),

@@ -16,6 +16,8 @@ import {
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.
@@ -107,6 +109,7 @@ function requestEligibleHammerWake({
   repo,
   prNumber,
   headSha,
+  reviewedHeadSha,
   eligibilityReason = HAMMER_WAKE_ELIGIBILITY_REASON,
   eligibility = { eligible: false, reasons: ['eligibility-not-observed'] },
   observedAt = new Date().toISOString(),
@@ -115,6 +118,19 @@ function requestEligibleHammerWake({
   log = console,
   retryAttempt = 0,
 } = {}) {
+  // Suppression hands this exact worker push to the hammer. It is eligible
+  // for a wake, while merge authority still requires HAM terminal validation.
+  // Keep every other policy miss, including CI, and never inherit an unrelated
+  // unreviewed push. The same terminal job record owns re-review suppression.
+  if (eligibility?.reasons?.includes('stale-head')) {
+    const finalRound = findCommentOnlyFinalRoundPushJob(rootDir, {
+      repo, prNumber, reviewedHead: reviewedHeadSha, workerPushedHeadSha: headSha,
+    }, log);
+    if (finalRound && normalizeEffectiveReviewVerdict(finalRound.reviewBody) === 'comment-only') {
+      const reasons = eligibility.reasons.filter((reason) => reason !== 'stale-head');
+      eligibility = { ...eligibility, eligible: reasons.length === 0, reasons };
+    }
+  }
   const identity = {
     repo: String(repo || '').trim(),
     prNumber: Number(prNumber),
@@ -238,6 +254,7 @@ function requestEligibleHammerWake({
                 return requestEligibleHammerWake({
                   rootDir,
                   ...identity,
+                  reviewedHeadSha,
                   eligibility,
                   observedAt,
                   nowMs,
@@ -250,6 +267,7 @@ function requestEligibleHammerWake({
                   return requestEligibleHammerWake({
                     rootDir,
                     ...identity,
+                    reviewedHeadSha,
                     eligibility,
                     observedAt,
                     nowMs,

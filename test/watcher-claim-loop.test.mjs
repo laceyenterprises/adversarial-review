@@ -154,6 +154,7 @@ export async function load(url, context, nextLoad) {
       export function hasSettledCommentOnlyReviewHead() { return false; }
       export function scanArchivedStoppedFollowUpJobs() { return []; }
       export function findFinalRoundJobForProvenPush() { return null; }
+      export function findCommentOnlyFinalRoundPushJob() { return null; }
       export function proveCommentOnlyFinalRoundHead() { return false; }
       export function suppressFinalRoundFollowUp() { return false; }
       export function withheldHeadRecoveryCandidates(root, options) { return options.prNumber === 101 ? [{ job: { completion: {} } }] : []; }

@@ -781,8 +781,10 @@ function buildRemediationOutcomeCommentBody({
   }
 
   if (action === 'completed' && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
+    const headDescription = typeof job?.completion?.workerPushedHeadSha === 'string'
+      ? "this remediation round's recorded head" : 'the PR head';
     lines.push('');
-    lines.push('The hammer owns final validation and close of this remediation round’s recorded head once structural gates are green. No re-review is queued.');
+    lines.push(`The hammer owns final validation and close of ${headDescription} once structural gates are green. No re-review is queued.`);
   }
 
   // Worker-supplied fields below are *untrusted*. They go through

@@ -132,9 +132,24 @@ for (const pendingCiOnly of [true, false]) {
     const { job } = fixture(t);
     job.completion.pendingCiOnly = pendingCiOnly;
     const body = buildRemediationOutcomeCommentBody({ workerClass: 'fixture-worker', action: 'completed', job });
-    assert.match(body, /hammer owns final validation and close/);
+    assert.match(body, /hammer owns final validation and close of this remediation round's recorded head/);
+    assert.doesNotMatch(body, /\u2019/);
     assert.match(body, /No re-review is queued/);
     assert.doesNotMatch(body, /re-review queued|re-review already pending/);
     if (pendingCiOnly) assert.match(body, /CI still running/);
+  });
+}
+
+for (const [label, completion] of [
+  ['missing completion', undefined],
+  ['missing pushed head', {}],
+  ['null pushed head', { workerPushedHeadSha: null }],
+]) {
+  test(`pushless suppressed completion refers to the PR head: ${label}`, t => {
+    const { job } = fixture(t, { completion });
+    const body = buildRemediationOutcomeCommentBody({ workerClass: 'fixture-worker', action: 'completed', job });
+    assert.match(body, /hammer owns final validation and close of the PR head once structural gates are green/);
+    assert.doesNotMatch(body, /recorded head|\u2019/);
+    assert.match(body, /No re-review is queued/);
   });
 }

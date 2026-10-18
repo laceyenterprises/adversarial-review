@@ -922,7 +922,7 @@ export async function handlePostedReviewRow({
 
 // ── Poll loop: once-per-tick post-review adoption + maintenance phase ─────────
 
-// Probe only locally settled current-head reviews. The bounded probe wave
+// Probe only lane-due, locally settled current-head reviews. The bounded probe wave
 // avoids serial GitHub reads before the scheduler can prioritize ready work.
 // Probe faults affect ordering only; the normal handler retries its own reads.
 export async function preparePostedReviewHandlers(handlers, {
@@ -930,6 +930,7 @@ export async function preparePostedReviewHandlers(handlers, {
   readReviewRow = handler => readCurrentReviewRow(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber }),
   resolveSettled = resolveSettledReviewVerdict,
   fetchSnapshot = fetchMergeAgentCandidateSnapshot,
+  laneGate = null,
   now = Date.now,
   deadlineAt = Infinity,
 } = {}) {
@@ -940,6 +941,9 @@ export async function preparePostedReviewHandlers(handlers, {
       const index = cursor++;
       const handler = handlers[index];
       try {
+        // Preview without advancing the ledger: the scheduler owns the one
+        // skip/run accounting decision, including wakes and the idle floor.
+        if (laneGate?.evaluate?.(handler, { recordSkip: false })?.run === false) continue;
         const row = readReviewRow(handler);
         if (row?.review_status !== 'posted' || !handler.headSha || row.reviewer_head_sha !== handler.headSha) continue;
         const settled = resolveSettled(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber,
@@ -972,6 +976,8 @@ const postedReviewStartupRecoveryRoots = new Set();
  * Bind the no-progress lane to real review-state rows.
  *
  * `evaluate` decides whether a queued posted-review handler runs this tick;
+ * `{ recordSkip: false }` previews that decision before readiness probes without
+ * advancing the skip counter. The scheduler alone accounts for skipped ticks;
  * `record` compares the post-run state fingerprint with the previous tick's to
  * decide whether the tick achieved anything for that PR. Both are kept here (and
  * out of the scheduler) so `runPostedReviewHandlersFairly` stays a pure,
@@ -997,7 +1003,7 @@ export function createNoProgressLaneGate({
     return fresh;
   };
   return {
-    evaluate(handler) {
+    evaluate(handler, { recordSkip = true } = {}) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
       const observedAt = now();
@@ -1038,7 +1044,7 @@ export function createNoProgressLaneGate({
             retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
         }
       }
-      if (!decision.due) {
+      if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
           now: observedAt,
@@ -1357,7 +1363,7 @@ export async function runQueuedReviewAdoptionPhase({
 
   const phaseStartedMs = Date.now();
   const preparedHandlers = await preparePostedReviewHandlersImpl(postedReviewHandlers, {
-    rootDir, logger,
+    rootDir, logger, laneGate: noProgressLaneGate,
     deadlineAt: phaseStartedMs + Math.min(30_000, effectivePostedReviewPhaseBudgetMs / 2),
   });
   const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({

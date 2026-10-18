@@ -505,8 +505,13 @@ posted-review watcher phase's wait behavior changes.
 Posted-review scheduling uses four concurrent handlers, with no deployment
 knob. Priority probes share the phase budget and use at most thirty seconds
 (or half the phase budget, if smaller), with ten seconds per read. They promote
-settled reviews on the current head with green
-CI and no pending remediation ahead of ordinary handlers. Budget-deferred
+lane-due settled reviews on the current head with green
+CI and no pending remediation ahead of ordinary handlers. The no-progress lane
+is previewed without advancing skip counters before any readiness probe;
+handlers still in backoff incur no readiness GitHub read. Merge readiness is an
+ordering hint only and cannot bypass lane backoff. The scheduler accounts for
+skips once per tick, and explicit wakes and the idle-lane floor retain their
+existing admission rules. Budget-deferred
 handlers retain their order at the front of the next tick; explicit wake
 priority and positive retry holds keep their existing meaning. Priority is
 scheduling evidence only: the probe reads a snapshot without performing hold

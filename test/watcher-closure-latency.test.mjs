@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { setImmediate as turn } from 'node:timers/promises';
 import { POSTED_REVIEW_CONCURRENCY, createPostedReviewFairnessState,
   runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
-import { handlePostedReviewRow, preparePostedReviewHandlers } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHandlers } from '../src/posted-review-row.mjs';
+import { readNoProgressLane, recordNoProgressLaneRun, recordNoProgressLaneSkip } from '../src/watcher-no-progress-lane.mjs';
 import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
 import { fetchMergeAgentCandidateSnapshot } from '../src/merge-agent-candidate-snapshot.mjs';
@@ -227,16 +228,69 @@ test('immutable cache retries failed JSON and isolates credentials, executors an
   });
 });
 
-test('merge-ready scheduling bypasses ordinary lane backoff but preserves explicit retry holds', async () => {
+test('merge readiness never bypasses lane backoff or retry holds', async () => {
   const ran = [];
   const result = await runPostedReviewHandlersFairly({
     handlers: [1, 2].map(n => ({ ...handler(n, async () => ran.push(n)), mergeReady: true })),
     laneGate: { evaluate: h => ({ run: false, retryAfterMs: h.prNumber === 2 ? 100 : 0 }) },
+    laneStarvationFloor: 0,
     logger: quiet,
   });
-  assert.deepEqual(ran, [1]);
-  assert.equal(result.priorityLaneBypasses, 1);
+  assert.deepEqual(ran, []);
+  assert.equal(result.skippedByLane, 2);
+  assert.equal(result.priorityLaneBypasses, 0);
 });
+
+for (const reason of ['worker-identity-unresolved', 'operator-hold', 'autonomous-merge-disabled']) {
+  test(`green settled PR parked on ${reason} is not probed or run before lane backoff`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closure-lane-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo, prNumber: 1 };
+    for (let i = 0; i < 5; i++) recordNoProgressLaneRun(rootDir, identity, {
+      headSha: head, fingerprint: 'unchanged', operatorReason: reason,
+      progressClass: reason === 'operator-hold' ? 'operator-decision-required' : 'self-resolving',
+      logger: quiet,
+    });
+    const baseline = readNoProgressLane(rootDir, identity);
+    const row = { review_status: 'posted', reviewer_head_sha: head };
+    const laneGate = createNoProgressLaneGate({ rootDir, hqRoot: join(rootDir, 'hq'),
+      readReviewRow: () => row, logger: quiet });
+    const reads = [], ran = [];
+    const prepare = () => preparePostedReviewHandlers([1, 2].map(n => handler(n, async () => { ran.push(n); })), {
+      laneGate, readReviewRow: () => row,
+      resolveSettled: () => ({ verdict: 'comment-only', remediationPending: false }),
+      fetchSnapshot: async (_, n) => {
+        reads.push(n);
+        return { headRefOid: head, state: 'OPEN', labels: [{ name: 'operator-hold' }],
+          statusCheckRollup: [{ name: 'build', conclusion: 'SUCCESS' }] };
+      }, logger: quiet,
+    });
+    const prepared = await prepare();
+    assert.deepEqual(reads, [2]);
+    assert.equal(readNoProgressLane(rootDir, identity).skippedTicks, baseline.skippedTicks,
+      'readiness preview must not count a skipped tick');
+    const summary = await runPostedReviewHandlersFairly({ handlers: prepared, laneGate, logger: quiet });
+    assert.deepEqual(ran, [2]);
+    assert.equal(summary.skippedByLane, 1);
+    assert.equal(summary.priorityLaneBypasses, 0);
+    const skipped = readNoProgressLane(rootDir, identity);
+    assert.equal(skipped.skippedTicks, baseline.skippedTicks + 1);
+    assert.equal(skipped.noProgressTicks, baseline.noProgressTicks);
+    assert.equal(skipped.lastRunAt, baseline.lastRunAt);
+
+    // Ordinary cadence still makes the parked PR eligible for a fresh probe.
+    while (!laneGate.evaluate(prepared[0], { recordSkip: false }).run) {
+      recordNoProgressLaneSkip(rootDir, identity, { headSha: head, logger: quiet });
+    }
+    reads.length = 0;
+    const due = await prepare();
+    assert.ok(reads.includes(1));
+    assert.equal(due[0].mergeReady, true);
+    ran.length = 0;
+    await runPostedReviewHandlersFairly({ handlers: due, laneGate, logger: quiet });
+    assert.ok(ran.includes(1));
+  });
+}
 
 
 test('unsupported-command evidence selects the real GitHub helper fallback without repeating the adapter', async () => {

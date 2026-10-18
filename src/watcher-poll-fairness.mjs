@@ -654,7 +654,7 @@ export async function runPostedReviewHandlersFairly({
         laneDecision = { run: true };
       }
     }
-    const priorityMatched = handler.mergeReady === true || postedReviewHandlerMatchesPriority(handler, normalizedPriorityTargets);
+    const priorityMatched = postedReviewHandlerMatchesPriority(handler, normalizedPriorityTargets);
     if (!laneDecision.run && priorityMatched && !(laneDecision.retryAfterMs > 0)) {
       summary.priorityLaneBypasses += 1;
       logger?.log?.(

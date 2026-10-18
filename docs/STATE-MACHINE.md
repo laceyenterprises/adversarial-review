@@ -861,8 +861,26 @@ six-hour `non-execution` slow-retry window. The window survives replacement
 admission; fresh heads reset it but cannot bypass the PR-wide lifetime ceiling.
 Only bounded LEASEPARK-01 contention refunds reduce lifetime charges. Bare
 `succeeded` rows retain ordinary success reconciliation and the one-refund-per-series
-exit grant. Unknown merged evidence with a live same-head `DISPATCHED` lease
-keeps the success hold before exit classification. See the [retry ledger](data-model/hammer-retry-cap.md)
+exit grant. HAMRETRY-01 settles the current PR's terminal launch before
+admission: a live OPEN same-head probe without armed auto-merge, or a retryable
+terminal audit, releases no-merge ownership under the retry caps, and the dispatch
+record becomes `launch-terminal`. A readable `terminal_at` keeps a 60-second
+grace for GitHub head propagation; a missing timestamp permits immediate
+same-head settlement.
+Merged success remains sticky. A shared read-only ledger snapshot excludes
+terminal launches from fleet capacity. Unreadable or budget-skipped rows retain
+same-PR ownership and reserve fleet capacity inside the bounded pending-launch
+window. The watcher explicitly enables the shared snapshot through its retry
+wrapper; a failed snapshot does not trigger per-record PostgreSQL queries.
+An armed GitHub auto-merge retains terminal-success ownership only inside the
+30-minute dispatched-lease window (`updatedAt`, falling back to `acquiredAt`);
+observations do not extend it. A no-merge audit bypasses the hold. At expiry an
+OPEN terminal launch settles as `failed-without-merge` and emits
+`ama_closer.auto_merge_hold_released`, allowing ordinary bounded retries. A stale-active worker with ledger `succeeded`
+uses this terminal-success classifier before retry/refund admission; the durable
+record separately maps the observation to `unverified-terminal-success`.
+Delivered wakes re-arm once per reconciled no-merge LRQ; running hammers remain duplicates. Without same-head
+or audit proof, unknown merged evidence retains the existing success hold. See the [retry ledger](data-model/hammer-retry-cap.md)
 and [dispatch records](data-model/ama-closer-dispatches.md) for fields and retention.
 
 The background hammer queue rechecks the live PR state, head, draft flag, and

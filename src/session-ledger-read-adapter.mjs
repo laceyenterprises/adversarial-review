@@ -851,6 +851,32 @@ function* readLatestWorkerRunStatusFromLedgerSteps({
   return { ok: true, row, target: queried.target };
 }
 
+// One read-only snapshot per closer capacity scan avoids one subprocess per
+// historical dispatch. Retry metadata is decoded by the ordinary chain reader.
+export function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
+  return runLedgerStepsAsync(readLaunchRequestSnapshotSteps(args), args);
+}
+
+function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, env = process.env,
+  rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
+  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
+    rootDir, hqRoot, requiredTables: ['launch_requests'] });
+  if (!resolution.ok) return resolution;
+  // SQLite reads are in-process; retain its indexed per-launch recursive query.
+  if (resolution.target.backend === 'sqlite') return { ok: true, target: resolution.target };
+  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
+  return yield* queryPostgresRowsSteps(resolution.target, `
+    SELECT json_build_object(
+      'launch_request_id', launch_request_id, 'status', status,
+      'updated_at', updated_at, 'terminal_at', terminal_at,
+      'failure_class', failure_class,
+      'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+      'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
+      'metadata_json', to_jsonb(launch_requests)->'metadata_json')
+    FROM launch_requests
+    ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC`, { spawnSyncImpl, readOnly: true });
+}
+
 // With includeRetryChain, a traversal failure preserves the base status and
 // sets retryChainUnreadable. Ownership-changing callers must check that flag.
 export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
@@ -859,6 +885,7 @@ export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLe
 function* readLaunchRequestStatusFromLedgerSteps({
   launchRequestId,
   includeRetryChain = false,
+  launchSnapshot = null,
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
@@ -870,7 +897,7 @@ function* readLaunchRequestStatusFromLedgerSteps({
   if (!normalizedLaunchRequestId) {
     return { ok: false, reason: 'missing-launch-request-id' };
   }
-  const resolution = resolveSessionLedgerReadTarget({
+  const resolution = launchSnapshot || resolveSessionLedgerReadTarget({
     ledgerTarget,
     ledgerDbPath,
     requiredTables: ['launch_requests'],
@@ -881,7 +908,11 @@ function* readLaunchRequestStatusFromLedgerSteps({
   if (!resolution.ok) return resolution;
   let queried;
   let sqliteLaunchProjection;
-  if (resolution.target.backend === 'sqlite') {
+  if (Array.isArray(launchSnapshot?.rows)) {
+    queried = { ...launchSnapshot, rows: launchSnapshot.rows
+      .filter(row => row.launch_request_id === normalizedLaunchRequestId)
+      .map(({ metadata_json: _metadata, ...row }) => row) };
+  } else if (resolution.target.backend === 'sqlite') {
     // HAMREFUND-01: older offline ledgers may predate the detail column.
     const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');
     if (!detailColumn.ok) return detailColumn;
@@ -956,16 +987,8 @@ function* readLaunchRequestStatusFromLedgerSteps({
     // Decode historical text metadata in JS: PostgreSQL before 16 has no safe
     // IS JSON predicate. A row-to-JSON projection also tolerates absent columns.
     // One bounded snapshot avoids per-descendant queries and database mutations.
-    retries = yield* queryPostgresRowsSteps(resolution.target, `
-      SELECT json_build_object(
-        'launch_request_id', launch_request_id, 'status', status,
-        'updated_at', updated_at, 'terminal_at', terminal_at,
-        'failure_class', failure_class,
-        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
-        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
-        'metadata_json', to_jsonb(launch_requests)->'metadata_json')
-      FROM launch_requests
-      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC`, { spawnSyncImpl, readOnly: true });
+    retries = launchSnapshot ? { ...launchSnapshot } : (yield* readLaunchRequestSnapshotSteps({ ledgerTarget: resolution.target,
+      env, rootDir, hqRoot, spawnSyncImpl }));
     if (retries.ok) {
       const children = new Map();
       for (const candidate of retries.rows) {

@@ -109,7 +109,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `prelaunchRefusalSlowRetry.exhaustedPagedAt` | optional ISO timestamp | Successful window-exhaustion alert delivery. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
-| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation. PR ownership reconciliation also writes it when settling the matching dispatched lease; bare successful exits without audit/merge evidence preserve the record. Cleared when launching again. |
+| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation. PR ownership reconciliation also writes it when settling the matching dispatched lease; terminal observation also writes `state: launch-terminal` before merge evidence is resolved. Cleared when launching again. |
 | `reconciledAt` | string, optional | ISO-8601 timestamp when launch-capacity reconciliation wrote `launch-terminal`; cleared when launching again. |
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
@@ -118,7 +118,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `drainEpoch` | optional string or null | Epoch parsed from an exit-6 drain-in-effect refusal. Diagnostic scheduling evidence; grants no launch or merge authority. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
 | `lastError` | string or null | Sanitized last error or recovery note. A hammer that ended `succeeded` with its PR still open records the same value as `outcome` here. `hammer-outcome-unconfirmed:<why>` means the live PR state (`live-pr-probe-failed`, `live-pr-state-unknown`) or, for an open PR without a local no-merge audit, its comments (`audit-comments-unreadable`) could not be read, so the launch was retained for another tick. |
-| `outcome` | string or null | Dispatch result written by `dispatch-closer.mjs` when a hammer ended `succeeded` with its PR still open: `failed-without-merge` (a terminal no-merge audit exists for the current head), `hammer-exited-without-close` (none does; HAMBG-02), or `no-merge:concurrent-writer`. Also written by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` only with matching-head AMA success audit, `no-merge:pr-closed-externally` after HQ cancellation), and by the stale-window reaper for an external merge (`no-merge:pr-merged-externally`). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
+| `outcome` | string or null | Resolved lease outcome written during terminal-launch reconciliation (`succeeded` for confirmed merge, otherwise the reclaimable no-merge outcome). Existing successful-process/open-PR classification also writes: `failed-without-merge` (a terminal no-merge audit exists for the current head), `hammer-exited-without-close` (none does; HAMBG-02), or `no-merge:concurrent-writer`. Also written by `closer-terminal-cancel.mjs` for lifecycle settlement (`succeeded` only with matching-head AMA success audit, `no-merge:pr-closed-externally` after HQ cancellation), and by the stale-window reaper for an external merge (`no-merge:pr-merged-externally`). The lifecycle writer locates a rekeyed lease's original dispatch head before updating this record. Unlike lease `terminalOutcome`, this field annotates the dispatch record and may be absent on older records. |
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract
@@ -143,11 +143,18 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   `dispatched` record without timestamps remains held until first observation.
 - Dispatch capacity first applies record identity, age and lease liveness checks.
   Only launches that would otherwise consume a slot are probed in the ledger;
-  aged-out historical records are left for manual reconciliation. The first
-  unreadable ledger result suppresses further probes for that scan, retaining
-  capacity under the existing liveness rules. Cancellation is checked between
+  aged-out historical records are left for manual reconciliation. Production PostgreSQL scans share one timeout-bounded read-only launch snapshot,
+  including transitive retry descendants; SQLite uses its in-process indexed reads.
+  Unreadable, missing or budget-skipped evidence retains same-PR ownership and
+  reserves fleet capacity inside the bounded pending-launch window. Unreadable
+  retry chains reserve the same bounded capacity even with a terminal ancestor.
+  The watcher explicitly enables snapshots through its status wrapper and
+  forwards the snapshot to every per-record read, including failed snapshots.
+  Injected per-launch readers retain the one-second scan budget and stop further queries after an unreadable result. Cancellation is checked between
   probes. `dispatching` intents are never probed or rewritten, since same-head
   retries can still reference the previous LRQ.
+- The path and read-only JSON reader live in `src/ama/dispatch-record-read.mjs`,
+  re-exported by the dispatcher for compatibility; hammer wakes import the leaf.
 - Reconciliation annotates confirmed terminal `dispatched` launches as
   `launch-terminal`, preserving existing fields and leaving closer and merge
   leases untouched. Launch success alone is not merge success. Missing rows
@@ -155,6 +162,14 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   keeps the reservation until observation. New launch writes clear
   `terminalLaunchStatus` and `reconciledAt`. Capacity recognizes `reaped` and
   `cancelled` without widening the per-PR unknown-status retry/re-arm decision.
+- Terminal-success ownership remains held while a live OPEN PR has an armed
+  `autoMergeRequest` only within the 30-minute dispatched-lease window, measured
+  from `updatedAt` (or `acquiredAt`) without extending it on observation. A no-merge
+  audit bypasses this hold. Expiry emits `ama_closer.auto_merge_hold_released`
+  and releases as `failed-without-merge` under ordinary retry/refund caps. A
+  stale-active worker with ledger `succeeded` enters the live terminal-success
+  classifier before retry/refund admission; the persisted observation remains
+  `unverified-terminal-success` with raw `terminalLaunchStatus: succeeded`.
 - Manual reconciliation must run as the canonical daemon account for the runtime
   root, pinning `--hq-root` and `--ledger-target` to match the watcher. The CLI
   reports the resolved backend and source without exposing DSN credentials.
@@ -196,10 +211,15 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   A concurrent record change emits
   `ama_closer.unexecuted_refund_dispatch_record_changed` with the refunded LRQ.
   The ledger refund remains durable and is idempotent on reconciliation.
-- Bare `succeeded` launches use existing terminal-success/exit-without-close
-  handling and its one-refund-per-series grant. An unknown merged signal with
-  a live `DISPATCHED` same-head lease retains the terminal-success hold before
-  an OPEN PR can be interpreted as an exit without close.
+- Before eligibility, the current PR reconciles its own terminal ledger launch
+  independently of the fleet scan budget. Its record becomes `launch-terminal`;
+  confirmed no-merge settlement writes `outcome` and `terminalOutcome` alongside
+  the matching lease. A live OPEN same-head probe releases a successful process
+  exit after the 60-second grace when `terminal_at` is readable; without that
+  timestamp the same-head exit releases immediately. Armed auto-merge adds only
+  the bounded hold described above. Merge evidence and
+  successful audits stay sticky. Series, target, lifetime and refund caps remain
+  authoritative; unreadable PR evidence retains existing ownership bounds.
 
 - Primary-change collection uses the earliest hammer launch with a valid 40-hex
   `targetRemediationSha` as trusted author-baseline evidence, even when repairs

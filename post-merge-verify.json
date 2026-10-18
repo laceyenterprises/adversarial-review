@@ -51,6 +51,7 @@
     },
     {
       "id": "handoff",
+      "description": "Terminal no-merge lease/capacity release and wake re-arm; armed auto-merge retains ownership inside the 30-minute lease window and releases at expiry; unreadable fresh launches reserve capacity.",
       "promise": "smv-handoff",
       "edges": [
         "review-row.10",
@@ -59,6 +60,8 @@
         "review-row.33",
         "closer-lease.02",
         "closer-lease.06",
+        "closer-lease.04",
+        "hammer-dispatch.09",
         "follow-up-job.03",
         "closure-owner.05",
         "hammer-dispatch.01",

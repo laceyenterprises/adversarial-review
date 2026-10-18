@@ -4,6 +4,9 @@
 // adapters rather than inside the claim loop. Extracting it also pulls
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
+import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
+import { isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
+import { readAmaCloserLease, AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './ama/closer-lease.mjs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -158,12 +161,26 @@ function requestEligibleHammerWake({
     }
     if (outcome !== 'failed') {
       auditPath = hammerWakeAuditPath(rootDir, identity);
+      let retryOfLaunchRequestId = null;
+      try {
+        const lease = readAmaCloserLease(rootDir, identity);
+        if (lease?.status === 'terminal' && AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(lease.terminalOutcome)) {
+          const record = readAmaCloserDispatchRecord(rootDir, { ...identity,
+            headSha: lease.rekeyedFromHeadSha || identity.headSha });
+          // A worker may finalize its audit before its process has exited.
+          // Only observed launch terminality releases a delivered wake.
+          if (record?.launchRequestId === lease.lrqId && isTerminalLaunchRequestStatus(record.terminalLaunchStatus)) {
+            retryOfLaunchRequestId = lease.lrqId || null;
+          }
+        }
+      } catch { /* Missing evidence preserves wake deduplication. */ }
       const reserved = {
         schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
         event: 'hammer_wake',
         ...identity,
         observedAt,
         outcome: 'reserved',
+        ...(retryOfLaunchRequestId ? { retryOfLaunchRequestId } : {}),
         route: 'watcher-ama-merge-authority',
       };
       let reservationCreated = false;
@@ -201,7 +218,7 @@ function requestEligibleHammerWake({
             eventType: 'hammer_wake',
             at: observedAt,
             source: 'event-driven-hammer-wake',
-            idempotencyKey: `hammer-wake:${hammerWakeDedupeKey(identity)}`,
+            idempotencyKey: `hammer-wake:${hammerWakeDedupeKey(identity)}${retryOfLaunchRequestId ? `:retry:${retryOfLaunchRequestId}` : ''}`,
             reason: identity.eligibilityReason,
             payload: { outcome, route: reserved.route, requestId: wake?.payload?.request_id || null },
           });
@@ -235,7 +252,9 @@ function requestEligibleHammerWake({
       } catch (err) {
         if (err?.code === 'EEXIST') {
           const prior = readHammerWakeAudit(auditPath);
-          if (prior?.outcome === 'failed' || staleHammerWakeReservation(prior, auditPath, nowMs)) {
+          if (prior?.outcome === 'failed' || staleHammerWakeReservation(prior, auditPath, nowMs)
+            || (prior?.outcome === 'requested' && retryOfLaunchRequestId
+              && prior.retryOfLaunchRequestId !== retryOfLaunchRequestId)) {
             if (retryAttempt + 1 >= HAMMER_WAKE_RETRY_ATTEMPTS) {
               outcome = 'failed';
               reason = 'wake-retry-contended';

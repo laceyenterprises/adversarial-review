@@ -873,6 +873,18 @@ switch retires hints immediately when observed. Each closer pass checks drain
 status without reaping. Clearance resumes normal ordered and capped
 admission that pass, including background mode. Status-read failures fall back
 to ordinary dispatch; other refusals retain their current handling.
+Before closer admission, terminal launch evidence updates that PR's dispatch
+record and lease. An open same-head no-merge exit without armed auto-merge
+releases ownership after the readable 60-second terminal grace (immediately
+when the timestamp is missing) under the ordinary retry caps; merged success remains sticky. Capacity scans
+explicitly share a read-only ledger snapshot through the watcher status wrapper
+so terminal launches stop holding other PRs. Missing, unreadable or budget-skipped
+records reserve capacity inside the bounded pending-launch window. An armed
+GitHub auto-merge retains ownership for at most the 30-minute dispatched-lease
+window; expiry emits `ama_closer.auto_merge_hold_released` and permits a bounded
+no-merge retry. A no-merge audit bypasses the hold.
+A delivered wake may re-fire once per reconciled no-merge launch. The handoff
+smoke scenario verifies terminal lease release, capacity release and wake retry.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 
@@ -912,6 +924,10 @@ the real follow-up consumer and merges through the watcher closure phase.
 An in-flight re-review request preserves its claim; settlement records the
 reviewed head or releases without charging, and a legacy headless posted row
 requeues once at its matching live revision without changing retry budgets.
+A synthetic terminal no-merge launch releases its lease and capacity, and its
+delivered wake re-arms exactly once for that finished LRQ. An armed auto-merge
+retains the lease inside the 30-minute bound and releases for retry at expiry;
+unreadable fresh launch reservations retain fleet capacity.
 
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
 review claim; no follow-up job and exhausted/no-progress remediation both assign
@@ -1094,7 +1110,7 @@ stateDiagram-v2
     [*] --> s0: closer-lease.01 exclusive acquisition
     s0 --> s1: closer-lease.02 launch receipt
     s0 --> s3: closer-lease.03 terminal observed before launch
-    s1 --> s3: closer-lease.04 terminal settlement
+    s1 --> s3: closer-lease.04 terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit
     s0 --> s2: closer-lease.05 bounded review request accepted
     s1 --> s2: closer-lease.06 bounded review request accepted
     s2 --> s0: closer-lease.07 review completed; locked reclaim
@@ -1164,9 +1180,9 @@ stateDiagram-v2
     s0 --> s7: hammer-dispatch.06 launch result: dispatch-failed
     s0 --> s9: hammer-dispatch.07 launch result: no-dispatch
     s0 --> s10: hammer-dispatch.08 launch result: completed
-    s1 --> s2: hammer-dispatch.09 readable terminal chain evidence (no live fleet retry)
+    s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
     s1 --> s7: hammer-dispatch.10 failed outcome reconciled
-    s2 --> s0: hammer-dispatch.11 bounded retry or changed context
+    s2 --> s0: hammer-dispatch.11 bounded same-head no-merge retry or changed context; merged success stays sticky
     s4 --> s0: hammer-dispatch.12 bounded retry or changed context
     s5 --> s0: hammer-dispatch.13 bounded retry or changed context
     s7 --> s0: hammer-dispatch.14 bounded retry or changed context

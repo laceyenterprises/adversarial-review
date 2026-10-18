@@ -1220,3 +1220,39 @@ test('SCRATCHRACE-01: a failed retry traversal retains the successfully observed
   assert.deepEqual(result.row, row);
   assert.equal(result.retryChainUnreadable, true);
 });
+
+test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live retry descendants', async t => {
+  const { readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestStatusFromLedgerAsync } =
+    await import('../src/session-ledger-read-adapter.mjs');
+  const root = tempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const rows = [
+    { launch_request_id: 'synthetic-ended', status: 'succeeded' },
+    { launch_request_id: 'synthetic-ancestor', status: 'failed' },
+    { launch_request_id: 'synthetic-retry', status: 'running', metadata_json: { retryOf: 'synthetic-ancestor' } },
+    { launch_request_id: 'synthetic-malformed', status: 'failed', metadata_json: '{broken' },
+  ];
+  let reads = 0;
+  const options = { ledgerTarget: { backend: 'postgres', databaseName: 'synthetic_ledger' },
+    env: HERMETIC_CONFIG_ENV, rootDir: root,
+    spawnSyncImpl: (command, _argv, opts) => {
+      reads++;
+      assert.equal(command, 'psql');
+      assert.match(opts.input, /BEGIN READ ONLY;/);
+      assert.match(opts.input, /FROM launch_requests/);
+      return { status: 0, stdout: rows.map(r => JSON.stringify(r)).join('\n') };
+    },
+  };
+  const launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync(options);
+  assert.equal(launchSnapshot.ok, true);
+  for (const row of rows) {
+    const result = withLiveLaunchRetry(await readLaunchRequestStatusFromLedgerAsync({ ...options,
+      launchSnapshot, launchRequestId: row.launch_request_id, includeRetryChain: true }));
+    assert.equal(result.ok, true);
+    assert.equal(Object.hasOwn(result.row, 'metadata_json'), false);
+    assert.equal(result.row.status, row.launch_request_id === 'synthetic-ancestor' ? 'running' : row.status);
+    if (row.launch_request_id === 'synthetic-ancestor') assert.equal(result.liveRetryLaunchRequestId, 'synthetic-retry');
+  }
+  assert.deepEqual(launchSnapshot.rows, rows, 'individual reads cannot mutate the shared snapshot');
+  assert.equal(reads, 1, 'all terminal and live statuses share the same bounded query');
+});

@@ -33,7 +33,7 @@ test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async
   assert.deepEqual(paths.map(p => readFileSync(p, 'utf8')), after);
 });
 
-test('missing ledger launch expires; unreadable ledger retains only fresh capacity', async (t) => {
+test('missing or unreadable launch reserves fleet capacity inside the pending window', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-missing-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = '2026-10-03T00:00:00Z';
@@ -315,6 +315,28 @@ test('scan budget stops additional queries and reconciliation logs safe metadata
   assert.equal(JSON.stringify(events).includes('secret'), false);
 });
 
+for (const snapshotRows of [undefined, []]) {
+  test(`scan budget applies to per-launch probes, not snapshot rows (${snapshotRows ? 'snapshot' : 'sqlite'})`, async t => {
+    const root = fixture(t, 'snapshot-budget');
+    dispatchRecord(root, 1);
+    dispatchRecord(root, 2);
+    let probes = 0;
+    const result = await reconcileAmaCloserDispatches(root, {
+      now: NOW, scanBudgetMs: 0, useLaunchSnapshot: true,
+      readLaunchRequestSnapshotImpl: () => ({ ok: true,
+        ...(snapshotRows ? { rows: snapshotRows } : {}),
+        target: { backend: snapshotRows ? 'postgres' : 'sqlite' } }),
+      readLaunchRequestStatusImpl: () => {
+        probes += 1;
+        return { ok: true, row: { status: 'failed' } };
+      },
+    });
+    assert.equal(probes, snapshotRows ? 2 : 0);
+    assert.equal(result.changed, snapshotRows ? 2 : 0);
+    assert.equal(result.active.length, snapshotRows ? 0 : 2);
+  });
+}
+
 test('CLI apply refuses a foreign directory owner while dry-run remains available', async (t) => {
   const root = fixture(t, 'owner');
   dispatchRecord(root, 1);
@@ -351,3 +373,35 @@ for (const status of ['running', 'succeeded', 'failed']) {
     assert.deepEqual(readFileSync(path), before, 'capacity reconciliation does not charge or record a hammer outcome');
   });
 }
+
+test('HAMRETRY-01: capacity excludes proven terminal launches and reserves unprobed fresh launches', async t => {
+  const root = fixture(t, 'terminal-capacity');
+  for (let i = 1; i <= 4; i++) dispatchRecord(root, i, { lastObservedStatus: 'starting' });
+  const active = await findActiveAmaCloserLaunches(root, { now: NOW,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === 'lrq-4' ? 'running' : 'succeeded' } }),
+  });
+  assert.deepEqual(active.map(r => r.launchRequestId), ['lrq-4']);
+  assert.equal(active[0].holdsCapacity, true);
+  for (let i = 1; i <= 3; i++) {
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
+      { repo: 'fixture/repo', prNumber: i, headSha: 'abc' })));
+    assert.equal(record.state, 'launch-terminal');
+    assert.equal(record.terminalLaunchStatus, 'succeeded');
+  }
+  const unprobed = await findActiveAmaCloserLaunches(root, { now: NOW, scanBudgetMs: 0,
+    readLaunchRequestStatusImpl: () => assert.fail('budget exhausted'),
+  });
+  assert.equal(unprobed.length, 1, 'unknown liveness still protects this PR from duplicate ownership');
+  assert.equal(unprobed[0].holdsCapacity, true, 'unknown evidence reserves capacity within the pending window');
+});
+
+test('HAMRETRY-01: unreadable retry traversal reserves bounded capacity', async t => {
+  const root = fixture(t, 'unreadable-retry-capacity');
+  dispatchRecord(root, 1, { lastObservedStatus: 'starting' });
+  const active = await findActiveAmaCloserLaunches(root, { now: NOW,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' }, retryChainUnreadable: true }),
+  });
+  assert.equal(active.length, 1);
+  assert.equal(active[0].holdsCapacity, true, 'base terminality cannot release an unreadable descendant');
+});

@@ -324,3 +324,45 @@ test('HAMCIWAKE-01 nonblocking closer resume retains blocking-finding refusal', 
   assert.equal(isHammerRemediableEligibilityMiss(reasons), false);
   assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'blocking-findings-present'], options), false);
 });
+
+for (const terminalOutcome of ['failed-without-merge', 'succeeded']) {
+  test(`HAMRETRY-01: wake follows a reconciled ${terminalOutcome} attempt once`, async () => {
+    const { updateAmaCloserDispatchRecord } = await import('../src/ama/dispatch-closer.mjs');
+    const { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
+    const rootDir = root();
+    const subject = { repo: 'synthetic/repository', prNumber: 23, headSha: 'a'.repeat(40) };
+    const calls = [];
+    const args = { rootDir, ...subject, eligibility: { eligible: true, reasons: [] },
+      requestWatcherWakeImpl: wakeImpl(calls), log: { log() {} } };
+    assert.equal(requestEligibleHammerWake(args).outcome, 'requested');
+    acquireAmaCloserLease({ rootDir, ...subject });
+    updateAmaCloserLease({ rootDir, ...subject, status: 'dispatched', lrqId: 'synthetic-attempt-one' });
+    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'running hammer retains wake dedupe');
+    updateAmaCloserLease({ rootDir, ...subject, status: 'terminal', terminalOutcome });
+    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'an audit alone cannot prove the hammer exited');
+    updateAmaCloserDispatchRecord(rootDir, subject, () => ({ ...subject,
+      state: 'launch-terminal', terminalLaunchStatus: 'succeeded', launchRequestId: 'synthetic-attempt-one' }));
+    const retries = terminalOutcome === 'failed-without-merge';
+    assert.equal(requestEligibleHammerWake(args).outcome, retries ? 'requested' : 'duplicate');
+    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'one re-wake per finished attempt');
+    if (retries) {
+      deleteAmaCloserLease(rootDir, subject);
+      acquireAmaCloserLease({ rootDir, ...subject });
+      updateAmaCloserLease({ rootDir, ...subject, status: 'dispatched', lrqId: 'synthetic-attempt-two' });
+      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate');
+      updateAmaCloserLease({ rootDir, ...subject, status: 'terminal', terminalOutcome });
+      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'a predecessor record cannot re-arm the new attempt');
+      updateAmaCloserDispatchRecord(rootDir, subject, () => ({ ...subject,
+        state: 'launch-terminal', terminalLaunchStatus: 'failed', launchRequestId: 'synthetic-attempt-two' }));
+      assert.equal(requestEligibleHammerWake(args).outcome, 'requested');
+      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate');
+    }
+    assert.equal(calls.length, retries ? 3 : 1);
+    const { openReviewStateDb } = await import('../src/review-state.mjs');
+    const db = openReviewStateDb(rootDir);
+    try {
+      assert.equal(db.prepare("SELECT count(*) AS count FROM review_latency_events WHERE event_type = 'hammer_wake'").get().count,
+        calls.length, 'each delivered attempt has its own latency event');
+    } finally { db.close(); }
+  });
+}

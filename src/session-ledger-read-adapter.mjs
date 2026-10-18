@@ -992,7 +992,7 @@ function* readLaunchRequestStatusFromLedgerSteps({
     // the edges once rather than parsing metadata on every recursive step.
     // psql conditionals keep unsupported functions out of pre-16 SQL entirely.
     // Older servers retain the bounded read-only snapshot/application traversal.
-    retries = yield* queryPostgresRowsSteps(resolution.target, `
+    retries = Array.isArray(launchSnapshot?.rows) ? { ...launchSnapshot } : (yield* queryPostgresRowsSteps(resolution.target, `
       SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
       \\gset
       \\if :retry_native_parser
@@ -1030,7 +1030,7 @@ function* readLaunchRequestStatusFromLedgerSteps({
       FROM launch_requests
       ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
       \\endif
-      ;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true });
+      ;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true }));
     if (retries.ok && retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json'))) {
       const children = new Map();
       for (const candidate of retries.rows) {

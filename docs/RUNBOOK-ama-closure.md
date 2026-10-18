@@ -144,8 +144,16 @@ transaction pooling, with no function creation or other catalog writes; SELECT
 permission suffices on read replicas and read-only connections. Pre-16 servers
 retain the read-only snapshot with application-side parsing and traversal; those
 servers still transfer unrelated rows and metadata and can exhaust the output
-bound on large ledgers. Upgrade to 16+ for descendant-only output. Both sync
-and async Postgres children use a shared 2 MiB output bound. A genuinely oversized
+bound on large ledgers. Upgrade to 16+ for descendant-only output on individual
+probes. Capacity reconciliation reuses its supplied read-only launch snapshot
+and traverses that snapshot in the application without another query. Both sync
+and async Postgres children use a shared 2 MiB output bound. The 16+ recursive
+query materializes retry edges across the full launch table once per probe;
+descendant-only output bounds transport, not database scan or JSON parsing cost.
+After deployment, measure individual retry-probe latency as ledger volume grows.
+If that scan becomes costly, plan a ledger-owner schema change with an indexed
+retry-parent column or validated metadata expression; no such migration is part
+of RETRYCHAIN-01. A genuinely oversized
 chain, query error or timeout remains unreadable under the existing ownership rules. SQLite retains
 its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later

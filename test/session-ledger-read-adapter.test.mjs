@@ -1306,6 +1306,9 @@ test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live r
     assert.equal(Object.hasOwn(result.row, 'metadata_json'), false);
     assert.equal(result.row.status, row.launch_request_id === 'synthetic-ancestor' ? 'running' : row.status);
     if (row.launch_request_id === 'synthetic-ancestor') assert.equal(result.liveRetryLaunchRequestId, 'synthetic-retry');
+    const syncResult = withLiveLaunchRetry(readLaunchRequestStatusFromLedger({ ...options,
+      launchSnapshot, launchRequestId: row.launch_request_id, includeRetryChain: true }));
+    assert.deepEqual(syncResult, result, 'sync and async readers both reuse the supplied snapshot');
   }
   assert.deepEqual(launchSnapshot.rows, rows, 'individual reads cannot mutate the shared snapshot');
   assert.equal(reads, 1, 'all terminal and live statuses share the same bounded query');

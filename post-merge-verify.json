@@ -94,6 +94,7 @@
     },
     {
       "id": "refusals",
+      "description": "Includes uncached ledger-independent fleet-stop refusal and matching file removal using disposable roots; activation also requires the registered watcher to adopt the reader and old hammers to drain.",
       "promise": "smv-refusals",
       "edges": [
         "closure-owner.02",

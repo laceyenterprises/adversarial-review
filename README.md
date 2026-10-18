@@ -447,6 +447,30 @@ operator intervention. To roll back only background hammer dispatch, return
 `watcher.ama_hammer_dispatch_mode` to `inline` or unset the environment
 override; unknown or unreadable values fail safe to inline.
 
+RDR-02 adds the ledger-independent stop used by `rdr stop --reason` and
+`hq halt --confirm --reason`. Both merge consumers read
+`<HQ_ROOT>/control/halt/active.json` and `merge-kill.json` through
+`src/fleet-stop.mjs`: the daemon checks before closure and before each merge
+subprocess, and `bin/ama-check.mjs` refuses the hammer's final eligibility
+check. Presence (even malformed content or a dangling link) and unreadable
+state refuse merge. Reads are uncached; matching `rdr resume --epoch N`
+restores the file latches and eligibility without a configuration reload.
+A stop at the merge boundary releases the lease and defers, without a permanent
+failure or manual-close page. Closure admission checks the same fence before
+dependency reads and excludes intentional stops from wait-exhaustion paging.
+An already-issued GitHub request cannot be recalled.
+
+Deploy both RDR-02 repositories before activation. The build manager must
+confirm the registered watcher process has adopted this reader and drain any
+older hammer processes; check owners, launchd domains and restart paths in
+Agent OS `scripts/os-restart.sh`. The `refusals` smoke scenario uses disposable
+file state. On a disposable installation, stop with the ledger unavailable,
+verify daemon and hammer refuse within one tick, reject the wrong epoch, then
+resume the matching epoch and verify eligibility returns. Restore the ledger
+and reconcile through HQ twice, observing one arm/disarm audit pair. No SPEC
+section 7 account or hardware step blocks this slice. Gate changes require the
+normal cross-model convergence loop; do not admin-merge this change.
+
 Two autonomous-close lanes keep a fail-closed daemon attempt from parking
 for manual merge, without ever loosening a safety gate:
 

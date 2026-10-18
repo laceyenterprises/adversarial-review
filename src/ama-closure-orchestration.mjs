@@ -1,5 +1,6 @@
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
+import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
@@ -855,6 +856,9 @@ export async function maybeDispatchAmaClosureFor({
   maybeDispatchAmaCloserImpl,
   ...options
 } = {}) {
+  const stopReason = fleetStopReason({ env: options.env || process.env });
+  if (stopReason) return withAmaDispatchMetadata({ dispatched: false,
+    skipMergeAgent: true, recoveryWait: true, reason: stopReason }, { amaEnabled: true });
   // STALECLOSER-03: every result for a stale head carries the shared
   // closer-authored-stale decision, so the orphan watchdog and rescue read the
   // closer's own answer.
@@ -880,7 +884,8 @@ export async function maybeDispatchAmaClosureFor({
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
-  if (finalRoundSink.value && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
+  if (finalRoundSink.value && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
+    && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
     try {
       const launchAt = Date.parse(result?.closerProgressAt || '');
       await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
@@ -2279,6 +2284,7 @@ async function dispatchAmaClosureFor({
       // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
       // so the watcher returns without dispatching anything.
       const boundedWait = daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED
+        && !daemonCleanMerge.reason?.startsWith('fleet-stop-')
         ? await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
           reason: daemonCleanMerge.reason, env }) : null;
       return withAmaDispatchMetadata(

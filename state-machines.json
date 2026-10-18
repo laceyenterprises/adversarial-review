@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "fleetStopGuard": {
+    "source": "src/fleet-stop.mjs",
+    "consumers": ["src/ama-closure-orchestration.mjs", "src/daemon-clean-merge.mjs", "bin/ama-check.mjs"],
+    "authority": "Uncached presence of HQ_ROOT/control/halt/active.json or merge-kill.json; unreadable state refuses merge",
+    "recovery": "Matching-epoch resume clears owned files; closure remains deferred and releases the merge lease without permanent parking",
+    "lifecycleChange": "No new persisted lifecycle states or transitions"
+  },
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",
   "knownDeadEnds": [
     {"state": "closer-lease.pending", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},

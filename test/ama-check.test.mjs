@@ -2,7 +2,7 @@ import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -376,6 +376,34 @@ test('ama-check normalizes mergeable=MERGEABLE plus mergeStateStatus=CLEAN as me
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('ama-check refuses an offline fleet stop and becomes eligible after resume', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-fleet-stop-'));
+  try {
+    const directory = join(tmp, 'control', 'halt');
+    mkdirSync(directory, { recursive: true });
+    const options = { branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      env: { HQ_ROOT: tmp } };
+    for (const latch of ['active.json', 'merge-kill.json']) {
+      writeFileSync(join(directory, latch), 'invalid JSON', { mode: 0o600 });
+      const stopped = runAmaCheck(tmp, options);
+      assert.equal(stopped.status, 0, stopped.stderr);
+      const verdict = JSON.parse(stopped.stdout);
+      assert.equal(verdict.eligible, false);
+      assert.ok(verdict.reasons.includes('fleet-stop-armed'));
+      rmSync(join(directory, latch));
+      const resumed = runAmaCheck(tmp, options);
+      assert.equal(resumed.status, 0, resumed.stderr);
+      assert.equal(JSON.parse(resumed.stdout).eligible, true, resumed.stdout);
+    }
+    rmSync(directory, { recursive: true });
+    writeFileSync(directory, 'not a directory');
+    const unreadable = runAmaCheck(tmp, options);
+    assert.equal(unreadable.status, 0, unreadable.stderr);
+    assert.ok(JSON.parse(unreadable.stdout).reasons.includes('fleet-stop-unreadable'));
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('ama-check accepts content-equivalent rebase coverage without rewriting reviewed SHA', () => {

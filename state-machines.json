@@ -4,6 +4,7 @@
     "source": "src/fleet-stop.mjs",
     "consumers": ["src/ama-closure-orchestration.mjs", "src/daemon-clean-merge.mjs", "bin/ama-check.mjs"],
     "authority": "Uncached presence of HQ_ROOT/control/halt/active.json or merge-kill.json; unreadable state refuses merge",
+    "reasons": {"active.json": "fleet-stop-active", "merge-kill.json": "fleet-stop-merge-kill", "readError": "fleet-stop-unreadable", "precedence": "active.json first; fleet-stop- prefix preserves intentional deferral"},
     "recovery": "Matching-epoch resume clears owned files; closure remains deferred and releases the merge lease without permanent parking",
     "lifecycleChange": "No new persisted lifecycle states or transitions"
   },

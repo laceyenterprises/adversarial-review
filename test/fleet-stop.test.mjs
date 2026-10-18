@@ -14,13 +14,17 @@ test('file stop is uncached, accepts no content and preserves merge-only holds',
     mkdirSync(directory, { recursive: true });
     const active = join(directory, 'active.json');
     writeFileSync(active, 'corrupt', { mode: 0o600 });
-    assert.equal(fleetStopReason({ env }), 'fleet-stop-armed');
+    assert.equal(fleetStopReason({ env }), 'fleet-stop-active');
     rmSync(active);
     symlinkSync(join(root, 'missing'), active);
-    assert.equal(fleetStopReason({ env }), 'fleet-stop-armed');
+    assert.equal(fleetStopReason({ env }), 'fleet-stop-active');
     rmSync(active);
     writeFileSync(join(directory, 'merge-kill.json'), '', { mode: 0o600 });
-    assert.equal(fleetStopReason({ env }), 'fleet-stop-armed');
+    assert.equal(fleetStopReason({ env }), 'fleet-stop-merge-kill');
+    writeFileSync(active, '');
+    assert.equal(fleetStopReason({ env }), 'fleet-stop-active');
+    rmSync(active);
+    assert.equal(fleetStopReason({ env }), 'fleet-stop-merge-kill');
     rmSync(join(directory, 'merge-kill.json'));
     assert.equal(fleetStopReason({ env: { AGENT_OS_HQ_ROOT: root } }), null);
   } finally { rmSync(root, { recursive: true, force: true }); }

@@ -453,7 +453,10 @@ RDR-02 adds the ledger-independent stop used by `rdr stop --reason` and
 `src/fleet-stop.mjs`: the daemon checks before closure and before each merge
 subprocess, and `bin/ama-check.mjs` refuses the hammer's final eligibility
 check. Presence (even malformed content or a dangling link) and unreadable
-state refuse merge. Reads are uncached; matching `rdr resume --epoch N`
+state refuse merge. Refusal reasons identify the latch as `fleet-stop-active`
+or `fleet-stop-merge-kill` (active takes precedence when both exist); read errors
+return `fleet-stop-unreadable`. Consumers treat the `fleet-stop-` prefix as an
+intentional deferral. Reads are uncached; matching `rdr resume --epoch N`
 restores the file latches and eligibility without a configuration reload.
 A stop at the merge boundary releases the lease and defers, without a permanent
 failure or manual-close page. Closure admission checks the same fence before
@@ -976,7 +979,9 @@ intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
 Settlement accepts a prompt first populated by that same captured attempt.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
-claim; exhaustion selects operator paging. Fleet identity proof requires a valid
+claim; exhaustion selects operator paging. Disposable halt files return distinct
+`fleet-stop-active` and `fleet-stop-merge-kill` refusals and unlinking each
+restores eligibility without reloading. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).
 A fake GitHub signed-commit policy refuses the unsigned head through the real
 daemon merge attempt. The real consumer stops exhausted rounds and operator-only

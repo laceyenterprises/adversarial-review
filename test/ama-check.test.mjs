@@ -386,13 +386,13 @@ test('ama-check refuses an offline fleet stop and becomes eligible after resume'
     const options = { branchProtectionRequired: false,
       protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
       env: { HQ_ROOT: tmp } };
-    for (const latch of ['active.json', 'merge-kill.json']) {
+    for (const [latch, reason] of [['active.json', 'fleet-stop-active'], ['merge-kill.json', 'fleet-stop-merge-kill']]) {
       writeFileSync(join(directory, latch), 'invalid JSON', { mode: 0o600 });
       const stopped = runAmaCheck(tmp, options);
       assert.equal(stopped.status, 0, stopped.stderr);
       const verdict = JSON.parse(stopped.stdout);
       assert.equal(verdict.eligible, false);
-      assert.ok(verdict.reasons.includes('fleet-stop-armed'));
+      assert.deepEqual(verdict.reasons.filter(value => value.startsWith('fleet-stop-')), [reason]);
       rmSync(join(directory, latch));
       const resumed = runAmaCheck(tmp, options);
       assert.equal(resumed.status, 0, resumed.stderr);

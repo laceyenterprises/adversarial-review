@@ -46,7 +46,7 @@ function cleanReview(overrides = {}) {
 }
 
 test('fleet stop at the merge boundary releases the lease without permanent parking', async () => {
-  for (const reason of ['fleet-stop-armed', 'fleet-stop-unreadable']) {
+  for (const reason of ['fleet-stop-active', 'fleet-stop-merge-kill', 'fleet-stop-unreadable']) {
     const harness = makeHarness({ mergeResults: [{ exitCode: 1, stderr: reason,
       closureHold: { reason, needsOperator: false } }] });
     const stopped = await attemptDaemonCleanMerge(baseArgs(harness));

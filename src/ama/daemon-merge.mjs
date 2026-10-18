@@ -931,7 +931,8 @@ async function attemptDaemonCleanMergeInner({
     }
     // A live safety hold prevented the transport from clicking merge. Keep
     // its reason and re-walkability; it is not a permanent merge rejection.
-    if (['stacked-base-merged', 'stacked-base-read-failed', 'fleet-stop-armed', 'fleet-stop-unreadable'].includes(mergeRes?.closureHold?.reason)) {
+    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)
+      || mergeRes?.closureHold?.reason?.startsWith('fleet-stop-')) {
       terminal = { reason: mergeRes.closureHold.reason, permanent: false,
         closureHold: mergeRes.closureHold };
       break;

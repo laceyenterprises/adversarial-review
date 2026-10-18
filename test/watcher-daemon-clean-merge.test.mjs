@@ -2707,21 +2707,21 @@ test('file stop refuses daemon closure before dependencies and recovers without 
       observeClosureWaitImpl: async () => assert.fail('intentional stop must not age into a page'),
       runDaemonCleanMergeAttemptImpl: async () => assert.fail('stop before dependency reads'),
       maybeDispatchAmaCloserImpl: async () => assert.fail('no hammer while stopped') });
-    assert.equal(closure.reason, 'fleet-stop-armed');
+    assert.equal(closure.reason, 'fleet-stop-active');
     assert.equal(closure.skipMergeAgent, true);
     let attempts = 0;
     const args = { ...unattributedDaemonArgs({ rootDir }), env: { HQ_ROOT: rootDir },
       operatorApprovalEvent: operatorApprovedEventAt('operator-pr-head'),
       fetchRollupImpl: async () => { throw new Error('ledger/GitHub unavailable'); } };
     const stopped = await runDaemonCleanMergeAttempt(args);
-    assert.equal(stopped.reason, 'fleet-stop-armed');
+    assert.equal(stopped.reason, 'fleet-stop-active');
     assert.equal(stopped.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
     assert.equal(stopped.skipMergeAgent, true);
     rmSync(join(directory, 'active.json'));
     const lateStop = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), env: { HQ_ROOT: rootDir },
       observeClosureWaitImpl: async () => assert.fail('late stop must not enter wait paging'),
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-        reason: 'fleet-stop-armed', merged: false }),
+        reason: 'fleet-stop-active', merged: false }),
       maybeDispatchAmaCloserImpl: async () => assert.fail('no late hammer') });
     assert.equal(lateStop.skipMergeAgent, true);
     const resumed = await runDaemonCleanMergeAttempt({ ...args,
@@ -2753,7 +2753,7 @@ test('stop appearing during merge checks or transport retry prevents every merge
           const response = await options.runMergeImpl({ repo: 'acme/repo', prNumber: 900,
             head: 'operator-pr-head', mergeMethod: 'squash', subject: 'Fixture', body: '' });
           assert.equal(response.exitCode, 1);
-          assert.equal(response.closureHold.reason, 'fleet-stop-armed');
+          assert.equal(response.closureHold.reason, 'fleet-stop-active');
           return response.closureHold;
         },
       });

@@ -599,7 +599,7 @@ function main(argv = process.argv.slice(2)) {
   const stopReason = fleetStopReason();
   if (stopReason) {
     result.eligible = false;
-    result.reasons.push(stopReason);
+    if (!result.reasons.includes(stopReason)) result.reasons.push(stopReason);
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;

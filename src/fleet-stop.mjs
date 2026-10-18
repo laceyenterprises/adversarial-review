@@ -10,7 +10,7 @@ export function fleetStopReason({ env = process.env, lstatImpl = lstatSync } = {
     for (const name of ['active.json', 'merge-kill.json']) {
       try {
         lstatImpl(join(directory, name));
-        return 'fleet-stop-armed';
+        return name === 'active.json' ? 'fleet-stop-active' : 'fleet-stop-merge-kill';
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }

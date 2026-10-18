@@ -473,7 +473,7 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
-      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs", "src/fleet-stop.mjs"],
       "owner": "adversarial-review alert delivery",
       "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"],
       "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"]

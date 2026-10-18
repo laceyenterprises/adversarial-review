@@ -385,7 +385,9 @@ test('ama-check refuses an offline fleet stop and becomes eligible after resume'
     mkdirSync(directory, { recursive: true });
     const options = { branchProtectionRequired: false,
       protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
-      env: { HQ_ROOT: tmp } };
+      env: { HQ_ROOT: tmp, ALERT_TO: '',
+        ADVERSARIAL_ALERT_DELIVERY_ROOT: join(tmp, 'alerts'),
+        AGENT_OS_ALERT_DELIVERY_SCRIPT: '' } };
     for (const [latch, reason] of [['active.json', 'fleet-stop-active'], ['merge-kill.json', 'fleet-stop-merge-kill']]) {
       writeFileSync(join(directory, latch), 'invalid JSON', { mode: 0o600 });
       const stopped = runAmaCheck(tmp, options);

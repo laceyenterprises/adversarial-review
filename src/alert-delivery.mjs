@@ -603,13 +603,22 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
   };
 }
 
-// The pager carries stalled first-pass reviews, exhausted AMA recovery,
+// The pager carries unreadable fleet-stop state, stalled first-pass reviews, exhausted AMA recovery,
 // bounded intent-preservation exhaustion and a hammer-owner route (review
 // cycle cap, or CI-blocked with no remediation job left) that ended without a
 // merge. Other pipeline notices remain durable digest entries.
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
+  if (event === 'fleet-stop-unreadable') {
+    return {
+      severity: 'SEV1',
+      headline: 'Fleet-stop state unreadable — autonomous merges held',
+      body: String(doc?.text || event),
+      action: 'Restore state root and halt directory readability; retain the merge hold until readable.',
+      detail: `Reason: ${event}; path class: ${payload.pathClass}; error code: ${payload.errorCode}`,
+    };
+  }
   if (event === REVIEW_STALL_EVENT) {
     const ageMinutes = Math.max(1, Math.round(Number(payload.age_ms || 0) / 60_000));
     const pendingCount = Number.isFinite(Number(payload.pending_review_count))
@@ -690,9 +699,12 @@ const FIXED_RECOVERY_EVENTS = Object.freeze([
   'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS,
 ]);
 
+function sanitizeAlertIdPrefix(prefix) {
+  return String(prefix || 'alert').replace(/[^A-Za-z0-9_-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, '').slice(0, 135) || 'alert';
+}
+
 function fixedAlertId(prefix, hash) {
-  const safePrefix = String(prefix || 'alert').replace(/[^A-Za-z0-9_-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, '').slice(0, 135) || 'alert';
-  return `${safePrefix}-${hash}`;
+  return `${sanitizeAlertIdPrefix(prefix)}-${hash}`;
 }
 
 function queueAlertDoc(rootDir, doc, { logger = console } = {}) {
@@ -1524,5 +1536,6 @@ export {
   resolveAlertDefaults,
   resolveAlertTransportDefaults,
   scheduleAlertDrain,
+  sanitizeAlertIdPrefix,
   sweepAlertArchiveRetention,
 };

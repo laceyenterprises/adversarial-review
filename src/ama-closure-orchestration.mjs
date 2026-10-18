@@ -129,9 +129,12 @@ export function recordFinalReviewHammerLatency(latencyMs, at = Date.now()) {
 }
 
 export function finalReviewHammerLatencySummary(now = Date.now()) {
-  for (let i = finalReviewHammerLatencies.length - 1; i >= 0; i--) {
-    if (finalReviewHammerLatencies[i].at < now - 86400000) finalReviewHammerLatencies.splice(i, 1);
+  let retained = 0;
+  for (const sample of finalReviewHammerLatencies) {
+    // Compact once, also handling timestamps reordered by a wall-clock change.
+    if (sample.at >= now - 86400000) finalReviewHammerLatencies[retained++] = sample;
   }
+  finalReviewHammerLatencies.length = retained;
   const values = finalReviewHammerLatencies.map(s => s.latencyMs).sort((a, b) => a - b);
   return { window_ms: 86400000, samples: values.length,
     p50_ms: values.length ? values[Math.ceil(values.length * 0.5) - 1] : null,

@@ -133,6 +133,24 @@ test('handlers fill exactly the fixed concurrency and refill a released slot', a
   assert.equal(peak, POSTED_REVIEW_CONCURRENCY);
 });
 
+test('settled changes-requested reviews stay behind clean reviews without readiness probes', async () => {
+  const probes = [];
+  const started = [];
+  const verdicts = ['request-changes', 'approved', 'comment-only'];
+  const prepared = await preparePostedReviewHandlers(verdicts.map((_, i) => handler(i + 1, async () => started.push(i + 1))), {
+    readReviewRow: () => ({ review_status: 'posted', reviewer_head_sha: head }),
+    resolveSettled: (_, { prNumber }) => ({ verdict: verdicts[prNumber - 1], remediationPending: false }),
+    fetchSnapshot: async (_, n) => {
+      probes.push(n);
+      return { headRefOid: head, state: 'OPEN', statusCheckRollup: [{ name: 'build', conclusion: 'SUCCESS' }] };
+    }, logger: quiet,
+  });
+  assert.deepEqual(probes, [2, 3]);
+  const summary = await runPostedReviewHandlersFairly({ handlers: prepared, logger: quiet });
+  assert.deepEqual(started, [2, 3, 1]);
+  assert.equal(summary.mergeReadyHandled, 2);
+});
+
 test('timed-out work retains its slots across ticks until the actual work settles', async () => {
   const state = createPostedReviewFairnessState();
   const gate = deferred();
@@ -142,9 +160,15 @@ test('timed-out work retains its slots across ticks until the actual work settle
     const first = await runPostedReviewHandlersFairly({ handlers, state, handlerTimeoutMs: 10,
       minimumHandlerStartBudgetMs: 1, logger: quiet });
     assert.equal(first.timedOut, POSTED_REVIEW_CONCURRENCY);
+    assert.equal(first.deferredByInFlight, 4);
+    assert.equal(first.deferredByBudget, 0);
     assert.equal(starts, POSTED_REVIEW_CONCURRENCY);
-    await runPostedReviewHandlersFairly({ handlers, state, handlerTimeoutMs: 10,
-      minimumHandlerStartBudgetMs: 1, logger: quiet });
+    const logs = [];
+    const second = await runPostedReviewHandlersFairly({ handlers, state, handlerTimeoutMs: 10,
+      minimumHandlerStartBudgetMs: 1, logger: { ...quiet, log: message => logs.push(message) } });
+    assert.equal(second.deferredByInFlight, 8);
+    assert.equal(second.deferredByBudget, 0);
+    assert.ok(logs.some(message => message.includes('budget_deferred=0 in_flight_deferred=8')));
     assert.equal(starts, POSTED_REVIEW_CONCURRENCY);
   } finally { gate.resolve(); await turn(); }
   assert.equal(state.inFlight.size, 0);
@@ -256,6 +280,21 @@ test('launch latency percentiles count confirmed samples, expire after a day, an
   resetFinalReviewHammerLatenciesForTesting();
   assert.deepEqual(finalReviewHammerLatencySummary(now), {
     window_ms: 86400000, samples: 0, p50_ms: null, p95_ms: null,
+  });
+});
+
+test('latency eviction retains boundary samples despite out-of-order timestamps and mass expiry', t => {
+  resetFinalReviewHammerLatenciesForTesting();
+  t.after(resetFinalReviewHammerLatenciesForTesting);
+  const now = Date.now();
+  recordFinalReviewHammerLatency(1000, now - 86400000);
+  for (let i = 0; i < 9998; i++) recordFinalReviewHammerLatency(9000, now - 86400001);
+  recordFinalReviewHammerLatency(2000, now);
+  assert.deepEqual(finalReviewHammerLatencySummary(now), {
+    window_ms: 86400000, samples: 2, p50_ms: 1000, p95_ms: 2000,
+  });
+  assert.deepEqual(finalReviewHammerLatencySummary(now + 1), {
+    window_ms: 86400000, samples: 1, p50_ms: 2000, p95_ms: 2000,
   });
 });
 

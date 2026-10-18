@@ -473,6 +473,7 @@ export async function runPostedReviewHandlersFairly({
     timedOut: 0,
     skippedByLane: 0,
     deferredByBudget: 0,
+    deferredByInFlight: 0,
     deferredAfterTimeout: 0,
     continuedAfterTimeout: 0,
     daemonCleanMerges: 0,
@@ -637,7 +638,7 @@ export async function runPostedReviewHandlersFairly({
     // tick must not multiply abandoned handlers or duplicate a PR's evaluation.
     if (inFlight.size >= POSTED_REVIEW_CONCURRENCY || inFlight.has(key)) {
       nextDeferred.add(key);
-      summary.deferredByBudget += 1;
+      summary.deferredByInFlight += 1;
       continue;
     }
 
@@ -714,6 +715,7 @@ export async function runPostedReviewHandlersFairly({
     && summary.failed === 0
     && summary.timedOut === 0
     && summary.deferredByBudget === 0
+    && summary.deferredByInFlight === 0
   ) {
     // Most-starved first: the PR that has waited the most ticks since its last
     // walk, then the one with the longest no-progress series, then queue order.
@@ -772,7 +774,7 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +
         `ran=0 failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout} ` +
         `slow_lane_floor_admissions=${summary.laneFloorAdmissions}`,
     );
   }
@@ -785,13 +787,14 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase stall signature: queued=${summary.queued} ` +
         `ran=${summary.ran} failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout}`,
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout}`,
     );
   }
   if (
     summary.queued > 0
     || summary.skippedByLane > 0
     || summary.deferredByBudget > 0
+    || summary.deferredByInFlight > 0
     || summary.deferredAfterTimeout > 0
     || summary.timedOut > 0
     || summary.laneFloorAdmissions > 0
@@ -803,7 +806,7 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase: queued=${summary.queued} ran=${summary.ran} ` +
         `failed=${summary.failed} timed_out=${summary.timedOut} merge_ready_handled=${summary.mergeReadyHandled} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout} ` +
         `continued_after_timeout=${summary.continuedAfterTimeout}` +
         (summary.priorityLaneBypasses > 0 ? ` priority_lane_bypasses=${summary.priorityLaneBypasses}` : '') +
         (summary.laneFloorAdmissions > 0 ? ` slow_lane_floor_admissions=${summary.laneFloorAdmissions}` : ''),

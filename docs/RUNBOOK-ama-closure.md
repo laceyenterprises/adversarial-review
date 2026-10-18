@@ -505,7 +505,7 @@ posted-review watcher phase's wait behavior changes.
 Posted-review scheduling uses four concurrent handlers, with no deployment
 knob. Priority probes share the phase budget and use at most thirty seconds
 (or half the phase budget, if smaller), with ten seconds per read. They promote
-lane-due settled reviews on the current head with green
+lane-due settled approved or comment-only reviews on the current head with green
 CI and no pending remediation ahead of ordinary handlers. The no-progress lane
 is previewed without advancing skip counters before any readiness probe;
 handlers still in backoff incur no readiness GitHub read. Merge readiness is an
@@ -525,6 +525,10 @@ Readiness probes use the adoption phase's injected `execFileImpl` executor,
 including the normal candidate snapshot read and its abort signal.
 
 Timed-out handler work keeps its concurrency slot until it actually settles.
+Deferrals caused by those occupied slots are reported as `in_flight_deferred`,
+separately from phase-time exhaustion (`budget_deferred`); both retain next-tick
+priority. Changes-requested reviews keep ordinary ordering and are excluded
+from `merge_ready_handled`.
 The hammer capacity census through dispatch-intent publication is serialized
 within the watcher process so concurrent evaluations cannot all claim the last
 launch slot. The slow dispatch acknowledgement remains outside that section;

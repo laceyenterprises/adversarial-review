@@ -948,7 +948,7 @@ export async function preparePostedReviewHandlers(handlers, {
         if (row?.review_status !== 'posted' || !handler.headSha || row.reviewer_head_sha !== handler.headSha) continue;
         const settled = resolveSettled(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber,
           reviewRow: row, currentHeadSha: handler.headSha, logger });
-        if (!['approved', 'comment-only', 'request-changes'].includes(settled.verdict) || settled.remediationPending !== false) continue;
+        if (!['approved', 'comment-only'].includes(settled.verdict) || settled.remediationPending !== false) continue;
         const value = await timePostedReviewStep('prepare-merge-ready', postedReviewHandlerKey(handler), logger,
           ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { execFileImpl, signal }),
           undefined, { deadlineMs: Math.max(1, Math.min(10_000, deadlineAt - now())) });

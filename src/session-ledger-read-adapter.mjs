@@ -909,7 +909,9 @@ function* readLaunchRequestStatusFromLedgerSteps({
   let queried;
   let sqliteLaunchProjection;
   if (Array.isArray(launchSnapshot?.rows)) {
-    queried = { ...launchSnapshot, rows: launchSnapshot.rows.filter(row => row.launch_request_id === normalizedLaunchRequestId) };
+    queried = { ...launchSnapshot, rows: launchSnapshot.rows
+      .filter(row => row.launch_request_id === normalizedLaunchRequestId)
+      .map(({ metadata_json: _metadata, ...row }) => row) };
   } else if (resolution.target.backend === 'sqlite') {
     // HAMREFUND-01: older offline ledgers may predate the detail column.
     const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');

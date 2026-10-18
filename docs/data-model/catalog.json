@@ -568,7 +568,7 @@
     },
     {
       "id": "ama-closer-dispatches",
-      "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps unless auto-merge is armed without a no-merge audit; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
+      "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps after the readable 60-second terminal grace, with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
@@ -635,7 +635,7 @@
     },
     {
       "id": "ama-closer-leases",
-      "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable immediately unless auto-merge is armed without a no-merge audit; merged success stays sticky.",
+      "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky.",
       "title": "AMA Closer Leases",
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",

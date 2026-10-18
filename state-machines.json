@@ -165,7 +165,7 @@
         {"id": "closer-lease.01","from": "[*]","to": "pending","trigger": "exclusive acquisition","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.02","from": "pending","to": "dispatched","trigger": "launch receipt","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.03","from": "pending","to": "terminal","trigger": "terminal observed before launch","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.04","from": "dispatched","to": "terminal","trigger": "terminal settlement; open same head releases no-merge launch unless auto-merge is armed without a no-merge audit","codeSource": "src/ama/closer-lease.mjs"},
+        {"id": "closer-lease.04","from": "dispatched","to": "terminal","trigger": "terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.05","from": "pending","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.06","from": "dispatched","to": "handed-to-review","trigger": "bounded review request accepted","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.07","from": "handed-to-review","to": "pending","trigger": "review completed; locked reclaim","codeSource": "src/ama/closer-lease.mjs"},

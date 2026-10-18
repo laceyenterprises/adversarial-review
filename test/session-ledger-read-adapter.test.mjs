@@ -1249,6 +1249,7 @@ test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live r
     const result = withLiveLaunchRetry(await readLaunchRequestStatusFromLedgerAsync({ ...options,
       launchSnapshot, launchRequestId: row.launch_request_id, includeRetryChain: true }));
     assert.equal(result.ok, true);
+    assert.equal(Object.hasOwn(result.row, 'metadata_json'), false);
     assert.equal(result.row.status, row.launch_request_id === 'synthetic-ancestor' ? 'running' : row.status);
     if (row.launch_request_id === 'synthetic-ancestor') assert.equal(result.liveRetryLaunchRequestId, 'synthetic-retry');
   }

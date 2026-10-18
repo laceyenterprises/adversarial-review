@@ -1500,6 +1500,24 @@ const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
 
+function terminalLaunchAgeMs(row, now) {
+  const value = row?.terminal_at;
+  const terminalAt = typeof value === 'number' ? value
+    : value instanceof Date ? value.getTime()
+      : typeof value === 'string' ? Date.parse(value) : NaN;
+  return Date.parse(now) - terminalAt;
+}
+
+// The lease clock is fixed across observations; polling must not extend an
+// armed GitHub merge indefinitely when CI needs another hammer's repair.
+function isAmaCloserAutoMergeHoldActive(lease, now) {
+  if (lease?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED) return false;
+  const leaseAt = parseTimeMs(lease.updatedAt || lease.acquiredAt);
+  const nowMs = parseTimeMs(now);
+  return leaseAt !== null && nowMs !== null
+    && nowMs - leaseAt < AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+}
+
 // Watcher closure reads yield while the GitHub child runs.
 async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal }) {
   try {
@@ -1697,21 +1715,22 @@ function* reconcileAmaCloserLeaseSteps({
     });
     throwIfAborted(signal);
     // GitHub can finish an armed auto-merge after the hammer exits. Retain
-    // ownership while it is armed; otherwise allow head-advance audit lag briefly.
+    // ownership only inside the dispatched-lease bound; allow GitHub head lag briefly.
     let decidingPrState = null;
     if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) {
       const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env, signal }));
       throwIfAborted(signal);
       if (!livePr) return false;
       decidingPrState = livePr.state;
-      if (decidingPrState === 'OPEN' && livePr.autoMergeRequest != null) return false;
-      if (decidingPrState === 'OPEN' && livePr.headRefOid !== held.headSha) {
-        const terminalTime = probe.row?.terminal_at;
-        const terminalAt = typeof terminalTime === 'number' ? terminalTime
-          : terminalTime instanceof Date ? terminalTime.getTime()
-            : typeof terminalTime === 'string' ? Date.parse(terminalTime) : NaN;
-        const ageMs = Date.parse(now) - terminalAt;
-        if (!Number.isFinite(ageMs) || ageMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS) return false;
+      if (decidingPrState === 'OPEN' && livePr.autoMergeRequest != null) {
+        if (isAmaCloserAutoMergeHoldActive(held.lease, now)) return false;
+        logger?.info?.(JSON.stringify({ event: 'ama_closer.auto_merge_hold_released',
+          repo, prNumber, launchRequestId, reason: 'dispatched-lease-bound' }));
+      }
+      if (decidingPrState === 'OPEN') {
+        const ageMs = terminalLaunchAgeMs(probe.row, now);
+        if (Number.isFinite(ageMs) ? ageMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS
+          : livePr.headRefOid !== held.headSha) return false;
       }
     }
     const terminalOutcome = decidingPrState === 'CLOSED' ? 'pr-closed-externally'
@@ -5803,9 +5822,21 @@ async function maybeDispatchAmaCloserAttempt({
             execFileImpl,
           })
           : false;
+        const terminalAgeMs = terminalLaunchAgeMs(launchRequestProbe?.row, dispatchContext.dispatchedAt);
+        if (terminalLivePr?.state === 'OPEN' && !auditTerminalOutcome
+          && noMergeAuditForCurrentHead !== true
+          && Number.isFinite(terminalAgeMs) && terminalAgeMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS) {
+          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+        }
         if (terminalLivePr?.state === 'OPEN' && terminalLivePr.autoMergeRequest != null
           && noMergeAuditForCurrentHead !== true) {
-          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+          if (isAmaCloserAutoMergeHoldActive(terminalSuccessHoldLease, dispatchContext.dispatchedAt)) {
+            return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+          }
+          logAmaCloserDispatchEvent(logger, 'ama_closer.auto_merge_hold_released', {
+            repo, prNumber, launchRequestId: existingRecord.launchRequestId,
+            reason: 'dispatched-lease-bound',
+          });
         }
         const hammerOutcome = classifySucceededHammerOutcome({
           livePrState: terminalLivePr?.state,

@@ -163,7 +163,10 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   `terminalLaunchStatus` and `reconciledAt`. Capacity recognizes `reaped` and
   `cancelled` without widening the per-PR unknown-status retry/re-arm decision.
 - Terminal-success ownership remains held while a live OPEN PR has an armed
-  `autoMergeRequest`, unless a no-merge audit proves a closing decision. A
+  `autoMergeRequest` only within the 30-minute dispatched-lease window, measured
+  from `updatedAt` (or `acquiredAt`) without extending it on observation. A no-merge
+  audit bypasses this hold. Expiry emits `ama_closer.auto_merge_hold_released`
+  and releases as `failed-without-merge` under ordinary retry/refund caps. A
   stale-active worker with ledger `succeeded` enters the live terminal-success
   classifier before retry/refund admission; the persisted observation remains
   `unverified-terminal-success` with raw `terminalLaunchStatus: succeeded`.
@@ -212,7 +215,9 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   independently of the fleet scan budget. Its record becomes `launch-terminal`;
   confirmed no-merge settlement writes `outcome` and `terminalOutcome` alongside
   the matching lease. A live OPEN same-head probe releases a successful process
-  exit immediately, even without a terminal timestamp. Merge evidence and
+  exit after the 60-second grace when `terminal_at` is readable; without that
+  timestamp the same-head exit releases immediately. Armed auto-merge adds only
+  the bounded hold described above. Merge evidence and
   successful audits stay sticky. Series, target, lifetime and refund caps remain
   authoritative; unreadable PR evidence retains existing ownership bounds.
 

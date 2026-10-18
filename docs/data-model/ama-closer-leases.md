@@ -41,15 +41,17 @@ reopened PR to acquire a fresh lease. `pr-closed-externally` and
 
 `reconcileAmaCloserLease` settles terminal launch ownership before ordinary
 closer admission or follow-up claims. A bare `succeeded` process exit on a confirmed live OPEN same head settles
-as `failed-without-merge`, allowing same-head retry in that decision pass under
-the existing caps, unless GitHub reports an armed `autoMergeRequest`. Both the
-synchronous follow-up probe and asynchronous watcher probe request this field;
-armed auto-merge retains ownership unless a no-merge audit resolves the exit.
-Without that head proof, the existing settlement grace and
-ownership bound apply while terminal audit and merged completion evidence
-are absent or unreadable. Holding leaves the reclaim clock unchanged;
-the existing 30-minute lease expiry and active dispatch-record guards still
-apply. A terminal audit or PR-scoped merged signal permits settlement. Merge
+as `failed-without-merge` under the existing caps after the 60-second
+terminal settlement grace when `terminal_at` is readable; a missing timestamp
+allows immediate same-head settlement. Both synchronous follow-up and asynchronous
+watcher probes request `autoMergeRequest`. Armed auto-merge holds ownership only
+until 30 minutes from the lease's `updatedAt` (falling back to `acquiredAt`),
+without refreshing that clock on observation. A no-merge audit bypasses the hold.
+At the bound an OPEN terminal launch settles as `failed-without-merge`, so ordinary
+retry/refund caps can admit CI repair even while GitHub auto-merge remains armed.
+Release emits `ama_closer.auto_merge_hold_released` with the PR and launch ID.
+Without live head proof, the existing settlement grace and ownership bound apply.
+The active dispatch-record guards still apply. A terminal audit or PR-scoped merged signal permits settlement. Merge
 signals cover rekeyed leases too: their stored SHA can be a merge commit,
 so lookup does not filter by the current or original lease head. Without an
 audit or merge evidence, other terminal launches settle as `superseded` when

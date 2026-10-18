@@ -1852,7 +1852,7 @@ test('concurrent capacity admission preserves the existing launch cap before ack
   }
 });
 
-for (const scenario of ['audit', 'no audit', 'auto-merge armed']) {
+for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-merge', 'expired auto-merge fallback']) {
   const audited = scenario === 'audit';
   test(`HAMRETRY-01: terminal success on the open same head reconciles before retry (${scenario})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'same-head-retry-'));
@@ -1879,7 +1879,7 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed']) {
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: HEAD, comments: [] }),
       deliverAlertImpl: async () => ({ ok: true }),
     };
-    if (scenario === 'auto-merge armed') {
+    if (scenario === 'auto-merge armed' || scenario.startsWith('expired auto-merge')) {
       const live = { state: 'OPEN', headRefOid: HEAD, headBranchExists: true,
         autoMergeRequest: { enabledAt: now } };
       input.readPullRequestStateImpl = () => live;
@@ -1889,15 +1889,35 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed']) {
       assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
       assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 1);
       assert.equal(deps.calls.length, 0, 'do not dispatch while GitHub has a queued merge');
-      live.autoMergeRequest = null;
+      if (scenario.startsWith('expired auto-merge')) {
+        input.dispatchContext.dispatchedAt = new Date(Date.parse(now) + 30 * 60_000).toISOString();
+        input.prMetadata.statusCheckRollup = [
+          { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+        ];
+        input.prMetadata.branchProtection.requiredContexts.push('test');
+        if (scenario.endsWith('fallback')) input.readPullRequestStateImpl = () => null;
+      } else live.autoMergeRequest = null;
     }
-    const result = await maybeDispatchAmaCloser(input);
+    let result = await maybeDispatchAmaCloser(input);
+    if (scenario.endsWith('fallback')) {
+      assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
+      assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'failed-without-merge');
+      result = await maybeDispatchAmaCloser(input);
+    }
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'lrq_hammer_1');
     assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 1);
     assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_hammer_1');
     assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 2);
-    const capped = await maybeDispatchAmaCloser(input);
+    if (scenario.startsWith('expired auto-merge')) {
+      input.dispatchContext.dispatchedAt = new Date(Date.parse(input.dispatchContext.dispatchedAt) + 30 * 60_000).toISOString();
+    }
+    let capped = await maybeDispatchAmaCloser(input);
+    if (scenario.endsWith('fallback')) {
+      assert.equal(capped.reason, 'stale-dispatched-lease-terminalized');
+      capped = await maybeDispatchAmaCloser(input);
+    }
     assert.equal(capped.dispatched, false);
     assert.equal(capped.reason, 'hammer-retry-cap-exhausted', JSON.stringify(capped));
     assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 1);
@@ -1990,3 +2010,50 @@ test('HAMRETRY-01: operation cancellation prevents delayed lease settlement', as
   }), /synthetic operation timeout/);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
 });
+
+for (const ageMs of [0, 59_999, 60_000, null]) {
+  test(`HAMRETRY-01: same-head terminal settle grace at age ${ageMs}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'terminal-settle-grace-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'synthetic/repository', prNumber: 23, headSha: HEAD };
+    const now = '2026-10-18T04:00:00.000Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-ended' });
+    const row = { status: 'succeeded', ...(ageMs === null ? {} : { terminal_at: new Date(Date.parse(now) - ageMs).toISOString() }) };
+    const settled = reconcileAmaCloserLease({ rootDir, ...identity, now,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row }),
+      readMergedSignalImpl: () => ({ ok: false }),
+      readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: HEAD }), logger: { info() {} },
+    });
+    assert.equal(settled, ageMs === null || ageMs >= 60_000);
+    assert.equal(readAmaCloserLease(rootDir, identity).status, settled ? 'terminal' : 'dispatched');
+  });
+}
+
+for (const ageMs of [30 * 60_000 - 1, 30 * 60_000]) {
+  test(`HAMRETRY-01: armed auto-merge lease bound at age ${ageMs}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'auto-merge-bound-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'synthetic/repository', prNumber: 23, headSha: HEAD };
+    const started = '2026-10-18T04:00:00.000Z';
+    const now = new Date(Date.parse(started) + ageMs).toISOString();
+    acquireAmaCloserLease({ rootDir, ...identity, now: started });
+    updateAmaCloserLease({ rootDir, ...identity, now: started, status: 'dispatched', lrqId: 'synthetic-ended' });
+    const events = [];
+    const input = { rootDir, ...identity, now,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded', terminal_at: started } }),
+      readMergedSignalImpl: () => ({ ok: false }),
+      readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: HEAD, autoMergeRequest: { enabledAt: started } }),
+      logger: { info: line => events.push(JSON.parse(line)) },
+    };
+    const expired = ageMs >= 30 * 60_000;
+    assert.equal(reconcileAmaCloserLease(input), expired);
+    const lease = readAmaCloserLease(rootDir, identity);
+    assert.equal(lease.status, expired ? 'terminal' : 'dispatched');
+    assert.equal(lease.updatedAt, expired ? now : started, 'observations do not extend the hold');
+    if (expired) {
+      assert.equal(lease.terminalOutcome, 'failed-without-merge');
+      assert.ok(events.some(event => event.event === 'ama_closer.auto_merge_hold_released'));
+    }
+  });
+}

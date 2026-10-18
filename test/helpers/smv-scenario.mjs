@@ -163,7 +163,9 @@ if (scenario === 'clean') {
   assert.equal(await reconcileAmaCloserLeaseAsync({ ...retrySubject,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     readMergedSignalImpl: () => ({ ok: false }),
-    readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: headSha }), logger: quiet,
+    now: new Date(Date.now() + 30 * 60_000).toISOString(),
+    readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: headSha,
+      autoMergeRequest: { enabledAt: new Date().toISOString() } }), logger: quiet,
   }), true);
   assert.equal(readAmaCloserLease(rootDir, retrySubject).terminalOutcome, 'failed-without-merge');
   const active = await findActiveAmaCloserLaunches(rootDir, {
@@ -182,7 +184,7 @@ if (scenario === 'clean') {
   assert.equal(unreadableActive.find(row => row.launchRequestId === 'synthetic-unreadable').holdsCapacity, true);
   evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
-    autoMergeHeld: true, unreadableCapacityReserved: true,
+    autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };

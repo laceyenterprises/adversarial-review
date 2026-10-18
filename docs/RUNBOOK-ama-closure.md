@@ -1393,9 +1393,12 @@ number before reading closer leases, probing ledger status or settling ownership
 Disabled closure remains a no-op. On the enabled path, early ownership
 reconciliation writes terminal launch status back to the record and settles
 the lease from terminal audit, merged completion, or live PR evidence. A live OPEN
-same-head probe records `failed-without-merge` immediately when auto-merge is
-not armed; missing terminal timestamps do not pin that head. An armed GitHub
-`autoMergeRequest` retains ownership unless a no-merge audit resolves it. Without same-head proof or a terminal audit,
+same-head probe records `failed-without-merge` after a 60-second grace when
+`terminal_at` is readable; missing timestamps do not pin that head. An armed
+GitHub `autoMergeRequest` retains ownership only inside the 30-minute dispatched
+lease window, measured from `updatedAt` (or `acquiredAt`) without refreshing it.
+A no-merge audit bypasses the hold. Expiry releases ownership under ordinary
+retry/refund caps and emits `ama_closer.auto_merge_hold_released`. Without same-head proof or a terminal audit,
 the existing settlement grace and ownership hold apply without refreshing the
 reclaim clock. Follow-up claims use the same evidence rule, including rekeyed leases.
 Merged signals are read per PR, independent of the lease head SHA. Other
@@ -2784,10 +2787,13 @@ Launch completion is not merge success. Capacity reconciliation leaves leases
 untouched; the current PR decision path separately reconciles its own record and
 lease before eligibility, inside the existing operation timeout. A terminal
 `succeeded` launch on a confirmed live OPEN same
-head settles as `failed-without-merge` immediately unless GitHub reports an
+head settles as `failed-without-merge` after the readable `terminal_at` grace
+(60 seconds; missing timestamps settle immediately), unless GitHub reports an
 armed `autoMergeRequest`. Both synchronous lease reconciliation and watcher
-dispatch read that field and retain ownership while auto-merge is armed, unless
-a no-merge audit proves the worker already made a closing decision. Audited
+dispatch read that field and retain ownership only inside the 30-minute
+dispatched-lease window; observations never refresh that clock. Expiry emits
+`ama_closer.auto_merge_hold_released` and settles as `failed-without-merge`,
+allowing bounded CI-repair retries. A no-merge audit bypasses the hold. Audited
 no-merge outcomes also release the lease. When the worker status is stale-active
 but the ledger says `succeeded`, the watcher keeps raw `succeeded` for the terminal-success classifier rather than
 mapping it to the retryable `unverified-terminal-success`. Live PR state,
@@ -2804,7 +2810,8 @@ same head in the next watcher pass, queue-depth live launches match the ledger,
 and no active-launch deferral identifies an already-terminal launch. During a
 ledger outage or skipped probe, fresh reservations still appear in queue depth
 until the pending-launch window expires. An OPEN PR with auto-merge armed must
-retain its lease without spending another hammer attempt.
+retain its lease inside 30 minutes without spending another attempt; after that
+bound it must release and allow a retry within caps even with red CI.
 Closers can spill to `hammer-claude` through the existing harness fallback (§2a).
 
 Preview the one-time backlog repair, then apply it against the runtime root.

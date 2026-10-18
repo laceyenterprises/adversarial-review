@@ -93,7 +93,6 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `promptDir` | string or null | Directory holding durable AMA closer prompts. |
 | `hqRoot` | string or null | HQ root used for the dispatch. |
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
-| `updatedAt` | ISO timestamp, optional | Initial drain refusal or last confirmed active drain poll; lane hints expire after 300 seconds. Legacy drain records fall back to `lastAttemptedAt`. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |
@@ -115,7 +114,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
-| `updatedAt` | string or null | ISO-8601 timestamp from the latest write when available. |
+| `updatedAt` | optional string or null | ISO-8601 timestamp from the latest write when available. For drain deferrals, records the initial refusal or last confirmed active drain poll; lane hints expire after 300 seconds. Legacy drain records fall back to `lastAttemptedAt`. |
 | `drainEpoch` | optional string or null | Epoch parsed from an exit-6 drain-in-effect refusal. Diagnostic scheduling evidence; grants no launch or merge authority. |
 | `lastFailureTransient` | boolean or null | Whether the latest launch refusal was classified as transient. |
 | `lastError` | string or null | Sanitized last error or recovery note. A hammer that ended `succeeded` with its PR still open records the same value as `outcome` here. `hammer-outcome-unconfirmed:<why>` means the live PR state (`live-pr-probe-failed`, `live-pr-state-unknown`) or, for an open PR without a local no-merge audit, its comments (`audit-comments-unreadable`) could not be read, so the launch was retained for another tick. |
@@ -254,7 +253,10 @@ exhaustion; hammer launch/lifetime caps remain unchanged.
 Exit 6 with an anchored `dispatch refused: drain in effect` line records
 `state: deferred-by-drain` and `drainEpoch`. No launch IDs means the pending
 lease is released, the retry budget is preserved, and inline transient retries
-are skipped. On each watcher pass the closer reads `hq dispatch drain-status
+are skipped. The drain lookup and hint retirement resolve the head from
+`prMetadata.headSha`, then `reviewState.headSha`, then
+`dispatchContext.reviewedSha`, then top-level `headSha`, using the first
+non-empty value. On each watcher pass the closer reads `hq dispatch drain-status
 --no-reap` for its HQ root (and ledger DB override when supplied). Any active
 drain, including a newer epoch, keeps the PR deferred. A clear drain re-enters
 ordinary live-head, eligibility, lease and capacity admission on that pass.

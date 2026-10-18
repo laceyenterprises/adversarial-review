@@ -586,6 +586,7 @@
       "foreignLaunchRefusalReason": "non-hammer-launch-not-adopted",
       "drainDeferralState": "deferred-by-drain",
       "drainDeferralFields": ["drainEpoch", "updatedAt"],
+      "drainHintHeadResolution": ["prMetadata.headSha", "reviewState.headSha", "dispatchContext.reviewedSha", "headSha"],
       "drainHintTtlMs": 300000,
       "drainHintRetirement": "lane expiry or either AMA kill switch; preserves existing lane debt",
       "drainDeferralResume": "first clear closer pass through normal admission and capacity; fresh confirmed drain hints alone bypass accounting",

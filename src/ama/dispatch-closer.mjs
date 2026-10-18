@@ -4465,7 +4465,8 @@ export async function maybeDispatchAmaCloser(args) {
   let preservePredecessor = false;
   try {
     throwIfAborted(args.signal);
-    const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber, headSha: args.prMetadata?.headSha };
+    const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber,
+      headSha: args.prMetadata?.headSha || args.reviewState?.headSha || dispatchContext?.reviewedSha || args.headSha };
     const deferred = dispatchContext?.rootDir && targetRepo && drainIdentity.headSha
       ? readAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity) : null;
     if (!args.cfg?.enabled && dispatchContext?.rootDir) {

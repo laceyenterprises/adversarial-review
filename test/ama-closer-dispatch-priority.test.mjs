@@ -1705,3 +1705,44 @@ for (const status of [{}, { isDraining: 'true' }, { isDraining: null }]) {
     assert.equal(warnings.filter(message => message.includes('drain status unavailable')).length, 1);
   });
 }
+
+for (const headSource of ['prMetadata', 'reviewState', 'dispatchContext', 'args']) {
+  test(`DRAINDEFER-01: drain lookup and retirement use ${headSource} head fallback in priority order`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-head-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'deferred-by-drain', drainEpoch: '7', updatedAt: new Date().toISOString() }));
+    const heads = [null, null, null, null];
+    const selected = ['prMetadata', 'reviewState', 'dispatchContext', 'args'].indexOf(headSource);
+    heads[selected] = HEAD;
+    for (let i = selected + 1; i < heads.length; i++) heads[i] = 'b'.repeat(40);
+    const args = findingsRemediationArgs(rootDir, {
+      prMetadata: { headSha: heads[0], isDraft: true },
+      reviewState: { headSha: heads[1] },
+      dispatchContext: { reviewedSha: heads[2] },
+    });
+    let isDraining = true;
+    let probes = 0;
+    const run = overrides => maybeDispatchAmaCloser({ ...args, ...testDeps(), headSha: heads[3],
+      readDispatchDrainStatusImpl: async () => { probes++; return { isDraining, epoch: 8 }; },
+      ...overrides });
+    const held = await run();
+    assert.equal(held.reason, 'deferred-by-drain');
+    assert.equal(probes, 1);
+    const readRecord = () => JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+    assert.equal(readRecord().drainEpoch, '8');
+
+    isDraining = false;
+    assert.equal((await run()).dispatched, false);
+    assert.equal(probes, 2);
+    assert.equal(readRecord().state, 'no-dispatch');
+    assert.equal(readRecord().reason, 'drain-wait-ended');
+
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'deferred-by-drain', drainEpoch: '8', updatedAt: new Date().toISOString() }));
+    assert.equal((await run({ cfg: { enabled: false } })).reason, 'ama-disabled');
+    assert.equal(probes, 2, 'disabled AMA retires the hint without a subprocess');
+    assert.equal(readRecord().state, 'no-dispatch');
+  });
+}

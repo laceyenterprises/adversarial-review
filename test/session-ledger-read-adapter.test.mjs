@@ -1181,18 +1181,20 @@ test('RETRYCHAIN-01: PostgreSQL requests only the selected retry tree and projec
       assert.equal(options.maxBuffer, 2 * 1024 * 1024);
       if (queries === 1) return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) };
       assert.ok(args.includes('lrq=synthetic-lrq'));
-      assert.match(options.input, /WITH RECURSIVE retry_chain/);
-      assert.match(options.input, /WITH RECURSIVE retry_chain\(launch_request_id\) AS \(\s+SELECT :'lrq'::text/);
+      assert.ok(args.includes('-q'));
+      assert.match(options.input, /^BEGIN READ ONLY;/);
+      assert.doesNotMatch(options.input, /CREATE FUNCTION|SET TRANSACTION|EXCEPTION|ROLLBACK/);
+      assert.match(options.input, /pg_input_is_valid/);
+      assert.match(options.input, /WITH RECURSIVE retry_edges AS MATERIALIZED/);
+      assert.match(options.input, /retry_chain\(launch_request_id\) AS \(\s+SELECT :'lrq'::text/);
       assert.match(options.input, /UNION\s+SELECT child.launch_request_id/);
       assert.doesNotMatch(options.input, /UNION ALL|IS JSON/);
-      assert.match(options.input, /EXCEPTION WHEN data_exception OR undefined_column THEN\s+RETURN NULL/);
-      assert.match(options.input, /ON pg_temp.retry_parent\(child\) = parent.launch_request_id/);
-      assert.match(options.input, /SET TRANSACTION READ ONLY;/);
+      assert.match(options.input, /CASE WHEN jsonb_typeof\(child.metadata->'retryOf'\) = 'string'/);
       assert.match(options.input, /WHERE launch_request_id IN \(SELECT launch_request_id FROM retry_chain\)/);
       assert.match(options.input, /AND launch_request_id != :'lrq'/);
-      const projection = options.input.slice(options.input.indexOf('SELECT json_build_object'));
+      const projection = options.input.slice(options.input.indexOf('SELECT json_build_object'), options.input.indexOf('\\else'));
       assert.doesNotMatch(projection, /metadata_json/);
-      assert.match(projection, /ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;\s+ROLLBACK;/);
+      assert.match(projection, /ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;/);
       return { status: 0, stdout: JSON.stringify(leaf) };
     },
   });
@@ -1200,6 +1202,27 @@ test('RETRYCHAIN-01: PostgreSQL requests only the selected retry tree and projec
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.deepEqual(result.retryChain, [leaf]);
   assert.deepEqual(withLiveLaunchRetry(result).row, leaf);
+});
+
+test('RETRYCHAIN-01: legacy PostgreSQL snapshot parses metadata and keeps only cycle-safe descendants', () => {
+  let queries = 0;
+  const snapshot = [
+    { launch_request_id: 'synthetic-root', status: 'failed', metadata_json: '{"retryOf":"synthetic-leaf"}' },
+    { launch_request_id: 'synthetic-leaf', status: 'running', metadata_json: { retryOf: 'synthetic-child' } },
+    { launch_request_id: 'synthetic-child', status: 'failed', metadata_json: '{"retryOf":"synthetic-root"}' },
+    { launch_request_id: 'synthetic-unrelated', status: 'running', metadata_json: '{broken' },
+    { launch_request_id: 'synthetic-numeric', status: 'running', metadata_json: { retryOf: 123 } },
+    { launch_request_id: 'synthetic-empty', status: 'running', metadata_json: null },
+  ];
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-root', includeRetryChain: true,
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
+    spawnSyncImpl: () => ({ status: 0, stdout: ++queries === 1
+      ? JSON.stringify(snapshot[0]) : snapshot.map(row => JSON.stringify(row)).join('\n') }) });
+  assert.equal(result.retryChainUnreadable, undefined);
+  assert.deepEqual(result.retryChain, [
+    { launch_request_id: 'synthetic-leaf', status: 'running' },
+    { launch_request_id: 'synthetic-child', status: 'failed' },
+  ]);
 });
 
 test('RETRYCHAIN-01: a successful PostgreSQL read with no retries is an empty chain', () => {

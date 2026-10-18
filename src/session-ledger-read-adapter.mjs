@@ -987,35 +987,27 @@ function* readLaunchRequestStatusFromLedgerSteps({
         AND launch_request_id != @launchRequestId
       ORDER BY updated_at DESC, launch_request_id DESC`, { launchRequestId: normalizedLaunchRequestId });
   } else {
-    // Pre-16 PostgreSQL has no IS JSON predicate. A transaction-local helper
-    // catches malformed historical text, including invalid JSON escapes. It is
-    // rolled back after the read and never changes the ledger or its schema.
-    // Pin setup and traversal to one transaction for transaction-pooling DSNs;
-    // the traversal itself runs READ ONLY. Only descendants cross the child
-    // buffer: unrelated launches and potentially large metadata stay in SQL.
+    // PostgreSQL 16+ can validate historical text without throwing or catalog
+    // writes. CASE guards the cast (including invalid Unicode escapes); materialize
+    // the edges once rather than parsing metadata on every recursive step.
+    // psql conditionals keep unsupported functions out of pre-16 SQL entirely.
+    // Older servers retain the bounded read-only snapshot/application traversal.
     retries = yield* queryPostgresRowsSteps(resolution.target, `
-      \\set QUIET on
-      BEGIN;
-      CREATE FUNCTION pg_temp.retry_parent(request record) RETURNS text
-      LANGUAGE plpgsql IMMUTABLE STRICT AS $retry_parent$
-      DECLARE parsed json;
-      BEGIN
-        parsed := request.metadata_json::json;
-        IF json_typeof(parsed->'retryOf') = 'string' THEN
-          RETURN parsed->>'retryOf';
-        END IF;
-        RETURN NULL;
-      EXCEPTION WHEN data_exception OR undefined_column THEN
-        RETURN NULL;
-      END;
-      $retry_parent$;
-      SET TRANSACTION READ ONLY;
-      WITH RECURSIVE retry_chain(launch_request_id) AS (
+      SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
+      \\gset
+      \\if :retry_native_parser
+      WITH RECURSIVE retry_edges AS MATERIALIZED (
+        SELECT launch_request_id,
+          CASE WHEN pg_input_is_valid(to_jsonb(request)->>'metadata_json', 'jsonb')
+            THEN (to_jsonb(request)->>'metadata_json')::jsonb END AS metadata
+        FROM launch_requests request
+      ), retry_chain(launch_request_id) AS (
         SELECT :'lrq'::text
         UNION
-        SELECT child.launch_request_id FROM launch_requests child
+        SELECT child.launch_request_id FROM retry_edges child
         JOIN retry_chain parent
-          ON pg_temp.retry_parent(child) = parent.launch_request_id
+          ON CASE WHEN jsonb_typeof(child.metadata->'retryOf') = 'string'
+            THEN child.metadata->>'retryOf' END = parent.launch_request_id
       )
       SELECT json_build_object(
         'launch_request_id', launch_request_id, 'status', status,
@@ -1027,7 +1019,34 @@ function* readLaunchRequestStatusFromLedgerSteps({
       WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
         AND launch_request_id != :'lrq'
       ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
-      ROLLBACK;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]] });
+      \\else
+      SELECT json_build_object(
+        'launch_request_id', launch_request_id, 'status', status,
+        'updated_at', updated_at, 'terminal_at', terminal_at,
+        'failure_class', failure_class,
+        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
+        'metadata_json', to_jsonb(launch_requests)->'metadata_json')
+      FROM launch_requests
+      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
+      \\endif
+      ;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true });
+    if (retries.ok && retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json'))) {
+      const children = new Map();
+      for (const candidate of retries.rows) {
+        let metadata = candidate.metadata_json;
+        try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { continue; }
+        if (!metadata || typeof metadata.retryOf !== 'string') continue;
+        if (!children.has(metadata.retryOf)) children.set(metadata.retryOf, []);
+        children.get(metadata.retryOf).push(candidate.launch_request_id);
+      }
+      const descendants = new Set([normalizedLaunchRequestId]);
+      for (const id of descendants) {
+        for (const child of children.get(id) || []) descendants.add(child);
+      }
+      retries.rows = retries.rows.filter(candidate => candidate.launch_request_id !== normalizedLaunchRequestId
+        && descendants.has(candidate.launch_request_id)).map(({ metadata_json: _metadata, ...candidate }) => candidate);
+    }
   }
   if (!retries.ok) return unreadableRetryChain();
   return { ok: true, row, retryChain: retries.rows, target: queried.target };

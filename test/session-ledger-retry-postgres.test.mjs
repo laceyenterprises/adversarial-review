@@ -2,15 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 
-// Native SQL coverage when PostgreSQL tools are installed. Standalone mode has
-// no sockets, network, running server, credentials or external ledger dependency.
-// The adapter unit tests always assert the query and failure contracts as well.
+// Optional native coverage uses an isolated cluster on a private Unix socket.
+// TCP listening is disabled; no network, credentials or external ledger is used.
+// Actual psql scripts, variable substitution and exit statuses are preserved.
 function isolatedPostgres(t) {
-  for (const command of ['initdb', 'postgres']) {
+  for (const command of ['initdb', 'pg_ctl', 'psql']) {
     const probe = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
     if (probe.error?.code === 'ENOENT') {
       t.skip('native PostgreSQL tools are not installed');
@@ -18,21 +17,34 @@ function isolatedPostgres(t) {
     }
     assert.equal(probe.status, 0, probe.stderr);
   }
-  const root = mkdtempSync(join(tmpdir(), 'retry-postgres-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Keep the socket path below macOS's Unix-domain path limit.
+  const root = mkdtempSync('/tmp/retry-postgres-');
   const dataDir = join(root, 'cluster');
-  const init = spawnSync('initdb', ['-D', dataDir, '-A', 'trust', '--no-locale'],
+  let started = false;
+  t.after(() => {
+    if (started) {
+      const stop = spawnSync('pg_ctl', ['-D', dataDir, '-m', 'immediate', '-w', '-t', '10', 'stop'],
+        { encoding: 'utf8', timeout: 15000 });
+      assert.equal(stop.status, 0, stop.stderr);
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const init = spawnSync('initdb', ['-D', dataDir, '-U', 'fixture_admin', '-A', 'trust', '--no-locale'],
     { encoding: 'utf8', timeout: 30000 });
   assert.equal(init.status, 0, init.stderr);
-  function sql(statement) {
-    const result = spawnSync('postgres', ['--single', '-D', dataDir, 'postgres'], {
-      // Standalone mode consumes one statement batch per line. This fixture's
-      // SQL has no line comments or multiline string values.
-      input: statement.replace(/\n/g, ' ') + '\n',
-      encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024,
+  const start = spawnSync('pg_ctl', ['-D', dataDir, '-l', join(root, 'server.log'),
+    '-o', `-F -k ${root} -c listen_addresses='' -c unix_socket_permissions=0700`, '-w', '-t', '10', 'start'],
+    { encoding: 'utf8', timeout: 15000 });
+  started = start.status === 0;
+  assert.equal(start.status, 0, start.stderr);
+  function psql(args, options = {}, user = 'fixture_admin') {
+    return spawnSync('psql', ['--host', root, '--username', user, ...args], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024, ...options,
     });
+  }
+  function sql(statement) {
+    const result = psql(['--no-psqlrc', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-t', '-A'], { input: statement });
     assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stderr, /(?:ERROR|FATAL|PANIC):/, result.stderr);
     return result.stdout;
   }
   sql(`CREATE TABLE launch_requests (
@@ -51,23 +63,24 @@ function isolatedPostgres(t) {
     ('synthetic-scalar', 'running', NULL, NULL, NULL, NULL, 'HAM', '"synthetic-root"'),
     ('synthetic-empty', 'running', NULL, NULL, NULL, NULL, 'HAM', ''),
     ('synthetic-null', 'running', NULL, NULL, NULL, NULL, 'HAM', NULL);`);
+  sql(`CREATE ROLE ledger_reader LOGIN;
+    GRANT SELECT ON launch_requests TO ledger_reader;
+    ALTER ROLE ledger_reader SET default_transaction_read_only = on;
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    REVOKE TEMP ON DATABASE postgres FROM PUBLIC;`);
   let responseBytes = 0;
   function spawnSyncImpl(command, args, options) {
     assert.equal(command, 'psql');
     assert.equal(options.maxBuffer, 2 * 1024 * 1024);
-    const selector = args.find(arg => arg.startsWith('lrq=')).slice(4);
-    const script = options.input.replace(/\\set QUIET on/, '')
-      .replaceAll(":'lrq'", "'" + selector.replaceAll("'", "''") + "'");
-    const stdout = sql(script);
-    const rows = [...stdout.matchAll(/json_build_object = "(.*)"\t\(typeid/g)].map(match => JSON.parse(match[1]));
-    const payload = rows.map(row => JSON.stringify(row)).join('\n');
-    if (options.input.includes('WITH RECURSIVE')) responseBytes = Buffer.byteLength(payload);
-    return { status: 0, stdout: payload, stderr: '' };
+    const actualArgs = args.map(arg => arg === 'synthetic' ? 'postgres' : arg);
+    const response = psql(actualArgs, options, 'ledger_reader');
+    if (options.input?.includes('WITH RECURSIVE')) responseBytes = Buffer.byteLength(response.stdout || '');
+    return response;
   }
   return { sql, spawnSyncImpl, responseBytes: () => responseBytes };
 }
 
-test('RETRYCHAIN-01: native PostgreSQL traverses cycles safely and skips malformed metadata', async t => {
+test('RETRYCHAIN-01: native psql traverses cycles with SELECT-only authority and skips malformed metadata', async t => {
   const fixture = isolatedPostgres(t);
   if (!fixture) return;
   const args = { launchRequestId: 'synthetic-root', includeRetryChain: true,
@@ -81,16 +94,18 @@ test('RETRYCHAIN-01: native PostgreSQL traverses cycles safely and skips malform
   assert.equal(result.retryChain[1].status, 'succeeded');
   assert.ok(result.retryChain.every(row => !Object.hasOwn(row, 'metadata_json')));
   const smallBytes = fixture.responseBytes();
+  const modern = Number(fixture.sql('SHOW server_version_num;').trim()) >= 160000;
   fixture.sql(`INSERT INTO launch_requests (launch_request_id, status, metadata_json)
     SELECT 'synthetic-unrelated-' || n, 'running',
       json_build_object('retryOf', 'synthetic-unrelated-parent', 'padding', repeat('x', 256))::text
     FROM generate_series(1, 50000) n;`);
+  if (!modern) fixture.sql("DELETE FROM launch_requests WHERE launch_request_id LIKE 'synthetic-unrelated-%';");
   const large = await readLaunchRequestStatusFromLedgerAsync(args);
   assert.deepEqual(large, result);
-  assert.equal(fixture.responseBytes(), smallBytes, 'unrelated rows must add zero response bytes');
+  if (modern) assert.equal(fixture.responseBytes(), smallBytes, 'unrelated rows must add zero response bytes');
   assert.ok(smallBytes < 2048);
-  // ROLLBACK removes the temporary helper; no durable function is installed.
-  assert.match(fixture.sql("SELECT count(*) FROM pg_proc WHERE proname = 'retry_parent';"), /count = "0"/);
+  // Read-only queries never install a parser in the catalog.
+  assert.match(fixture.sql("SELECT count(*) FROM pg_proc WHERE proname = 'retry_parent';"), /^0\s*$/);
   const empty = readLaunchRequestStatusFromLedger({ ...args, launchRequestId: 'synthetic-empty' });
   assert.deepEqual(empty.retryChain, []);
   let removedRoot = false;
@@ -119,4 +134,42 @@ test('RETRYCHAIN-01: native PostgreSQL supports JSON metadata and absent histori
   const missing = readLaunchRequestStatusFromLedger(args);
   assert.equal(missing.ok, true);
   assert.deepEqual(missing.retryChain, []);
+});
+
+// Exercise psql's pre-16 branch even when the installed server is newer. Actual
+// compatibility also runs naturally when the optional fixture uses PostgreSQL 15.
+test('RETRYCHAIN-01: legacy PostgreSQL snapshot fallback stays read-only', t => {
+  const fixture = isolatedPostgres(t);
+  if (!fixture) return;
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-root', includeRetryChain: true,
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
+    spawnSyncImpl: (command, args, options) => fixture.spawnSyncImpl(command, args, {
+      ...options,
+      input: options.input.replace("current_setting('server_version_num')::int >= 160000", 'false'),
+    }) });
+  assert.equal(result.ok, true);
+  assert.equal(result.retryChainUnreadable, undefined);
+  assert.deepEqual(result.retryChain.map(row => row.launch_request_id),
+    ['synthetic-sibling', 'synthetic-leaf', 'synthetic-retry']);
+  assert.ok(result.retryChain.every(row => !Object.hasOwn(row, 'metadata_json')));
+});
+
+test('RETRYCHAIN-01: real psql failures retain base status and mark traversal unreadable', t => {
+  const fixture = isolatedPostgres(t);
+  if (!fixture) return;
+  let queries = 0;
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-root', includeRetryChain: true,
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
+    spawnSyncImpl: (...args) => {
+      const response = fixture.spawnSyncImpl(...args);
+      if (++queries === 1) fixture.sql('REVOKE SELECT ON launch_requests FROM ledger_reader;');
+      else {
+        assert.notEqual(response.status, 0);
+        assert.match(response.stderr, /permission denied/);
+      }
+      return response;
+    } });
+  assert.equal(result.ok, true);
+  assert.equal(result.row.status, 'failed');
+  assert.equal(result.retryChainUnreadable, true);
 });

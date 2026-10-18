@@ -136,15 +136,17 @@ then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
 `dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
 for both admission and cleanup. Descendants are ordered by latest update and
 launch ID, and promoted live rows retain their status metadata. RETRYCHAIN-01:
-PostgreSQL uses a recursive query rooted at the probed launch, returning only
-descendant status fields. A temporary parser safely skips malformed historical
-metadata on pre-16 servers and tolerates missing metadata columns. Setup and
-traversal share one transaction (including through transaction pooling); after
-creating the temporary function, traversal runs read-only, then rollback removes
-the function. No persistent schema change or migration is required. Both sync
-and async Postgres children use a shared 2 MiB output bound: unrelated launches and
-metadata no longer consume that buffer. A genuinely oversized chain, query error
-or timeout remains unreadable under the existing ownership rules. SQLite retains
+PostgreSQL 16+ uses a recursive query rooted at the probed launch, returning only
+descendant status fields. Inline input validation skips malformed historical
+metadata, including invalid Unicode escapes, and tolerates missing metadata
+columns. All retry reads run in a read-only transaction, including through
+transaction pooling, with no function creation or other catalog writes; SELECT
+permission suffices on read replicas and read-only connections. Pre-16 servers
+retain the read-only snapshot with application-side parsing and traversal; those
+servers still transfer unrelated rows and metadata and can exhaust the output
+bound on large ledgers. Upgrade to 16+ for descendant-only output. Both sync
+and async Postgres children use a shared 2 MiB output bound. A genuinely oversized
+chain, query error or timeout remains unreadable under the existing ownership rules. SQLite retains
 its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch

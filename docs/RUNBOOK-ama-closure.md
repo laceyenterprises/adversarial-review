@@ -1541,10 +1541,15 @@ uses (`src/hammer-owner-route.mjs`).
 - CIBLOCKHAM-03: native wake admission uses that same CI-repair rule for the
   exhausted final hammer, including the stale pre-remediation verdict. A
   current-head blocking verdict and all other holds retain their wake refusal.
+  Ownership uses the same rule for terminal failed conclusions: `FAILURE`,
+  `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
+  Pending or unknown CI cannot acquire this repair ownership.
   A refused, settled handoff retires an unchanged unlaunched intent as
   `dispatch-failed`, reason `wake-refused:<closer result.reason>`, only with a
   matching pending lease whose owner is dead or whose bounded launch reclaim
   age elapsed. Missing leases, launch receipts and live work are preserved.
+  A prompt populated after intent capture belongs to that attempt when its
+  timestamp and target still match; an already captured prompt must match too.
   Settlement follows the closer result regardless of the diagnostic wake outcome.
   CI-repair wake events stay in telemetry but are excluded from the
   `clean_verdict_to_hammer_wake` latency segment.

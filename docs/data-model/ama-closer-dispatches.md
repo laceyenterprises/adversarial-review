@@ -129,6 +129,9 @@ pending lease satisfies `isInterruptedInFlightAmaCloserDispatch`: its owner PID
 is dead or the bounded pending-launch reclaim age has elapsed. Missing leases,
 live launches, receipts, other-process ownership and replacement intents remain
 untouched. The matching lease is removed and the phantom retry rolled back once.
+If the captured intent had no prompt path, the same attempt may populate it
+before refusal settlement. A captured non-empty prompt path must still match;
+the attempt timestamp, target and reclaimable matching lease remain required.
 `reason` and `lastError` are `wake-refused:<closer result.reason>` (falling back
 to `wake-refused:dispatch-refused` when absent), independent of whether the
 wake was skipped, requested or duplicated. Wake eligibility reasons remain

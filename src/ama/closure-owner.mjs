@@ -2,6 +2,7 @@ import { checkPrimaryChange } from './primary-change.mjs';
 import { isDaemonMergeReviewAllowed } from './daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS } from './closer-lease.mjs';
+import { ciBlockedHammerReasonsCovered } from './review-cycle-cap-route.mjs';
 
 export const CLOSURE_OWNER_WAIT_MS = 30_000;
 
@@ -33,8 +34,9 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   const hammer = reason => capped
     ? action('page', lifetimeExhausted ? 'hammer-lifetime-cap' : 'hammer-retry-cap')
     : action('hammer', reason);
-  if (ciBlockedHammerOwner && !roundsLeft && checks === 'FAILURE'
-    && lease?.status !== 'handed-to-review' && reviewState.remediationPending !== true
+  if (!roundsLeft && ciBlockedHammerReasonsCovered(['ci-not-green'], {
+    ciBlockedHammerOwner, checksConclusion: checks, remediationPending: reviewState.remediationPending,
+  }) && lease?.status !== 'handed-to-review'
     && reviewState.headSha && currentHead
     && (reviewState.headSha !== currentHead || !reviewState.verdict)) {
     return hammer('ci-blocked-remediation-exhausted');

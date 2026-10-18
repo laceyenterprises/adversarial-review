@@ -214,6 +214,15 @@ if (scenario === 'clean') {
   assert.equal(wake.outcome, 'requested');
   assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
     ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }).owner, 'hammer');
+  const repairConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
+  for (const checks of repairConclusions) {
+    assert.equal(hammerWakeEligibility({ eligible: false,
+      reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] }, {
+      dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
+      reviewState: exhausted, headSha, checksConclusion: checks }).eligible, true);
+    assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
+      ciBlockedHammerOwner: true, roundsLeft: false, checks }).owner, 'hammer');
+  }
   const intent = { ...identity(), targetRemediationSha: headSha, state: 'dispatching',
     lastAttemptedAt: '2026-01-01T00:00:00Z' };
   updateAmaCloserDispatchRecord(rootDir, identity(), () => intent);
@@ -224,6 +233,7 @@ if (scenario === 'clean') {
     wake: { outcome: 'requested' }, result: { dispatched: false } });
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatching');
   assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
+  updateAmaCloserDispatchRecord(rootDir, identity(), record => ({ ...record, promptPath: 'synthetic-generated-prompt' }));
   settleRefusedHammerWake({ rootDir, identity: identity(), intent,
     wake: { outcome: 'duplicate' }, result: { dispatched: false, reason: 'synthetic-refusal' } });
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-refusal');
@@ -233,7 +243,8 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
-    nativeFinalHammerWake: true, refusedWakeTerminal: true, livePendingLeasePreserved: true, merges: 0 };
+    nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
+    refusedWakeTerminal: true, livePendingLeasePreserved: true, merges: 0 };
 } else if (scenario === 'refusals') {
   acquireAmaCloserLease({ ...identity(), now: '2000-01-01T00:00:00Z' });
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });

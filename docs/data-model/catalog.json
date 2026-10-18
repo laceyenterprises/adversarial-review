@@ -603,6 +603,7 @@
       "unprovenFleetRetryRefusal": "charged dispatch-failed with existing bounded paged recovery",
       "fleetRetryLiveness": "transitive launch-ledger metadata.retryOf descendants",
       "promptOwnership": "unique path per dispatch attempt; unlaunched prompts removed; interrupted admission retains predecessor artifacts",
+      "refusedWakePromptIdentity": "an absent captured prompt may be populated by the same timestamp/target attempt; a non-empty captured path must match; matching reclaimable pending lease required",
       "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
       "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
       "operatorLabelRefundsLifetime": false,

@@ -2622,7 +2622,7 @@ export function settleRefusedHammerWake({ rootDir, identity, intent, result,
   const settled = updateAmaCloserDispatchRecord(rootDir, identity, current => {
     if (current?.state !== 'dispatching' || current.launchRequestId || current.dispatchId
       || !intent.lastAttemptedAt || current.lastAttemptedAt !== intent.lastAttemptedAt
-      || current.promptPath !== intent.promptPath
+      || (intent.promptPath && current.promptPath !== intent.promptPath)
       || current.targetRemediationSha !== intent.targetRemediationSha) return null;
     const lease = readAmaCloserLease(rootDir, leaseIdentity);
     if (lease?.lrqId || lease?.acquiredAt !== intent.lastAttemptedAt

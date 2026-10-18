@@ -943,7 +943,9 @@ the hammer, while the shared merge predicate refuses a merge over red CI.
 The native exhausted unreviewed head also clears wake admission, and a refused
 settled handoff with a reclaimable matching lease leaves the closer's terminal
 refusal reason regardless of wake outcome, while a fresh live-PID lease and its
-intent survive a plain refusal.
+intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
+`TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
+Settlement accepts a prompt first populated by that same captured attempt.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
 claim; exhaustion selects operator paging. Fleet identity proof requires a valid
@@ -1148,7 +1150,7 @@ stateDiagram-v2
     [*] --> s0: closure-owner.01 recompute ownership: close
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 recompute ownership: wait
-    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped unreviewed head)
+    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped unreviewed head with terminal failed CI)
     [*] --> s4: closure-owner.05 recompute ownership: review
     [*] --> s5: closure-owner.06 recompute ownership: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain

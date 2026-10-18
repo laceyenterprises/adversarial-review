@@ -1820,7 +1820,7 @@ async function dispatchAmaClosureFor({
     let identity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
     let intent = ciBlockedHammerOwner
       ? amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, identity) : null;
-    if (ciBlockedHammerOwner && !intent && reviewState.headSha !== currentPrHeadSha) {
+    if (ciBlockedHammerOwner && !intent && reviewState.headSha && reviewState.headSha !== currentPrHeadSha) {
       const reviewedIdentity = { ...identity, headSha: reviewState.headSha };
       const reviewedIntent = amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, reviewedIdentity);
       if (reviewedIntent) { identity = reviewedIdentity; intent = reviewedIntent; }

@@ -196,7 +196,7 @@
         {"id": "closure-owner.01","from": "[*]","to": "close","trigger": "recompute ownership: close","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.02","from": "[*]","to": "page","trigger": "recompute ownership: page","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.03","from": "[*]","to": "wait","trigger": "recompute ownership: wait","codeSource": "src/ama/closure-owner.mjs"},
-        {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "recompute ownership: hammer (including exhausted CI-stopped unreviewed head)","codeSource": "src/ama/closure-owner.mjs"},
+        {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "recompute ownership: hammer (including exhausted CI-stopped unreviewed head with terminal failed CI)","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "recompute ownership: review","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.06","from": "[*]","to": "remediation","trigger": "recompute ownership: remediation","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.07","from": "[*]","to": "follow-up-drain","trigger": "recompute ownership: follow-up-drain","codeSource": "src/ama/closure-owner.mjs"},

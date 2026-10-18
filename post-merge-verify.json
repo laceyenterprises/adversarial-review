@@ -80,7 +80,7 @@
     {
       "id": "ci-blocked",
       "promise": "smv-ci-blocked",
-      "description": "CI-repair wake admits bounded hammer work; closer refusal settles only a matching reclaimable pending lease regardless of wake outcome and preserves fresh live-PID ownership",
+      "description": "CI-repair wake and ownership admit FAILURE, TIMED_OUT, CANCELLED, STARTUP_FAILURE, ACTION_REQUIRED and ERROR; closer refusal settles a matching reclaimable pending lease even after prompt generation, and preserves fresh live-PID ownership",
       "edges": [
         "review-row.17",
         "closure-owner.04",

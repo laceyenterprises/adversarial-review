@@ -18,6 +18,7 @@ const reviewed = 'a'.repeat(40), head = 'b'.repeat(40);
 const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only';
 const quiet = { log() {}, warn() {}, error() {} };
 const red = [{ __typename: 'CheckRun', name: 'synthetic-ci', status: 'COMPLETED', conclusion: 'FAILURE' }];
+const failedConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
 
 function fixture(t, mode = 'native') {
   const rootDir = mkdtempSync(join(tmpdir(), 'ciblockham-03-'));
@@ -88,8 +89,10 @@ function fixture(t, mode = 'native') {
 }
 
 for (const mode of ['native', 'agentos']) {
-  test(`${mode}: exhausted red unreviewed head wakes and launches its final hammer in one pass`, async t => {
+  for (const conclusion of failedConclusions) test(`${mode}: exhausted ${conclusion} unreviewed head wakes and launches its final hammer in one pass`, async t => {
     const { args, wakes, launches } = fixture(t, mode);
+    const checks = red.map(check => ({ ...check, conclusion }));
+    args.candidate.statusCheckRollup = checks;
     const result = await maybeDispatchAmaClosureFor(args);
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'synthetic-launch');
@@ -100,7 +103,7 @@ for (const mode of ['native', 'agentos']) {
     assert.equal(record.state, 'dispatched');
     assert.equal(record.dispatchReason, 'exhausted-final-hammer');
     // Dispatch is not merge authority: red CI and stale review still refuse merge.
-    const merge = evaluateMergeEligibility({ verdict: 'comment-only', requiredChecks: red,
+    const merge = evaluateMergeEligibility({ verdict: 'comment-only', requiredChecks: checks,
       candidateHead: head, validatedHead: reviewed, mergeable: 'MERGEABLE',
       labels: [], leaseHeld: true, branchProtectionRequired: false });
     assert.equal(merge.eligible, false);
@@ -108,6 +111,22 @@ for (const mode of ['native', 'agentos']) {
     assert.ok(merge.reasons.includes('stale-head'));
   });
 }
+
+test('the CI handoff derives exhaustion before constructing the wake and closer snapshots', async t => {
+  const { args, wakes, launches } = fixture(t);
+  args.resolveReviewCycleExhaustionImpl = () => ({ reviewCycleExhausted: false });
+  const dispatch = args.maybeDispatchAmaCloserImpl;
+  args.maybeDispatchAmaCloserImpl = payload => {
+    assert.equal(payload.reviewState.reviewCycleExhausted, true);
+    assert.equal(payload.dispatchContext.dispatchReason, 'exhausted-final-hammer');
+    return dispatch(payload);
+  };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.closureOwner.owner, 'hammer');
+  assert.equal(wakes[0].outcome, 'requested');
+  assert.equal(launches.length, 1);
+});
 
 test('native wake keeps current-head blocking verdicts and every other gate ineligible', () => {
   const context = { dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
@@ -134,7 +153,7 @@ test('native wake keeps current-head blocking verdicts and every other gate inel
 });
 
 for (const parkedHead of [reviewed, head]) test('rescue uses the stopped exhausted row to choose a final hammer: ' + parkedHead[0], async t => {
-  const { args } = fixture(t);
+  const { args, wakes } = fixture(t);
   args.reviewStateRow.reviewer_head_sha = parkedHead;
   args.dispatchJob = {}; // Rescue has the durable row, not the watcher's handoff flag.
   args.maybeDispatchAmaCloserImpl = async payload => {
@@ -145,6 +164,7 @@ for (const parkedHead of [reviewed, head]) test('rescue uses the stopped exhaust
   };
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.closureOwner.owner, 'hammer', JSON.stringify(result));
+  assert.equal(wakes[0].outcome, parkedHead === reviewed ? 'requested' : 'skipped');
   const rescue = classifyRescue({ closureOwner: result.closureOwner, reviewHeadSha: reviewed, headSha: head });
   assert.equal(rescue.decision, 'hammer-eligible');
   assert.equal(rescue.reason, 'ci-blocked-remediation-exhausted');
@@ -182,6 +202,23 @@ for (const recordHead of [head, reviewed]) test(`a ${outcome} wake records the a
   assert.equal(readAmaCloserLease(args.rootDir, leaseIdentity), null);
 });
 
+test('a missing reviewed head cannot adopt and settle a headless dispatch record', async t => {
+  const { args } = fixture(t);
+  args.reviewStateRow.reviewer_head_sha = null;
+  args.reviewStateRow.review_body = null;
+  args.reviewStateRow.last_verdict = null;
+  args.fetchLatestHeadReviewBodiesImpl = async () => [];
+  const identity = { repo, prNumber, headSha: null };
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, repo, prNumber, headSha: head, now: intent.lastAttemptedAt });
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'synthetic-refusal' });
+  await maybeDispatchAmaClosureFor(args);
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.equal(readAmaCloserLease(args.rootDir, { repo, prNumber, headSha: head }).status, 'pending');
+});
+
 test('rescue ownership preserves explicit review handoff, active remediation and hammer caps', () => {
   const input = { reviewState: { verdict: 'comment-only', headSha: reviewed }, currentHead: head,
     checks: 'FAILURE', roundsLeft: false, ciBlockedHammerOwner: true };
@@ -193,6 +230,9 @@ test('rescue ownership preserves explicit review handoff, active remediation and
   assert.notEqual(decideClosureOwner({ ...input, reviewState: { ...input.reviewState,
     remediationPending: true } }).owner, 'hammer');
   assert.equal(decideClosureOwner({ ...input, roundsLeft: true }).owner, 'review');
+  for (const checks of ['SUCCESS', 'PENDING', 'IN_PROGRESS', null, 'UNKNOWN']) {
+    assert.notEqual(decideClosureOwner({ ...input, checks }).owner, 'hammer', String(checks));
+  }
 });
 
 test('refusal reconciliation preserves launch receipts, active work and replacement intents', t => {
@@ -212,10 +252,27 @@ test('refusal reconciliation preserves launch receipts, active work and replacem
     [{ lastAttemptedAt: '2026-01-02T00:00:00Z' }, { dispatched: false }],
     [{ promptPath: 'synthetic-new-prompt' }, { dispatched: false }],
   ]) {
-    updateAmaCloserDispatchRecord(args.rootDir, identity, () => ({ ...intent, ...patch }));
-    settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent, wake, result });
+    const captured = { ...intent, promptPath: 'synthetic-original-prompt' };
+    updateAmaCloserDispatchRecord(args.rootDir, identity, () => ({ ...captured, ...patch }));
+    settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent: captured, wake, result });
     assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).state, 'dispatching');
   }
+});
+
+for (const promptPath of [undefined, null, '']) test(`refusal settles a matching attempt that populated its prompt after capture: ${String(promptPath)}`, t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const intent = { ...identity, targetRemediationSha: head, promptPath,
+    state: 'dispatching', lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => ({ ...intent, promptPath: 'synthetic-generated-prompt' }));
+  settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
+    result: { dispatched: false, reason: 'synthetic-refusal' } });
+  const record = readAmaCloserDispatchRecord(args.rootDir, identity);
+  assert.equal(record.state, 'dispatch-failed');
+  assert.equal(record.reason, 'wake-refused:synthetic-refusal');
+  assert.equal(record.retryCount, 0);
+  assert.equal(readAmaCloserLease(args.rootDir, identity), null);
 });
 
 test('a plain refusal preserves a fresh live-pid pending lease and its dispatch intent', t => {

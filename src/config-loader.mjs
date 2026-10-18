@@ -632,6 +632,17 @@ function schemaV1() {
             __pattern: PATTERN_LOCAL_USERNAME,
             __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
           },
+          // BUILDHOSTQUIET-01: host-local agent-account inventory. The
+          // bootstrap consumer excludes the operator even if listed here.
+          agent_users: {
+            __type: TYPE_LIST,
+            __default: [],
+            __item: {
+              __type: TYPE_STRING,
+              __pattern: PATTERN_LOCAL_USERNAME,
+              __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
+            },
+          },
           runtime_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
           admin_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
         },

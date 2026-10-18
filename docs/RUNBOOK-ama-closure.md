@@ -135,10 +135,17 @@ Admission and predecessor matching resolve the repository from `dispatchContext.
 then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
 `dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
 for both admission and cleanup. Descendants are ordered by latest update and
-launch ID, and promoted live rows retain their status metadata. PostgreSQL reads
-one timeout-bounded, read-only snapshot and parses metadata in the adapter;
-this supports pre-16 servers and missing metadata columns without casting malformed
-historical text in SQL. SQLite retains its recursive query. Interrupted admission (including
+launch ID, and promoted live rows retain their status metadata. RETRYCHAIN-01:
+PostgreSQL uses a recursive query rooted at the probed launch, returning only
+descendant status fields. A temporary parser safely skips malformed historical
+metadata on pre-16 servers and tolerates missing metadata columns. Setup and
+traversal share one transaction (including through transaction pooling); after
+creating the temporary function, traversal runs read-only, then rollback removes
+the function. No persistent schema change or migration is required. Both sync
+and async Postgres children use a shared 2 MiB output bound: unrelated launches and
+metadata no longer consume that buffer. A genuinely oversized chain, query error
+or timeout remains unreadable under the existing ownership rules. SQLite retains
+its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch
 immediately, including when the current admission subsequently aborts. A refused

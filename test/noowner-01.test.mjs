@@ -396,7 +396,7 @@ test('daemon failure followed by capacity deferral does not hold the first repai
     args.cfg.amaCloserMaxConcurrentLaunches = 1;
     args.dispatchContext.forceHammerAfterDaemonFailure = forceHammerAfterDaemonFailure;
     const deps = closerDeps();
-    deps.readLaunchRequestStatusImpl = () => ({ ok: true, status: 'running' });
+    deps.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
     const result = await maybeDispatchAmaCloser({ ...args, ...deps });
     assert.equal(deps.alerts.length, 0, 'no false hammer-stop page');
     return { result, launches: hqLaunches(deps).length };

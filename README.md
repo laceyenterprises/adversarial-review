@@ -457,8 +457,9 @@ state refuse merge. Refusal reasons identify the latch as `fleet-stop-active`
 or `fleet-stop-merge-kill` (active takes precedence when both exist); read errors
 return `fleet-stop-unreadable`, log the failing path class and error code, and
 page through the existing alert sink once per distinct cause per process
-lifetime. Recovery logs without paging; deliberate halt markers never page
-from this evaluator. Consumers treat the `fleet-stop-` prefix as an
+lifetime. Recovery logs only for the state root that recovered, without paging;
+deliberate halt markers never page from this evaluator. Consumers treat the
+`fleet-stop-` prefix as an
 intentional deferral. Reads are uncached; matching `rdr resume --epoch N`
 restores the file latches and eligibility without a configuration reload.
 A stop at the merge boundary releases the lease and defers, without a permanent

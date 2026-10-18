@@ -7,7 +7,7 @@ principal-owned `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
 parent root; the sink appends `data/alert-delivery/`. A path already ending in
 `data/alert-delivery/` is accepted as the final sink path for compatibility.
 **Source of truth:** `src/alert-delivery.mjs`
-**Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`
+**Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`, `src/fleet-stop.mjs`
 
 ## Purpose
 
@@ -58,7 +58,8 @@ Directory: `data/alert-delivery/`
   path class (state root or halt directory), and error code per process lifetime.
   Logs and payloads contain the path class and code, never paths or file contents.
   Its event uses the same safe-prefix sanitizer as orphan recovery identities;
-  `deliverAlert` allocates the normal safe outbox ID. Recovery emits a log only;
+  `deliverAlert` allocates the normal safe outbox ID. Recovery is tracked per
+  state root and emits a log only when that root becomes readable again;
   deliberate halt markers and readable empty directories never alert here.
   Enqueue failure is logged and retains the hold; the process debounce still
   suppresses further attempts for that cause. Durable transport retries remain

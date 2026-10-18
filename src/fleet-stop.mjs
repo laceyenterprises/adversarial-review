@@ -5,12 +5,13 @@ import { deliverAlert, sanitizeAlertIdPrefix } from './alert-delivery.mjs';
 
 const UNREADABLE_EVENT = sanitizeAlertIdPrefix('fleet-stop-unreadable');
 const alertedCauses = new Set();
-let unreadablePathClass = null;
+const unreadableByRoot = new Map();
 
-function recordRecovery(logger) {
-  if (unreadablePathClass === null) return;
-  logger.info?.(`[fleet-stop] recovered from fleet-stop-unreadable: ${unreadablePathClass} is readable again`);
-  unreadablePathClass = null;
+function recordRecovery(root, logger) {
+  const pathClass = unreadableByRoot.get(root);
+  if (pathClass === undefined) return;
+  logger?.info?.(`[fleet-stop] recovered from fleet-stop-unreadable: ${pathClass} is readable again`);
+  unreadableByRoot.delete(root);
 }
 
 // Presence is authority: malformed files and dangling symlinks also stop merges.
@@ -30,24 +31,24 @@ export function fleetStopReason({
     for (const name of ['active.json', 'merge-kill.json']) {
       try {
         lstatImpl(join(directory, name));
-        recordRecovery(logger);
+        recordRecovery(root, logger);
         return name === 'active.json' ? 'fleet-stop-active' : 'fleet-stop-merge-kill';
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;
       }
     }
-    recordRecovery(logger);
+    recordRecovery(root, logger);
     return null;
   } catch (error) {
-    unreadablePathClass = pathClass;
+    unreadableByRoot.set(root, pathClass);
     // Identify causes without logging paths, exception messages or file contents.
     const errorCode = /^[A-Z][A-Z0-9_]{0,39}$/u.test(error?.code) ? error.code : 'UNKNOWN';
     const cause = JSON.stringify([typeof root === 'string' ? root : null, pathClass, errorCode]);
     if (!alertedCauses.has(cause)) {
       alertedCauses.add(cause);
       const text = `fleet-stop-unreadable: cannot read ${pathClass} (${errorCode}); autonomous merges remain on hold.`;
-      logger.error?.(`[fleet-stop] ERROR ${text}`);
-      const deliveryFailed = () => logger.error?.('[fleet-stop] ERROR fleet-stop-unreadable operator alert delivery failed; autonomous merges remain on hold.');
+      logger?.error?.(`[fleet-stop] ERROR ${text}`);
+      const deliveryFailed = () => logger?.error?.('[fleet-stop] ERROR fleet-stop-unreadable operator alert delivery failed; autonomous merges remain on hold.');
       try {
         // Keep the synchronous merge predicate unchanged. deliverAlert enqueues
         // durably before its promise resolves; its drain owns transport retries.

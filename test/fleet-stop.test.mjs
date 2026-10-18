@@ -19,9 +19,7 @@ function fixture(t) {
     deliverAlertImpl: (text, metadata) => { alerts.push({ text, ...metadata }); },
     logger: { error: line => errors.push(line), info: line => recoveries.push(line) },
   };
-  // Settle any prior fixture's recovery before recording this fixture's logs.
   assert.equal(fleetStopReason(options), null);
-  recoveries.length = 0;
   return { root, directory, alerts, errors, recoveries, options };
 }
 
@@ -89,6 +87,46 @@ test('an unresolvable state root holds and identifies the state root path class'
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].payload.pathClass, 'state root');
   assert.match(errors[0], /fleet-stop-unreadable.*state root/u);
+});
+
+test('recovery belongs to the unreadable root, independently of other environments', (t) => {
+  const first = fixture(t);
+  const second = fixture(t);
+  assert.equal(fleetStopReason({ ...first.options, lstatImpl: unreadable('EACCES') }), 'fleet-stop-unreadable');
+  assert.equal(fleetStopReason(second.options), null);
+  assert.equal(second.recoveries.length, 0);
+
+  assert.equal(fleetStopReason({ ...second.options, lstatImpl: unreadable('EIO') }), 'fleet-stop-unreadable');
+  assert.equal(fleetStopReason(first.options), null);
+  assert.equal(fleetStopReason(first.options), null);
+  assert.equal(first.recoveries.length, 1);
+  assert.equal(second.recoveries.length, 0);
+  assert.equal(fleetStopReason(second.options), null);
+  assert.equal(fleetStopReason(second.options), null);
+  assert.equal(second.recoveries.length, 1);
+  assert.equal(first.alerts.length, 1);
+  assert.equal(second.alerts.length, 1);
+});
+
+test('an explicit null logger preserves holds, alert attempts and recovery', async (t) => {
+  for (const delivery of ['success', 'throw', 'reject']) {
+    const { options } = fixture(t);
+    let attempts = 0;
+    const silentOptions = {
+      ...options,
+      logger: null,
+      deliverAlertImpl: () => {
+        attempts += 1;
+        if (delivery === 'throw') throw new Error('synthetic');
+        if (delivery === 'reject') return Promise.reject(new Error('synthetic'));
+      },
+    };
+    assert.equal(fleetStopReason({ ...silentOptions, lstatImpl: unreadable('EACCES') }), 'fleet-stop-unreadable');
+    await Promise.resolve();
+    assert.equal(fleetStopReason(silentOptions), null);
+    assert.equal(fleetStopReason({ ...silentOptions, lstatImpl: unreadable('EACCES') }), 'fleet-stop-unreadable');
+    assert.equal(attempts, 1);
+  }
 });
 
 test('present halt markers hold without alerts, including recovery to a deliberate stop', (t) => {

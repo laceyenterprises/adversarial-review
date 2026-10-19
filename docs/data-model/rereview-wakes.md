@@ -69,6 +69,7 @@ emitting a second terminal latency event.
 |---|---|---|
 | `rereview-admitted:pending` / `:reviewing` | completed | The row is queued for, or held by, a reviewer. |
 | `rereview-posted` | completed | A review posted on the requested head at or after the request. |
+| `review-ceiling-hammer-owned` | skipped | A moved-head `remediation-closeout` request was handed to terminal hammer remediation at the delivered-review ceiling. This is not review admission. |
 | `pr-terminal` | skipped | The PR is merged or closed. |
 | `review-row-missing` | skipped | No `reviewed_prs` row for the subject. |
 | `head-superseded` | skipped | A newer head landed; that head's own wake is the live one. |
@@ -86,7 +87,9 @@ emitting a second terminal latency event.
 - Each state transition emits one `rereview_wake` row in `review_latency_events`
   with `payload.state` set to `requested`, `claimed`, `completed`, or `skipped`,
   keyed `rereview-wake:<state>:<dedupe key>` so replays collapse.
-- The per-PR drain runs in the watcher's admission lane; a once-per-tick sweep
+- The per-PR drain runs in the watcher's admission lane. The posted-row lane drains
+  these before handing closure to the hammer, retaining the reviewed head as
+  evidence and the live head as the target. A once-per-tick sweep
   in the adoption phase covers PRs the admission lane cannot reach. Both are
   bounded at 200 records per pass. The fleet sweep rotates through directory
   entries so a held first batch cannot starve later records. Settled-file

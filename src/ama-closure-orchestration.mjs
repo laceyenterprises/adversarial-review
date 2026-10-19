@@ -1361,7 +1361,13 @@ async function dispatchAmaClosureFor({
   }
   let closerOnlyHeadDelta = closerHeadProof?.proven === true;
   let closerHeadHasLiveReview = false;
-  let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead : settledReviewHeadSha;
+  // CEILINGPUSH-01: preserve the last review's findings as terminal-remediation
+  // input for a moved head. This grants no closer-only carry-forward proof:
+  // candidate/validated heads still differ and every merge gate stays intact.
+  const ceilingMovedHead = reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
+    && originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha;
+  let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead
+    : ceilingMovedHead ? originalReviewedHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
@@ -1387,7 +1393,7 @@ async function dispatchAmaClosureFor({
   const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
   // COMMENTCLOSE-01: a verdict resolved through a recorded final-round push came
   // from the REVIEWED head, so its live reconcile reads that head's reviews.
-  let liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
+  let liveReviewHeadSha = closerOnlyHeadDelta || ceilingMovedHead || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
     ? gateSnapshot.reviewedHeadSha
     : settledReviewHeadSha;
   if (
@@ -1408,7 +1414,7 @@ async function dispatchAmaClosureFor({
     try {
       // A review on the live closer head supersedes historical evidence. Never
       // substitute H0 over a fresh blocking review on H1 (or a failed lookup).
-      if (closerOnlyHeadDelta) {
+      if (closerOnlyHeadDelta || ceilingMovedHead) {
         const currentBodies = await runCoexistenceOperation(
           'closer-head-live-review',
           ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
@@ -1829,6 +1835,7 @@ async function dispatchAmaClosureFor({
   try {
     const eligibility = orchestrationMode === 'native' ? hammerWakeEligibility(disabledEligibility, {
       dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+      reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure',
       ciBlockedHammerOwner, reviewState, headSha: currentPrHeadSha,
       checksConclusion: closureOwnerInput.checks,
     }) : disabledEligibility;
@@ -1849,7 +1856,8 @@ async function dispatchAmaClosureFor({
       ...(closerAuthoredStale.eligible
         ? { eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON, eligibility: { eligible: true, reasons: [] } }
         : { eligibility, ...(eligibility !== disabledEligibility
-          ? { eligibilityReason: 'exhausted-final-hammer-ci-repair' } : {}) }),
+          ? { eligibilityReason: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
+            ? 'review-ceiling-terminal-remediation' : 'exhausted-final-hammer-ci-repair' } : {}) }),
       log: logger,
     });
     if (hammerWakeSink && ciBlockedHammerOwner && orchestrationMode === 'native') {

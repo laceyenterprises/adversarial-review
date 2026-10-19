@@ -24,9 +24,17 @@ import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { ciBlockedHammerReasonsCovered } from './ama/review-cycle-cap-route.mjs';
 
 export function hammerWakeEligibility(eligibility, { dispatchReason, ciBlockedHammerOwner,
-  reviewState, headSha, checksConclusion } = {}) {
+  reviewCeilingReached, reviewState, headSha, checksConclusion } = {}) {
   if (dispatchReason !== 'exhausted-final-hammer' || reviewState?.reviewCycleExhausted !== true) return eligibility;
   const stale = Boolean(reviewState?.headSha && headSha && reviewState.headSha !== headSha);
+  // CEILINGPUSH-01: a ceiling-routed external push belongs to terminal
+  // remediation. These are dispatch misses, not permission to merge the head.
+  // The closer still verifies every finding and records exact-head HAM proof.
+  if (reviewCeilingReached === true && stale && reviewState?.remediationPending !== true
+    && eligibility?.reasons?.length > 0
+    && eligibility.reasons.every(reason => ['stale-head', 'verdict-not-eligible'].includes(reason))) {
+    return { eligible: true, reasons: [] };
+  }
   const reasons = (eligibility?.reasons || []).map(reason => reason === 'stale-head' && stale
     ? 'stale-review-head' : reason === 'verdict-not-eligible' && stale
       ? 'verdict-not-settled-success' : reason);

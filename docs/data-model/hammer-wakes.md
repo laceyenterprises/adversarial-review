@@ -14,6 +14,11 @@ and whose exact head is recorded as `workerPushedHeadSha` by the suppressed
 comment-only final round for the reviewed head. That handoff uses the same
 terminal job lookup as re-review suppression; another unreviewed head remains
 stale. The hammer performs terminal validation before merge.
+CEILINGPUSH-01 also admits a ceiling-routed moved head whose only merge misses
+are `stale-head` and/or `verdict-not-eligible`, with no active remediation.
+Its reason is `review-ceiling-terminal-remediation`; the older review's findings
+remain terminal-remediation input. This changes wake admission only: the merge
+verdict allowlist and exact-head checks remain authoritative.
 The files are a reservation and audit trail for a latency optimization only: they do not grant
 merge authority, bypass the watcher, or replace the normal poll path.
 
@@ -39,7 +44,7 @@ Directory: `data/hammer-wakes/`
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. Invalid, zero, fractional, boolean, null, or blank values are rejected before reservation. |
 | `headSha` | string | Live PR head SHA admitted for the wake. |
-| `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`; exhausted native CI repair uses `exhausted-final-hammer-ci-repair`. |
+| `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`; exhausted native CI repair uses `exhausted-final-hammer-ci-repair`; ceiling handoffs use `review-ceiling-terminal-remediation`. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
 | `route` | string | Current value is `watcher-ama-merge-authority`, because the wake targets the existing watcher AMA route. |

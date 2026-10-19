@@ -14,6 +14,10 @@ import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
+import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';
+import { classifyRereviewWakeOutcome, requestRereviewWake, consumeRereviewWakes, rereviewWakeBacklog } from '../src/rereview-wake.mjs';
 
 const repo = 'example/repair-fixture', prNumber = 37;
 const reviewed = 'a'.repeat(40), head = 'b'.repeat(40);
@@ -22,7 +26,7 @@ const quiet = { log() {}, warn() {}, error() {} };
 const red = [{ __typename: 'CheckRun', name: 'synthetic-ci', status: 'COMPLETED', conclusion: 'FAILURE' }];
 const failedConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
 
-function fixture(t, mode = 'native') {
+function fixture(t, mode = 'native', liveHammer = false) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ciblockham-03-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const wakes = [], launches = [];
@@ -69,6 +73,9 @@ function fixture(t, mode = 'native') {
       fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
       guardStackedBaseImpl: async () => null,
       execFileImpl: async (_cmd, argv) => {
+        if (liveHammer && argv[0] === 'dispatch' && argv[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'running', ticketRef: 'HAM' }) };
+        }
         if (argv[0] === 'dispatch') {
           launches.push(argv);
           return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-dispatch',
@@ -76,7 +83,8 @@ function fixture(t, mode = 'native') {
         }
         throw new Error(`Unexpected external command: ${argv[0]}`);
       },
-      readLaunchRequestStatusImpl: () => ({ ok: false }),
+      readLaunchRequestStatusImpl: () => liveHammer
+        ? ({ ok: true, row: { status: 'running', ticket_ref: 'HAM' } }) : ({ ok: false }),
       readPullRequestStateImpl: () => null,
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: head, comments: [] }),
       readTemplateImpl: () => 'Synthetic <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -89,6 +97,119 @@ function fixture(t, mode = 'native') {
   };
   return { args, wakes, launches };
 }
+
+// CEILINGPUSH-01 exercises the green sibling of the exhausted CI handoff,
+// through the same real orchestration, wake, dispatcher, lease and merge gates.
+const blockingBody = '## Blocking issues\n- **Validate input**\n  - **File:** `src/fixture.mjs`\n  - **Lines:** `1`\n  - **Problem:** unchecked input\n  - **Recommended fix:** validate it\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes';
+function ceilingFixture(t) {
+  const f = fixture(t, 'native', true);
+  delete f.args.dispatchJob.ciBlockedHammerOwner;
+  Object.assign(f.args.reviewStateRow, { review_status: 'posted', last_verdict: 'Request changes',
+    review_body: blockingBody, rereview_reason: 'system-review-ceiling-closure',
+    posted_at: '2026-01-01T00:00:00Z' });
+  f.args.candidate.statusCheckRollup = red.map(check => ({ ...check, conclusion: 'SUCCESS' }));
+  f.args.resolveReviewCycleExhaustionImpl = () => ({ reviewCycleExhausted: false });
+  f.args.fetchLatestHeadReviewBodiesImpl = async (_repo, _pr, sha) => sha === reviewed ? [blockingBody] : [];
+  return f;
+}
+
+test('CEILINGPUSH-01: moved green head dispatches one terminal hammer with the older blocking findings', async t => {
+  const { args, wakes, launches } = ceilingFixture(t);
+  const dispatch = args.maybeDispatchAmaCloserImpl;
+  args.maybeDispatchAmaCloserImpl = payload => {
+    assert.equal(payload.reviewState.headSha, reviewed);
+    assert.equal(payload.reviewState.verdict, 'request-changes');
+    assert.equal(payload.reviewState.blockingFindingCount, 1);
+    assert.equal(payload.reviewState.reviewCycleExhausted, true);
+    assert.equal(payload.dispatchContext.reviewCycleCapReached, true);
+    assert.equal(payload.dispatchContext.reviewedSha, reviewed);
+    assert.equal(payload.dispatchContext.targetRemediationSha, head);
+    return dispatch(payload);
+  };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(launches.length, 1);
+  assert.equal(wakes[0].outcome, 'requested');
+  assert.equal(wakes[0].eligibilityReason, 'review-ceiling-terminal-remediation');
+  assert.equal(readAmaCloserLease(args.rootDir, { repo, prNumber, headSha: head }).status, 'dispatched');
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(launches.length, 1, 'a live lease prevents duplicate hammers');
+  assert.equal(wakes[1].outcome, 'duplicate');
+  const merge = evaluateMergeEligibility({ verdict: 'request-changes',
+    requiredChecks: args.candidate.statusCheckRollup, candidateHead: head, validatedHead: reviewed,
+    mergeable: 'MERGEABLE', labels: [], leaseHeld: true, branchProtectionRequired: false });
+  assert.deepEqual(merge.reasons, ['verdict-not-eligible', 'stale-head']);
+});
+
+test('CEILINGPUSH-01: repeated ceiling observations restore the review once and settle closeout as hammer-owned', t => {
+  const { args } = ceilingFixture(t);
+  const db = openReviewStateDb(args.rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha,posted_at)
+    VALUES (?,?,'2026-01-01','claude','posted',?,'2026-01-01')`).run(repo, prNumber, reviewed);
+  db.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,started_at,
+    ended_at,status,head_sha,body_md) VALUES (?,?,1,'claude','first-pass','2026-01-01','2026-01-01',
+    'completed',?,?)`).run(repo, prNumber, reviewed, blockingBody);
+  const logs = [], route = { db, repo, prNumber, headSha: head, ceiling: 1,
+    logger: { log: line => logs.push(JSON.parse(line)) } };
+  const original = db.prepare('SELECT * FROM reviewed_prs').get();
+  for (const row of [original, original, db.prepare('SELECT * FROM reviewed_prs').get()]) {
+    assert.equal(routeCappedReviewToClosure({ ...route, row }), true);
+  }
+  const routed = db.prepare('SELECT * FROM reviewed_prs').get();
+  assert.equal(routeCappedReviewToClosure({ ...route, row: routed }), true);
+  assert.equal(logs.length, 1, 'including a stale snapshot must not repeat posted -> posted');
+  assert.equal(routeCappedReviewToClosure({ ...route, row: routed, headSha: reviewed }), false);
+  const at = '2026-01-01T00:01:00Z';
+  requestRereviewWake({ rootDir: args.rootDir, repo, prNumber, headSha: head,
+    reason: 'remediation-closeout', requestedAt: at, db, log: quiet,
+    requestWatcherWakeImpl: () => ({ requested: true }) });
+  const consumed = consumeRereviewWakes({ rootDir: args.rootDir, repo, prNumber,
+    reviewRow: routed, currentHeadSha: head, at, db, log: quiet });
+  assert.equal(consumed.skipped, 1);
+  assert.equal(consumed.completed, 0);
+  assert.equal(consumed.outcomes[0].reason, 'review-ceiling-hammer-owned');
+  assert.equal(rereviewWakeBacklog({ rootDir: args.rootDir }).pending, 0);
+});
+
+test('CEILINGPUSH-01: an unavailable closure records its reason and pages once within the existing wait bound', async t => {
+  const { args } = ceilingFixture(t);
+  const pages = [], observations = [];
+  let clock = 0;
+  args.now = () => clock;
+  args.env = { AMA_CLOSURE_WAIT_BOUND_MS: '100' };
+  args.observeClosureWaitImpl = input => {
+    observations.push(input.reason);
+    return observeClosureWait({ ...input, now: clock, pageImpl: async text => pages.push(text) });
+  };
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false,
+    reason: 'not-eligible', reasons: ['branch-protection-missing-gate'] });
+  for (clock of [0, 101, 102]) await maybeDispatchAmaClosureFor(args);
+  assert.equal(pages.length, 1);
+  assert.match(pages[0], /branch-protection-missing-gate/);
+  assert.ok(observations.every(reason => reason.includes('branch-protection-missing-gate')));
+});
+
+test('CEILINGPUSH-01: same-head and ordinary wakes retain their existing review admission semantics', () => {
+  const eligibility = { eligible: false, reasons: ['verdict-not-eligible', 'stale-head'] };
+  const options = { dispatchReason: 'exhausted-final-hammer', reviewCeilingReached: true,
+    reviewState: { headSha: reviewed, reviewCycleExhausted: true }, headSha: head };
+  assert.equal(hammerWakeEligibility(eligibility, options).eligible, true);
+  for (const changed of [{ headSha: reviewed }, { reviewCeilingReached: false },
+    { dispatchReason: null }, { reviewState: { ...options.reviewState, remediationPending: true } }]) {
+    assert.equal(hammerWakeEligibility(eligibility, { ...options, ...changed }), eligibility);
+  }
+  for (const reason of ['ci-not-green', 'branch-protection-missing-gate', 'label-do-not-merge',
+    'labels-unavailable', 'primary-change-reverted', 'lease-not-held']) {
+    const held = { eligible: false, reasons: [...eligibility.reasons, reason] };
+    assert.equal(hammerWakeEligibility(held, options), held);
+  }
+  const record = { headSha: head, reason: 'remediation-closeout', requestedAt: '2026-01-01T00:00:00Z' };
+  const row = { review_status: 'posted', rereview_reason: 'system-review-ceiling-closure',
+    reviewer_head_sha: head, posted_at: '2026-01-01T00:01:00Z' };
+  assert.equal(classifyRereviewWakeOutcome({ record, reviewRow: row, currentHeadSha: head }).reason, 'rereview-posted');
+  assert.equal(classifyRereviewWakeOutcome({ record, reviewRow: { ...row, reviewer_head_sha: reviewed },
+    currentHeadSha: 'c'.repeat(40) }).reason, 'head-superseded');
+});
 
 for (const mode of ['native', 'agentos']) {
   for (const conclusion of failedConclusions) test(`${mode}: exhausted ${conclusion} unreviewed head wakes and launches its final hammer in one pass`, async t => {

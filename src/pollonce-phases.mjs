@@ -1438,7 +1438,18 @@ export async function processReviewSubject(entry, ctx) {
             roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
           })) });
       }
-      if (cappedClosure) existing = stmtGetReviewRow.get(repoPath, prNumber);
+      if (cappedClosure) {
+        existing = stmtGetReviewRow.get(repoPath, prNumber);
+        // Posted rows leave admission below. Settle closeout wakes against the
+        // ceiling handoff here, so pickup records the hammer owner explicitly.
+        try {
+          consumeRereviewWakesImpl({ rootDir: ROOT, db, repo: repoPath, prNumber,
+            reviewRow: existing, currentHeadSha: subject.headSha,
+            subjectTerminal: Boolean(subject.terminal), log: console });
+        } catch (error) {
+          console.warn(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
+        }
+      }
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&

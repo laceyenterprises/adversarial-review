@@ -3180,6 +3180,12 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
         attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
         VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
         '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
+      const wakeModule = await import(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))});
+      const wakeRepo = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get().repo;
+      if (${postedCount} === 5) wakeModule.requestRereviewWake({
+        rootDir: ${JSON.stringify(REPO_ROOT)}, db, repo: wakeRepo, prNumber: 101,
+        headSha: ${JSON.stringify(head)}, reason: 'remediation-closeout',
+        requestWatcherWakeImpl: () => ({ requested: true }) });
     `, afterFirstPoll: postedCount < 5 ? `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'raised budget admits the moved head');
@@ -3198,6 +3204,14 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
       assert.equal(row.review_status, 'posted');
       assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
       assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
+      const pending = wakeModule.rereviewWakeBacklog({ rootDir: ${JSON.stringify(REPO_ROOT)} });
+      assert.equal(pending.pending, 0, 'CEILINGPUSH-01 posted lane drains the closeout wake');
+      const events = db.prepare("SELECT reason FROM review_latency_events WHERE event_type='rereview_wake'").all();
+      assert.ok(events.some(event => event.reason === 'review-ceiling-hammer-owned'));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(db.prepare('SELECT rereview_reason FROM reviewed_prs WHERE pr_number=101').get().rereview_reason,
+        'system-review-ceiling-closure');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
     ` }));
     const env = installGhFixture(tmp);
     const ghPath = path.join(tmp, 'gh');

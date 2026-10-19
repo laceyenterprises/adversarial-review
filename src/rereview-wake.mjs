@@ -609,6 +609,13 @@ function classifyRereviewWakeOutcome({
   if (requestedHead && observedHead && requestedHead !== observedHead) {
     return { state: REREVIEW_WAKE_STATES.SKIPPED, reason: 'head-superseded' };
   }
+  // The ceiling hands remediation closeout to the hammer rather than another
+  // reviewer. Do not report this wake as admitted or let it expire silently.
+  if (record?.reason === REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT
+    && reviewStatus === 'posted' && reviewRow.rereview_reason === 'system-review-ceiling-closure'
+    && observedHead && reviewRow.reviewer_head_sha && reviewRow.reviewer_head_sha !== observedHead) {
+    return { state: REREVIEW_WAKE_STATES.SKIPPED, reason: 'review-ceiling-hammer-owned' };
+  }
   if (TERMINAL_REVIEW_STATUSES.has(reviewStatus)) {
     return { state: REREVIEW_WAKE_STATES.SKIPPED, reason: `review-status-terminal:${reviewStatus}` };
   }

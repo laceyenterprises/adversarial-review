@@ -33,6 +33,9 @@ import { hasOperatorApprovedOverride } from './eligibility.mjs';
  * is the exhausted-round HAM terminal-remediation marker (SPEC §1.1.1) that the
  * closer records only after it verifies the HAM commit + audit provenance.
  * Anything else fails the gate with `verdict-not-eligible`.
+ * CEILINGPUSH-01: a stale request-changes verdict can admit a ceiling-routed
+ * hammer wake/dispatch, but never a merge. Keep this list restricted: the
+ * hammer must remediate and verify the live head before terminal validation.
  */
 export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
   'settled-success',

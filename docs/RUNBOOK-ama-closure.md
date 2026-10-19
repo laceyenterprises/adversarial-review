@@ -3512,6 +3512,19 @@ Without such a review pass, the router leaves the row unchanged. Stored review
 bodies and verified artifact evidence count as delivery even before comment-id
 backfill. Posted legacy rows without pass history retain the attempts fallback.
 Generic failed rows are not revived; every routing transition logs prior status.
+CEILINGPUSH-01 makes repeated observations idempotent: an already routed row
+retains closure ownership without another write or transition log. The native
+hammer wake admits stale-head/verdict misses for this ceiling handoff as
+`review-ceiling-terminal-remediation`, preserving the last review's findings
+at the reviewed head and targeting the live head. Active remediation and all
+independent policy holds retain their existing admission rules. The closer's
+ceiling route owns terminal remediation; merge still requires exact-head HAM
+validation of every finding and green required checks. No extra review is
+admitted. A `remediation-closeout` wake settles explicitly as
+`skipped: review-ceiling-hammer-owned` in the posted-row lane. If closure cannot
+act, the existing final-round durable wait records the refusal and pages once
+at its 30-minute bound. After deployment, verify the next such PR reaches a
+hammer lease, terminal validation and merge without an operator hand merge.
 The ledger and ceiling are computed only when the review head has moved.
 
 The watcher persists the last head verified nonempty and probes again only on a

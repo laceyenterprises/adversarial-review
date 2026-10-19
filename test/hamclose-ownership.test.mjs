@@ -68,7 +68,7 @@ test('LEASEDEADPID-01 a live pending watcher waits until the existing reclaim bo
 });
 
 test('LEASEDEADPID-01 foreign-host pending leases retain the shared PID rule', () => {
-  const lease = { status: 'pending', host: 'synthetic-remote.invalid', watcherPid: 4242, acquiredAt: leaseAtAge(1_000) };
+  const lease = { status: 'pending', holderHost: 'synthetic-remote.invalid', watcherPid: 4242, acquiredAt: leaseAtAge(1_000) };
   // The existing dispatch predicate probes the PID regardless of recorded host.
   for (const [processKillImpl, owner] of [[deadWatcher, 'hammer'], [() => {}, 'wait']]) {
     assert.equal(decideClosureOwner({ ...finalCommentOwner, lease, processKillImpl }).owner, owner);

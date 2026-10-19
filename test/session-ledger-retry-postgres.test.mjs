@@ -1,9 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+
+function reserveLoopbackPort() {
+  const reserve = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { createServer } from 'node:net';
+    const server = createServer();
+    server.listen(0, '127.0.0.1', () => {
+      process.stdout.write(String(server.address().port));
+      server.close();
+    });`], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(reserve.status, 0, reserve.stderr);
+  const port = Number(reserve.stdout);
+  assert.ok(Number.isInteger(port) && port > 0);
+  return port;
+}
+
+function startPostgresWithPortRetry({ dataDir, root, reservePort = reserveLoopbackPort, spawnSyncImpl = spawnSync }) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const port = reservePort();
+    // Separate logs keep an earlier collision from masking a later failure.
+    const logPath = join(root, `server-${attempt}.log`);
+    const start = spawnSyncImpl('pg_ctl', ['-D', dataDir, '-l', logPath,
+      '-o', `-F -k ${root} -p ${port} -c listen_addresses=127.0.0.1 -c unix_socket_permissions=0700`, '-w', '-t', '10', 'start'],
+      { encoding: 'utf8', timeout: 15000 });
+    const diagnostics = [start.error?.message, start.stderr, start.stdout,
+      existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''].filter(Boolean).join('\n');
+    if (start.status === 0 || start.error || !/address already in use/i.test(diagnostics) || attempt === 3) {
+      return { start, port, diagnostics };
+    }
+  }
+}
+
+for (const scenario of ['recovers', 'exhausts', 'unrelated failure']) {
+  test(`native PostgreSQL fixture port collision retry ${scenario}`, t => {
+    const root = mkdtempSync('/tmp/retry-postgres-start-');
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let calls = 0;
+    let reservations = 0;
+    const result = startPostgresWithPortRetry({ dataDir: join(root, 'cluster'), root,
+      reservePort: () => 40000 + ++reservations,
+      spawnSyncImpl: (command, args) => {
+        assert.equal(command, 'pg_ctl');
+        calls++;
+        assert.ok(args[args.indexOf('-o') + 1].includes(`-p ${40000 + calls} `));
+        const succeeds = scenario === 'recovers' && calls === 2;
+        const message = scenario === 'unrelated failure' && calls === 2
+          ? 'FATAL: invalid configuration' : 'could not bind IPv4 address "127.0.0.1": Address already in use';
+        writeFileSync(args[args.indexOf('-l') + 1], succeeds ? 'ready' : message);
+        // pg_ctl puts the bind failure in the server log, not stderr.
+        return { status: succeeds ? 0 : 1, stdout: '', stderr: succeeds ? '' : 'could not start server' };
+      },
+    });
+    assert.equal(calls, scenario === 'exhausts' ? 3 : 2);
+    assert.equal(reservations, calls);
+    assert.equal(result.port, 40000 + calls);
+    assert.equal(result.start.status, scenario === 'recovers' ? 0 : 1);
+    if (scenario === 'unrelated failure') assert.match(result.diagnostics, /invalid configuration/);
+  });
+}
 
 // Optional native coverage uses an isolated cluster on an ephemeral loopback
 // port (Unix-socket connects are denied by the host network guard). No external
@@ -21,16 +79,6 @@ function isolatedPostgres(t) {
   // Keep the socket path below macOS's Unix-domain path limit.
   const root = mkdtempSync('/tmp/retry-postgres-');
   const dataDir = join(root, 'cluster');
-  const reserve = spawnSync(process.execPath, ['--input-type=module', '-e', `
-    import { createServer } from 'node:net';
-    const server = createServer();
-    server.listen(0, '127.0.0.1', () => {
-      process.stdout.write(String(server.address().port));
-      server.close();
-    });`], { encoding: 'utf8', timeout: 5000 });
-  assert.equal(reserve.status, 0, reserve.stderr);
-  const port = Number(reserve.stdout);
-  assert.ok(Number.isInteger(port) && port > 0);
   let started = false;
   t.after(() => {
     if (started) {
@@ -43,11 +91,9 @@ function isolatedPostgres(t) {
   const init = spawnSync('initdb', ['-D', dataDir, '-U', 'fixture_admin', '-A', 'trust', '--no-locale'],
     { encoding: 'utf8', timeout: 30000 });
   assert.equal(init.status, 0, init.stderr);
-  const start = spawnSync('pg_ctl', ['-D', dataDir, '-l', join(root, 'server.log'),
-    '-o', `-F -k ${root} -p ${port} -c listen_addresses=127.0.0.1 -c unix_socket_permissions=0700`, '-w', '-t', '10', 'start'],
-    { encoding: 'utf8', timeout: 15000 });
+  const { start, port, diagnostics } = startPostgresWithPortRetry({ dataDir, root });
   started = start.status === 0;
-  assert.equal(start.status, 0, start.stderr);
+  assert.equal(start.status, 0, diagnostics);
   function psql(args, options = {}, user = 'fixture_admin') {
     return spawnSync('psql', ['--host', '127.0.0.1', '--port', String(port), '--username', user, ...args], {
       encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024, ...options,

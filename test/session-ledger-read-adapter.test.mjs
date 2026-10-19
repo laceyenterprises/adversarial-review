@@ -1183,6 +1183,7 @@ test('RETRYCHAIN-01: PostgreSQL requests only the selected retry tree and projec
       assert.ok(args.includes('lrq=synthetic-lrq'));
       assert.ok(args.includes('-q'));
       assert.match(options.input, /^BEGIN READ ONLY;/);
+      assert.match(options.input, /\\endif\nCOMMIT;\n$/);
       assert.doesNotMatch(options.input, /CREATE FUNCTION|SET TRANSACTION|EXCEPTION|ROLLBACK/);
       assert.match(options.input, /pg_input_is_valid/);
       assert.match(options.input, /WHERE child.metadata_json ->> 'retryOf' = parent.launch_request_id/);
@@ -1301,6 +1302,7 @@ test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live r
       reads++;
       assert.equal(command, 'psql');
       assert.match(opts.input, /BEGIN READ ONLY;/);
+      assert.match(opts.input, /\\endif\nCOMMIT;\n$/);
       assert.match(opts.input, /FROM launch_requests/);
       assert.ok(_argv.includes(`launch_ids=${JSON.stringify(options.launchRequestIds)}`));
       assert.doesNotMatch(opts.input, /synthetic-ended|to_jsonb|MATERIALIZED/);

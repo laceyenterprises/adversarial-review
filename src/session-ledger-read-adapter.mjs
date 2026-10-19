@@ -693,8 +693,12 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
     }
     let result;
     if (readOnly || psqlVars.length > 0) {
+      const sql = String(jsonSql).trim();
+      // Conditional scripts terminate SQL inside each branch. Keep the final
+      // psql meta-command intact rather than appending a statement terminator.
+      const terminatedSql = /(?:;|\\endif)$/.test(sql) ? sql : `${sql};`;
       const statement = readOnly
-        ? `BEGIN READ ONLY;\n${String(jsonSql).trim().replace(/;$/, '')};\nCOMMIT;`
+        ? `BEGIN READ ONLY;\n${terminatedSql}\nCOMMIT;`
         : jsonSql;
       const script = `${statement}\n`;
       args.push(...spawnConfig.args, '-t', '-A');
@@ -923,8 +927,7 @@ function postgresRetryReadSql({ snapshot = false } = {}) {
     \\else
       ${snapshot ? `SELECT ${postgresLaunchProjection}) FROM launch_requests request
         WHERE request.launch_request_id IN (${seed});` : 'SELECT NULL WHERE false;'}
-    \\endif
-    ;`;
+    \\endif`;
 }
 
 // One read-only snapshot of the requested launches and descendants per capacity

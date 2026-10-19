@@ -42,9 +42,12 @@ refusals and holds: `missing-dispatch-phase-scripts`,
 `unrendered-dispatch-phase-script-placeholders`. These predicates describe
 missing scratch scripts or unrendered dispatch paths, so fresh dispatch can
 repair them without a PR input change. A new stop returns `none` without a
-hold page. A persisted hold releases on its next evaluation with
+hold page. Only an unreleased persisted infrastructure hold releases, once, with
 `releasedBy: ['infrastructure-stop']`, without another page, even if the audit
-has since cleared. Release does not refund attempts; ordinary gates, leases,
+has since cleared. Packaging failures leave unrelated deterministic holds
+unchanged. Already-released infrastructure holds return `none` without rewriting
+state, whether the packaging audit remains or has cleared.
+Release does not refund attempts; ordinary gates, leases,
 the per-PR retry cap and lifetime ceiling still apply.
 
 HAMUNKNOWN-02 re-evaluates `github-gate-not-green` and

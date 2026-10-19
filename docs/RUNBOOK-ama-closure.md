@@ -1739,9 +1739,11 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   evidence hold or a separate ten-minute page. STOPHOLDINFRA-01 excludes
   missing dispatch phase scripts and unrendered phase-script placeholders from
   holds and hold pages. Existing holds for those infrastructure predicates
-  release with `infrastructure-stop` on the next evaluation; fresh dispatch
-  renders scripts again. No attempts are refunded, so ordinary gates, leases
-  and retry caps continue to bound recovery. Other predicates retain their
+  release once with `infrastructure-stop` on the next evaluation; fresh dispatch
+  renders scripts again. Packaging failures preserve unrelated deterministic
+  holds. Released infrastructure holds return `none` without writing state on
+  later ticks, with or without audit evidence. No attempts are refunded, so
+  ordinary gates, leases and retry caps continue to bound recovery. Other predicates retain their
   holds and page rules. Released stops return to ordinary backoff.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence

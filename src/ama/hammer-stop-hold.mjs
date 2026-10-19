@@ -403,12 +403,13 @@ export async function evaluateHammerStopHold({
   const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
   const prior = state.heads[headSha];
   // STOPHOLDINFRA-01: packaging failures say nothing about the PR. Retire old
-  // holds without paging or refunding attempts; ordinary gates, leases and
-  // retry caps still own re-dispatch. The audit may already have been cleared.
+  // infrastructure holds once, without paging or refunding attempts. An incoming
+  // packaging failure cannot release an unrelated refusal. Ordinary gates,
+  // leases and retry caps still own re-dispatch; the audit may already be cleared.
   if (isInfrastructureStop(stop) || (!stop && isInfrastructureStop(prior))) {
-    if (!prior) return { action: 'none' };
+    if (!isInfrastructureStop(prior) || prior.releasedAt) return { action: 'none' };
     const changed = ['infrastructure-stop'];
-    const entry = { ...prior, releasedAt: prior.releasedAt || now, releasedBy: changed };
+    const entry = { ...prior, releasedAt: now, releasedBy: changed };
     writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha,
       heads: { ...state.heads, [headSha]: entry } });
     return { action: 'release', hammerStop: stop || prior, changed };

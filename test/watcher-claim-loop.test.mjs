@@ -3166,10 +3166,19 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
     const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4');
     // Automatic stale-head requests omit db in production. Bind this replay
     // to the fixture DB so its re-review reset and claim share the same state.
+    const phaseSource = readFileSync(path.join(REPO_ROOT, 'src/pollonce-phases.mjs'), 'utf8').replace(
+      'export async function processReviewSubject(entry, ctx) {',
+      'export async function processReviewSubject(entry, ctx) { ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
+    );
     writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource }).replace(
       'return actual.requestReviewRereview(options);',
       'return actual.requestReviewRereview({ ...options, db: options.db || db });',
-    ));
+    ).replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(fileUrl('src', 'pollonce-phases.mjs'))}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(phaseSource)} };
+      }
+      return nextLoad(url, context);
+    `));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
       db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
@@ -3180,6 +3189,27 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
         attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
         VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
         '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
+      const wakeModule = await import(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))});
+      const ceilingLog = { warn() {} }, ceilingWarnings = [];
+      let ceilingDrainCount = 0;
+      if (${postedCount} === 5) globalThis.__ceilingLoggingContext = {
+        log: ceilingLog, warn: message => ceilingWarnings.push(message),
+        consumeRereviewWakesImpl(payload) {
+          assert.equal(payload.log, ceilingLog, 'closeout drain receives the configured sink');
+          if (++ceilingDrainCount === 2) throw new Error('synthetic closeout drain failure');
+          return wakeModule.consumeRereviewWakes({ ...payload, rootDir: ${JSON.stringify(tmp)} });
+        },
+      };
+      const wakeRepo = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get().repo;
+      if (${postedCount} === 5) {
+        // Settled wakes suppress duplicate requests; keep this replay's queue
+        // separate from prior runs as well as from the watcher's real queue.
+        const wakeRequest = wakeModule.requestRereviewWake({
+          rootDir: ${JSON.stringify(tmp)}, db, repo: wakeRepo, prNumber: 101,
+          headSha: ${JSON.stringify(head)}, reason: 'remediation-closeout',
+          requestWatcherWakeImpl: () => ({ requested: true }) });
+        assert.equal(wakeRequest.requested, true, 'fixture enqueues a fresh closeout wake');
+      }
     `, afterFirstPoll: postedCount < 5 ? `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'raised budget admits the moved head');
@@ -3198,6 +3228,17 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
       assert.equal(row.review_status, 'posted');
       assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
       assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
+      const pending = wakeModule.rereviewWakeBacklog({ rootDir: ${JSON.stringify(tmp)} });
+      assert.equal(pending.pending, 0, 'CEILINGPUSH-01 posted lane drains the closeout wake');
+      const events = db.prepare("SELECT reason FROM review_latency_events WHERE event_type='rereview_wake'").all();
+      assert.ok(events.some(event => event.reason === 'review-ceiling-hammer-owned'));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(ceilingDrainCount, 2);
+      assert.equal(ceilingWarnings.length, 1);
+      assert.match(ceilingWarnings[0], /ceiling closeout wake drain failed.*synthetic closeout drain failure/);
+      assert.equal(db.prepare('SELECT rereview_reason FROM reviewed_prs WHERE pr_number=101').get().rereview_reason,
+        'system-review-ceiling-closure');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
     ` }));
     const env = installGhFixture(tmp);
     const ghPath = path.join(tmp, 'gh');

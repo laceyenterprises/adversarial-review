@@ -20,7 +20,7 @@ export function postedReviewCeilingReached({ db, repo, prNumber, ceiling }) {
 
 export { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 
-export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, ceiling, logger = console }) {
+export function routeCappedReviewToClosure({ db, stmtGetReviewRow, repo, prNumber, headSha, row, ceiling, logger = console }) {
   if (!row || ['reviewing', 'malformed', 'failed-orphan'].includes(row.review_status)
     || isExplicitOperatorReviewRetrigger(row) || isOrphanHeadReviewRequested(row, headSha)
     || !postedReviewCeilingReached({ db, repo, prNumber, ceiling })) return false;
@@ -31,10 +31,18 @@ export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, c
     AND ${DELIVERED_REVIEW_SQL}
     ORDER BY ended_at DESC, pass_id DESC LIMIT 1`).get(repo, prNumber);
   if (!posted || posted.head_sha === headSha) return false;
+  // Return ownership even on a no-op: the caller must keep auto-refresh
+  // suppressed on every tick, without rewriting/logging posted -> posted.
   const changed = db.prepare(`UPDATE reviewed_prs SET review_status='posted',
     reviewer_head_sha=?, posted_at=?, rereview_reason='system-review-ceiling-closure'
-    WHERE repo=? AND pr_number=? AND review_status=? AND review_status IN ('posted','pending','pending-upstream','failed')`)
-    .run(posted.head_sha, posted.ended_at, repo, prNumber, row.review_status).changes === 1;
+    WHERE repo=? AND pr_number=? AND review_status=? AND review_status IN ('posted','pending','pending-upstream','failed')
+    AND NOT (review_status='posted' AND reviewer_head_sha IS ? AND posted_at IS ?
+      AND rereview_reason IS 'system-review-ceiling-closure')`)
+    .run(posted.head_sha, posted.ended_at, repo, prNumber, row.review_status, posted.head_sha, posted.ended_at).changes === 1;
   if (changed) logger.log?.(JSON.stringify({ event: 'review-ceiling-closure-transition', repo, prNumber, headSha, priorStatus: row.review_status, status: 'posted' }));
-  return changed;
+  const current = changed ? null : (stmtGetReviewRow
+    || db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?')).get(repo, prNumber);
+  return changed || (current?.review_status === 'posted'
+    && current.rereview_reason === 'system-review-ceiling-closure'
+    && current.reviewer_head_sha === posted.head_sha && current.posted_at === posted.ended_at);
 }

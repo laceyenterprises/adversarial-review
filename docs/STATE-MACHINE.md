@@ -915,6 +915,18 @@ Delivered wakes re-arm once per reconciled no-merge LRQ; running hammers remain 
 or audit proof, unknown merged evidence retains the existing success hold. See the [retry ledger](data-model/hammer-retry-cap.md)
 and [dispatch records](data-model/ama-closer-dispatches.md) for fields and retention.
 
+CEILINGPUSH-01 routes a moved head at the delivered-review ceiling to terminal
+hammer remediation. The original review head and findings remain evidence;
+the live head remains the remediation target. Native wake admission tolerates
+only the stale-head and stale-verdict merge misses for this route, independently
+of the legacy exhaustion dispatch reason or exhaustion snapshot; the merge
+verdict allowlist stays unchanged. An already routed row retains ownership
+without another write or `review-ceiling-closure-transition` event. The posted
+lane settles `remediation-closeout` wakes as `skipped: review-ceiling-hammer-owned`.
+The existing final-round wait records refusals and pages once after 30 minutes.
+There are no new lifecycle states or review rounds. STOPHOLDREVIEW-01 posting
+receipts and REVERSALPROV-01 reversal provenance remain independent requirements.
+
 The background hammer queue rechecks the live PR state, head, draft flag, and
 mergeability when each queued entry gets a slot. Changed or unreadable state
 settles without launching a hammer; the next tick applies that outcome.

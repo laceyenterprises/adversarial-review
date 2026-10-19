@@ -21,6 +21,7 @@ const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldA
 const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
+const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
 const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = await import('../../src/review-state.mjs');
@@ -223,6 +224,35 @@ if (scenario === 'clean') {
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
+  const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
+  const ceilingPr = 8, ceilingLogs = [];
+  ceilingDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha)
+    VALUES (?,?,'2026-01-01','gemini','posted',?)`).run(repo, ceilingPr, base);
+  ceilingDb.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+    started_at,ended_at,status,head_sha,body_md) VALUES (?,?,1,'gemini','first-pass',
+    '2026-01-01','2026-01-01','completed',?,?)`).run(repo, ceilingPr, base, cleanBody);
+  for (let tick = 0; tick < 2; tick++) {
+    assert.equal(routeCappedReviewToClosure({ db: ceilingDb, repo, prNumber: ceilingPr, headSha, ceiling: 1,
+      row: ceilingDb.prepare('SELECT * FROM reviewed_prs WHERE pr_number=?').get(ceilingPr),
+      logger: { log: line => ceilingLogs.push(line) } }), true);
+  }
+  assert.equal(ceilingLogs.length, 1);
+  assert.equal(ceilingDb.prepare('SELECT reviewer_head_sha FROM reviewed_prs WHERE pr_number=?').get(ceilingPr).reviewer_head_sha, base);
+  ceilingDb.close();
+  for (const dispatchReason of ['exhausted-final-hammer', 'review-ceiling-terminal-remediation', null]) {
+    for (const reviewCycleExhausted of [true, false]) {
+      const ceilingEligibility = hammerWakeEligibility({ eligible: false,
+        reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason,
+        reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted }, headSha });
+      assert.equal(ceilingEligibility.eligible, true);
+    }
+  }
+  const ceilingEligibility = hammerWakeEligibility({ eligible: false,
+    reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason: null,
+    reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted: false }, headSha });
+  assert.equal(requestEligibleHammerWake({ ...identity(), prNumber: ceilingPr,
+    eligibility: ceilingEligibility, eligibilityReason: 'review-ceiling-terminal-remediation',
+    log: quiet, requestWatcherWakeImpl: () => ({ requested: true }) }).outcome, 'requested');
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {
     const admission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
@@ -234,7 +264,7 @@ if (scenario === 'clean') {
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_session_uuid)
     VALUES (?,?,'2026-01-01','gemini','reviewing','synthetic-session')`).run(repo, prNumber);
   assert.equal(prepareMarkRereviewCiBlocked(db).run('2026-01-01','red CI','2026-01-01',headSha,headSha,'synthetic-session',repo,prNumber).changes, 1);
-  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'ci-blocked'); db.close();
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=?').get(prNumber).review_status, 'ci-blocked'); db.close();
   assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha, blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' }, currentHead: headSha, checks: 'FAILURE' }).owner, 'hammer');
   const exhausted = { verdict: 'comment-only', headSha: base, reviewCycleExhausted: true };
   const eligibility = hammerWakeEligibility({ eligible: false,
@@ -286,6 +316,7 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+    greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };

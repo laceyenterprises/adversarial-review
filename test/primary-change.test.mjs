@@ -296,7 +296,7 @@ test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and i
     assert.equal(records.length, 1);
     const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
     assert.equal(record.history.renameProofReadFailed, undefined);
-    assert.equal(record.key[7], 'hamreversal-v2');
+    assert.equal(record.key[7], 'reversalprov-v1');
     assert.deepEqual(await fetchPrimaryChange(args), evidence);
     assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
   }
@@ -1126,7 +1126,18 @@ test('operator diagnostics enforce a wall-clock budget and pass its signal to th
   assert.equal(reads, 1, 'no reads after deadline');
   assert.ok(Date.now() - start < 2000);
   assert.match(evidence.revertedRegionDiagnostics[0].error, /time budget exhausted/);
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  const refusal = checkPrimaryChange(evidence, head);
+  assert.equal(refusal.reason, 'primary-change-reverted');
+  assert.match(refusal.missingEvidence.summary, /diagnostic time budget exhausted/);
+  // Even a full rejection list cannot push the deadline explanation past the
+  // operator summary's 4096-character limit.
+  evidence.rejectedReversalAuthorizations = Array.from({ length: 10 }, () => ({
+    review: 'PRR_fixture', finding: 1, kind: 'blocking', commit: head,
+    reason: 'rebased-commit-unproven', detail: 'long diagnostic '.repeat(80),
+  }));
+  const summary = checkPrimaryChange(evidence, head).missingEvidence.summary;
+  assert.equal(summary.length, 4096);
+  assert.match(summary, /diagnostic time budget exhausted/);
 });
 
 test('whole-file reversal diagnostics use a file-level label without changing the refusal', () => {

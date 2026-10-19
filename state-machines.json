@@ -279,7 +279,7 @@
     "src/ama-closure-orchestration.mjs": "8df2a587d74b481e6a0764f1a9ce8d8b3b79d81721aab7bb1f946ee975563529",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "adf0130c0fe0a08ac3de7c6128a9930ed8fe3095b6f452b783dc814e46bf3515",
+    "src/ama/dispatch-closer.mjs": "6a0b219100de45898ddf9f59c4c124f2424047efa93b47b8bf6ddf7e2f31a073",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",

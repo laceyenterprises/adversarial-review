@@ -336,3 +336,32 @@ test('FINALCLOSE-01 a failed page retries even when the head advances during del
   await observeClosureWait({ ...args, headSha: reviewed, pageImpl: async text => pages.push(text) });
   assert.equal(pages.length, 1);
 });
+
+for (const rowHead of [headSha, reviewed]) {
+  test(`STOPHOLDREVIEW-01 orchestration carries only a posting receipt bound to the settled head: ${rowHead === headSha}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'stopholdreview-caller-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let dispatches = 0;
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [],
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: rowHead, last_verdict: 'Comment only', posted_at: observed, review_body: body },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+      runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
+      maybeDispatchAmaCloserImpl: async args => {
+        dispatches++;
+        assert.equal(args.reviewState.headSha, rowHead, 'receipt retains its reviewed-head binding');
+        assert.equal(args.reviewState.postedAt, observed);
+        return { dispatched: true };
+      },
+      logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(dispatches, 1);
+  });
+}

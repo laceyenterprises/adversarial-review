@@ -28,7 +28,7 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify the latest observed stop. Legacy stops use this identity; structured deterministic refusals use `refusal.key` across attempts. |
 | `heads[sha].predicate` | string | Recorded stop reason, normalized to one line and capped at 120 characters, or `reason-not-recorded`. |
 | `heads[sha].firstObservedAt` | ISO timestamp | First closer observation of this stop. |
-| `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical review evidence fingerprint described below. |
+| `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`; terminal audit readings take precedence where available, with first-observation or prior-release inputs filling unrecorded dimensions. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical review evidence fingerprint described below. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
 | `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02). |
@@ -127,3 +127,22 @@ The page includes full missing evidence and a single `next` action. A read-only
 probe can release a primary-reversal refusal through `primary-change-evidence`
 when its authority becomes verifiable or its missing-evidence tuple changes.
 Unchanged or unreadable authority retains the hold.
+
+
+STOPHOLDREVIEW-01 releases `exact-head-review-required` and `stale-review-head`
+when the closer's existing review state proves a review of the held head posted
+strictly after the terminal attempt timestamp (`startedAt`, `timestamp`, or
+`recordedAt`, also carried in the stop key). This releases with `review` even
+when that review predates `firstObservedAt`; a first-observation release sends
+no hold page. Missing/unparseable timestamps, an older review, or another head
+do not satisfy this predicate. The orchestration passes the posted row's
+`posted_at` only when its `reviewer_head_sha` matches the settled reviewed head.
+This posting receipt is admission evidence, separate from the review fingerprint.
+
+Comparable terminal audit readings (rebased base, live head, mergeability and
+structured review fields in the eligibility trace) override observed baselines,
+including holds created before this fix. Unrecorded dimensions retain their
+observed baseline; aggregate CI conclusions and failed-check subsets cannot
+reconstruct a full check rollup. Release changes ownership only: findings still
+route to remediation, and ordinary eligibility, strict remediation policy,
+leases and retry caps remain in force.

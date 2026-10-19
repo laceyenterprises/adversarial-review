@@ -1029,3 +1029,147 @@ test('REVIEWALERT-01 a competing launch wins the late lease CAS without losing i
   assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
   assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), receipt);
 });
+
+
+// STOPHOLDREVIEW-01: synthetic times/heads, including the production ordering.
+const REVIEW_STOP_HEAD = 'd'.repeat(40);
+const REVIEW_STOP_T0 = '2026-01-01T00:00:00Z';
+const REVIEW_STOP_T1 = '2026-01-01T00:10:00Z';
+const REVIEW_STOP_T2 = '2026-01-01T00:20:00Z';
+function reviewStopFixture(t, predicate = 'exact-head-review-required', attempt = {}) {
+  const rootDir = tmpRoot(t, 'stopholdreview-');
+  const args = closerArgs(rootDir, {
+    repo: 'fixture/review-stop', prNumber: 42,
+    reviewedSha: REVIEW_STOP_HEAD, headSha: REVIEW_STOP_HEAD,
+    reviewState: { postedAt: REVIEW_STOP_T1, nonBlockingFindingCount: 16 },
+    prMetadata: { baseSha: 'e'.repeat(40), statusCheckRollup: [
+      { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ] },
+    dispatchContext: { dispatchedAt: REVIEW_STOP_T2 },
+  });
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot,
+    repo: args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
+    now: REVIEW_STOP_T0, attempt: { outcome: 'failed-without-merge',
+      head: REVIEW_STOP_HEAD, path: 'hammer', reason: predicate, ...attempt } });
+  const alerts = [];
+  const evaluate = (reviewState = args.reviewState, now = REVIEW_STOP_T2) => evaluateHammerStopHold({
+    rootDir, hqRoot: args.dispatchContext.hqRoot, repo: args.dispatchContext.repo,
+    prNumber: 42, headSha: REVIEW_STOP_HEAD, reviewedSha: REVIEW_STOP_HEAD,
+    prMetadata: args.prMetadata, reviewState, now, logger: SILENT,
+    execFileImpl: async () => assert.fail('review release needs no new GitHub read'),
+    deliverAlertImpl: async text => alerts.push(text),
+  });
+  return { rootDir, args, alerts, evaluate };
+}
+
+for (const predicate of ['exact-head-review-required', 'stale-review-head']) {
+  test(`STOPHOLDREVIEW-01 ${predicate}: stop T0, review T1, first observation T2 releases without a page`, async t => {
+    const f = reviewStopFixture(t, predicate);
+    const result = await f.evaluate();
+    assert.equal(result.action, 'release');
+    assert.deepEqual(result.changed, ['review']);
+    assert.equal(f.alerts.length, 0);
+    assert.deepEqual((await f.evaluate()).changed, ['review'], 'release persists');
+  });
+
+  test(`STOPHOLDREVIEW-01 ${predicate}: review after first observation releases even with identical findings`, async t => {
+    const f = reviewStopFixture(t, predicate);
+    const oldReview = { ...f.args.reviewState, postedAt: '2025-12-31T23:59:00Z' };
+    assert.equal((await f.evaluate(oldReview, REVIEW_STOP_T1)).action, 'hold');
+    assert.equal((await f.evaluate(oldReview, REVIEW_STOP_T1)).action, 'hold');
+    assert.equal(f.alerts.length, 1);
+    const result = await f.evaluate();
+    assert.equal(result.action, 'release');
+    assert.deepEqual(result.changed, ['review']);
+    assert.equal(f.alerts.length, 1);
+  });
+
+  for (const [label, patch] of [
+    ['predates stop', { postedAt: '2025-12-31T23:59:00Z' }],
+    ['same timestamp', { postedAt: REVIEW_STOP_T0 }],
+    ['missing timestamp', { postedAt: null }],
+    ['invalid timestamp', { postedAt: 'invalid' }],
+    ['different head', { headSha: 'f'.repeat(40) }],
+    ['no review verdict', { verdict: '' }],
+  ]) {
+    test(`STOPHOLDREVIEW-01 ${predicate}: ${label} remains held and pages once`, async t => {
+      const f = reviewStopFixture(t, predicate);
+      for (let i = 0; i < 2; i++) {
+        assert.equal((await f.evaluate({ ...f.args.reviewState, ...patch })).action, 'hold');
+      }
+      assert.equal(f.alerts.length, 1);
+    });
+  }
+}
+
+test('STOPHOLDREVIEW-01 a post-stop review at first observation does not satisfy ci-not-green', async t => {
+  const f = reviewStopFixture(t, 'ci-not-green');
+  assert.equal((await f.evaluate()).action, 'hold');
+  assert.equal((await f.evaluate()).action, 'hold');
+  assert.equal(f.alerts.length, 1);
+});
+
+for (const [dimension, attempt] of [
+  ['base', { rebasedOntoBase: 'c'.repeat(40) }],
+  ['mergeability', { githubGate: { mergeable: 'CONFLICTING' } }],
+  ['review', { eligibilityTrace: { trace: { verdict: { normalized: 'request-changes' } } } }],
+]) {
+  test(`STOPHOLDREVIEW-01 terminal audit ${dimension} reading wins over first observation`, async t => {
+    const f = reviewStopFixture(t, 'ci-not-green', attempt);
+    const result = await f.evaluate();
+    assert.equal(result.action, 'release');
+    assert.deepEqual(result.changed, [dimension]);
+    assert.equal(f.alerts.length, 0);
+  });
+}
+
+test('STOPHOLDREVIEW-01 release dispatches one remediating hammer for sixteen non-blocking findings', async t => {
+  const f = reviewStopFixture(t);
+  const deps = closerDeps({ alerts: f.alerts });
+  const result = await maybeDispatchAmaCloser({ ...f.args, ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 1);
+  assert.equal(result.eligibilityReasons.verdict.nonBlockingFindings.count, 16);
+  const launchArgs = hqLaunches(deps)[0].args;
+  assert.equal(launchArgs[launchArgs.indexOf('--priority') + 1], 'normal', 'findings retain the remediation lane');
+  assert.equal(f.alerts.length, 0);
+  assert.equal((await maybeDispatchAmaCloser({ ...f.args, ...deps })).dispatched, false, 'lease keeps one worker');
+  assert.equal(hqLaunches(deps).length, 1);
+});
+
+for (const timestamp of [null, 'invalid']) {
+  test(`STOPHOLDREVIEW-01 missing or invalid terminal timestamp cannot prove a later review: ${timestamp}`, async t => {
+    const f = reviewStopFixture(t);
+    const result = await evaluateHammerStopHold({ rootDir: f.rootDir, hqRoot: f.args.dispatchContext.hqRoot,
+      repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
+      prMetadata: f.args.prMetadata, reviewState: f.args.reviewState, logger: SILENT,
+      readAuditImpl: () => ({ attempts: [{ head: REVIEW_STOP_HEAD, path: 'hammer',
+        outcome: 'failed-without-merge', reason: 'exact-head-review-required', timestamp }] }),
+      deliverAlertImpl: async text => f.alerts.push(text) });
+    assert.equal(result.action, 'hold');
+    assert.equal(f.alerts.length, 1);
+  });
+}
+
+test('STOPHOLDREVIEW-01 the review receipt cannot release a newer terminal attempt', async t => {
+  const f = reviewStopFixture(t);
+  assert.equal((await f.evaluate()).action, 'release');
+  writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot,
+    repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
+    now: '2026-01-01T00:15:00Z', attempt: { outcome: 'failed-without-merge',
+      head: REVIEW_STOP_HEAD, path: 'hammer', reason: 'exact-head-review-required' } });
+  assert.equal((await f.evaluate()).action, 'hold');
+  assert.equal(f.alerts.length, 1);
+});
+
+test('STOPHOLDREVIEW-01 a satisfied review predicate cannot bypass the per-PR retry cap', async t => {
+  const f = reviewStopFixture(t);
+  for (let i = 0; i < 2; i++) recordHammerRetryDispatch(f.rootDir,
+    { repo: f.args.dispatchContext.repo, prNumber: 42 },
+    { jobKey: REVIEW_STOP_HEAD, headSha: REVIEW_STOP_HEAD, now: REVIEW_STOP_T0 });
+  const deps = closerDeps({ alerts: f.alerts });
+  const result = await maybeDispatchAmaCloser({ ...f.args, ...deps });
+  assert.equal(result.reason, 'hammer-retry-cap-exhausted', JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 0);
+  assert.ok(f.alerts.every(alert => alert.options.event !== 'ama_closer.hammer_stop_hold'));
+});

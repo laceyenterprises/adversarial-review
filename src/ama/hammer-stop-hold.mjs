@@ -21,13 +21,19 @@ import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // The closer reads the hammer's own terminal audit for the live head. When the
 // latest terminal attempt for that head is `failed-without-merge`, the hammer
 // is not dispatched again until one of these inputs differs from what the
-// closer saw when it first observed the stop:
+// hammer recorded in its terminal audit, falling back per input to the closer's
+// first observation when that audit has no comparable reading. A prior release
+// is also a known baseline for a subsequent stop. Aggregate CI conclusions are
+// not complete check rollups and cannot stand in for them. STOPHOLDREVIEW-01
+// additionally checks review-required predicates against the stop timestamp:
+// first observation must not absorb the exact-head review the hammer requested.
 //   - the PR head SHA,
 //   - the base branch SHA (a dependency merged, main moved),
 //   - mergeability (MERGEABLE / CONFLICTING; UNKNOWN is not a reading), or
 //   - computable primary-change evidence after an evidence-collection failure, or
 //   - the external check rollup (each check's latest state; the pipeline's own
 //     gate context is excluded because the watcher writes it).
+//   - the reviewed head, verdict and finding evidence.
 // Once an input changes, the hold releases for that stop and the closer's
 // ordinary gates, lease and per-PR retry cap decide the one re-dispatch. A new
 // no-merge on the same head starts a new hold. The page is sent once per head.
@@ -64,6 +70,7 @@ export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
 export const HAMMER_GITHUB_READ_FAILURES = new Set(['github-gate-not-green', 'pr-mergeability-unknown']);
+const REVIEW_REQUIRED_STOPS = new Set(['exact-head-review-required', 'stale-review-head']);
 export const HAMMER_EVIDENCE_RECHECK_INTERVAL_MS = 5 * 60_000;
 // Two ordinary five-minute polling intervals let a transport fault recover
 // before paging. Start at the first failed probe, not the old hammer timestamp.
@@ -252,7 +259,7 @@ export function readHammerStopForHead({
         || item.attempt?.executionStarted === false,
       predicate: oneLine(item.attempt?.reason, 120),
       recordedAt: item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || null,
-      stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,
+      stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || ''}`,
     })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     reasons: stopReasons(attempt),
@@ -262,8 +269,42 @@ export function readHammerStopForHead({
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason) } : {}),
     next: oneLine(attempt?.next),
     recordedAt: attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || null,
-    stopKey: `${latest.fileHead}:${attempt?.attemptNumber ?? latest.order}:${attempt?.startedAt || attempt?.timestamp || ''}`,
+    stopKey: `${latest.fileHead}:${attempt?.attemptNumber ?? latest.order}:${attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || ''}`,
+    inputEvidence: recordedStopInputs(attempt),
   };
+}
+
+// Only compare readings actually present in the terminal attempt. In particular,
+// checksConclusion/badChecks cannot reconstruct the full external check rollup.
+function recordedStopInputs(attempt) {
+  const trace = attempt.eligibilityTrace?.trace;
+  const inputs = {};
+  const head = attempt.githubGate?.liveHead || trace?.headMatch?.current;
+  if (head) inputs.headSha = head;
+  if (attempt.rebasedOntoBase) inputs.baseSha = attempt.rebasedOntoBase;
+  const mergeability = attempt.githubGate?.mergeable || trace?.mergeability?.mergeableState;
+  if (mergeability) inputs.mergeability = ['MERGEABLE', 'CONFLICTING'].includes(mergeability) ? mergeability : null;
+  const review = {};
+  if (trace?.headMatch?.reviewed) review.headSha = trace.headMatch.reviewed;
+  const verdict = trace?.verdict;
+  if (typeof verdict?.normalized === 'string') review.verdict = verdict.normalized;
+  if (typeof verdict?.remediationPending === 'boolean') review.remediationPending = verdict.remediationPending;
+  for (const [field, evidence] of [['blocking', verdict?.originalBlockingFindings || verdict?.blockingFindings],
+    ['nonBlocking', verdict?.nonBlockingFindings]]) {
+    if (!evidence) continue;
+    if (typeof evidence.state === 'string') review[`${field}FindingState`] = evidence.state;
+    if (Number.isFinite(evidence.count)) review[`${field}FindingCount`] = evidence.count;
+  }
+  return { inputs, review };
+}
+
+function stopBaseline(stop, fallback) {
+  const { inputs, review } = stop.inputEvidence;
+  let observedReview;
+  try { observedReview = JSON.parse(fallback.review || 'null'); } catch { /* Legacy/unreadable fingerprint. */ }
+  return { ...fallback, ...inputs,
+    ...(Object.keys(review).length
+      ? { review: JSON.stringify(stable({ ...observedReview, ...review })) } : {}) };
 }
 
 function checkName(item) {
@@ -386,14 +427,22 @@ export async function evaluateHammerStopHold({
       firstObservedAt: now,
       // A stop that follows a released hold read the inputs seen at release;
       // compare against those, not against this first observation.
-      inputs: prior?.releasedInputs || inputs,
+      inputs: stopBaseline(stop, prior?.releasedInputs || inputs),
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
   let dirty = !reuseEntry || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
-    const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(entry.inputs, inputs);
+    const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(stopBaseline(stop, entry.inputs), inputs);
+    // A review can arrive before the first closer observation. Its posting
+    // time must strictly follow this terminal attempt, never a previous hold.
+    const stoppedAt = Date.parse(stop.recordedAt || '');
+    const reviewedAt = Date.parse(reviewState?.postedAt || '');
+    if (REVIEW_REQUIRED_STOPS.has(stop.predicate)
+      && reviewState?.headSha === headSha && reviewState?.verdict
+      && Number.isFinite(stoppedAt) && reviewedAt > stoppedAt
+      && !changed.includes('review')) changed.push('review');
     // HAMUNKNOWN-02: the first hold snapshot may already have recovered from
     // the hammer's transient read. Re-evaluate the named gate on this pass's
     // live metadata instead of waiting forever for another input change.

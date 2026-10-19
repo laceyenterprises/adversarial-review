@@ -11,17 +11,23 @@ import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
 test('runner gives the shared HQ resolver canonical roots inside its sandbox', () => {
   const root = resolveHqRoot();
   assert.equal(process.env.HQ_ROOT, process.env.AGENT_OS_HQ_ROOT);
+  assert.equal(process.env.AGENT_OS_WORKER_RUN_AS_USER, undefined);
+  assert.equal(process.env.HQ_WORKER_RUN_AS_USER, undefined);
   for (const directory of [root, homedir()]) {
     assert.equal(directory, realpathSync(directory), 'worker roots must be canonical');
     const beneathWorker = relative(process.env.ADVERSARIAL_REVIEW_TEST_CWD, directory);
     assert.ok(beneathWorker && beneathWorker !== '..' && !beneathWorker.startsWith(`..${sep}`) && !isAbsolute(beneathWorker),
       'worker roots must be inside their worker sandbox for coordinator cleanup');
   }
-  const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.env.HQ_ROOT)'], {
+  const child = spawnSync(process.execPath, ['-e', `process.stdout.write(JSON.stringify({
+    HQ_ROOT: process.env.HQ_ROOT,
+    AGENT_OS_WORKER_RUN_AS_USER: process.env.AGENT_OS_WORKER_RUN_AS_USER,
+    HQ_WORKER_RUN_AS_USER: process.env.HQ_WORKER_RUN_AS_USER,
+  }))`], {
     encoding: 'utf8', timeout: 5_000,
   });
   assert.equal(child.status, 0);
-  assert.equal(child.stdout, root);
+  assert.deepEqual(JSON.parse(child.stdout), { HQ_ROOT: root });
   if (process.env.HQ_ROOT_FIXTURE_REPORT) {
     writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir() }));
   }

@@ -115,7 +115,8 @@ try {
   mkdirSync(fixtureBin);
   writeFileSync(path.join(fixtureBin, 'gh'), '#!/bin/sh\necho "offline fixture: inject a GitHub executor or fake gh" >&2\nexit 78\n', { mode: 0o755 });
   // Home-derived defaults must not be bypassed by inherited auth/session or
-  // config paths. A test that needs one sets its own synthetic override.
+  // config paths. Worker run-as users also belong to fixtures, not the host.
+  // A test that needs an override sets its own synthetic value.
   const inheritedStatePaths = new Set([
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',
@@ -123,6 +124,7 @@ try {
     'CLAUDE_SESSION_ROOTS', 'CLAUDE_SESSION_ROOT', 'CLAUDE_PROJECTS_ROOT',
     'AGENT_OS_CONFIG_PATH', 'ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR',
     'AGENT_OS_REVIEWER_QUOTA_STATUS_DIR', 'ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR',
+    'AGENT_OS_WORKER_RUN_AS_USER', 'HQ_WORKER_RUN_AS_USER',
   ]);
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !inheritedStatePaths.has(key) && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)$/.test(key)));

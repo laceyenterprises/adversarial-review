@@ -8,7 +8,7 @@ import test from 'node:test';
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 
-test('runner replaces inherited HQ roots, ignores exhausted home quota and cleans up each root', () => {
+test('runner replaces inherited HQ roots, clears host run-as users, ignores exhausted home quota and cleans up each root', () => {
   const fixture = mkdtempSync(join(tmpdir(), 'hq-runner-fixture-'));
   try {
     const home = join(fixture, 'home');
@@ -31,6 +31,8 @@ test('runner replaces inherited HQ roots, ignores exhausted home quota and clean
         HOME: home,
         HQ_ROOT: primary,
         AGENT_OS_HQ_ROOT: secondaryRoot,
+        AGENT_OS_WORKER_RUN_AS_USER: 'fixture-primary-worker',
+        HQ_WORKER_RUN_AS_USER: 'fixture-fallback-worker',
         HQ_ROOT_FIXTURE_REPORT: report,
         HQ_ROOT_FIXTURE_FAIL: fail === true ? '1' : fail || '0',
       };

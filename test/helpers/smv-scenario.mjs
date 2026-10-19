@@ -219,7 +219,39 @@ if (scenario === 'clean') {
   assert.equal(existsSync(staleScratch), true);
   assert.equal((await sweepHammerScratchDirs(rootDir, { ...scratchOptions, nowMs: scratchNow })).length, 1);
   assert.equal(existsSync(staleScratch), false);
-  evidence = { hammers, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  const cursorRoot = join(rootDir, 'synthetic-cursor-sweep');
+  const cursorPromptDir = join(cursorRoot, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+  const cursorTrees = [];
+  for (let index = 0; index < 3; index += 1) {
+    const path = createHammerScratchDir(cursorPromptDir);
+    const at = new Date(scratchOld.getTime() + index * 1000);
+    utimesSync(path, at, at);
+    const owner = amaCloserDispatchFilePath(cursorRoot, { repo, prNumber: index + 1, headSha: 'synthetic-cursor-head' });
+    mkdirSync(dirname(owner), { recursive: true });
+    writeFileSync(owner, JSON.stringify({ scratchDir: path, state: 'dispatched',
+      launchRequestId: `synthetic-cursor-${index}`, lastObservedStatus: 'succeeded' }));
+    cursorTrees.push(path);
+  }
+  const visits = [];
+  const cursorOptions = { logger: quiet, nowMs: scratchNow, scanBudgetMs: 1000, maxRemovals: 1,
+    readProcessSnapshotImpl: () => ({ ps: '123 synthetic-idle-process', lsof: 'p123\nn/fixture/unrelated' }),
+    readLaunchRequestStatusImpl: ({ launchRequestId, timeoutMs }) => {
+      assert.ok(timeoutMs > 1000 && timeoutMs <= 10_000);
+      visits.push(launchRequestId);
+      return { ok: true, row: { status: 'succeeded' } };
+    },
+    readWorkerStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === 'synthetic-cursor-0' ? 'running' : 'succeeded' } }),
+  };
+  assert.equal((await sweepHammerScratchDirs(cursorRoot, cursorOptions)).length, 1);
+  assert.equal(existsSync(cursorTrees[0]), true);
+  assert.equal(existsSync(cursorTrees[1]), false);
+  const { sweepHammerScratchDirs: restartedScratchSweep } = await import('../../src/ama/hammer-scratch-sweep.mjs?synthetic-smoke-restart');
+  assert.equal((await restartedScratchSweep(cursorRoot, cursorOptions)).length, 1);
+  assert.equal(existsSync(cursorTrees[0]), true);
+  assert.equal(existsSync(cursorTrees[2]), false);
+  assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
+  evidence = { hammers, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };

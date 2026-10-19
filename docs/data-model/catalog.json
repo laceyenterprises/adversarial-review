@@ -762,6 +762,14 @@
       "owner": "follow-up daemon configuration and consume health"
     },
     {
+      "id": "hammer-scratch-sweep",
+      "title": "Hammer Scratch Sweep Checkpoints",
+      "path": "docs/data-model/hammer-scratch-sweep.md",
+      "store": "data/follow-up-jobs/hammer-scratch-record-index.json, data/follow-up-jobs/hammer-scratch-candidate-cursor.json",
+      "schemaSurface": "src/ama/hammer-scratch-sweep.mjs",
+      "owner": "AMA hammer scratch maintenance"
+    },
+    {
       "id": "follow-up-reaper-cursors",
       "title": "Follow-up Reaper Cursors",
       "path": "docs/data-model/follow-up-reaper-cursors.md",

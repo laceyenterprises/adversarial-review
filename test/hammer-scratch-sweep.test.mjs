@@ -97,6 +97,182 @@ function sweepSummary(f) {
   return summaries[0];
 }
 
+function terminalCandidates(f, count) {
+  const paths = [];
+  for (let index = 0; index < count; index += 1) {
+    const path = f.scratch();
+    const owner = f.record(path, { launchRequestId: `synthetic-lrq-${index}` });
+    writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+    rmSync(owner);
+    // Reverse creation order: a filesystem listing cannot satisfy oldest first.
+    const at = new Date(old.getTime() - index * 1000);
+    utimesSync(path, at, at);
+    paths.unshift(path);
+  }
+  return paths;
+}
+
+function readCursor(f) {
+  return JSON.parse(readFileSync(join(f.root, 'data', 'follow-up-jobs', 'hammer-scratch-candidate-cursor.json'), 'utf8'));
+}
+
+test('SCRATCHLEAK-02: 100 aged terminal candidates drain oldest first across three-removal scan budgets and restarts', async t => {
+  const f = fixture(t);
+  const paths = terminalCandidates(f, 100);
+  let clock = nowMs;
+  t.mock.method(Date, 'now', () => clock);
+  const names = [];
+  for (let pass = 0; pass < 34; pass += 1) {
+    f.logs.length = 0;
+    const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+    const removed = await restartedSweep(f.root, { ...f.options, scanBudgetMs: 300,
+      logger: { ...f.options.logger, info: line => {
+        f.logs.push(line);
+        // Model 100ms of filesystem deletion/accounting per terminal tree.
+        if (JSON.parse(line).event === 'ama_closer.scratch_swept') clock += 100;
+      } },
+    });
+    assert.equal(removed.length, pass < 33 ? 3 : 1);
+    names.push(...removed.map(entry => entry.name));
+    assert.equal(readCursor(f).after.name, removed.at(-1).name);
+    assert.equal(sweepSummary(f).completed, pass === 33);
+    assert.equal(sweepSummary(f).remainingCandidates, Math.max(0, 100 - names.length));
+  }
+  assert.deepEqual(names, paths.map(path => path.split('/').at(-1)));
+  assert.ok(paths.every(path => !existsSync(path)));
+});
+
+test('SCRATCHLEAK-02: slow successful launch and worker reads do not spend the scan budget', async t => {
+  const f = fixture(t);
+  const paths = terminalCandidates(f, 4);
+  let clock = nowMs;
+  t.mock.method(Date, 'now', () => clock);
+  const timeouts = [];
+  const readSlowly = ({ timeoutMs }) => {
+    timeouts.push(timeoutMs);
+    clock += 1000;
+    return { ok: true, row: { status: 'succeeded' } };
+  };
+  assert.equal((await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 100,
+    readLaunchRequestStatusImpl: readSlowly, readWorkerStatusImpl: readSlowly })).length, 4);
+  assert.equal(timeouts.length, 8);
+  assert.ok(timeouts.every(timeout => timeout === 10_000));
+  assert.ok(paths.every(path => !existsSync(path)));
+  assert.equal(sweepSummary(f).completed, true);
+});
+
+for (const reader of ['readLaunchRequestStatusImpl', 'readWorkerStatusImpl']) {
+  test(`SCRATCHLEAK-02: a timed-out ${reader} retains one candidate and resumes after it on restart`, async t => {
+    const f = fixture(t);
+    const paths = terminalCandidates(f, 3);
+    let clock = nowMs;
+    t.mock.method(Date, 'now', () => clock);
+    let reads = 0;
+    const options = { ...f.options, scanBudgetMs: 100,
+      [reader]: ({ timeoutMs }) => {
+        reads += 1;
+        if (reads === 1) clock += timeoutMs;
+        return { ok: true, row: { status: 'succeeded' } };
+      },
+      logger: { ...f.options.logger, info: line => {
+        f.logs.push(line);
+        if (JSON.parse(line).event === 'ama_closer.scratch_swept') clock += 100;
+      } },
+    };
+    const first = await sweepHammerScratchDirs(f.root, options);
+    assert.deepEqual(first.map(entry => entry.name), [paths[1].split('/').at(-1)]);
+    assert.equal(existsSync(paths[0]), true, 'a late terminal result never authorizes removal');
+    assert.equal(sweepSummary(f).deferredCandidates, 1);
+    assert.equal(sweepSummary(f).remainingCandidates, 1);
+    const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+    const second = await restartedSweep(f.root, options);
+    assert.deepEqual(second.map(entry => entry.name), [paths[2].split('/').at(-1)]);
+    assert.equal(existsSync(paths[0]), true, 'resume after the timed-out candidate before wrapping');
+    assert.equal((await restartedSweep(f.root, options)).length, 1, 'revisit the deferred candidate on wrap');
+    assert.ok(paths.every(path => !existsSync(path)));
+  });
+}
+
+test('SCRATCHLEAK-02: an unresolved async ledger read is aborted and checkpointed past without guessing', async t => {
+  const f = fixture(t);
+  const paths = terminalCandidates(f, 2);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal;
+  let started;
+  const reading = new Promise(resolve => { started = resolve; });
+  const pending = sweepHammerScratchDirs(f.root, { ...f.options, maxRemovals: 1,
+    readLaunchRequestStatusImpl: args => {
+      if (signal) return f.options.readLaunchRequestStatusImpl(args);
+      signal = args.signal;
+      started();
+      return new Promise(() => {});
+    },
+  });
+  await reading;
+  t.mock.timers.tick(10_000);
+  assert.equal((await pending).length, 1);
+  assert.equal(signal.aborted, true);
+  assert.equal(existsSync(paths[0]), true);
+  assert.equal(existsSync(paths[1]), false);
+  assert.equal(sweepSummary(f).deferredCandidates, 1);
+  assert.equal(readCursor(f).after.name, paths[1].split('/').at(-1));
+});
+
+test('SCRATCHLEAK-02: kept candidates advance across restarts and zero-removal laps preserve the cursor', async t => {
+  const f = fixture(t);
+  const paths = terminalCandidates(f, 5);
+  let clock = nowMs;
+  t.mock.method(Date, 'now', () => clock);
+  const visits = [];
+  const options = { ...f.options, scanBudgetMs: 100,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => {
+      visits.push(launchRequestId);
+      return { ok: true, row: { status: 'succeeded' } };
+    },
+    processKillImpl: () => { clock += 100; },
+  };
+  // The worker row's live PID protects every candidate while spending scan time.
+  for (let pass = 0; pass < 5; pass += 1) {
+    const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+    assert.deepEqual(await restartedSweep(f.root, options), []);
+    assert.equal(readCursor(f).after.name, paths[pass].split('/').at(-1));
+    if (pass === 1) {
+      const before = readCursor(f);
+      assert.deepEqual(await restartedSweep(f.root, { ...options, scanBudgetMs: 1000 }), []);
+      assert.deepEqual(readCursor(f), before, 'a full zero-removal lap retains a cursor inside the ordering');
+      visits.splice(2); // Keep the bounded-pass visit assertion independent of this full lap.
+    }
+  }
+  assert.deepEqual(visits, [4, 3, 2, 1, 0].map(index => `synthetic-lrq-${index}`));
+  const before = readCursor(f);
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...options, scanBudgetMs: 1000 }), []);
+  assert.deepEqual(readCursor(f), before, 'a full lap with zero removals retains its ordering position');
+  assert.ok(paths.every(existsSync));
+});
+
+test('SCRATCHLEAK-02: equal-mtime candidates use stable names and a bad cursor cannot bypass live ownership', async t => {
+  const f = fixture(t);
+  const paths = terminalCandidates(f, 3).sort();
+  for (const path of paths) utimesSync(path, old, old);
+  const cursorPath = join(f.root, 'data', 'follow-up-jobs', 'hammer-scratch-candidate-cursor.json');
+  writeFileSync(cursorPath, JSON.stringify({ schemaVersion: 1,
+    after: { name: '../synthetic-invalid', mtimeMs: old.getTime() } }));
+  const visits = [];
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => {
+      visits.push(launchRequestId);
+      return { ok: true, row: { status: 'running' } };
+    },
+  }), []);
+  assert.equal(visits.length, 3);
+  assert.equal(readCursor(f).after.name, paths.at(-1).split('/').at(-1));
+  assert.equal(sweepSummary(f).kept['non-terminal'], 3);
+  assert.ok(paths.every(existsSync));
+  const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+  const removed = await restartedSweep(f.root, f.options);
+  assert.deepEqual(removed.map(entry => entry.name), paths.map(path => path.split('/').at(-1)));
+});
+
 test('SCRATCHCENSUS-02: unrelated open audit files named after owner ids do not protect terminal scratch', async t => {
   const f = fixture(t);
   const path = f.scratch();
@@ -224,9 +400,9 @@ test('SCRATCHCENSUS-01: 100 terminal candidates share a slow census and retain p
   t.mock.method(Date, 'now', () => clock);
   let censusCalls = 0;
   const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 2500,
-    readWorkerStatusImpl: () => {
+    processKillImpl: () => {
       clock += 50;
-      return { ok: true, row: { status: 'succeeded' } };
+      throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' });
     },
     readProcessSnapshotImpl: async ({ timeout }) => {
       censusCalls += 1;
@@ -300,9 +476,9 @@ for (const refreshedLive of [false, true]) {
     let calls = 0;
     let completed = false;
     const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
-      readWorkerStatusImpl: () => {
+      processKillImpl: () => {
         clock += 31_000;
-        return { ok: true, row: { status: 'succeeded' } };
+        throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' });
       },
       readProcessSnapshotImpl: ({ timeout }) => {
         calls += 1;
@@ -338,14 +514,16 @@ for (const afterRefresh of ['idle', 'process', 'worker', 'owner', 'expired']) {
     let completed = false;
     t.mock.method(Date, 'now', () => ticking ? clock++ : clock);
     const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
-      readWorkerStatusImpl: () => {
+      processKillImpl: () => {
         if (calls === 1 || (calls === 2 && afterRefresh === 'expired')) {
           // Enter with a fresh census, then cross 30 seconds during final checks.
           clock = censusStartedAt + 29_997;
           ticking = true;
         }
-        return { ok: true, row: { status: calls === 2 && afterRefresh === 'worker' ? 'running' : 'succeeded' } };
+        throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' });
       },
+      readWorkerStatusImpl: () => ({ ok: true,
+        row: { status: calls === 2 && afterRefresh === 'worker' ? 'running' : 'succeeded', pid: 12345 } }),
       readProcessSnapshotImpl: () => {
         calls += 1;
         censusStartedAt = clock;
@@ -405,7 +583,7 @@ for (const status of ['succeeded', 'canceled']) {
   });
 }
 
-test('HAMTMP-05: injected subprocess handles launch and worker ledger probes within the scan budget', async t => {
+test('HAMTMP-05: injected subprocess handles launch and worker probes within their own ledger timeout', async t => {
   const f = fixture(t);
   const path = f.scratch();
   f.record(path, { lastObservedStatus: 'starting' });
@@ -431,7 +609,7 @@ test('HAMTMP-05: injected subprocess handles launch and worker ledger probes wit
     assert.equal(call.command, 'synthetic-ledger');
     assert.equal(call.options.encoding, 'utf8');
     assert.equal(call.options.env, env);
-    assert.ok(call.options.timeout > 0 && call.options.timeout <= 5000);
+    assert.ok(call.options.timeout > 5000 && call.options.timeout <= 10_000);
   }
 });
 

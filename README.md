@@ -917,8 +917,10 @@ processes and launch lease holders during terminal cleanup, gives pytest one
 replaceable `tmp-tests` base under scratch, and sweeps aged terminal backlog
 without a recursive in-use probe or an unbounded size prerequisite. Cwd probe
 timeouts have a bounded terminal-only escape while positive process/lease/retry
-evidence remains protective. The offline scratch suites pin retention and
-admission races.
+evidence remains protective. SCRATCHLEAK-02 persists an oldest-first candidate
+cursor across passes and restarts; ledger timeouts retain and advance past
+inconclusive candidates without spending the scan budget. The offline scratch
+suites pin retention, eventual backlog reclamation and admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
@@ -990,7 +992,9 @@ is unsigned: an ordinary reviewed head does not require fleet identity proof.
 <a id="smv-handoff"></a>**smv-handoff:** terminal scratch cleanup retains a draining
 recorded process, removes its test tree after exit, and pins private pytest temp
 with retention one. The synthetic sweep also proves timeout recovery after the
-existing launch/lease grace. Existing handoff promises: drain refusal persists an epoch without
+existing launch/lease grace, oldest-first cursor resumption after a restart,
+live-owner retention and ledger timeouts independent of the scan budget.
+Existing handoff promises: drain refusal persists an epoch without
 charging no-progress counters; the first clear pass resumes dispatch. A stale
 hint expires after five minutes without closer polling and normal backoff
 resumes. Findings dispatch one hammer through the

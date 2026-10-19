@@ -21,11 +21,29 @@ export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_RETRY_MS = 60 * 1000;
 const PROCESS_CENSUS_TIMEOUT_MS = 15_000;
 const PROCESS_CENSUS_FRESHNESS_MS = 30_000;
+const LEDGER_READ_TIMEOUT_MS = 10_000;
 class ScratchScanBudgetExhausted extends Error {}
+class ScratchLedgerReadTimedOut extends Error {}
 const execFileAsync = promisify(execFile);
 // The disk checkpoint retains partial indexing across watcher restarts. Neither
 // cache authorizes deletion without a complete, current metadata census.
 const recordIndexes = new Map();
+
+function compareCandidates(a, b) {
+  return a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+function readCandidateCursor(path) {
+  try {
+    if (!lstatSync(path).isFile()) return null;
+    const saved = JSON.parse(readFileSync(path, 'utf8'));
+    const after = saved.after;
+    if (saved.schemaVersion === 1 && typeof after?.name === 'string'
+      && after.name.startsWith('hammer-scratch-') && !/[/\\]/.test(after.name)
+      && Number.isFinite(after.mtimeMs)) return after;
+  } catch { /* A cursor only schedules work; cold starts still prove safety. */ }
+  return null;
+}
 
 function readRecordIndex(path, directory) {
   try {
@@ -183,32 +201,59 @@ function pidMayBeAlive(pid, processKillImpl) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-async function hasLiveWorker(record, options, deadline) {
+async function hasLiveWorker(record, options, readLedger) {
   if (pidMayBeAlive(record.pid ?? record.worker_process_pid, options.processKillImpl)) return true;
   if (!record.launchRequestId) return false;
-  const probe = await options.readWorkerStatusImpl(ledgerReadArgs(record, options, deadline));
+  const probe = await readLedger(record, options.readWorkerStatusImpl);
   if (!probe?.ok) return probe?.reason !== 'missing-worker-run-row';
   if (!probe.row) return true;
   if (pidMayBeAlive(probe.row.pid ?? probe.row.worker_process_pid, options.processKillImpl)) return true;
   return !isTerminalHammerScratchRecord({ lastObservedStatus: probe.row.status });
 }
 
-function ledgerReadArgs(record, options, deadline) {
+function ledgerReadArgs(record, options, deadline, signal) {
   return {
     launchRequestId: record.launchRequestId, rootDir: options.rootDir, includeRetryChain: true,
     hqRoot: record.hqRoot || options.hqRoot, env: options.env,
     ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
     timeoutMs: Math.max(1, deadline - Date.now()),
+    signal,
     spawnSyncImpl: options.spawnSyncImpl ? (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
       ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
     }) : undefined,
     // Retain the existing explicit fixture seam, while production uses async
-    // psql and keeps the sweep deadline on each child.
+    // psql and keeps the ledger deadline on each child.
     spawnAsyncImpl: options.spawnAsyncImpl || (options.spawnSyncImpl
       ? async (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
         ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
       }) : undefined),
   };
+}
+
+async function readScratchLedger(record, options, readImpl) {
+  const ledgerDeadline = Date.now() + LEDGER_READ_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timer;
+  const timeoutError = () => new ScratchLedgerReadTimedOut('scratch ledger read timed out');
+  try {
+    const result = await Promise.race([
+      Promise.resolve().then(() => readImpl(ledgerReadArgs(record, options, ledgerDeadline, controller.signal))),
+      new Promise((_, reject) => { timer = setTimeout(() => {
+        controller.abort();
+        reject(timeoutError());
+      }, LEDGER_READ_TIMEOUT_MS); }),
+    ]);
+    // Also discard late synchronous fixture/SQLite results. A late terminal
+    // answer never authorizes deletion, even if it beat the timer callback.
+    if (Date.now() >= ledgerDeadline) throw timeoutError();
+    return result;
+  } catch (error) {
+    if (Date.now() >= ledgerDeadline || controller.signal.aborted) throw timeoutError();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
 }
 
 async function readScratchPullRequestState({ repo, prNumber, timeout, env }) {
@@ -219,11 +264,11 @@ async function readScratchPullRequestState({ repo, prNumber, timeout, env }) {
   return JSON.parse(stdout);
 }
 
-async function isTerminalOwner(record, options, deadline) {
+async function isTerminalOwner(record, options, getDeadline, readLedger) {
   // A retry intent can still carry its predecessor's LRQ and terminal status.
-  if (record.state === 'dispatching' || Date.now() >= deadline) return false;
+  if (record.state === 'dispatching' || Date.now() >= getDeadline()) return false;
   if (record.launchRequestId) {
-    const probe = withLiveLaunchRetry(await options.readLaunchRequestStatusImpl(ledgerReadArgs(record, options, deadline)));
+    const probe = withLiveLaunchRetry(await readLedger(record, options.readLaunchRequestStatusImpl));
     if (!probe?.ok && probe?.reason !== 'missing-launch-request-row') {
       throw new Error('unreadable launch ledger');
     }
@@ -237,10 +282,10 @@ async function isTerminalOwner(record, options, deadline) {
   // Legacy records with no surviving launch row can still be settled by the
   // live PR. A database failure above must never become this fallback.
   if (!record.repo || !Number.isInteger(Number(record.prNumber)) || Number(record.prNumber) <= 0
-    || Date.now() >= deadline) return false;
+    || Date.now() >= getDeadline()) return false;
   try {
     const pr = await options.readPullRequestStateImpl({ repo: record.repo, prNumber: record.prNumber,
-      env: options.env, timeout: Math.max(1, Math.min(5000, deadline - Date.now())) });
+      env: options.env, timeout: Math.max(1, Math.min(5000, getDeadline() - Date.now())) });
     return ['MERGED', 'CLOSED'].includes(String(pr?.state || '').toUpperCase());
   } catch {
     // An unreadable PR protects this owner without deferring independent ones.
@@ -264,6 +309,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const maxAgeMs = settings.maxAgeMs ?? HAMMER_SCRATCH_MAX_AGE_MS;
   let deadline = Date.now() + (settings.scanBudgetMs ?? 10_000);
   const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+  const cursorPath = join(rootDir, 'data', 'follow-up-jobs', 'hammer-scratch-candidate-cursor.json');
   const removed = [];
   const kept = { 'live-owner': 0, 'non-terminal': 0, 'process-references-path': 0,
     'process-references-id': 0, 'too-young': 0, 'probe-timeout': 0 };
@@ -275,6 +321,11 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   let censusStartedAt;
   let censusReads = 0;
   let cwdTimedOut = false;
+  async function readLedger(record, readImpl) {
+    const startedAt = Date.now();
+    try { return await readScratchLedger(record, settings, readImpl); }
+    finally { deadline += Date.now() - startedAt; }
+  }
   async function refreshCensus() {
     censusStartedAt = Date.now();
     censusReads += 1;
@@ -304,8 +355,17 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       return removed;
     }
     if (!parentStat.isDirectory()) { completed = true; return removed; }
-    candidates = readdirSync(promptDir, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && entry.name.startsWith('hammer-scratch-'));
+    for (const entry of readdirSync(promptDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('hammer-scratch-')) continue;
+      try {
+        const stat = lstatSync(join(promptDir, entry.name));
+        if (stat.isDirectory()) candidates.push({ name: entry.name, mtimeMs: stat.mtimeMs });
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    candidates.sort(compareCandidates);
+    const cursor = readCandidateCursor(cursorPath);
+    const start = cursor ? candidates.findIndex(entry => compareCandidates(entry, cursor) > 0) : 0;
+    if (start > 0) candidates = [...candidates.slice(start), ...candidates.slice(0, start)];
     // The deadline bounds production scans; a count cap must not stretch a
     // small retained history over hours. Tests may force partial checkpoints.
     const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? Infinity, logger);
@@ -319,16 +379,23 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       const owners = records.filter(({ record }) => typeof record.scratchDir === 'string'
         && resolve(record.scratchDir) === resolve(scratchDir));
       let keepReason;
-      for (const { path, record } of owners) {
-        const current = JSON.parse(readFileSync(path, 'utf8'));
-        if (JSON.stringify(current) !== JSON.stringify(record)
-          || !await isTerminalOwner(current, settings, deadline)) { keepReason = 'non-terminal'; break; }
-        if (hammerScratchLeaseHeld(rootDir, current, { now: new Date(nowMs).toISOString(),
-          processKillImpl: settings.processKillImpl })
-          || await hasLiveWorker(current, settings, deadline)) { keepReason = 'live-owner'; break; }
+      try {
+        for (const { path, record } of owners) {
+          const current = JSON.parse(readFileSync(path, 'utf8'));
+          if (JSON.stringify(current) !== JSON.stringify(record)
+            || !await isTerminalOwner(current, settings, () => deadline, readLedger)) { keepReason = 'non-terminal'; break; }
+          if (hammerScratchLeaseHeld(rootDir, current, { now: new Date(nowMs).toISOString(),
+            processKillImpl: settings.processKillImpl })
+            || await hasLiveWorker(current, settings, readLedger)) { keepReason = 'live-owner'; break; }
+        }
+      } catch (error) {
+        if (!(error instanceof ScratchLedgerReadTimedOut)) throw error;
+        // Retain inconclusive ownership, but finish this candidate so a slow
+        // ledger cannot pin either this pass or the persisted cursor to it.
+        continue;
       }
-      if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
       if (keepReason) { kept[keepReason] += 1; continue; }
+      if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
       // Terminal ownership, not recursive file mtimes, determines a finished
       // run's age. Orphans still require a complete idle-tree scan.
       const terminalAt = Math.max(before.mtimeMs, ...owners.map(({ record }) => {
@@ -407,6 +474,14 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       pauseReason = 'scan-budget';
     } else if (error.code !== 'ENOENT') logger.warn?.(`hammer scratch sweep deferred: ${error.message}`);
   } finally {
+    if (candidateIndex > 0) {
+      try {
+        writeFileAtomic(cursorPath, JSON.stringify({ schemaVersion: 1,
+          after: candidates[candidateIndex - 1] }), { mode: 0o600 });
+      } catch (error) {
+        logger.warn?.(`hammer scratch candidate checkpoint deferred: ${error.message}`);
+      }
+    }
     logger.info?.(JSON.stringify({ event: 'ama_closer.scratch_sweep_summary', kept,
       removed: removed.length, remainingCandidates: candidates.length - candidateIndex,
       deferredCandidates: candidateIndex - removed.length - Object.values(kept).reduce((sum, count) => sum + count, 0),

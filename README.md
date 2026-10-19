@@ -952,6 +952,12 @@ It retains timed-out work in its concurrency accounting and preserves the
 existing hammer launch cap. Per-tick readiness counts and rolling launch-latency
 percentiles are described in the [closure runbook](docs/RUNBOOK-ama-closure.md).
 These scheduling changes introduce no lifecycle states or SMV edge changes.
+STOPHOLDREVIEW-01 likewise adds no lifecycle state or SMV edge: an exact-head
+review posted after a review-required hammer stop releases retry admission,
+including before the first hold observation, without a hold page. Strict
+remediation policy, merge gates, leases and retry caps still apply.
+Review baselines retain the closer's canonical fingerprint; eligibility-trace
+summaries cannot release an unchanged review or suppress its hold page.
 
 <a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
 merges autonomously and the bare remote records that SHA. The synthetic commit

@@ -1678,7 +1678,9 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   latest terminal audit for the live head is `failed-without-merge`, the closer
   does not dispatch another hammer on that head until the head, base SHA,
   mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
-  what it first saw, or primary-change evidence becomes computable after an
+  the hammer recorded in its terminal audit (falling back per missing input to
+  the first observation or prior release), or review evidence changes, or
+  primary-change evidence becomes computable after an
   evidence-collection stop (CAPROUTE-01). A newly available head/base SHA or a
   known mergeability reading after `UNKNOWN` counts as a change; missing current SHA readings and
   current `UNKNOWN` mergeability do not release the hold. Own gate exclusion
@@ -1686,6 +1688,22 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   external check runs with that name remain inputs. Per-attempt producer
   provenance excludes daemon failures, including daemon attempts on a
   HAM-certified head, so capacity deferral cannot invent a hammer decision.
+  STOPHOLDREVIEW-01 also releases `exact-head-review-required` and
+  `stale-review-head` when an exact-head review posted strictly after that
+  terminal attempt, including before the first hold observation. It records
+  `review` and sends no hold page when already satisfied. Findings still route
+  to a remediating hammer under ordinary strict policy, leases and retry caps.
+  Review fingerprints use only closer observations or prior-release inputs;
+  normalized eligibility-trace verdicts and finding summaries cannot replace
+  them. An unchanged review therefore retains the hold and pages once, even
+  when the terminal audit contains an eligibility trace. The posting-time
+  release applies only to those two review-required predicates.
+  Posting-time release requires the local `reviewed_prs` row to be `posted`
+  with `reviewer_head_sha` matching the settled reviewed head. Live review
+  reconciliation supplies bodies without verified submission timestamps; it
+  cannot supply this receipt before SQLite reconciliation. If no other input
+  changes, the hold remains until a later closer pass observes that matching
+  posted row. Same-tick posting-time release from live bodies is not guaranteed.
   HAMUNKNOWN-02 re-evaluates GitHub-read predicates (`github-gate-not-green`,
   `pr-mergeability-unknown`) on every pass: fresh green checks and MERGEABLE
   mergeability on the same open head release with `github-gate-cleared`, even

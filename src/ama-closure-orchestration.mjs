@@ -1562,6 +1562,11 @@ async function dispatchAmaClosureFor({
     operatorLabelFindings: gateSnapshot.settledReview?.operatorLabelFindings || null,
     // A same-head review edit is new evidence even when verdict/counts agree.
     refusalReviewVersion: gateSnapshot.settledReview?.evidenceVersion || null,
+    // STOPHOLDREVIEW-01: the row's posting receipt proves a review arrived on
+    // this head; never borrow its timestamp for a different settled head.
+    postedAt: reviewStateRow?.review_status === 'posted'
+      && reviewStateRow?.reviewer_head_sha === gateSnapshot.reviewedHeadSha
+      ? reviewStateRow.posted_at || null : null,
     verdict: gateSnapshot.settledReview?.verdict || '',
     // `headSha` remains the reviewed evidence identity. Ordinary MSM-04 dispatch
     // uses it as the stable budget key; proven closer-only continuations use the

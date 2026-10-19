@@ -26,7 +26,7 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   }))`], {
     encoding: 'utf8', timeout: 5_000,
   });
-  assert.equal(child.status, 0);
+  assert.equal(child.status, 0, child.stderr || child.error?.message);
   assert.deepEqual(JSON.parse(child.stdout), { HQ_ROOT: root });
   if (process.env.HQ_ROOT_FIXTURE_REPORT) {
     writeFileSync(join(process.env.HQ_ROOT_FIXTURE_REPORT, `${process.pid}.json`), JSON.stringify({ root, home: homedir() }));

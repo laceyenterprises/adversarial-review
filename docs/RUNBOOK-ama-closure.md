@@ -135,26 +135,30 @@ Admission and predecessor matching resolve the repository from `dispatchContext.
 then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
 `dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
 for both admission and cleanup. Descendants are ordered by latest update and
-launch ID, and promoted live rows retain their status metadata. RETRYCHAIN-01:
-PostgreSQL 16+ uses a recursive query rooted at the probed launch, returning only
-descendant status fields. Inline input validation skips malformed historical
-metadata, including invalid Unicode escapes, and tolerates missing metadata
-columns. All retry reads run in a read-only transaction, including through
-transaction pooling, with no function creation or other catalog writes; SELECT
-permission suffices on read replicas and read-only connections. Pre-16 servers
-retain the read-only snapshot with application-side parsing and traversal; those
-servers still transfer unrelated rows and metadata and can exhaust the output
-bound on large ledgers. Upgrade to 16+ for descendant-only output on individual
-probes. Capacity reconciliation reuses its supplied read-only launch snapshot
-and traverses that snapshot in the application without another query. Both sync
-and async Postgres children use a shared 2 MiB output bound. The 16+ recursive
-query materializes retry edges across the full launch table once per probe;
-descendant-only output bounds transport, not database scan or JSON parsing cost.
-After deployment, measure individual retry-probe latency as ledger volume grows.
-If that scan becomes costly, plan a ledger-owner schema change with an indexed
-retry-parent column or validated metadata expression; no such migration is part
-of RETRYCHAIN-01. A genuinely oversized
-chain, query error or timeout remains unreadable under the existing ownership rules. SQLite retains
+launch ID, and promoted live rows retain their status metadata. RETRYCHAIN-02:
+PostgreSQL selects the retry reader by the metadata column type. Native `jsonb`
+uses a cycle-safe recursive join directly on `metadata_json ->> 'retryOf'` on
+all server versions. The recursive predicate repeats the existing partial
+`idx_launch_requests_retry_of` index predicate; no whole-table edge set is
+materialized. Status projections select individual columns and never serialize
+payloads through `to_jsonb(request)`. A missing metadata column means an empty
+chain. On PostgreSQL 16+, historical text metadata uses per-row input validation
+on the column before casting, skipping malformed JSON and invalid Unicode
+escapes. Pre-16 text retains the read-only snapshot and application traversal;
+this compatibility path can still exhaust the output bound on large ledgers.
+All retry reads use read-only transactions, including through transaction
+pooling, with no catalog writes; SELECT permission suffices.
+Capacity reconciliation supplies only the launch IDs being reconciled, and
+shares one read-only snapshot of those launches and their descendants. An empty
+ID list returns no rows without a query. Application traversal reuses that
+snapshot. Both sync and async PostgreSQL children retain the shared 2 MiB output
+bound. An oversized chain, query error, timeout or abort remains unreadable
+under the existing ownership rules. The reader preserves base status and
+returns `retryChainFailure` with `reason`, `detail` and `elapsedMs`.
+Closer admission logs one `ama_closer.retry_chain_unreadable` JSON line before
+returning `dispatch-retry-chain-unreadable`; refusal-time ownership failures
+log the same diagnostic. Connection strings, row objects and PostgreSQL
+continuation lines are excluded from that log. SQLite retains
 its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch
@@ -2817,7 +2821,7 @@ launch-only records with no parseable launch timestamp stay held. Before any
 ledger query, the dispatch scan checks identity, record age and lease liveness.
 Aged-out records release capacity without a probe or rewrite; historical cleanup
 belongs to the CLI. Production PostgreSQL capacity scans share a single timeout-bounded read-only
-launch snapshot with transitive retry metadata, explicitly enabled through the
+launch snapshot restricted to eligible dispatch IDs and their transitive retries, enabled through the
 watcher's retry-status wrapper and forwarded to every per-record read. A failed
 snapshot is reused as unreadable evidence, without repeated PostgreSQL queries.
 SQLite reads remain in-process.

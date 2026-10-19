@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 
-// Optional native coverage uses an isolated cluster on a private Unix socket.
-// TCP listening is disabled; no network, credentials or external ledger is used.
+// Optional native coverage uses an isolated cluster on an ephemeral loopback
+// port (Unix-socket connects are denied by the host network guard). No external
+// network, credentials or existing ledger is used.
 // Actual psql scripts, variable substitution and exit statuses are preserved.
 function isolatedPostgres(t) {
   for (const command of ['initdb', 'pg_ctl', 'psql']) {
@@ -20,6 +21,16 @@ function isolatedPostgres(t) {
   // Keep the socket path below macOS's Unix-domain path limit.
   const root = mkdtempSync('/tmp/retry-postgres-');
   const dataDir = join(root, 'cluster');
+  const reserve = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { createServer } from 'node:net';
+    const server = createServer();
+    server.listen(0, '127.0.0.1', () => {
+      process.stdout.write(String(server.address().port));
+      server.close();
+    });`], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(reserve.status, 0, reserve.stderr);
+  const port = Number(reserve.stdout);
+  assert.ok(Number.isInteger(port) && port > 0);
   let started = false;
   t.after(() => {
     if (started) {
@@ -33,12 +44,12 @@ function isolatedPostgres(t) {
     { encoding: 'utf8', timeout: 30000 });
   assert.equal(init.status, 0, init.stderr);
   const start = spawnSync('pg_ctl', ['-D', dataDir, '-l', join(root, 'server.log'),
-    '-o', `-F -k ${root} -c listen_addresses='' -c unix_socket_permissions=0700`, '-w', '-t', '10', 'start'],
+    '-o', `-F -k ${root} -p ${port} -c listen_addresses=127.0.0.1 -c unix_socket_permissions=0700`, '-w', '-t', '10', 'start'],
     { encoding: 'utf8', timeout: 15000 });
   started = start.status === 0;
   assert.equal(start.status, 0, start.stderr);
   function psql(args, options = {}, user = 'fixture_admin') {
-    return spawnSync('psql', ['--host', root, '--username', user, ...args], {
+    return spawnSync('psql', ['--host', '127.0.0.1', '--port', String(port), '--username', user, ...args], {
       encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024, ...options,
     });
   }
@@ -69,15 +80,27 @@ function isolatedPostgres(t) {
     REVOKE CREATE ON SCHEMA public FROM PUBLIC;
     REVOKE TEMP ON DATABASE postgres FROM PUBLIC;`);
   let responseBytes = 0;
+  let lastChainRead;
   function spawnSyncImpl(command, args, options) {
     assert.equal(command, 'psql');
     assert.equal(options.maxBuffer, 2 * 1024 * 1024);
     const actualArgs = args.map(arg => arg === 'synthetic' ? 'postgres' : arg);
     const response = psql(actualArgs, options, 'ledger_reader');
-    if (options.input?.includes('WITH RECURSIVE')) responseBytes = Buffer.byteLength(response.stdout || '');
+    if (options.input?.includes('WITH RECURSIVE')) {
+      responseBytes = Buffer.byteLength(response.stdout || '');
+      lastChainRead = { args: actualArgs, options };
+    }
     return response;
   }
-  return { sql, spawnSyncImpl, responseBytes: () => responseBytes };
+  function explainLastRead() {
+    assert.ok(lastChainRead);
+    const result = psql(lastChainRead.args, { ...lastChainRead.options,
+      input: lastChainRead.options.input.replaceAll('WITH RECURSIVE', 'EXPLAIN (COSTS OFF) WITH RECURSIVE'),
+    }, 'ledger_reader');
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+  return { sql, spawnSyncImpl, explainLastRead, responseBytes: () => responseBytes };
 }
 
 test('RETRYCHAIN-01: native psql traverses cycles with SELECT-only authority and skips malformed metadata', async t => {
@@ -94,6 +117,11 @@ test('RETRYCHAIN-01: native psql traverses cycles with SELECT-only authority and
   assert.equal(result.retryChain[1].status, 'succeeded');
   assert.ok(result.retryChain.every(row => !Object.hasOwn(row, 'metadata_json')));
   const smallBytes = fixture.responseBytes();
+  const launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync({ ...args,
+    launchRequestIds: ['synthetic-root'] });
+  assert.equal(launchSnapshot.ok, true, JSON.stringify(launchSnapshot));
+  const snapshotResult = await readLaunchRequestStatusFromLedgerAsync({ ...args, launchSnapshot });
+  assert.deepEqual(snapshotResult, result);
   const modern = Number(fixture.sql('SHOW server_version_num;').trim()) >= 160000;
   fixture.sql(`INSERT INTO launch_requests (launch_request_id, status, metadata_json)
     SELECT 'synthetic-unrelated-' || n, 'running',
@@ -121,7 +149,7 @@ test('RETRYCHAIN-01: native psql traverses cycles with SELECT-only authority and
     'deleting the base row after its status probe cannot hide surviving retries');
 });
 
-test('RETRYCHAIN-01: native PostgreSQL supports JSON metadata and absent historical columns', t => {
+test('RETRYCHAIN-01: native PostgreSQL supports JSON metadata and absent historical columns', async t => {
   const fixture = isolatedPostgres(t);
   if (!fixture) return;
   fixture.sql(`DELETE FROM launch_requests WHERE launch_request_id IN ('synthetic-malformed', 'synthetic-empty', 'synthetic-escape');
@@ -134,6 +162,12 @@ test('RETRYCHAIN-01: native PostgreSQL supports JSON metadata and absent histori
   const missing = readLaunchRequestStatusFromLedger(args);
   assert.equal(missing.ok, true);
   assert.deepEqual(missing.retryChain, []);
+  assert.equal(missing.row.failure_detail, null);
+  const launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync({ ...args,
+    launchRequestIds: ['synthetic-root'] });
+  assert.equal(launchSnapshot.ok, true, JSON.stringify(launchSnapshot));
+  assert.deepEqual(launchSnapshot.rows, [missing.row]);
+  assert.deepEqual(await readLaunchRequestStatusFromLedgerAsync({ ...args, launchSnapshot }), missing);
 });
 
 // Exercise psql's pre-16 branch even when the installed server is newer. Actual
@@ -172,4 +206,88 @@ test('RETRYCHAIN-01: real psql failures retain base status and mark traversal un
   assert.equal(result.ok, true);
   assert.equal(result.row.status, 'failed');
   assert.equal(result.retryChainUnreadable, true);
+});
+
+test('RETRYCHAIN-02: native jsonb retry and capacity plans use indexes at ledger scale on every server version', async t => {
+  const fixture = isolatedPostgres(t);
+  if (!fixture) return;
+  fixture.sql(`DELETE FROM launch_requests WHERE launch_request_id IN ('synthetic-malformed', 'synthetic-empty', 'synthetic-escape');
+    ALTER TABLE launch_requests ALTER COLUMN metadata_json TYPE jsonb USING metadata_json::jsonb;
+    ALTER TABLE launch_requests ADD COLUMN created_at timestamptz DEFAULT '2026-01-01';
+    ALTER TABLE launch_requests ADD COLUMN payload text;
+    ALTER TABLE launch_requests ALTER COLUMN payload SET STORAGE EXTERNAL;
+    INSERT INTO launch_requests (launch_request_id, status, metadata_json, payload)
+      SELECT 'synthetic-unrelated-' || n, 'running', jsonb_build_object('retryOf', 'synthetic-unrelated-parent-' || n),
+        repeat(md5(n::text), 256) FROM generate_series(1, 25000) n;
+    INSERT INTO launch_requests (launch_request_id, status, metadata_json) VALUES
+      ('synthetic-alone', 'failed', NULL),
+      ('synthetic-chain-0', 'failed', NULL),
+      ('synthetic-chain-1', 'failed', '{"retryOf":"synthetic-chain-0"}'),
+      ('synthetic-chain-2', 'failed', '{"retryOf":"synthetic-chain-1"}'),
+      ('synthetic-chain-3', 'running', '{"retryOf":"synthetic-chain-2"}');
+    CREATE INDEX idx_launch_requests_retry_of ON launch_requests
+      USING btree ((metadata_json ->> 'retryOf'), created_at, launch_request_id)
+      WHERE CASE WHEN metadata_json IS NULL THEN NULL::boolean ELSE true END;
+    ANALYZE launch_requests;`);
+  const args = { includeRetryChain: true,
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' }, spawnSyncImpl: fixture.spawnSyncImpl };
+  // Keep the deployed RETRYCHAIN-01 query as a synthetic EXPLAIN baseline.
+  // No ANALYZE: this captures plan shape without executing the whole-row scan.
+  const baseline = `EXPLAIN (COSTS OFF)
+    WITH RECURSIVE retry_edges AS MATERIALIZED (
+      SELECT launch_request_id,
+        CASE WHEN pg_input_is_valid(to_jsonb(request)->>'metadata_json', 'jsonb')
+          THEN (to_jsonb(request)->>'metadata_json')::jsonb END AS metadata
+      FROM launch_requests request
+    ), retry_chain(launch_request_id) AS (
+      SELECT 'synthetic-alone'::text UNION
+      SELECT child.launch_request_id FROM retry_edges child JOIN retry_chain parent
+        ON CASE WHEN jsonb_typeof(child.metadata->'retryOf') = 'string'
+          THEN child.metadata->>'retryOf' END = parent.launch_request_id
+    )
+    SELECT json_build_object('launch_request_id', launch_request_id, 'status', status,
+      'updated_at', updated_at, 'terminal_at', terminal_at, 'failure_class', failure_class,
+      'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+      'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref')
+    FROM launch_requests
+    WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
+      AND launch_request_id != 'synthetic-alone'
+    ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;`;
+  const modern = Number(fixture.sql('SHOW server_version_num;').trim()) >= 160000;
+  const before = fixture.sql(modern ? baseline : baseline.replace(
+    "pg_input_is_valid(to_jsonb(request)->>'metadata_json', 'jsonb')", 'true'));
+  assert.match(before, /Seq Scan on launch_requests/);
+  t.diagnostic(`Before (RETRYCHAIN-01):\n${before.trim()}`);
+  for (const legacy of [false, true]) {
+    const options = { ...args, spawnSyncImpl: (command, argv, opts) => fixture.spawnSyncImpl(command, argv, {
+      ...opts, input: legacy ? opts.input.replace("current_setting('server_version_num')::int >= 160000", 'false') : opts.input,
+    }) };
+    for (const [id, expected] of [
+      ['synthetic-alone', []],
+      ['synthetic-chain-0', ['synthetic-chain-3', 'synthetic-chain-2', 'synthetic-chain-1']],
+      ['synthetic-root', ['synthetic-sibling', 'synthetic-leaf', 'synthetic-retry']],
+    ]) {
+      const result = await readLaunchRequestStatusFromLedgerAsync({ ...options, launchRequestId: id });
+      assert.equal(result.retryChainUnreadable, undefined, JSON.stringify(result));
+      assert.deepEqual(result.retryChain.map(row => row.launch_request_id), expected);
+      assert.ok(result.retryChain.every(row => !Object.hasOwn(row, 'metadata_json')));
+      const plan = fixture.explainLastRead();
+      assert.match(plan, /(?:Index Scan|Bitmap Index Scan).*idx_launch_requests_retry_of/);
+      assert.doesNotMatch(plan, /Seq Scan on launch_requests|CTE retry_edges/);
+      if (!legacy && id === 'synthetic-alone') t.diagnostic(`After (RETRYCHAIN-02):\n${plan}`);
+    }
+    const launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync({ ...options,
+      launchRequestIds: ['synthetic-alone', 'synthetic-chain-0', 'synthetic-root'] });
+    assert.equal(launchSnapshot.ok, true, JSON.stringify(launchSnapshot));
+    assert.equal(launchSnapshot.rows.length, 9);
+    const plan = fixture.explainLastRead();
+    assert.match(plan, /(?:Index Scan|Bitmap Index Scan).*idx_launch_requests_retry_of/);
+    assert.doesNotMatch(plan, /Seq Scan on launch_requests|CTE retry_edges/);
+    const result = await readLaunchRequestStatusFromLedgerAsync({ ...options, launchSnapshot, launchRequestId: 'synthetic-root' });
+    assert.equal(result.row.status, 'failed');
+    const chain = await readLaunchRequestStatusFromLedgerAsync({ ...options, launchSnapshot,
+      launchRequestId: 'synthetic-root', includeRetryChain: true });
+    assert.deepEqual(chain.retryChain.map(row => row.launch_request_id),
+      ['synthetic-sibling', 'synthetic-leaf', 'synthetic-retry']);
+  }
 });

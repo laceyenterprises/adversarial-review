@@ -854,30 +854,97 @@ function* readLatestWorkerRunStatusFromLedgerSteps({
   return { ok: true, row, target: queried.target };
 }
 
-// One read-only snapshot per closer capacity scan avoids one subprocess per
-// historical dispatch. Retry metadata is decoded by the ordinary chain reader.
+// Catalog probes select only fixed SQL expressions, never row contents. Avoid
+// to_jsonb(request): even a one-row status lookup would detoast every payload.
+const postgresLaunchColumns = `
+  SELECT
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'failure_detail' AND NOT attisdropped)
+      THEN 'request.failure_detail' ELSE 'NULL::text' END AS launch_detail,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'ticket_ref' AND NOT attisdropped)
+      THEN 'request.ticket_ref' ELSE 'NULL::text' END AS launch_ticket,
+    EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'metadata_json' AND NOT attisdropped) AS retry_has_metadata,
+    EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'metadata_json' AND atttypid = 'jsonb'::regtype AND NOT attisdropped) AS retry_jsonb
+  \\gset
+`;
+
+const postgresLaunchProjection = `json_build_object(
+  'launch_request_id', request.launch_request_id, 'status', request.status,
+  'updated_at', request.updated_at, 'terminal_at', request.terminal_at,
+  'failure_class', request.failure_class,
+  'failure_detail', :launch_detail, 'ticket_ref', :launch_ticket`;
+
+// Only text on pre-16 needs the historical application-side fallback. Native
+// jsonb always joins the indexed expression directly, on every server version.
+// LATERAL/OFFSET keeps lookups parameterized by the current parent: a flattened
+// join can choose a whole-table hash scan when it misestimates retry fan-out.
+function postgresRetryReadSql({ snapshot = false } = {}) {
+  const seed = snapshot ? "SELECT jsonb_array_elements_text(:'launch_ids'::jsonb)" : "SELECT :'lrq'::text";
+  const projection = `${postgresLaunchProjection}${snapshot ? ", 'metadata_json', request.metadata_json" : ''})`;
+  const recursive = edge => `
+    WITH RECURSIVE retry_chain(launch_request_id) AS (
+      ${seed}
+      UNION
+      SELECT child.launch_request_id FROM retry_chain parent
+      JOIN LATERAL (
+        SELECT child.launch_request_id FROM launch_requests child
+        WHERE ${edge}
+        OFFSET 0
+      ) child ON true
+    )
+    SELECT ${projection}
+    FROM retry_chain chain
+    JOIN LATERAL (
+      SELECT launch_request_id, status, updated_at, terminal_at, failure_class,
+        :launch_detail AS failure_detail, :launch_ticket AS ticket_ref${snapshot ? ', metadata_json' : ''}
+      FROM launch_requests request WHERE request.launch_request_id = chain.launch_request_id
+      LIMIT 1
+    ) request ON true
+    ${snapshot ? '' : "WHERE request.launch_request_id != :'lrq'"}
+    ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;`;
+  return `${postgresLaunchColumns}
+    \\if :retry_has_metadata
+      \\if :retry_jsonb
+        ${recursive("child.metadata_json ->> 'retryOf' = parent.launch_request_id\n        AND CASE WHEN child.metadata_json IS NULL THEN NULL::boolean ELSE true END\n        AND jsonb_typeof(child.metadata_json->'retryOf') = 'string'")}
+      \\else
+        SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
+        \\gset
+        \\if :retry_native_parser
+          ${recursive("CASE WHEN pg_input_is_valid(child.metadata_json::text, 'jsonb')\n        THEN CASE WHEN jsonb_typeof(child.metadata_json::jsonb->'retryOf') = 'string'\n          THEN child.metadata_json::jsonb->>'retryOf' END END = parent.launch_request_id")}
+        \\else
+          SELECT ${postgresLaunchProjection}, 'metadata_json', request.metadata_json)
+          FROM launch_requests request
+          ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;
+        \\endif
+      \\endif
+    \\else
+      ${snapshot ? `SELECT ${postgresLaunchProjection}) FROM launch_requests request
+        WHERE request.launch_request_id IN (${seed});` : 'SELECT NULL WHERE false;'}
+    \\endif
+    ;`;
+}
+
+// One read-only snapshot of the requested launches and descendants per capacity
+// scan. An empty request never means permission to dump the ledger.
 export function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
   return runLedgerStepsAsync(readLaunchRequestSnapshotSteps(args), args);
 }
 
-function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, env = process.env,
+function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,
   rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
     rootDir, hqRoot, requiredTables: ['launch_requests'] });
   if (!resolution.ok) return resolution;
-  // SQLite reads are in-process; retain its indexed per-launch recursive query.
   if (resolution.target.backend === 'sqlite') return { ok: true, target: resolution.target };
   if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
-  return yield* queryPostgresRowsSteps(resolution.target, `
-    SELECT json_build_object(
-      'launch_request_id', launch_request_id, 'status', status,
-      'updated_at', updated_at, 'terminal_at', terminal_at,
-      'failure_class', failure_class,
-      'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
-      'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
-      'metadata_json', to_jsonb(launch_requests)->'metadata_json')
-    FROM launch_requests
-    ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC`, { spawnSyncImpl, readOnly: true });
+  const ids = [...new Set(launchRequestIds.map(normalizeText).filter(Boolean))];
+  if (!ids.length) return { ok: true, rows: [], target: resolution.target };
+  return yield* queryPostgresRowsSteps(resolution.target, postgresRetryReadSql({ snapshot: true }), {
+    spawnSyncImpl, readOnly: true, psqlVars: [['launch_ids', JSON.stringify(ids)]],
+  });
 }
 
 // With includeRetryChain, a traversal failure preserves the base status and
@@ -935,18 +1002,11 @@ function* readLaunchRequestStatusFromLedgerSteps({
   } else if (resolution.target.backend === 'postgres') {
     queried = yield* queryPostgresRowsSteps(
       resolution.target,
-      `SELECT json_build_object(
-          'launch_request_id', launch_request_id,
-          'status', status,
-          'updated_at', updated_at,
-          'terminal_at', terminal_at,
-          'failure_class', failure_class,
-          'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
-          'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref'
-        )
-         FROM launch_requests
-        WHERE launch_request_id = :'lrq'
-        LIMIT 1`,
+      `${postgresLaunchColumns}
+       SELECT ${postgresLaunchProjection})
+       FROM launch_requests request
+       WHERE request.launch_request_id = :'lrq'
+       LIMIT 1`,
       {
         spawnSyncImpl,
         psqlVars: [['lrq', normalizedLaunchRequestId]],
@@ -966,12 +1026,15 @@ function* readLaunchRequestStatusFromLedgerSteps({
     };
   }
   if (!includeRetryChain) return { ok: true, row, target: queried.target };
-  const unreadableRetryChain = () => ({ ok: true, row, retryChainUnreadable: true, target: queried.target });
+  const retryStarted = performance.now();
+  const unreadableRetryChain = failure => ({ ok: true, row, retryChainUnreadable: true,
+    retryChainFailure: { reason: failure.reason, detail: failure.detail,
+      elapsedMs: Math.round(performance.now() - retryStarted) }, target: queried.target });
   // Follow dispatcher-owned retries with cycle-safe traversal on either backend.
   let retries;
   if (resolution.target.backend === 'sqlite') {
     const metadataColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'metadata_json');
-    if (!metadataColumn.ok) return unreadableRetryChain();
+    if (!metadataColumn.ok) return unreadableRetryChain(metadataColumn);
     if (!metadataColumn.exists) return { ok: true, row, retryChain: [], target: queried.target };
     retries = querySqliteRows(resolution.target, `
       WITH RECURSIVE retry_chain(launch_request_id) AS (
@@ -987,51 +1050,12 @@ function* readLaunchRequestStatusFromLedgerSteps({
         AND launch_request_id != @launchRequestId
       ORDER BY updated_at DESC, launch_request_id DESC`, { launchRequestId: normalizedLaunchRequestId });
   } else {
-    // PostgreSQL 16+ can validate historical text without throwing or catalog
-    // writes. CASE guards the cast (including invalid Unicode escapes); materialize
-    // the edges once rather than parsing metadata on every recursive step.
-    // psql conditionals keep unsupported functions out of pre-16 SQL entirely.
-    // Older servers retain the bounded read-only snapshot/application traversal.
-    retries = Array.isArray(launchSnapshot?.rows) ? { ...launchSnapshot } : (yield* queryPostgresRowsSteps(resolution.target, `
-      SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
-      \\gset
-      \\if :retry_native_parser
-      WITH RECURSIVE retry_edges AS MATERIALIZED (
-        SELECT launch_request_id,
-          CASE WHEN pg_input_is_valid(to_jsonb(request)->>'metadata_json', 'jsonb')
-            THEN (to_jsonb(request)->>'metadata_json')::jsonb END AS metadata
-        FROM launch_requests request
-      ), retry_chain(launch_request_id) AS (
-        SELECT :'lrq'::text
-        UNION
-        SELECT child.launch_request_id FROM retry_edges child
-        JOIN retry_chain parent
-          ON CASE WHEN jsonb_typeof(child.metadata->'retryOf') = 'string'
-            THEN child.metadata->>'retryOf' END = parent.launch_request_id
-      )
-      SELECT json_build_object(
-        'launch_request_id', launch_request_id, 'status', status,
-        'updated_at', updated_at, 'terminal_at', terminal_at,
-        'failure_class', failure_class,
-        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
-        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref')
-      FROM launch_requests
-      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
-        AND launch_request_id != :'lrq'
-      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
-      \\else
-      SELECT json_build_object(
-        'launch_request_id', launch_request_id, 'status', status,
-        'updated_at', updated_at, 'terminal_at', terminal_at,
-        'failure_class', failure_class,
-        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
-        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
-        'metadata_json', to_jsonb(launch_requests)->'metadata_json')
-      FROM launch_requests
-      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
-      \\endif
-      ;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true }));
-    if (retries.ok && retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json'))) {
+    retries = Array.isArray(launchSnapshot?.rows) ? { ...launchSnapshot }
+      : (yield* queryPostgresRowsSteps(resolution.target, postgresRetryReadSql(), {
+        spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true,
+      }));
+    if (retries.ok && (Array.isArray(launchSnapshot?.rows)
+      || retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json')))) {
       const children = new Map();
       for (const candidate of retries.rows) {
         let metadata = candidate.metadata_json;
@@ -1048,7 +1072,7 @@ function* readLaunchRequestStatusFromLedgerSteps({
         && descendants.has(candidate.launch_request_id)).map(({ metadata_json: _metadata, ...candidate }) => candidate);
     }
   }
-  if (!retries.ok) return unreadableRetryChain();
+  if (!retries.ok) return unreadableRetryChain(retries);
   return { ok: true, row, retryChain: retries.rows, target: queried.target };
 }
 

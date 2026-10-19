@@ -323,9 +323,11 @@ for (const snapshotRows of [undefined, []]) {
     let probes = 0;
     const result = await reconcileAmaCloserDispatches(root, {
       now: NOW, scanBudgetMs: 0, useLaunchSnapshot: true,
-      readLaunchRequestSnapshotImpl: () => ({ ok: true,
-        ...(snapshotRows ? { rows: snapshotRows } : {}),
-        target: { backend: snapshotRows ? 'postgres' : 'sqlite' } }),
+      readLaunchRequestSnapshotImpl: ({ launchRequestIds }) => {
+        assert.deepEqual(launchRequestIds, ['lrq-1', 'lrq-2']);
+        return { ok: true, ...(snapshotRows ? { rows: snapshotRows } : {}),
+          target: { backend: snapshotRows ? 'postgres' : 'sqlite' } };
+      },
       readLaunchRequestStatusImpl: () => {
         probes += 1;
         return { ok: true, row: { status: 'failed' } };

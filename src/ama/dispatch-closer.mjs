@@ -2206,18 +2206,24 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     });
     return true;
   };
-  for (const name of listSettledJsonNames(amaCloserDispatchDir(rootDir))) {
+  const records = listSettledJsonNames(amaCloserDispatchDir(rootDir)).flatMap(name => {
     throwIfAborted(options.signal);
     const dispatchPath = join(amaCloserDispatchDir(rootDir), name);
     const record = readJsonFile(dispatchPath);
     const prNumber = Number(record?.prNumber);
-    if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
-    if (record?.state !== 'dispatched' && record?.state !== 'dispatching') continue;
-    counts.scanned += 1;
+    if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0
+      || !['dispatched', 'dispatching'].includes(record.state)) return [];
     let lease = null;
-    try {
-      lease = readAmaCloserLease(rootDir, record);
-    } catch { /* Preserve the existing lease-less liveness rules. */ }
+    try { lease = readAmaCloserLease(rootDir, record); }
+    catch { /* Preserve the existing lease-less liveness rules. */ }
+    return [{ dispatchPath, record, prNumber, lease }];
+  });
+  const launchRequestIds = records.filter(({ record, lease }) => record.state === 'dispatched'
+    && (!options.capacityOnly || isAmaCloserLaunchInProgress(record, { ...options, now, lease })))
+    .map(({ record }) => record.launchRequestId).filter(Boolean);
+  for (const { dispatchPath, record, prNumber, lease } of records) {
+    throwIfAborted(options.signal);
+    counts.scanned += 1;
     const progressOptions = { ...options, now, lease };
     const inProgress = isAmaCloserLaunchInProgress(record, progressOptions);
     // Historical records do not belong on the synchronous dispatch hot path.
@@ -2238,10 +2244,10 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     let probe;
     if (record.launchRequestId) {
       throwIfAborted(options.signal);
-      // The production reader shares one bounded PostgreSQL snapshot across
-      // all records, including retry descendants. SQLite is already in-process.
+      // The production reader shares a PostgreSQL snapshot of just these
+      // launches and retry descendants. SQLite is already in-process.
       if ((options.useLaunchSnapshot ?? !options.readLaunchRequestStatusImpl) && !launchSnapshot) {
-        launchSnapshot = await (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)({ ...options, rootDir });
+        launchSnapshot = await (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)({ ...options, rootDir, launchRequestIds });
         throwIfAborted(options.signal);
       }
       const budgetExpired = !Array.isArray(launchSnapshot?.rows) && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
@@ -2329,6 +2335,24 @@ function logAmaCloserDispatchEvent(logger, event, fields = {}, options = {}) {
       ? logger.info.bind(logger)
       : console.log.bind(console);
   sink(JSON.stringify({ event, ...fields }));
+}
+
+// Only diagnostic fields are logged. Never spread the probe or its target:
+// those contain ledger rows and connection credentials. PostgreSQL diagnostic
+// continuation lines can include SQL/row contents, so retain the headline only.
+function logRetryChainUnreadable(logger, probe, identity) {
+  const failure = probe?.retryChainFailure || probe || {};
+  const connection = probe?.target?.dsn;
+  const diagnostic = connection ? String(failure.detail || '').replaceAll(connection, '[redacted connection]')
+    : String(failure.detail || '');
+  const rawDetail = diagnostic.split(/\r?\n/)[0];
+  const detail = rawDetail
+    .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, '[redacted connection]')
+    .replace(/\b(?:host|hostaddr|port|dbname|user|password|passfile|service)\s*=\s*(?:'[^']*'|[^\s]+)/gi, '[redacted connection]');
+  logAmaCloserDispatchEvent(logger, 'ama_closer.retry_chain_unreadable', {
+    ...identity, reason: failure.reason || 'unknown', detail,
+    elapsedMs: failure.elapsedMs ?? null,
+  }, { level: 'warn' });
 }
 
 // How the primary was grounded, in operator-readable words. A SOFT (AFH-02)
@@ -4680,8 +4704,11 @@ async function maybeDispatchAmaCloserAttempt({
         ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
-      if (statusProbe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
-        skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+      if (statusProbe?.retryChainUnreadable) {
+        logRetryChainUnreadable(logger, statusProbe, { repo: reconciliationRepo, prNumber });
+        return noAmaDispatch({ dispatched: false,
+          skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+      }
       if (statusProbe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
         launchRequestId: held.lease.lrqId, liveRetryLaunchRequestId: statusProbe.liveRetryLaunchRequestId });
@@ -5355,8 +5382,11 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
-    if (probe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
-      skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+    if (probe?.retryChainUnreadable) {
+      logRetryChainUnreadable(logger, probe, { repo, prNumber });
+      return noAmaDispatch({ dispatched: false,
+        skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+    }
     if (probe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
       skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
       launchRequestId: existingRecord.launchRequestId, liveRetryLaunchRequestId: probe.liveRetryLaunchRequestId });
@@ -7782,6 +7812,7 @@ async function maybeDispatchAmaCloserAttempt({
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
       if (retryChainUnknown) {
+        logRetryChainUnreadable(logger, retryProbe, { repo, prNumber });
         // Charge the refusal, but preserve the ancestor's identity/artifacts for
         // the next probe. Incomplete evidence is not a dispatched worker claim.
         updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({

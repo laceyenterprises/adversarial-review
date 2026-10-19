@@ -1745,6 +1745,10 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   the earlier refusal (but not past success). The pre-route fence also checks
   packaging stops against persisted refusals, including ownerless recovery.
   Unchanged refusals return `hold` without rewriting state or paging again.
+  With packaging-only audit history, changed base, mergeability, checks or review
+  inputs release the persisted refusal and record the new input baseline. Unknown
+  or transient predicates prevent classification as a pure packaging stop.
+  Preflight evaluates legacy cleanup even when no audit stop remains.
   Stops combining packaging and deterministic reasons retain the refusal after
   stripping packaging reasons. Without a current stop, legacy infrastructure state is marked released
   but returns `none`, so cleanup cannot widen admission. Released infrastructure

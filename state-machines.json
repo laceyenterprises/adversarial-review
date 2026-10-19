@@ -13,8 +13,8 @@
   "hammerStopGuard": {
     "source": "src/ama/hammer-stop-hold.mjs",
     "consumer": "src/ama/dispatch-closer.mjs",
-    "authority": "Packaging stops and deferrals retain earlier deterministic refusals until success. Packaging-only audit history reasserts an unreleased persisted refusal before every route, including ownerless recovery, without state writes or another page.",
-    "recovery": "All-infrastructure holds release once; cleanup without a current stop returns none and cannot widen admission. Mixed reasons retain deterministic refusal reasons. Release write failures log and preserve the current decision.",
+    "authority": "Packaging stops and deferrals retain earlier deterministic refusals until success. Packaging-only audit history reasserts an unreleased persisted refusal before every route, including ownerless recovery, without state writes or another page when inputs are unchanged; changed inputs release and record the new baseline.",
+    "recovery": "All-infrastructure holds release once; closer preflight evaluates cleanup without audit history, returning none without a current stop so it cannot widen admission. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain deterministic refusal reasons. Release write failures log and preserve the current decision.",
     "lifecycleChange": "Existing refusal fence restored; no new dispatch statuses or lifecycle edges"
   },
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",

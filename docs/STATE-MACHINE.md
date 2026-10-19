@@ -716,7 +716,11 @@ once with `infrastructure-stop`; packaging failures preserve unrelated
 deterministic holds in force, including ownerless recovery. Audit selection
 looks past packaging stops and deferrals for the prior refusal, stopping at
 success; persisted refusals also fence packaging-only audit history. Unchanged
-refusals return `hold` without state writes or another page. Stops combining
+refusals return `hold` without state writes or another page. With packaging-only
+history, changed base, mergeability, checks or review inputs release the persisted
+refusal and record the new baseline. Unknown or transient predicates prevent
+pure infrastructure classification. Closer preflight evaluates legacy cleanup
+even when the audit stop is absent. Stops combining
 packaging and deterministic reasons retain the refusal after packaging reasons
 are stripped. Legacy
 infrastructure cleanup without a current stop returns `none` after marking the

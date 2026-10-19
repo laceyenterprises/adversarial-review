@@ -877,7 +877,11 @@ heads and closed PRs retain their terminal refusal.
 Packaging stops and deferrals retain earlier deterministic hammer refusals until
 success. Packaging-only audit history also reasserts an unreleased persisted
 refusal before all dispatch routes, including ownerless recovery, without state
-writes or another page. Stops combining packaging and deterministic reasons
+writes or another page when inputs are unchanged; changed base, mergeability,
+checks or review inputs release the persisted refusal normally. Unknown or
+transient predicates prevent classification as a pure packaging stop.
+The closer evaluates legacy infrastructure cleanup even without audit history.
+Stops combining packaging and deterministic reasons
 retain the refusal after packaging reasons are stripped.
 Legacy infrastructure cleanup without a current stop returns `none` after
 marking release, preserving ordinary admission. Release write failures log and

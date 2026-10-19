@@ -94,7 +94,7 @@
     },
     {
       "id": "refusals",
-      "description": "Packaging stops retain deterministic refusals and fence ownerless recovery even with packaging-only audit history, without another page. Includes distinct fleet-stop-active and fleet-stop-merge-kill reasons, uncached ledger-independent refusal and matching file removal using disposable roots; activation also requires the registered watcher to adopt the reader and old hammers to drain.",
+      "description": "Packaging stops retain unchanged deterministic refusals and fence ownerless recovery even with packaging-only audit history, without another page; changed inputs release persisted refusals. Production preflight retires legacy holds without audit history, and mixed transient predicates prevent pure infrastructure classification. Includes distinct fleet-stop-active and fleet-stop-merge-kill reasons, uncached ledger-independent refusal and matching file removal using disposable roots; activation also requires the registered watcher to adopt the reader and old hammers to drain.",
       "promise": "smv-refusals",
       "edges": [
         "closure-owner.02",

@@ -28,6 +28,7 @@ import {
   evaluateHammerStopHold,
   hammerStopInputs,
   hammerStopPrIsConflicting,
+  isInfrastructureStop,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
@@ -142,6 +143,17 @@ const hqLaunches = (deps) => deps.execCalls.filter((call) => call.args[0] === 'd
 const INFRA_REASONS = ['missing-dispatch-phase-scripts', 'unrendered-dispatch-phase-scripts',
   'unrendered-dispatch-phase-script-placeholders'];
 
+test('STOPHOLDINFRA-01 mixed transient predicates are not pure packaging stops', () => {
+  for (const reason of INFRA_REASONS) {
+    for (const other of ['history-read-failed', 'environment-unavailable', 'unknown-stop']) {
+      assert.equal(isInfrastructureStop({ predicate: other, reasons: [reason] }), false);
+      assert.equal(isInfrastructureStop({ reason: other, reasons: [reason] }), false);
+      assert.equal(isInfrastructureStop({ predicate: reason, reason: other }), false);
+    }
+    assert.equal(isInfrastructureStop({ predicate: reason }), true);
+  }
+});
+
 function infrastructureFixture(t, reason) {
   const rootDir = tmpRoot(t, 'stopholdinfra-');
   const identity = { repo: 'example/project', prNumber: 41, headSha: 'a'.repeat(40) };
@@ -251,6 +263,56 @@ for (const reason of INFRA_REASONS) {
       assert.equal(persisted.action, 'hold');
       assert.deepEqual(persisted.hammerStop.refusal, held.hammerStop.refusal);
       assert.equal(readFileSync(f.statePath, 'utf8'), heldState);
+    });
+  }
+
+  test(`STOPHOLDINFRA-01 ${reason}: production preflight cleans a legacy hold without audit history`, async t => {
+    const f = infrastructureFixture(t, reason);
+    rmSync(amaAuditFilePath(f.args.dispatchContext.hqRoot, f.identity.repo,
+      f.identity.prNumber, f.identity.headSha));
+    mkdirSync(dirname(f.statePath), { recursive: true });
+    writeFileSync(f.statePath, JSON.stringify({ currentHead: f.identity.headSha,
+      heads: { [f.identity.headSha]: { predicate: reason, firstObservedAt: f.at,
+        refusal: { key: 'legacy-packaging', reasons: [reason] } } } }));
+    const deps = closerDeps();
+    assert.equal((await maybeDispatchAmaCloser({ ...f.args, ...deps })).dispatched, true);
+    const entry = JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha];
+    assert.equal(entry.releasedAt, f.at);
+    assert.deepEqual(entry.releasedBy, ['infrastructure-stop']);
+    assert.equal(deps.alerts.length, 0);
+    assert.equal(hqLaunches(deps).length, 1);
+  });
+
+  for (const dimension of ['base', 'mergeability', 'checks', 'review']) {
+    test(`STOPHOLDINFRA-01 ${reason}: packaging-only history releases persisted refusal on ${dimension} change`, async t => {
+      const f = infrastructureFixture(t, 'verdict-not-eligible');
+      const deps = { deliverAlertImpl: async () => assert.fail('must not page') };
+      assert.equal((await f.evaluate()).action, 'hold');
+      writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
+        now: minutesAfter(f.at, 1), attempt: { outcome: 'failed-without-merge', reason,
+          reasons: [reason], head: f.identity.headSha, attemptPhase: 'hammer-close' } });
+      const audit = readAmaAuditEntry(f.args.dispatchContext.hqRoot, f.identity.repo,
+        f.identity.prNumber, f.identity.headSha);
+      const onlyPackaging = { attempts: [audit.attempts.at(-1)] };
+      const prMetadata = { ...f.args.prMetadata };
+      let reviewState = null;
+      if (dimension === 'base') prMetadata.baseSha = 'c'.repeat(40);
+      if (dimension === 'mergeability') prMetadata.mergeableState = 'CONFLICTING';
+      if (dimension === 'checks') prMetadata.statusCheckRollup = [
+        { name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+      if (dimension === 'review') reviewState = { headSha: f.identity.headSha, verdict: 'approve' };
+      const now = minutesAfter(f.at, 2);
+      const result = await f.evaluate({ ...deps, now, prMetadata, reviewState,
+        readAuditImpl: () => onlyPackaging });
+      assert.equal(result.action, 'release');
+      assert.equal(result.hammerStop.predicate, 'verdict-not-eligible');
+      assert.deepEqual(result.changed, [dimension]);
+      const entry = JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha];
+      assert.equal(entry.releasedAt, now);
+      assert.deepEqual(entry.releasedBy, [dimension]);
+      assert.deepEqual(entry.releasedInputs, hammerStopInputs(prMetadata, { reviewState }));
+      assert.deepEqual(await f.evaluate({ ...deps, prMetadata, reviewState,
+        readAuditImpl: () => onlyPackaging }), { action: 'none' });
     });
   }
 

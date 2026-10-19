@@ -49,7 +49,11 @@ does not grant redispatch admission. Packaging failures leave unrelated
 deterministic holds in force: audit selection looks past packaging stops and
 deferrals to the earlier refusal, but never past success. If only packaging
 audit history remains, an unreleased persisted deterministic refusal returns
-`hold` without a state write or another page, including before ownerless recovery.
+`hold` without a state write or another page when inputs are unchanged, including
+before ownerless recovery. Changed base, mergeability, checks or review inputs
+release that refusal with `releasedAt`, `releasedBy` and `releasedInputs`.
+Closer preflight evaluates cleanup even when audit history is absent. Unknown
+or transient predicates prevent classification as a pure infrastructure stop.
 Mixed reasons strip packaging reasons from the computed deterministic refusal;
 legacy mixed holds are not released as infrastructure. Already-released
 infrastructure holds return `none` without rewriting state, whether the

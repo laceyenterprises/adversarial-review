@@ -89,8 +89,7 @@ const INFRASTRUCTURE_STOP_REASONS = new Set([
 
 export function isInfrastructureStop(stop) {
   const reasons = [...stopReasons(stop), ...(stop?.refusal?.reasons || []),
-    ...[stop?.predicate, stop?.reason].filter(reason =>
-      INFRASTRUCTURE_STOP_REASONS.has(reason) || DETERMINISTIC_STOP_REASONS.has(reason))];
+    ...[stop?.predicate, stop?.reason].filter(Boolean)];
   return reasons.length > 0 && reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason));
 }
 
@@ -417,8 +416,15 @@ export async function evaluateHammerStopHold({
   // leases and retry caps still own re-dispatch; the audit may already be cleared.
   if (isInfrastructureStop(stop) || (!stop && isInfrastructureStop(prior))) {
     if (prior?.refusal && !prior.releasedAt && !isInfrastructureStop(prior)) {
-      return { action: 'hold', hammerStop: { headSha, predicate: prior.predicate,
-        refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) } };
+      const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
+      const changed = changedHammerStopInputs(prior.inputs, inputs);
+      const hammerStop = { headSha, predicate: prior.predicate,
+        refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) };
+      if (changed.length > 0) {
+        persist({ ...prior, releasedAt: now, releasedBy: changed, releasedInputs: inputs });
+        return { action: 'release', hammerStop, changed };
+      }
+      return { action: 'hold', hammerStop };
     }
     if (!isInfrastructureStop(prior) || prior.releasedAt) return { action: 'none' };
     const changed = ['infrastructure-stop'];

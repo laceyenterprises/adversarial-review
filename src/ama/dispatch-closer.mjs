@@ -4764,7 +4764,8 @@ async function maybeDispatchAmaCloserAttempt({
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
-    if (stop?.refusal || isInfrastructureStop(stop) || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
+    // With no audit stop, the evaluator still retires legacy on-disk packaging holds.
+    if (!stop || stop.refusal || isInfrastructureStop(stop) || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
       || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,

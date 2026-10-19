@@ -337,15 +337,30 @@ test('FINALCLOSE-01 a failed page retries even when the head advances during del
   assert.equal(pages.length, 1);
 });
 
-for (const rowHead of [headSha, reviewed]) {
-  test(`STOPHOLDREVIEW-01 orchestration carries only a posting receipt bound to the settled head: ${rowHead === headSha}`, async t => {
+for (const [label, rowHead, settledHead] of [
+  ['matching current head', headSha, headSha],
+  ['matching stale head', reviewed, reviewed],
+  ['mismatched settled head', reviewed, headSha],
+]) {
+  test(`STOPHOLDREVIEW-01 orchestration posting receipt: ${label}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'stopholdreview-caller-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    let dispatches = 0;
+    const mismatched = rowHead !== settledHead;
+    if (mismatched) {
+      // A completed current-head job supplies the settled review while the
+      // posted row still carries the previous head's receipt.
+      const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'fixture__repo-pr-41-current.json'), JSON.stringify({ repo, prNumber,
+        status: 'completed', revisionRef: settledHead, completedAt: observed,
+        reviewBody: '## Blocking issues\n- **Current-head defect**\n  - **Problem:** synthetic regression\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' }));
+    }
+    let dispatches = 0, dispatchedReviewState;
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
       currentRevisionRef: headSha, labelNames: [],
       reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
-        reviewer_head_sha: rowHead, last_verdict: 'Comment only', posted_at: observed, review_body: body },
+        reviewer_head_sha: rowHead, last_verdict: 'Comment only', posted_at: observed, review_body: body,
+        ...(mismatched ? { rereview_reason: `auto-refresh: posted review on stale head ${rowHead}; current head is ${headSha}` } : {}) },
       candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
         mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
       loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
@@ -355,13 +370,15 @@ for (const rowHead of [headSha, reviewed]) {
       runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
       maybeDispatchAmaCloserImpl: async args => {
         dispatches++;
-        assert.equal(args.reviewState.headSha, rowHead, 'receipt retains its reviewed-head binding');
-        assert.equal(args.reviewState.postedAt, observed);
+        dispatchedReviewState = args.reviewState;
         return { dispatched: true };
       },
       logger: { log() {}, warn() {} },
     });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(dispatches, 1);
+    assert.equal(dispatchedReviewState.headSha, settledHead, 'settled head comes from the review evidence');
+    assert.equal(dispatchedReviewState.postedAt, mismatched ? null : observed,
+      'a receipt cannot be borrowed from another reviewed head');
   });
 }

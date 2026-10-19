@@ -282,7 +282,7 @@ function recordedStopInputs(attempt) {
   const head = attempt.githubGate?.liveHead || trace?.headMatch?.current;
   if (head) inputs.headSha = head;
   if (attempt.rebasedOntoBase) inputs.baseSha = attempt.rebasedOntoBase;
-  const mergeability = attempt.githubGate?.mergeable || trace?.mergeability?.mergeableState;
+  const mergeability = String(attempt.githubGate?.mergeable || trace?.mergeability?.mergeableState || '').trim().toUpperCase();
   if (mergeability) inputs.mergeability = ['MERGEABLE', 'CONFLICTING'].includes(mergeability) ? mergeability : null;
   const review = {};
   if (trace?.headMatch?.reviewed) review.headSha = trace.headMatch.reviewed;

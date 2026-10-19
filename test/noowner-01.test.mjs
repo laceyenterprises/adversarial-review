@@ -1123,6 +1123,24 @@ for (const [dimension, attempt] of [
   });
 }
 
+for (const source of ['githubGate', 'eligibilityTrace']) {
+  for (const [value, canonical] of [[' mergeable ', 'MERGEABLE'], [' cOnFlIcTiNg ', 'CONFLICTING']]) {
+    test(`STOPHOLDREVIEW-01 terminal audit normalizes ${source} mergeability: ${value}`, async t => {
+      const attempt = source === 'githubGate'
+        ? { githubGate: { mergeable: value } }
+        : { eligibilityTrace: { trace: { mergeability: { mergeableState: value } } } };
+      const f = reviewStopFixture(t, 'ci-not-green', attempt);
+      const stop = readHammerStopForHead({ hqRoot: f.args.dispatchContext.hqRoot,
+        repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD });
+      assert.equal(stop.inputEvidence.inputs.mergeability, canonical);
+      const result = await f.evaluate();
+      assert.equal(result.action, canonical === 'MERGEABLE' ? 'hold' : 'release');
+      if (canonical === 'CONFLICTING') assert.deepEqual(result.changed, ['mergeability']);
+      assert.equal(f.alerts.length, canonical === 'MERGEABLE' ? 1 : 0);
+    });
+  }
+}
+
 test('STOPHOLDREVIEW-01 release dispatches one remediating hammer for sixteen non-blocking findings', async t => {
   const f = reviewStopFixture(t);
   const deps = closerDeps({ alerts: f.alerts });

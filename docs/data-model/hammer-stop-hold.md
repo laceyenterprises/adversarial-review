@@ -141,8 +141,10 @@ This posting receipt is admission evidence, separate from the review fingerprint
 
 Comparable terminal audit readings (rebased base, live head, mergeability and
 structured review fields in the eligibility trace) override observed baselines,
-including holds created before this fix. Unrecorded dimensions retain their
-observed baseline; aggregate CI conclusions and failed-check subsets cannot
+including holds created before this fix. Audit mergeability from `githubGate`
+or the eligibility trace is trimmed and uppercased before classification, just
+like live PR metadata, so casing alone cannot release a hold. Unrecorded
+dimensions retain their observed baseline; aggregate CI conclusions and failed-check subsets cannot
 reconstruct a full check rollup. Release changes ownership only: findings still
 route to remediation, and ordinary eligibility, strict remediation policy,
 leases and retry caps remain in force.

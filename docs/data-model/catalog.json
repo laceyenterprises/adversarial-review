@@ -633,7 +633,7 @@
       ],
       "owner": "AMA closer retry admission",
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
-      "baseline": "Comparable terminal audit readings, with unrecorded inputs falling back to first observation or prior release; exact-head review predicates also compare posted_at with the terminal timestamp",
+      "baseline": "Comparable terminal audit readings, with mergeability trimmed and uppercased as for live metadata, and unrecorded inputs falling back to first observation or prior release; exact-head review predicates also compare posted_at with the terminal timestamp",
       "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared"]
     },
     {

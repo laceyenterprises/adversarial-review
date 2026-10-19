@@ -688,8 +688,10 @@ The watcher runs review on that new SHA before ordinary closure resumes; busy
 bases can therefore produce another rebase/review cycle. Real terminal HAM
 commits with an unlinked author remain accepted by eligibility and reversal
 checks when their linked HAM committer carries the full terminal trailer set.
-Either linked non-HAM identity rejects terminal-remediation certification and
-reversal authorization, even when the trailers are present.
+Either linked non-HAM identity rejects terminal-remediation certification.
+Reversal authorization rejects a linked foreign author; REVERSALPROV-01 permits
+a linked HAM author with a foreign rebase committer only with exact-SHA App
+validation or the matching immutable original HAM reversal proof below.
 Suppression also rejects terminal trailers with either linked foreign identity.
 The remote GitHub probe requires linked closer provenance; an unidentified remote
 commit cannot suppress review. Local Git retains the offline trailer-only
@@ -964,6 +966,12 @@ Key control points:
   the first superseding GitHub review's immutable head. Hunk boundaries,
   context-run boundaries and newline markers must match; context text/counts
   and hunk offsets are ignored only when matching that original reversal commit.
+  REVERSALPROV-01 routes a linked HAM author with a foreign linked rebase
+  committer through exact-SHA App validation or that immutable original proof,
+  binding the same trailer set and reversal patch identity. Without either it
+  reports `rebased-commit-unproven`. Foreign authors, conflicting identity
+  trailers and unsigned web-flow commits remain `commit-provenance` failures.
+  App validation does not waive supersession or finding coverage checks.
   Commit dates cannot prove freshness. A refusal names collector and evaluator
   rejection reasons in its
   `missingEvidence` and a HAM head missing only that authorization gets one

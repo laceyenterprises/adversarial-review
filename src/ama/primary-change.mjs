@@ -16,6 +16,32 @@ import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parse
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
+// REVERSALPROV-01: a linked HAM author may survive a pipeline rebase, but
+// clearing the committer is only a shape check, never authorization by itself.
+// Keep duplicate identity claims and unsigned web-flow commits fail-closed.
+const isRecommittedHammer = commit => Boolean(commit?.author?.login && commit?.committer?.login)
+  && commit.committer.login.trim().toLowerCase() !== 'web-flow'
+  && !hamCommitIdentityMatches(commit)
+  && hamCommitIdentityMatches({ ...commit, committer: null });
+
+function reversalCommitIdentityMatches(authorization, cache) {
+  if (cache?.has(authorization)) return cache.get(authorization);
+  const { commit, rebased, originalAuthorization } = authorization;
+  if (hamCommitIdentityMatches(commit)) return true;
+  if (!rebased || !isRecommittedHammer(commit)) return false;
+  if (commit.reversalAppAttested === true) return true;
+  const original = originalAuthorization?.commit;
+  const matches = Boolean(original && isHammer(original) && hamCommitIdentityMatches(original)
+    && reversalTrailerIdentity(original) === reversalTrailerIdentity(commit)
+    && reversalPatchIdentity(original.files) === reversalPatchIdentity(commit.files));
+  cache?.set(authorization, matches);
+  return matches;
+}
+
+function reversalTrailerIdentity(commit) {
+  return JSON.stringify(Object.entries(parseCommitTrailerValues(commit?.commit?.message || ''))
+    .map(([key, values]) => [key, [...values].sort()]).sort(([a], [b]) => a.localeCompare(b)));
+}
 const isHammerCommit = (commit, loginProvenance = false) => {
   const trailers = parseCommitTrailers(commit?.commit?.message || '');
   // A comment-author login alone cannot distinguish a builder from a hammer.
@@ -321,7 +347,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           'non-blocking': parseNonBlockingFindingsSection(review.body) },
       });
       const parsedReview = cache.get(review);
-      if (!isHammer(commit) || !hamCommitIdentityMatches(commit) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
+      if (!isHammer(commit) || !reversalCommitIdentityMatches(authorization, cache) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
         || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
@@ -380,9 +406,10 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
 // coordinate in the final patch proves those lines were never reversed. Do
 // not infer preservation from text elsewhere or from omitted context.
 function hasRebasedReversalProof(evidence, path) {
-  return (evidence.reversalAuthorizations || []).some(({ commit, review, reviewedFiles, parentFiles, rebased }) => {
+  return (evidence.reversalAuthorizations || []).some(authorization => {
+    const { commit, review, reviewedFiles, parentFiles, rebased } = authorization;
     try {
-      if (!rebased || !isHammer(commit) || !hamCommitIdentityMatches(commit) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true)
+      if (!rebased || !isHammer(commit) || !reversalCommitIdentityMatches(authorization) || (rebased && !commit.author?.login && commit.reversalAppAttested !== true)
         || commit.parents?.length !== 1
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
         || parseCommitTrailers(commit.commit.message)['reviewed-head'] !== review.commit_id
@@ -450,10 +477,14 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
   const rejected = [...(evidence.rejectedReversalAuthorizations || []),
     ...(cache.get('rejectedReversals')?.values() || [])].slice(0, 10);
   const accepted = cache.get('verifiedReversals')?.size || 0;
+  const diagnosticTimeout = evidence.revertedRegionDiagnostics?.some(entry => entry.path === path
+    && entry.error?.includes('diagnostic time budget exhausted'));
   let summary = missing === 'reversal-authorization'
     ? `no verified Reversal-Authorized-By covers the reverted ${path} region (${accepted} verified`
+      + `${diagnosticTimeout ? '; region diagnostic time budget exhausted' : ''}`
       + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason}${entry.detail ? `: ${entry.detail}` : ''})`).join(', ')}` : ''})`
-    : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
+    : `the reverted ${path} change cannot be authorized by a finding (${missing})`
+      + `${diagnosticTimeout ? '; region diagnostic time budget exhausted' : ''}`;
   const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
@@ -678,14 +709,16 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber }) {
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber, matchTrailers = false }) {
   if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
     || snapshot.commits.length !== snapshot.total_commits) return { detail: 'incomplete or unsupported superseding snapshot' };
   const identity = reversalPatchIdentity(commit.files);
-  const sameMessage = snapshot.commits.filter(entry => entry.commit?.message === commit.commit.message);
-  if (!sameMessage.length) return { detail: 'no candidate with the same commit message' };
+  const sameMessage = snapshot.commits.filter(entry => matchTrailers
+    ? reversalTrailerIdentity(entry) === reversalTrailerIdentity(commit)
+    : entry.commit?.message === commit.commit.message);
+  if (!sameMessage.length) return { detail: matchTrailers ? 'no candidate with the same trailer set' : 'no candidate with the same commit message' };
   const candidates = sameMessage.filter(entry => isHammer(entry) && SHA.test(entry.sha || ''));
   if (!candidates.length) return { detail: 'commit-provenance: no valid same-message candidate identity' };
   const failures = [];
@@ -916,8 +949,9 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           if (authorizedPairs.has(pair)) continue;
           authorizedPairs.add(pair);
           const commit = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
+          const recommitted = isRecommittedHammer(commit);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
-            || !hamCommitIdentityMatches(commit)
+            || (!hamCommitIdentityMatches(commit) && !recommitted)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) { reject('commit-provenance'); continue; }
           const parentSha = commit.parents[0].sha;
           let rebased = false;
@@ -932,6 +966,11 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             if (ancestry.status !== 'diverged') { reject('review-not-current'); continue; }
             superseding = firstSupersedingReview(review, reviews);
             rebased = true;
+          }
+          if (recommitted) {
+            if (!rebased) { reject('rebased-commit-unproven', 'review head did not diverge from the HAM parent'); continue; }
+            if (await attestedReversal(commit, repo, read, prNumber)) commit.reversalAppAttested = true;
+            else if (!superseding) { reject('rebased-commit-unproven', 'missing App attestation or immutable original reversal'); continue; }
           }
           if (rebased && !commit.author?.login) {
             if (!await attestedReversal(commit, repo, read, prNumber)) { reject('commit-provenance'); continue; }
@@ -955,9 +994,11 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            const proof = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber });
+            const proof = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber,
+              matchTrailers: recommitted });
             originalAuthorization = proof.authorization;
-            if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession', proof.detail); continue; }
+            if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested
+              ? 'rebased-commit-unproven' : 'original-reversal-not-proven-before-supersession', proof.detail); continue; }
             if (originalAuthorization.rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
               reject('parent-is-not-reviewed-head-rebase'); continue;
             }

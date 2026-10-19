@@ -2025,7 +2025,7 @@ removed or renamed; restoring the merge-base name does not qualify.
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse and a `hamreversal-v2` identity version to
+compatibility checked on reuse and a `reversalprov-v1` identity version to
 invalidate older proof records, including original-reversal refusals cached before
 context-tolerant, structure-preserving matching. Already-held PRs recompute on
 their next evaluation without head/review movement or a manual cache purge. Live head/base and
@@ -2137,6 +2137,15 @@ added lines must match exactly, including hunk boundaries, context-run boundarie
 and `\ No newline at end of file` markers. Context text, context-run lengths and
 hunk coordinates are ignored only for this original-commit match. Moving an
 addition across a context run or into another hunk refuses the proof.
+REVERSALPROV-01 also admits a linked HAM author with a foreign linked rebase
+committer when exact-SHA App validation verifies, or the immutable original
+HAM commit passes the shared identity predicate and carries the same trailer
+set and reversal patch identity described above. Only this provenance proof
+may ignore a changed commit subject. Without either proof the citation is
+rejected as `rebased-commit-unproven`. A linked foreign author, conflicting
+identity trailers, or unsigned web-flow committer still fails as
+`commit-provenance`; a HAM committer alone cannot establish rebase provenance.
+App validation does not waive the original proof for a superseded citation.
 The reviewed-parent rebase proof retains
 its existing context and hunk checks. The collector verifies original
 HAM identity, citation freshness at its original parent, and the parent's merge
@@ -2159,7 +2168,9 @@ original candidate patches are rejected with candidate diagnostics; the search
 continues through later candidates, and refuses authorization if none is valid.
 The complete detail
 is limited to 1200 characters and the operator summary to 4096 characters,
-including a trailing `...` on truncation. When a HAM head's own exact-head
+including a trailing `...` on truncation. Diagnostic time-budget exhaustion is
+reported before the rejection details so it survives summary truncation. The
+operator diagnostic budget remains 15 seconds. When a HAM head's own exact-head
 self-certification failed
 only on that authorization (`stale-review-head`, `verdict-not-settled-success`
 and `blocking-findings-unknown` are its cascade), the closer marks the

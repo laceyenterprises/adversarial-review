@@ -27,6 +27,112 @@ function withReversalContext(commit, context) {
   })) };
 }
 
+async function recommittedReversal({ attested = false, original = false,
+  transform = (_path, response) => response, ...options } = {}) {
+  return snapshotReversal({
+    ...(original ? {} : { reviews: [review()] }),
+    ...(attested ? { attestationAuthor: 'the-hammer-lacey[bot]' } : {}),
+    ...options,
+    transform: (path, response) => transform(path, path.endsWith(`/commits/${head}`)
+      ? { ...withReversalContext(response, 'new_base'), committer: { login: 'fixture-rebase-worker' } }
+      : path.endsWith(`/commits/${sha('d')}`) ? withReversalContext(response, 'old_base') : response),
+  });
+}
+
+test('REVERSALPROV-01: a worker-rebased HAM reversal accepts exact-head App attestation', async () => {
+  const { evidence, result } = await recommittedReversal({ attested: true });
+  assert.equal(result.ok, true);
+  assert.equal(evidence.reversalAuthorizations[0].commit.reversalAppAttested, true);
+  assert.equal(evidence.reversalAuthorizations[0].rebased, true);
+  for (const attestationHead of [sha('9'), sha('d')]) {
+    const rejected = await recommittedReversal({ attested: true, attestationHead });
+    assert.equal(rejected.result.reason, 'primary-change-reverted');
+    assert.equal(rejected.evidence.rejectedReversalAuthorizations[0].reason, 'rebased-commit-unproven');
+  }
+});
+
+test('REVERSALPROV-01: a worker-rebased HAM reversal keeps its immutable original proof', async () => {
+  const { evidence, result } = await recommittedReversal({ original: true, transform: (path, response) =>
+    path.endsWith(`/commits/${head}`)
+      ? { ...response, commit: { ...response.commit,
+        message: response.commit.message.replace('HAM repair', 'Rebased HAM repair') } }
+      : path.endsWith(`${base}...${head}`)
+        ? { ...response, commits: response.commits.map(commit => commit.sha === head
+          ? { ...commit, commit: { ...commit.commit,
+            message: commit.commit.message.replace('HAM repair', 'Rebased HAM repair') } } : commit) }
+        : response });
+  assert.equal(result.ok, true);
+  assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
+  assert.equal(evidence.reversalAuthorizations[0].commit.reversalAppAttested, undefined);
+  // The evaluator independently binds the original patch and trailer set.
+  const authorization = evidence.reversalAuthorizations[0];
+  authorization.commit.files[0].patch = authorization.commit.files[0].patch.replace('+start()', '+other()');
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+test('REVERSALPROV-01: different removed/added lines, trailers or original identities refuse rebase proof', async () => {
+  for (const options of [
+    { originalAdded: '-different_generated_line()' },
+    { originalLogin: 'fixture-builder' },
+    { transform: (path, response) => path.endsWith(`/commits/${head}`)
+      ? { ...response, files: response.files.map(file => ({ ...file,
+        patch: file.patch.replace('+start()', '+different_generated_line()') })) } : response },
+    { transform: (path, response) => path.endsWith(`/commits/${sha('d')}`)
+      || path.endsWith(`${reviewedHead}...${sha('f')}`)
+      ? JSON.parse(JSON.stringify(response).replaceAll('Worker-Ticket: HAM', 'Worker-Ticket: AMA-PR-8088')) : response },
+  ]) {
+    const { evidence, result } = await recommittedReversal({ original: true, ...options });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'rebased-commit-unproven');
+    assert.match(result.missingEvidence.summary, /rebased-commit-unproven/);
+  }
+  const unproven = await recommittedReversal();
+  assert.equal(unproven.evidence.rejectedReversalAuthorizations[0].reason, 'rebased-commit-unproven');
+});
+
+test('REVERSALPROV-01: App attestation cannot authorize a foreign author or conflicting identity trailers', async () => {
+  for (const shape of [{ author: { login: 'fixture-builder' } }, { author: null },
+    { trailer: 'Worker-Ticket: AMA-PR-8088' }, { trailer: 'Closed-By: fixture-builder' }]) {
+    const { evidence, result } = await recommittedReversal({ attested: true, transform: (path, response) => {
+      const { trailer, ...identity } = shape;
+      if (trailer && path.endsWith(`${base}...${head}`)) return { ...response,
+        commits: response.commits.map(commit => commit.sha === head ? { ...commit,
+          commit: { ...commit.commit, message: `${commit.commit.message}\n${trailer}` } } : commit) };
+      if (!path.endsWith(`/commits/${head}`)) return response;
+      return { ...response, ...identity, ...(trailer ? { commit: { ...response.commit,
+        message: `${response.commit.message}\n${trailer}` } } : {}) };
+    } });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'commit-provenance');
+  }
+});
+
+test('REVERSALPROV-01: synthetic generated README reversal survives a linked worker rebase', async () => {
+  const finding = review({ body: review().body.replace('## Blocking issues', '## Non-blocking issues')
+    .replace('## Non-blocking issues\n- None.\n', '')
+    .replace('## Non-blocking issues\n', '## Non-blocking issues\n- **Unrelated index**\n'
+      + '  - **File:** `other.md`\n  - **Lines:** `1`\n  - **Problem:** Stale index.\n  - **Recommended fix:** Regenerate.\n') });
+  const later = review({ node_id: 'PRR_snapshot', commit_id: sha('f'), state: 'COMMENTED',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const { evidence } = await recommittedReversal({ original: true, reviews: [finding, later],
+    cites: ['PRR_cited finding=2 kind=non-blocking'],
+    transform: (path, response) => {
+      // The regenerated bytes survive in the final head at a different position.
+      if (path.endsWith(`${base}...${head}`)) response = { ...response,
+        files: [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
+          patch: '@@ -45,0 +46,2 @@\n+start_unsafe()\n+log_startup()' }] };
+      return JSON.parse(JSON.stringify(response)
+        .replaceAll('src/a.mjs', 'README.md').replaceAll('start_unsafe()', 'Generated stale declaration')
+        .replaceAll('log_startup()', 'Generated stale index').replaceAll('start()', 'Generated current declaration'));
+    } });
+  assert.equal(evidence.reversalAuthorizations[0].commit.author.login, 'the-hammer-lacey[bot]');
+  assert.equal(evidence.reversalAuthorizations[0].commit.committer.login, 'fixture-rebase-worker');
+  const addedLines = file => file.patch.split('\n').filter(line => line.startsWith('+'));
+  assert.deepEqual(addedLines(evidence.primaryFiles[0]), addedLines(evidence.finalFiles[0]));
+  assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, true);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
 test('a superseded authorized reversal survives changed context and hunk coordinates', async () => {
   for (const originalRebased of [false, true]) {
     const { evidence, result } = await snapshotReversal({

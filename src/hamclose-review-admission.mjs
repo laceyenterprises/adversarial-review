@@ -20,7 +20,7 @@ export function postedReviewCeilingReached({ db, repo, prNumber, ceiling }) {
 
 export { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 
-export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, ceiling, logger = console }) {
+export function routeCappedReviewToClosure({ db, stmtGetReviewRow, repo, prNumber, headSha, row, ceiling, logger = console }) {
   if (!row || ['reviewing', 'malformed', 'failed-orphan'].includes(row.review_status)
     || isExplicitOperatorReviewRetrigger(row) || isOrphanHeadReviewRequested(row, headSha)
     || !postedReviewCeilingReached({ db, repo, prNumber, ceiling })) return false;
@@ -40,7 +40,8 @@ export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, c
       AND rereview_reason IS 'system-review-ceiling-closure')`)
     .run(posted.head_sha, posted.ended_at, repo, prNumber, row.review_status, posted.head_sha, posted.ended_at).changes === 1;
   if (changed) logger.log?.(JSON.stringify({ event: 'review-ceiling-closure-transition', repo, prNumber, headSha, priorStatus: row.review_status, status: 'posted' }));
-  const current = changed ? null : db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
+  const current = changed ? null : (stmtGetReviewRow
+    || db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?')).get(repo, prNumber);
   return changed || (current?.review_status === 'posted'
     && current.rereview_reason === 'system-review-ceiling-closure'
     && current.reviewer_head_sha === posted.head_sha && current.posted_at === posted.ended_at);

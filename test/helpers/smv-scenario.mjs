@@ -239,9 +239,17 @@ if (scenario === 'clean') {
   assert.equal(ceilingLogs.length, 1);
   assert.equal(ceilingDb.prepare('SELECT reviewer_head_sha FROM reviewed_prs WHERE pr_number=?').get(ceilingPr).reviewer_head_sha, base);
   ceilingDb.close();
+  for (const dispatchReason of ['exhausted-final-hammer', 'review-ceiling-terminal-remediation', null]) {
+    for (const reviewCycleExhausted of [true, false]) {
+      const ceilingEligibility = hammerWakeEligibility({ eligible: false,
+        reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason,
+        reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted }, headSha });
+      assert.equal(ceilingEligibility.eligible, true);
+    }
+  }
   const ceilingEligibility = hammerWakeEligibility({ eligible: false,
-    reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason: 'exhausted-final-hammer',
-    reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted: true }, headSha });
+    reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason: null,
+    reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted: false }, headSha });
   assert.equal(requestEligibleHammerWake({ ...identity(), prNumber: ceilingPr,
     eligibility: ceilingEligibility, eligibilityReason: 'review-ceiling-terminal-remediation',
     log: quiet, requestWatcherWakeImpl: () => ({ requested: true }) }).outcome, 'requested');

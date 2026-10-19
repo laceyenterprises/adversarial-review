@@ -980,7 +980,8 @@ after the review ceiling. The old findings remain input to terminal remediation;
 the live head remains unvalidated until the hammer verifies it. Repeated ceiling
 observations do not rewrite/log another transition, and closeout wakes settle as
 `review-ceiling-hammer-owned`. The existing final-round wait pages once if closure
-cannot act. No review round or merge authority is added.
+cannot act. Ceiling wake admission is independent of the legacy exhaustion
+dispatch reason or exhaustion snapshot. No review round or merge authority is added.
 
 <a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
 merges autonomously and the bare remote records that SHA. The synthetic commit
@@ -1014,7 +1015,8 @@ intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
 `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
 Settlement accepts a prompt first populated by that same captured attempt.
 The smoke also verifies a green moved head at the review ceiling wakes terminal
-remediation, keeps the older review identity, and logs only one routing transition.
+remediation independently of the legacy exhaustion reason/snapshot, keeps the older
+review identity, and logs only one routing transition.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
 claim; exhaustion selects operator paging. Disposable halt files return distinct

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewCeilingHandoff": "CEILINGPUSH-01: a moved head at the delivered-review ceiling retains the prior review as terminal hammer input, admits its native wake, and settles remediation-closeout as review-ceiling-hammer-owned. Repeated observations retain ownership without another row write or transition log. Existing final-round waits record refusal and page once after 1800 seconds. No new states, edges, review rounds or merge authority.",
+  "reviewCeilingHandoff": "CEILINGPUSH-01: a moved head at the delivered-review ceiling retains the prior review as terminal hammer input, admits its native wake independently of the legacy exhaustion dispatch reason or exhaustion snapshot, and settles remediation-closeout as review-ceiling-hammer-owned. Repeated observations retain ownership without another row write or transition log. Existing final-round waits record refusal and page once after 1800 seconds. No new states, edges, review rounds or merge authority.",
   "hammerScratchLifetime": "SCRATCHLEAK-01: terminal cleanup retains recorded draining processes and live launch leases; pytest uses one replaceable tmp-tests base under scratch. Startup sweeps reclaim old terminal backlog; cwd-only probe timeouts expire after the idle bound plus twice the existing launch/lease window, requiring readable ps, terminal retry chains and no positive holder. Partial size accounting cannot prevent terminal reclamation. No merge-authority transitions change.",
   "fleetStopGuard": {
     "source": "src/fleet-stop.mjs",

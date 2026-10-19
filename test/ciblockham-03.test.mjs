@@ -149,7 +149,13 @@ test('CEILINGPUSH-01: repeated ceiling observations restore the review once and 
   db.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,started_at,
     ended_at,status,head_sha,body_md) VALUES (?,?,1,'claude','first-pass','2026-01-01','2026-01-01',
     'completed',?,?)`).run(repo, prNumber, reviewed, blockingBody);
-  const logs = [], route = { db, repo, prNumber, headSha: head, ceiling: 1,
+  const stmtGetReviewRow = db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?');
+  const prepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    assert.notEqual(sql, 'SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?', 'reuse the cached row statement');
+    return prepare(sql);
+  };
+  const logs = [], route = { db, stmtGetReviewRow, repo, prNumber, headSha: head, ceiling: 1,
     logger: { log: line => logs.push(JSON.parse(line)) } };
   const original = db.prepare('SELECT * FROM reviewed_prs').get();
   for (const row of [original, original, db.prepare('SELECT * FROM reviewed_prs').get()]) {
@@ -193,15 +199,22 @@ test('CEILINGPUSH-01: same-head and ordinary wakes retain their existing review 
   const eligibility = { eligible: false, reasons: ['verdict-not-eligible', 'stale-head'] };
   const options = { dispatchReason: 'exhausted-final-hammer', reviewCeilingReached: true,
     reviewState: { headSha: reviewed, reviewCycleExhausted: true }, headSha: head };
-  assert.equal(hammerWakeEligibility(eligibility, options).eligible, true);
-  for (const changed of [{ headSha: reviewed }, { reviewCeilingReached: false },
-    { dispatchReason: null }, { reviewState: { ...options.reviewState, remediationPending: true } }]) {
-    assert.equal(hammerWakeEligibility(eligibility, { ...options, ...changed }), eligibility);
+  const ceilingOptions = [options, { ...options, dispatchReason: null },
+    { ...options, dispatchReason: 'review-ceiling-terminal-remediation',
+      reviewState: { headSha: reviewed, reviewCycleExhausted: false } }];
+  for (const input of ceilingOptions) {
+    assert.equal(hammerWakeEligibility(eligibility, input).eligible, true);
+    for (const reason of ['ci-not-green', 'branch-protection-missing-gate', 'label-do-not-merge',
+      'labels-unavailable', 'primary-change-reverted', 'lease-not-held']) {
+      const held = { eligible: false, reasons: [...eligibility.reasons, reason] };
+      assert.equal(hammerWakeEligibility(held, input), held);
+    }
   }
-  for (const reason of ['ci-not-green', 'branch-protection-missing-gate', 'label-do-not-merge',
-    'labels-unavailable', 'primary-change-reverted', 'lease-not-held']) {
-    const held = { eligible: false, reasons: [...eligibility.reasons, reason] };
-    assert.equal(hammerWakeEligibility(held, options), held);
+  for (const changed of [{ headSha: reviewed }, { reviewCeilingReached: false },
+    { reviewCeilingReached: false, dispatchReason: null },
+    { reviewCeilingReached: false, reviewState: { headSha: reviewed, reviewCycleExhausted: false } },
+    { reviewState: { ...options.reviewState, remediationPending: true } }]) {
+    assert.equal(hammerWakeEligibility(eligibility, { ...options, ...changed }), eligibility);
   }
   const record = { headSha: head, reason: 'remediation-closeout', requestedAt: '2026-01-01T00:00:00Z' };
   const row = { review_status: 'posted', rereview_reason: 'system-review-ceiling-closure',

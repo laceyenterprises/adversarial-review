@@ -1432,7 +1432,7 @@ export async function processReviewSubject(entry, ctx) {
         const roundBudget = resolveRoundBudgetForJob({
           linearTicketId, riskClass: ledger.latestRiskClass,
         }, { rootDir: ROOT });
-        cappedClosure = routeCappedReviewToClosure({ db, repo: repoPath,
+        cappedClosure = routeCappedReviewToClosure({ db, stmtGetReviewRow, repo: repoPath,
           prNumber, headSha: subject.headSha, row: existing,
           ceiling: resolveHardReviewCeiling(resolveMaxRemediationRounds({
             roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
@@ -1445,9 +1445,9 @@ export async function processReviewSubject(entry, ctx) {
         try {
           consumeRereviewWakesImpl({ rootDir: ROOT, db, repo: repoPath, prNumber,
             reviewRow: existing, currentHeadSha: subject.headSha,
-            subjectTerminal: Boolean(subject.terminal), log: console });
+            subjectTerminal: Boolean(subject.terminal), log: ctx.log || console });
         } catch (error) {
-          console.warn(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
+          (ctx.warn || console.warn)(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
         }
       }
       const postedReviewHeadMoved =

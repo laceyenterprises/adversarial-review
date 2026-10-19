@@ -918,7 +918,8 @@ and [dispatch records](data-model/ama-closer-dispatches.md) for fields and reten
 CEILINGPUSH-01 routes a moved head at the delivered-review ceiling to terminal
 hammer remediation. The original review head and findings remain evidence;
 the live head remains the remediation target. Native wake admission tolerates
-only the stale-head and stale-verdict merge misses for this route; the merge
+only the stale-head and stale-verdict merge misses for this route, independently
+of the legacy exhaustion dispatch reason or exhaustion snapshot; the merge
 verdict allowlist stays unchanged. An already routed row retains ownership
 without another write or `review-ceiling-closure-transition` event. The posted
 lane settles `remediation-closeout` wakes as `skipped: review-ceiling-hammer-owned`.

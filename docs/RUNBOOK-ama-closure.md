@@ -3483,8 +3483,11 @@ and still uses atomic single-claim acquisition.
 answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
 remain enforced. LEASEDEADPID-01 shares pending/dispatched reclaim predicates
-with closer dispatch: a dead watcher's pending lease or an aged reclaimable
-lease is treated as absent on the next ownership evaluation. Ordinary routing
+with closer dispatch: a dead local watcher's pending lease or an aged reclaimable
+lease is treated as absent on the next ownership evaluation. Local PID probing
+requires `holderHost` to match the current hostname or be absent on a legacy
+lease; foreign-host pending leases rely only on age expiry. Both reclaim
+predicates accept ISO strings or numeric epoch milliseconds for `now`. Ordinary routing
 then selects the owner, including hammer for final comment-only findings in
 strict mode, without an operator step. The decision leaves lease files intact;
 the acquisition path reclaims them. Live pending leases and sticky succeeded

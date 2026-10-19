@@ -96,11 +96,13 @@ export function isAmaCloserPidAlive(pid, processKillImpl = process.kill) {
 export function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
   if (lease?.status !== PENDING) return false;
 
-  const pidAlive = isAmaCloserPidAlive(lease.watcherPid, processKillImpl);
+  // A foreign host's PID cannot be checked against this process table.
+  const isLocalHost = !lease.holderHost || lease.holderHost === hostname();
+  const pidAlive = isLocalHost ? isAmaCloserPidAlive(lease.watcherPid, processKillImpl) : null;
   if (pidAlive === false) return true;
 
   const acquiredAtMs = Date.parse(String(lease.acquiredAt || ''));
-  const nowMs = Date.parse(String(now || new Date().toISOString()));
+  const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
   return Number.isFinite(acquiredAtMs)
     && Number.isFinite(nowMs)
     && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
@@ -116,7 +118,7 @@ export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}
   }
 
   const updatedAtMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
-  const nowMs = Date.parse(String(now || new Date().toISOString()));
+  const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
   return Number.isFinite(updatedAtMs)
     && Number.isFinite(nowMs)
     && nowMs - updatedAtMs >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;

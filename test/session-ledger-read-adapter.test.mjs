@@ -1072,7 +1072,6 @@ test('readActiveDagRunsForPlan filters sqlite rows to the plan and live states',
   assert.deepEqual(result.runs.map((run) => run.run_id), ['dagrun_live', 'dagrun_parked']);
 });
 
-
 test('active DAG reads retry transient failures, stop on permanent errors, and fail closed at cap', () => {
   for (const failure of [
     { status: null, error: { code: 'ETIMEDOUT' } },
@@ -1128,7 +1127,8 @@ test('HAMREFUND-01: PostgreSQL projects failure detail without requiring a new s
     ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
     env: HERMETIC_CONFIG_ENV,
     spawnSyncImpl: (_cmd, _args, options) => {
-      assert.match(options.input, /to_jsonb\(launch_requests\)->>'failure_detail'/);
+      assert.match(options.input, /THEN 'request.failure_detail' ELSE 'NULL::text' END/);
+      assert.doesNotMatch(options.input, /to_jsonb/);
       return { status: 0, stdout: JSON.stringify({ launch_request_id: 'lrq_58bbdea0', status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' }) + '\n', stderr: '' };
     },
   });
@@ -1183,18 +1183,21 @@ test('RETRYCHAIN-01: PostgreSQL requests only the selected retry tree and projec
       assert.ok(args.includes('lrq=synthetic-lrq'));
       assert.ok(args.includes('-q'));
       assert.match(options.input, /^BEGIN READ ONLY;/);
+      assert.match(options.input, /\\endif\nCOMMIT;\n$/);
       assert.doesNotMatch(options.input, /CREATE FUNCTION|SET TRANSACTION|EXCEPTION|ROLLBACK/);
       assert.match(options.input, /pg_input_is_valid/);
-      assert.match(options.input, /WITH RECURSIVE retry_edges AS MATERIALIZED/);
+      assert.match(options.input, /WHERE child.metadata_json ->> 'retryOf' = parent.launch_request_id/);
+      assert.match(options.input, /AND CASE WHEN child.metadata_json IS NULL THEN NULL::boolean ELSE true END/);
+      assert.doesNotMatch(options.input, /MATERIALIZED|to_jsonb/);
       assert.match(options.input, /retry_chain\(launch_request_id\) AS \(\s+SELECT :'lrq'::text/);
       assert.match(options.input, /UNION\s+SELECT child.launch_request_id/);
       assert.doesNotMatch(options.input, /UNION ALL|IS JSON/);
-      assert.match(options.input, /CASE WHEN jsonb_typeof\(child.metadata->'retryOf'\) = 'string'/);
-      assert.match(options.input, /WHERE launch_request_id IN \(SELECT launch_request_id FROM retry_chain\)/);
-      assert.match(options.input, /AND launch_request_id != :'lrq'/);
+      assert.match(options.input, /pg_input_is_valid\(child.metadata_json::text, 'jsonb'\)/);
+      assert.match(options.input, /WHERE request.launch_request_id = chain.launch_request_id/);
+      assert.match(options.input, /WHERE request.launch_request_id != :'lrq'/);
       const projection = options.input.slice(options.input.indexOf('SELECT json_build_object'), options.input.indexOf('\\else'));
       assert.doesNotMatch(projection, /metadata_json/);
-      assert.match(projection, /ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;/);
+      assert.match(projection, /ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;/);
       return { status: 0, stdout: JSON.stringify(leaf) };
     },
   });
@@ -1260,6 +1263,7 @@ for (const failure of [
   { status: 1, stderr: 'synthetic retry query unavailable' },
   { status: null, error: Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }) },
   { status: null, error: Object.assign(new Error('synthetic overflow'), { code: 'ENOBUFS' }) },
+  { status: null, error: Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' }) },
 ]) test(`RETRYCHAIN-01: unreadable PostgreSQL retry traversal retains base status (${failure.error?.code || 'query error'})`, () => {
   let queries = 0;
   const row = { launch_request_id: 'synthetic-lrq', status: 'failed' };
@@ -1273,6 +1277,10 @@ for (const failure of [
   assert.equal(result.ok, true);
   assert.deepEqual(result.row, row);
   assert.equal(result.retryChainUnreadable, true);
+  assert.equal(result.retryChainFailure.reason, 'ledger-read-failed');
+  assert.equal(result.retryChainFailure.detail, failure.error?.code === 'ETIMEDOUT'
+    ? 'psql timed out after 30000ms' : failure.error?.message || failure.stderr);
+  assert.ok(result.retryChainFailure.elapsedMs >= 0);
 });
 
 test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live retry descendants', async t => {
@@ -1287,13 +1295,17 @@ test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live r
     { launch_request_id: 'synthetic-malformed', status: 'failed', metadata_json: '{broken' },
   ];
   let reads = 0;
-  const options = { ledgerTarget: { backend: 'postgres', databaseName: 'synthetic_ledger' },
+  const options = { launchRequestIds: rows.map(row => row.launch_request_id),
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic_ledger' },
     env: HERMETIC_CONFIG_ENV, rootDir: root,
     spawnSyncImpl: (command, _argv, opts) => {
       reads++;
       assert.equal(command, 'psql');
       assert.match(opts.input, /BEGIN READ ONLY;/);
+      assert.match(opts.input, /\\endif\nCOMMIT;\n$/);
       assert.match(opts.input, /FROM launch_requests/);
+      assert.ok(_argv.includes(`launch_ids=${JSON.stringify(options.launchRequestIds)}`));
+      assert.doesNotMatch(opts.input, /synthetic-ended|to_jsonb|MATERIALIZED/);
       return { status: 0, stdout: rows.map(r => JSON.stringify(r)).join('\n') };
     },
   };
@@ -1312,4 +1324,13 @@ test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live r
   }
   assert.deepEqual(launchSnapshot.rows, rows, 'individual reads cannot mutate the shared snapshot');
   assert.equal(reads, 1, 'all terminal and live statuses share the same bounded query');
+});
+
+test('RETRYCHAIN-02: an empty capacity census never requests an unfiltered launch snapshot', async () => {
+  const { readLaunchRequestSnapshotFromLedgerAsync } = await import('../src/session-ledger-read-adapter.mjs');
+  const result = await readLaunchRequestSnapshotFromLedgerAsync({
+    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
+    spawnSyncImpl: () => assert.fail('empty census must not spawn psql'),
+  });
+  assert.deepEqual(result.rows, []);
 });

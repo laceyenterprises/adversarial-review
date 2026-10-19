@@ -87,9 +87,11 @@ const INFRASTRUCTURE_STOP_REASONS = new Set([
   'unrendered-dispatch-phase-script-placeholders',
 ]);
 
-function isInfrastructureStop(stop) {
-  return [stop?.predicate, stop?.reason, ...(stop?.reasons || []),
-    ...(stop?.refusal?.reasons || [])].some(reason => INFRASTRUCTURE_STOP_REASONS.has(reason));
+export function isInfrastructureStop(stop) {
+  const reasons = [...stopReasons(stop), ...(stop?.refusal?.reasons || []),
+    ...[stop?.predicate, stop?.reason].filter(reason =>
+      INFRASTRUCTURE_STOP_REASONS.has(reason) || DETERMINISTIC_STOP_REASONS.has(reason))];
+  return reasons.length > 0 && reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason));
 }
 
 const DETERMINISTIC_STOP_REASONS = new Set([
@@ -119,9 +121,9 @@ function stable(value) {
 }
 
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
-  const reasons = stopReasons(attempt);
-  if (isInfrastructureStop({ ...attempt, reasons })) return null;
-  if (!reasons.length && DETERMINISTIC_STOP_REASONS.has(attempt.reason)) reasons.push(attempt.reason);
+  const reasons = stopReasons(attempt).filter(reason => !INFRASTRUCTURE_STOP_REASONS.has(reason));
+  if (DETERMINISTIC_STOP_REASONS.has(attempt.reason) && !reasons.includes(attempt.reason)) reasons.push(attempt.reason);
+  reasons.sort();
   if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
     || attempt.githubGate?.primaryChangeMissingEvidence || null);
@@ -209,7 +211,8 @@ function isHammerAttempt(attempt, doc) {
  * pushes a new head records its stop on the reviewed head with the new head
  * named in `head`/`currentHead`). Returns the stop only when that latest
  * hammer terminal attempt is a no-merge. A later `deferred` clears legacy
- * opaque stops, but preserves deterministic refusals; `succeeded` clears both.
+ * opaque stops, but preserves deterministic refusals, as do packaging stops.
+ * `succeeded` clears both.
  * Daemon attempts do not set or clear hammer decisions.
  */
 export function readHammerStopForHead({
@@ -254,14 +257,20 @@ export function readHammerStopForHead({
   if (terminal.length === 0) return null;
   terminal.sort((a, b) => (a.at - b.at) || (a.order - b.order));
   let latest = terminal.at(-1);
-  if (!STOP_OUTCOMES.has(latest.outcome)) {
-    // A later wait/read deferral is not new predicate evidence. It cannot
+  if (latest.outcome === 'deferred' || (STOP_OUTCOMES.has(latest.outcome) && isInfrastructureStop(latest.attempt))) {
+    // A later deferral or packaging failure is not new predicate evidence. It cannot
     // erase a deterministic refusal and re-arm dispatch on unchanged inputs.
-    if (latest.outcome !== 'deferred') return null;
-    latest = [...terminal].reverse().find(item => STOP_OUTCOMES.has(item.outcome)
-      && deterministicRefusal(item.attempt, { repo, prNumber, headSha }));
-    if (!latest) return null;
+    let refusal = null;
+    for (const item of [...terminal].reverse()) {
+      if (item.outcome === 'succeeded') break;
+      if (STOP_OUTCOMES.has(item.outcome) && deterministicRefusal(item.attempt, { repo, prNumber, headSha })) {
+        refusal = item;
+        break;
+      }
+    }
+    if (refusal) latest = refusal;
   }
+  if (!STOP_OUTCOMES.has(latest.outcome)) return null;
   const { attempt } = latest;
   return {
     headSha,
@@ -407,21 +416,22 @@ export async function evaluateHammerStopHold({
   // packaging failure cannot release an unrelated refusal. Ordinary gates,
   // leases and retry caps still own re-dispatch; the audit may already be cleared.
   if (isInfrastructureStop(stop) || (!stop && isInfrastructureStop(prior))) {
+    if (prior?.refusal && !prior.releasedAt && !isInfrastructureStop(prior)) {
+      return { action: 'hold', hammerStop: { headSha, predicate: prior.predicate,
+        refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) } };
+    }
     if (!isInfrastructureStop(prior) || prior.releasedAt) return { action: 'none' };
     const changed = ['infrastructure-stop'];
     const entry = { ...prior, releasedAt: now, releasedBy: changed };
-    writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha,
-      heads: { ...state.heads, [headSha]: entry } });
-    return { action: 'release', hammerStop: stop || prior, changed };
+    persist(entry);
+    return stop ? { action: 'release', hammerStop: stop, changed } : { action: 'none' };
   }
   if (!stop) return { action: 'none' };
   // FINALCLOSE-01: transport evidence cannot become an input-change hold. The
   // launched hammer owns a fresh read; ordinary series/lifetime caps own retries.
   if (stop.predicate === 'history-read-failed' && !stop.refusal) {
     const changed = ['history-read-retry'];
-    writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha,
-      heads: { ...state.heads, [headSha]: { stopKey: stop.stopKey, releasedAt: now,
-        releasedBy: changed, paged: false } } });
+    persist({ stopKey: stop.stopKey, releasedAt: now, releasedBy: changed, paged: false });
     return { action: 'release', hammerStop: stop, changed };
   }
 
@@ -560,9 +570,9 @@ export async function evaluateHammerStopHold({
   if (dirty) persist();
   return { action: 'hold', hammerStop: { ...hammerStop, paged: Boolean(entry.pagedAt) || PAGED_IN_PROCESS.has(debounceKey) } };
 
-  function persist() {
+  function persist(holdEntry = entry) {
     try {
-      writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: entry } });
+      writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: holdEntry } });
     } catch (err) {
       logger?.error?.(JSON.stringify({
         event: 'ama_closer.hammer_stop_hold_persist_failed',

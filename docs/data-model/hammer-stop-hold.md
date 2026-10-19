@@ -44,9 +44,17 @@ missing scratch scripts or unrendered dispatch paths, so fresh dispatch can
 repair them without a PR input change. A new stop returns `none` without a
 hold page. Only an unreleased persisted infrastructure hold releases, once, with
 `releasedBy: ['infrastructure-stop']`, without another page, even if the audit
-has since cleared. Packaging failures leave unrelated deterministic holds
-unchanged. Already-released infrastructure holds return `none` without rewriting
-state, whether the packaging audit remains or has cleared.
+has since cleared. Without a current stop this cleanup returns `none`, so it
+does not grant redispatch admission. Packaging failures leave unrelated
+deterministic holds in force: audit selection looks past packaging stops and
+deferrals to the earlier refusal, but never past success. If only packaging
+audit history remains, an unreleased persisted deterministic refusal returns
+`hold` without a state write or another page, including before ownerless recovery.
+Mixed reasons strip packaging reasons from the computed deterministic refusal;
+legacy mixed holds are not released as infrastructure. Already-released
+infrastructure holds return `none` without rewriting state, whether the
+packaging audit remains or has cleared. Release write failures are logged and
+the in-memory decision still applies for that tick.
 Release does not refund attempts; ordinary gates, leases,
 the per-PR retry cap and lifetime ceiling still apply.
 
@@ -77,8 +85,9 @@ the separate [retry-cap refund](hammer-retry-cap.md). Refund write failures
 log a warning and leave charges intact without suppressing the hold release.
 
 The closer reads fresh audit evidence on each tick; the hold file alone cannot
-create a decision. Known current SHA or mergeability readings can release an
-unknown baseline; missing current SHA readings and `UNKNOWN` mergeability
+create a decision without a current stop. A packaging stop retains a persisted
+deterministic refusal as described above. Known current SHA or mergeability
+readings can release an unknown baseline; missing current SHA readings and `UNKNOWN` mergeability
 cannot prove change. Checks use the canonical latest-run and own-status
 exclusion helpers: only matching `StatusContext` entries (or legacy entries
 with `context` and no type) are excluded. A same-name external `CheckRun`

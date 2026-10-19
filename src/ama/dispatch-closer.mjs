@@ -180,6 +180,7 @@ import {
   HAMMER_EVIDENCE_FAILURES,
   HAMMER_GITHUB_READ_FAILURES,
   HAMMER_STOP_HOLD_REASON,
+  isInfrastructureStop,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
 import {
@@ -4763,7 +4764,7 @@ async function maybeDispatchAmaCloserAttempt({
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
-    if (stop?.refusal || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
+    if (stop?.refusal || isInfrastructureStop(stop) || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
       || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,

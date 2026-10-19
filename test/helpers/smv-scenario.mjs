@@ -1,7 +1,7 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import net from 'node:net';
@@ -290,6 +290,34 @@ if (scenario === 'clean') {
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
+  const { amaAuditFilePath, writeAmaAuditEntry } = await import('../../src/ama/audit.mjs');
+  const { evaluateHammerStopHold, readHammerStopForHead } = await import('../../src/ama/hammer-stop-hold.mjs');
+  const holdIdentity = { rootDir, hqRoot: join(rootDir, 'hq'), repo, prNumber: prNumber + 2, headSha };
+  const holdArgs = { ...holdIdentity, logger: quiet,
+    prMetadata: { prNumber: holdIdentity.prNumber, headSha, isOpen: true, isDraft: false,
+      labels: [], mergeableState: 'MERGEABLE', statusCheckRollup: [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }] },
+    reviewState: { headSha, verdict: 'approved', riskClass: 'low', remediationPending: false } };
+  writeAmaAuditEntry({ ...holdIdentity, now: '2026-01-01T00:00:00Z', attempt: {
+    outcome: 'failed-without-merge', reason: 'verdict-not-eligible', head: headSha, attemptPhase: 'hammer-close' } });
+  let refusalPages = 0;
+  assert.equal((await evaluateHammerStopHold({ ...holdArgs,
+    deliverAlertImpl: async () => { refusalPages++; } })).action, 'hold');
+  writeAmaAuditEntry({ ...holdIdentity, now: '2026-01-01T00:01:00Z', attempt: {
+    outcome: 'failed-without-merge', reason: 'missing-dispatch-phase-scripts', head: headSha, attemptPhase: 'hammer-close' } });
+  assert.deepEqual(readHammerStopForHead(holdIdentity).refusal.reasons, ['verdict-not-eligible']);
+  // Even truncated audit history must retain the persisted refusal before recovery.
+  const auditPath = amaAuditFilePath(holdIdentity.hqRoot, repo, holdIdentity.prNumber, headSha);
+  const audit = JSON.parse(readFileSync(auditPath, 'utf8'));
+  audit.attempts = audit.attempts.slice(-1);
+  writeFileSync(auditPath, JSON.stringify(audit));
+  const packagingHold = await maybeDispatchAmaCloser({ ...holdArgs,
+    cfg: { enabled: true, workerClass: 'hammer' }, options: {},
+    dispatchContext: { ...holdIdentity, reviewedSha: headSha, orphanRecovery: { ownerProof: true, headSha } },
+    execFileImpl: refuse, deliverAlertImpl: refuse, readLaunchRequestStatusImpl: refuse });
+  assert.equal(packagingHold.reason, 'hammer-stop-awaiting-input-change');
+  assert.equal(packagingHold.skipMergeAgent, true);
+  assert.equal(packagingHold.hammerStop.paged, true);
+  assert.equal(refusalPages, 1);
   const { runDaemonCleanMergeAttempt } = await import('../../src/daemon-clean-merge.mjs');
   const haltDirectory = join(rootDir, 'hq', 'control', 'halt');
   mkdirSync(haltDirectory, { recursive: true });
@@ -331,7 +359,8 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
+  evidence = { packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
+    fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
     exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');
 console.log(JSON.stringify({ ok: true, ...evidence }));

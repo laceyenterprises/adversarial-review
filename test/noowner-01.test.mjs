@@ -204,8 +204,8 @@ for (const reason of INFRA_REASONS) {
         heads: { [f.identity.headSha]: prior } }));
       const noPage = { deliverAlertImpl: async () => assert.fail('release must not page') };
       const result = await f.evaluate({ ...noPage, ...(auditPresent ? {} : { readAuditImpl: () => null }) });
-      assert.equal(result.action, 'release');
-      assert.deepEqual(result.changed, ['infrastructure-stop']);
+      assert.equal(result.action, auditPresent ? 'release' : 'none');
+      if (auditPresent) assert.deepEqual(result.changed, ['infrastructure-stop']);
       const entry = JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha];
       assert.equal(entry.releasedAt, f.at);
       assert.deepEqual(entry.releasedBy, ['infrastructure-stop']);
@@ -235,10 +235,22 @@ for (const reason of INFRA_REASONS) {
       writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
         now: minutesAfter(f.at, 1), attempt: { outcome: 'failed-without-merge', reason,
           reasons: [reason], head: f.identity.headSha, attemptPhase: 'hammer-close' } });
-      assert.deepEqual(await f.evaluate({ deliverAlertImpl: async () => assert.fail('packaging must not page') }),
-        { action: 'none' });
+      const held = await f.evaluate({ ...deps,
+        deliverAlertImpl: async () => assert.fail('packaging must not page') });
+      assert.equal(held.action, 'hold');
+      assert.equal(held.hammerStop.predicate, predicate);
+      assert.equal(held.hammerStop.paged, true);
       assert.equal(readFileSync(f.statePath, 'utf8'), heldState, 'packaging must not mutate a deterministic hold');
       assert.equal(JSON.parse(heldState).heads[f.identity.headSha].releasedAt, undefined);
+
+      // Also retain the persisted refusal if its older audit is unavailable.
+      const audit = readAmaAuditEntry(f.args.dispatchContext.hqRoot, f.identity.repo,
+        f.identity.prNumber, f.identity.headSha);
+      const onlyPackaging = { attempts: [audit.attempts.at(-1)] };
+      const persisted = await f.evaluate({ ...deps, readAuditImpl: () => onlyPackaging });
+      assert.equal(persisted.action, 'hold');
+      assert.deepEqual(persisted.hammerStop.refusal, held.hammerStop.refusal);
+      assert.equal(readFileSync(f.statePath, 'utf8'), heldState);
     });
   }
 
@@ -282,6 +294,82 @@ test('STOPHOLDINFRA-01 deterministic primary-change-reverted still holds and pag
     assert.equal(result.hammerStop.paged, true);
   }
   assert.equal(alerts.length, 1);
+});
+
+test('STOPHOLDINFRA-01 refusal survives packaging and deferral; success clears the decision', async t => {
+  const f = infrastructureFixture(t, 'verdict-not-eligible');
+  const read = () => readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot });
+  const refusal = read();
+  for (const [index, attempt] of [
+    { outcome: 'failed-without-merge', reason: INFRA_REASONS[0] },
+    { outcome: 'deferred', reason: 'capacity-deferred' },
+    { outcome: 'failed-without-merge', reason: INFRA_REASONS[1] },
+  ].entries()) {
+    writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
+      now: minutesAfter(f.at, index + 1),
+      attempt: { ...attempt, head: f.identity.headSha, attemptPhase: 'hammer-close' } });
+    assert.equal(read().stopKey, refusal.stopKey);
+    assert.deepEqual(read().refusal, refusal.refusal);
+  }
+  writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
+    now: minutesAfter(f.at, 4), attempt: { outcome: 'succeeded',
+      head: f.identity.headSha, attemptPhase: 'hammer-close' } });
+  assert.equal(read(), null);
+  const audit = readAmaAuditEntry(f.args.dispatchContext.hqRoot, f.identity.repo,
+    f.identity.prNumber, f.identity.headSha);
+  const afterSuccess = readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot,
+    readAuditImpl: () => ({ ...audit, attempts: [...audit.attempts,
+      { outcome: 'deferred', reason: 'capacity-deferred', timestamp: minutesAfter(f.at, 5),
+        head: f.identity.headSha, attemptPhase: 'hammer-close' }] }) });
+  assert.equal(afterSuccess, null, 'a deferral must not resurrect a refusal cleared by success');
+});
+
+test('STOPHOLDINFRA-01 mixed packaging reasons retain only the deterministic refusal', async t => {
+  for (const reason of INFRA_REASONS) {
+    const f = infrastructureFixture(t, reason);
+    writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
+      now: minutesAfter(f.at, 1), attempt: { outcome: 'failed-without-merge', reason,
+        reasons: ['primary-change-reverted', reason], head: f.identity.headSha, attemptPhase: 'hammer-close' } });
+    const stop = readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot });
+    assert.deepEqual(stop.refusal.reasons, ['primary-change-reverted']);
+    const alerts = [];
+    const deps = { fetchPrimaryChangeImpl: async () => { throw new Error('unavailable authority'); },
+      deliverAlertImpl: async (...args) => alerts.push(args) };
+    assert.equal((await f.evaluate(deps)).action, 'hold');
+    // A legacy mixed-reason hold must not be retired as infrastructure either.
+    const state = JSON.parse(readFileSync(f.statePath, 'utf8'));
+    state.heads[f.identity.headSha].refusal.reasons.push(reason);
+    writeFileSync(f.statePath, JSON.stringify(state));
+    assert.equal((await f.evaluate(deps)).action, 'hold');
+    assert.equal(JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha].releasedAt, undefined);
+    assert.equal(alerts.length, 1);
+  }
+});
+
+test('STOPHOLDINFRA-01 release write failures are logged without losing the decision', async t => {
+  for (const reason of [INFRA_REASONS[0], 'history-read-failed']) {
+    const f = infrastructureFixture(t, reason);
+    mkdirSync(dirname(f.statePath), { recursive: true });
+    writeFileSync(f.statePath, JSON.stringify({ currentHead: f.identity.headSha,
+      heads: { [f.identity.headSha]: { predicate: reason, firstObservedAt: f.at } } }));
+    const audit = readAmaAuditEntry(f.args.dispatchContext.hqRoot, f.identity.repo,
+      f.identity.prNumber, f.identity.headSha);
+    const errors = [];
+    const result = await f.evaluate({
+      readAuditImpl: () => {
+        // State was read already; force an atomic rename failure at persistence.
+        rmSync(f.statePath, { recursive: true, force: true });
+        mkdirSync(f.statePath);
+        return audit;
+      },
+      logger: { ...SILENT, error: message => errors.push(JSON.parse(message)) },
+      deliverAlertImpl: async () => assert.fail('release must not page'),
+    });
+    assert.equal(result.action, 'release');
+    assert.deepEqual(result.changed, [reason === 'history-read-failed' ? 'history-read-retry' : 'infrastructure-stop']);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].event, 'ama_closer.hammer_stop_hold_persist_failed');
+  }
 });
 
 function minutesAfter(iso, minutes) {

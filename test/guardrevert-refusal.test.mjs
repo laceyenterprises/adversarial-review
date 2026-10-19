@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
-import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { amaAuditFilePath, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
 
@@ -34,9 +34,11 @@ function setup(t) {
   return { args, pages, record, rootDir, prMetadata, reviewState };
 }
 
-test('GUARDREVERT-01: second unchanged wake never dispatches and pages once across all closer routes', async t => {
-  for (const route of [{}, { reviewCycleCapReached: true }, { ciBlockedHammerOwner: true },
-    { orphanRecovery: { ownerProof: true, headSha: head } }]) {
+test('GUARDREVERT-01: packaging after a refusal never dispatches or re-pages across all closer routes', async t => {
+  const routes = [{}, { reviewCycleCapReached: true }, { ciBlockedHammerOwner: true },
+    { orphanRecovery: { ownerProof: true, headSha: head } }];
+  for (const { route, keepRefusalAudit } of routes.flatMap(route =>
+    [true, false].map(keepRefusalAudit => ({ route, keepRefusalAudit })))) {
     const f = setup(t);
     let launches = 0;
     let holdEvaluations = 0;
@@ -59,6 +61,14 @@ test('GUARDREVERT-01: second unchanged wake never dispatches and pages once acro
     assert.deepEqual(first.hammerStop.refusal.missingEvidence, missingEvidence);
     assert.equal(holdEvaluations, 1, 'the pre-route fence evaluates the hold once per tick');
     assert.equal(ownershipProbes, 0, 'a held refusal fences ownership probes');
+    f.record('2026-01-01T00:01:00Z', { reason: 'missing-dispatch-phase-scripts',
+      reasons: ['missing-dispatch-phase-scripts'], eligibilityTrace: null });
+    if (!keepRefusalAudit) {
+      const path = amaAuditFilePath(f.rootDir, repo, 1, head);
+      const doc = JSON.parse(readFileSync(path, 'utf8'));
+      doc.attempts = doc.attempts.slice(-1);
+      writeFileSync(path, JSON.stringify(doc));
+    }
     _resetHammerStopHoldPageDebounceForTests(); // Simulate a watcher restart.
     const second = await invoke();
     assert.equal(second.dispatched, false);

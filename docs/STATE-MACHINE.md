@@ -713,8 +713,16 @@ authority releases the hold through the existing stop-store path.
 STOPHOLDINFRA-01 skips holds and hold pages for missing dispatch phase scripts
 and unrendered phase-script placeholders. Existing infrastructure holds release
 once with `infrastructure-stop`; packaging failures preserve unrelated
-deterministic holds. Released infrastructure holds return `none` without state
-writes on later ticks, with or without audit evidence. Ordinary gates, leases
+deterministic holds in force, including ownerless recovery. Audit selection
+looks past packaging stops and deferrals for the prior refusal, stopping at
+success; persisted refusals also fence packaging-only audit history. Unchanged
+refusals return `hold` without state writes or another page. Stops combining
+packaging and deterministic reasons retain the refusal after packaging reasons
+are stripped. Legacy
+infrastructure cleanup without a current stop returns `none` after marking the
+release, so it cannot widen admission. Released infrastructure holds return
+`none` without state writes on later ticks. Release write failures are logged
+without discarding the current decision. Ordinary gates, leases
 and retry caps still decide re-dispatch, without an attempt refund.
 HAMUNKNOWN-02 also releases GitHub-read stops once fresh metadata shows the
 same open head is MERGEABLE with green external checks, even if the hold's

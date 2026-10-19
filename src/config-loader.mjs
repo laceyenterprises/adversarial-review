@@ -2738,6 +2738,26 @@ function schemaV1() {
                 __pattern: PATTERN_OP_REF,
                 __pattern_description: PATTERN_OP_REF_DESCRIPTION,
               },
+              // Python owns this extensible worker-class map. Mirror its known
+              // entries and preserve fleet-defined classes during strict loads.
+              worker_class_vaults: {
+                __type: TYPE_DICT,
+                __strict: false,
+                __default: {},
+                __keys: Object.fromEntries(['research', 'dream'].map(name => [name, {
+                  __type: TYPE_DICT,
+                  __strict: true,
+                  __keys: {
+                    vault: { __type: TYPE_STRING, __default: null, __nullable: true },
+                    service_account_token_ref: { __type: TYPE_STRING, __default: null, __nullable: true },
+                    shared_vault_optin: {
+                      __type: TYPE_LIST,
+                      __default: [],
+                      __item: { __type: TYPE_STRING },
+                    },
+                  },
+                }])),
+              },
               op_read_cache: {
                 __type: TYPE_DICT,
                 __strict: true,

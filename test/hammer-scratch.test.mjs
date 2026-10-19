@@ -703,7 +703,7 @@ for (const predecessor of [true, false]) {
   });
 }
 
-for (const [leasePresent, failureCode] of [[true, 'ETIMEDOUT'], [false, 'ABORT_ERR']])
+for (const [leasePresent, failureCode] of [[true, 'ETIMEDOUT'], [false, 'ABORT_ERR'], [true, 'malformed-output']])
 test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves ownership (lease=${leasePresent})`, async t => {
   const root = fixture(t);
   const args = dispatchArgs(root);
@@ -717,7 +717,9 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
     includeRetryChain: true, ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
     spawnSyncImpl: () => ++reads % 2 === 1
       ? { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) }
-      : { status: null, error: Object.assign(new Error('The operation was aborted\nDETAIL: synthetic-row-payload'), { code: failureCode }) },
+      : failureCode === 'malformed-output'
+        ? { status: 0, stdout: '{"launch_request_id":"synthetic-row-payload",' }
+        : { status: null, error: Object.assign(new Error('The operation was aborted\nDETAIL: synthetic-row-payload'), { code: failureCode }) },
   });
   const events = [];
   const diagnosticLogger = { ...logger, warn: line => events.push(JSON.parse(line)) };
@@ -730,7 +732,8 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   const diagnostic = events.filter(event => event.event === 'ama_closer.retry_chain_unreadable');
   assert.equal(diagnostic.length, 1);
   assert.equal(diagnostic[0].reason, 'ledger-read-failed');
-  assert.equal(diagnostic[0].detail, failureCode === 'ETIMEDOUT' ? 'psql timed out after 30000ms' : 'The operation was aborted');
+  assert.equal(diagnostic[0].detail, failureCode === 'ETIMEDOUT' ? 'psql timed out after 30000ms'
+    : failureCode === 'malformed-output' ? 'unparseable psql stdout' : 'The operation was aborted');
   assert.ok(diagnostic[0].elapsedMs >= 0);
   assert.equal(Object.hasOwn(diagnostic[0], 'row'), false);
   assert.equal(Object.hasOwn(diagnostic[0], 'target'), false);

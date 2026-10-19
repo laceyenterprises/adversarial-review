@@ -2345,7 +2345,8 @@ function logRetryChainUnreadable(logger, probe, identity) {
   const connection = probe?.target?.dsn;
   const diagnostic = connection ? String(failure.detail || '').replaceAll(connection, '[redacted connection]')
     : String(failure.detail || '');
-  const rawDetail = diagnostic.split(/\r?\n/)[0];
+  const rawDetail = diagnostic.startsWith('unparseable psql stdout:')
+    ? 'unparseable psql stdout' : diagnostic.split(/\r?\n/)[0];
   const detail = rawDetail
     .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, '[redacted connection]')
     .replace(/\b(?:host|hostaddr|port|dbname|user|password|passfile|service)\s*=\s*(?:'[^']*'|[^\s]+)/gi, '[redacted connection]');

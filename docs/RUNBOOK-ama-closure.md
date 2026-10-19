@@ -157,8 +157,8 @@ under the existing ownership rules. The reader preserves base status and
 returns `retryChainFailure` with `reason`, `detail` and `elapsedMs`.
 Closer admission logs one `ama_closer.retry_chain_unreadable` JSON line before
 returning `dispatch-retry-chain-unreadable`; refusal-time ownership failures
-log the same diagnostic. Connection strings, row objects and PostgreSQL
-continuation lines are excluded from that log. SQLite retains
+log the same diagnostic. Connection strings, row objects, malformed-output
+previews and PostgreSQL continuation lines are excluded from that log. SQLite retains
 its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch

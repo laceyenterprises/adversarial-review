@@ -9,9 +9,14 @@ import { readLatestWorkerRunStatusFromLedgerAsync, readLaunchRequestStatusFromLe
 import { isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
+  hammerScratchLeaseHeld,
 } from './dispatch-closer.mjs';
+import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 
-export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export const HAMMER_SCRATCH_MAX_AGE_MS = 4 * AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+// Give an inconclusive cwd probe another complete launch/teardown window.
+export const HAMMER_SCRATCH_PROBE_GRACE_MS = 2 * Math.max(
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, amaCloserPendingLeaseExpiryMs());
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_RETRY_MS = 60 * 1000;
 const PROCESS_CENSUS_TIMEOUT_MS = 15_000;
@@ -55,9 +60,9 @@ export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl =
     execFileImpl('ps', [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command='], {
       encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024,
     }),
-    // Open files and cwd also protect descendants that cleared TMPDIR. Hammer
-    // runs share the watcher's runtime uid; avoid inspecting other users' files.
-    execFileImpl('lsof', ['-nP', '-a', '-u', String(process.getuid()), '-F', 'n'], {
+    // Only cwd is needed to identify descendants that cleared TMPDIR. Selecting
+    // cwd avoids enumerating thousands of test files (and never walks the tree).
+    execFileImpl('lsof', ['-nP', '-a', '-u', String(process.getuid()), '-d', 'cwd', '-F', 'n'], {
       encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024,
     }),
   ]);
@@ -66,12 +71,16 @@ export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl =
   logger.info?.(JSON.stringify({ event: 'ama_closer.scratch_process_census',
     durationMs: Date.now() - startedAt, psBytes: bytes(results[0]), lsofBytes: bytes(results[1]),
     outcome: unreadable ? 'unreadable' : 'ok' }));
-  if (unreadable) {
+  const cwdError = results[1].status === 'rejected' ? results[1].reason : null;
+  const cwdTimedOut = cwdError?.code === 'ETIMEDOUT' || cwdError?.killed === true;
+  if (unreadable && !(cwdTimedOut && results[0].status === 'fulfilled' && results[0].value?.stdout?.trim())) {
     throw new Error('unreadable process census');
   }
   // An unrelated log shipper can hold audit files named after every launch.
   // Keep file names separate: only process arguments/environments prove ID liveness.
-  return { ps: results[0].value.stdout, lsof: results[1].value.stdout };
+  return { ps: results[0].value.stdout,
+    lsof: results[1].status === 'fulfilled' ? results[1].value.stdout : String(cwdError?.stdout || ''),
+    ...(cwdTimedOut ? { cwdTimedOut: true } : {}) };
 }
 
 function readRecords(rootDir, deadline, maxRecordReads, logger) {
@@ -138,12 +147,15 @@ function readRecords(rootDir, deadline, maxRecordReads, logger) {
   return records;
 }
 
-function treeSize(path, deadline) {
+function treeSize(path, deadline, allowPartial = false) {
   let bytes = 0;
   let newestMtimeMs = 0;
   const pending = [path];
   while (pending.length) {
-    if (Date.now() >= deadline) throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
+    if (Date.now() >= deadline) {
+      if (allowPartial) return { bytes, newestMtimeMs, partial: true };
+      throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
+    }
     const current = pending.pop();
     const stat = lstatSync(current);
     bytes += Number.isFinite(stat.blocks) ? stat.blocks * 512 : stat.size;
@@ -153,7 +165,10 @@ function treeSize(path, deadline) {
     try {
       let entry;
       while ((entry = dir.readSync())) {
-        if (Date.now() >= deadline) throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
+        if (Date.now() >= deadline) {
+          if (allowPartial) return { bytes, newestMtimeMs, partial: true };
+          throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
+        }
         pending.push(join(current, entry.name));
       }
     } finally { dir.closeSync(); }
@@ -251,7 +266,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
   const removed = [];
   const kept = { 'live-owner': 0, 'non-terminal': 0, 'process-references-path': 0,
-    'process-references-id': 0, 'too-young': 0 };
+    'process-references-id': 0, 'too-young': 0, 'probe-timeout': 0 };
   let candidates = [];
   let candidateIndex = 0;
   let pauseReason;
@@ -259,14 +274,17 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   let openFiles;
   let censusStartedAt;
   let censusReads = 0;
+  let cwdTimedOut = false;
   async function refreshCensus() {
     censusStartedAt = Date.now();
     censusReads += 1;
     try {
       const snapshot = await settings.readProcessSnapshotImpl({ timeout: PROCESS_CENSUS_TIMEOUT_MS, logger });
       if (typeof snapshot?.ps !== 'string' || !snapshot.ps.trim()
-        || typeof snapshot?.lsof !== 'string' || !snapshot.lsof.trim()) throw new Error('unreadable process census');
+        || typeof snapshot?.lsof !== 'string'
+        || (!snapshot.lsof.trim() && snapshot.cwdTimedOut !== true)) throw new Error('unreadable process census');
       processes = snapshot.ps;
+      cwdTimedOut = snapshot.cwdTimedOut === true;
       openFiles = snapshot.lsof.split(/\r?\n/).filter(line => line.startsWith('n')).map(line => line.slice(1));
     } catch {
       // Executor errors can contain environments or command output. Never log them.
@@ -300,17 +318,24 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       if (!before.isDirectory() || nowMs - before.mtimeMs < maxAgeMs) { kept['too-young'] += 1; continue; }
       const owners = records.filter(({ record }) => typeof record.scratchDir === 'string'
         && resolve(record.scratchDir) === resolve(scratchDir));
-      const size = treeSize(scratchDir, deadline);
-      if (nowMs - size.newestMtimeMs < maxAgeMs) { kept['too-young'] += 1; continue; }
       let keepReason;
       for (const { path, record } of owners) {
         const current = JSON.parse(readFileSync(path, 'utf8'));
         if (JSON.stringify(current) !== JSON.stringify(record)
           || !await isTerminalOwner(current, settings, deadline)) { keepReason = 'non-terminal'; break; }
-        if (await hasLiveWorker(current, settings, deadline)) { keepReason = 'live-owner'; break; }
+        if (hammerScratchLeaseHeld(rootDir, current, { now: new Date(nowMs).toISOString(),
+          processKillImpl: settings.processKillImpl })
+          || await hasLiveWorker(current, settings, deadline)) { keepReason = 'live-owner'; break; }
       }
       if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
       if (keepReason) { kept[keepReason] += 1; continue; }
+      // Terminal ownership, not recursive file mtimes, determines a finished
+      // run's age. Orphans still require a complete idle-tree scan.
+      const terminalAt = Math.max(before.mtimeMs, ...owners.map(({ record }) => {
+        const at = Date.parse(record.lastObservedAt || record.updatedAt || record.dispatchedAt || '');
+        return Number.isFinite(at) ? at : before.mtimeMs;
+      }));
+      if (owners.length && nowMs - terminalAt < maxAgeMs) { kept['too-young'] += 1; continue; }
       // Read once before deletions, then refresh at most once if it ages out.
       // Recheck every path and owner against the current census; an absent
       // dispatch record alone cannot prove a process stopped using TMPDIR.
@@ -321,6 +346,14 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       if (Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
         pauseReason = 'census-expired'; break;
       }
+      // Only a timed-out cwd probe has a bounded escape. A readable ps census,
+      // terminal retry chain, absent worker and unheld lease remain mandatory.
+      // Never age away positive liveness or guess at an unowned directory.
+      if (cwdTimedOut && (!owners.length
+        || nowMs - terminalAt < maxAgeMs + Math.max(HAMMER_SCRATCH_PROBE_GRACE_MS,
+          ...owners.map(({ record }) => 2 * amaCloserPendingLeaseExpiryMs(record.dispatchTimeoutMs))))) {
+        kept['probe-timeout'] += 1; continue;
+      }
       const paths = [...new Set([scratchDir, realpathSync(scratchDir)])];
       if (paths.some(path => processes.includes(path)
         || openFiles.some(file => file === path || file.startsWith(`${path}/`)))) {
@@ -330,6 +363,15 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
         .some(id => id && processes.includes(id)))) { kept['process-references-id'] += 1; continue; }
       if (owners.some(({ path, record }) => JSON.stringify(JSON.parse(readFileSync(path, 'utf8')))
         !== JSON.stringify(record))) { kept['non-terminal'] += 1; continue; }
+      if (owners.some(({ record }) => hammerScratchLeaseHeld(rootDir, record,
+        { now: new Date(nowMs).toISOString(), processKillImpl: settings.processKillImpl }))) {
+        kept['live-owner'] += 1; continue;
+      }
+      // Byte accounting must not starve reclamation of a large terminal tree.
+      // Report a lower bound when its small accounting budget is exhausted.
+      const size = treeSize(scratchDir, owners.length
+        ? Math.min(deadline, Date.now() + 25) : deadline, owners.length > 0);
+      if (!owners.length && nowMs - size.newestMtimeMs < maxAgeMs) { kept['too-young'] += 1; continue; }
       const parentNow = lstatSync(promptDir);
       const current = lstatSync(scratchDir);
       if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
@@ -345,10 +387,18 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
         || parentNow.ino !== parentStat.ino || parentNow.dev !== parentStat.dev
         || current.ino !== before.ino || current.dev !== before.dev
         || current.mtimeMs !== before.mtimeMs) continue;
+      if (owners.some(({ path, record }) => JSON.stringify(JSON.parse(readFileSync(path, 'utf8')))
+        !== JSON.stringify(record))) { kept['non-terminal'] += 1; continue; }
+      if (owners.some(({ record }) => hammerScratchLeaseHeld(rootDir, record,
+        { now: new Date(nowMs).toISOString(), processKillImpl: settings.processKillImpl }))) {
+        kept['live-owner'] += 1; continue;
+      }
       if (cleanupHammerScratchDir({ scratchDir, promptDir }, logger)) {
-        removed.push({ name: entry.name, bytesFreed: size.bytes });
+        removed.push({ name: entry.name, bytesFreed: size.bytes,
+          ...(size.partial ? { bytesFreedIsLowerBound: true } : {}) });
         logger.info?.(JSON.stringify({ event: 'ama_closer.scratch_swept',
-          name: entry.name, bytesFreed: size.bytes, reason: owners.length ? 'terminal' : 'orphan' }));
+          ...removed.at(-1), reason: owners.length ? 'terminal' : 'orphan',
+          ...(cwdTimedOut ? { cwdProbe: 'timed-out-aged-terminal' } : {}) }));
       }
     }
     completed = candidateIndex === candidates.length;

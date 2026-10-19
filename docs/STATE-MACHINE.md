@@ -688,8 +688,10 @@ The watcher runs review on that new SHA before ordinary closure resumes; busy
 bases can therefore produce another rebase/review cycle. Real terminal HAM
 commits with an unlinked author remain accepted by eligibility and reversal
 checks when their linked HAM committer carries the full terminal trailer set.
-Either linked non-HAM identity rejects terminal-remediation certification and
-reversal authorization, even when the trailers are present.
+Either linked non-HAM identity rejects terminal-remediation certification.
+Reversal authorization rejects a linked foreign author; REVERSALPROV-01 permits
+a linked HAM author with a foreign rebase committer only with exact-SHA App
+validation or the matching immutable original HAM reversal proof below.
 Suppression also rejects terminal trailers with either linked foreign identity.
 The remote GitHub probe requires linked closer provenance; an unidentified remote
 commit cannot suppress review. Local Git retains the offline trailer-only
@@ -742,7 +744,11 @@ refusal returns `dispatching` to `dispatched` with reason `dispatch-retry-live`,
 restoring predecessor ownership without consuming an attempt. Prompts are
 unique per attempt; all-terminal chains still permit scratch cleanup. Interrupted
 admission preserves deferred predecessor artifacts for a later completed pass;
-unlaunched attempts remove their own prompt and scratch.
+unlaunched attempts remove their own prompt and scratch. SCRATCHLEAK-01 keeps
+terminal disk cleanup separate from merge authority: recorded draining processes
+and live launch lease holders retain scratch, pytest has one replaceable private
+test tree, and the sweep's cwd timeout expires only for aged terminal owners
+with readable process and retry evidence. No closure transitions change.
 
 LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and
 terminal-worker/lease reconciliation, before dispatch, when latest live
@@ -964,6 +970,12 @@ Key control points:
   the first superseding GitHub review's immutable head. Hunk boundaries,
   context-run boundaries and newline markers must match; context text/counts
   and hunk offsets are ignored only when matching that original reversal commit.
+  REVERSALPROV-01 routes a linked HAM author with a foreign linked rebase
+  committer through exact-SHA App validation or that immutable original proof,
+  binding the same trailer set and reversal patch identity. Without either it
+  reports `rebased-commit-unproven`. Foreign authors, conflicting identity
+  trailers and unsigned web-flow commits remain `commit-provenance` failures.
+  App validation does not waive supersession or finding coverage checks.
   Commit dates cannot prove freshness. A refusal names collector and evaluator
   rejection reasons in its
   `missingEvidence` and a HAM head missing only that authorization gets one

@@ -336,3 +336,93 @@ test('FINALCLOSE-01 a failed page retries even when the head advances during del
   await observeClosureWait({ ...args, headSha: reviewed, pageImpl: async text => pages.push(text) });
   assert.equal(pages.length, 1);
 });
+
+for (const [label, rowHead, settledHead] of [
+  ['matching current head', headSha, headSha],
+  ['matching stale head', reviewed, reviewed],
+  ['mismatched settled head', reviewed, headSha],
+]) {
+  test(`STOPHOLDREVIEW-01 orchestration posting receipt: ${label}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'stopholdreview-caller-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const mismatched = rowHead !== settledHead;
+    if (mismatched) {
+      // A completed current-head job supplies the settled review while the
+      // posted row still carries the previous head's receipt.
+      const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'fixture__repo-pr-41-current.json'), JSON.stringify({ repo, prNumber,
+        status: 'completed', revisionRef: settledHead, completedAt: observed,
+        reviewBody: '## Blocking issues\n- **Current-head defect**\n  - **Problem:** synthetic regression\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' }));
+    }
+    let dispatches = 0, dispatchedReviewState;
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [],
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: rowHead, last_verdict: 'Comment only', posted_at: observed, review_body: body,
+        ...(mismatched ? { rereview_reason: `auto-refresh: posted review on stale head ${rowHead}; current head is ${headSha}` } : {}) },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+      runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
+      maybeDispatchAmaCloserImpl: async args => {
+        dispatches++;
+        dispatchedReviewState = args.reviewState;
+        return { dispatched: true };
+      },
+      logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(dispatches, 1);
+    assert.equal(dispatchedReviewState.headSha, settledHead, 'settled head comes from the review evidence');
+    assert.equal(dispatchedReviewState.postedAt, mismatched ? null : observed,
+      'a receipt cannot be borrowed from another reviewed head');
+  });
+}
+
+test('STOPHOLDREVIEW-01 live bodies wait for the matching SQLite posting receipt', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'stopholdreview-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-41-current.json'), JSON.stringify({ repo, prNumber,
+    status: 'completed', revisionRef: headSha, completedAt: observed, reviewBody: body }));
+  const hqRoot = join(rootDir, 'hq');
+  writeAmaAuditEntry({ hqRoot, repo, prNumber, headSha, now: started,
+    attempt: { outcome: 'failed-without-merge', head: headSha, path: 'hammer',
+      reason: 'exact-head-review-required' } });
+  const reviewStateRow = { repo, pr_number: prNumber, review_status: 'pending', reviewer: 'claude',
+    reviewer_head_sha: headSha, last_verdict: 'Comment only', posted_at: observed, review_body: body,
+    rereview_reason: `auto-refresh: posted review on stale head ${reviewed}; current head is ${headSha}` };
+  let liveReads = 0;
+  const holds = [];
+  const args = { rootDir, repoPath: repo, prNumber, currentRevisionRef: headSha, labelNames: [],
+    reviewStateRow,
+    candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+      mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    fetchLatestHeadReviewBodiesImpl: async () => { liveReads++; return [body]; },
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
+    maybeDispatchAmaCloserImpl: async ({ reviewState, prMetadata }) => {
+      holds.push(await evaluateHammerStopHold({ rootDir, hqRoot, repo, prNumber, headSha,
+        reviewedSha: headSha, reviewState, prMetadata, now: observed,
+        deliverAlertImpl: async () => ({ ok: true }), logger: { warn() {} } }));
+      assert.equal(reviewState.postedAt, reviewStateRow.review_status === 'posted' ? observed : null);
+      return { dispatched: false, reason: 'fixture' };
+    },
+    logger: { log() {}, warn() {} },
+  };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(liveReads, 1, 'the pending-row pass resolved the live review body');
+  assert.equal(holds[0].action, 'hold', 'live bodies alone cannot prove the review postdates the stop');
+  reviewStateRow.review_status = 'posted';
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(liveReads, 2);
+  assert.equal(holds[1].action, 'release', 'a later pass observes the reconciled receipt');
+  assert.deepEqual(holds[1].changed, ['review']);
+});

@@ -1005,14 +1005,41 @@ export function createHammerScratchDir(promptDir) {
   return scratchDir;
 }
 
-export function cleanupHammerScratchDir(record, logger = console) {
+export function hammerScratchEnvironment(scratchDir, env = process.env) {
+  // pytest parses PYTEST_ADDOPTS with shlex, so quote paths containing spaces.
+  // A fixed basetemp is replaced on each invocation, retaining one test tree.
+  return { ...env, TMPDIR: scratchDir,
+    PYTEST_ADDOPTS: [env.PYTEST_ADDOPTS, `--basetemp=${JSON.stringify(join(scratchDir, 'tmp-tests'))}`,
+      '-o tmp_path_retention_count=1'].filter(Boolean).join(' ') };
+}
+
+export function hammerScratchLeaseHeld(rootDir, record, options = {}) {
+  if (!rootDir || !record?.repo || !record.headSha) return false;
+  const lease = readAmaCloserDispatchLease(rootDir, record);
+  if (!lease) return false;
+  if (lease.status === AMA_CLOSER_LEASE_STATUS.PENDING) {
+    return !isReclaimablePendingAmaCloserLease(lease, options);
+  }
+  // A terminal launch can retain its own merge-authority lease (HAMTMP-05).
+  // A different launch's live lease must never authorize predecessor removal.
+  return lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+    && lease.lrqId !== record.launchRequestId
+    && !isReclaimableDispatchedAmaCloserLease(lease, options);
+}
+
+export function cleanupHammerScratchDir(record, logger = console, options = {}) {
   const scratchDir = record?.scratchDir;
   // Records from before HAMTMP-01 have no directory. Restrict removal to the
   // exact child namespace we create; never follow a record outside prompt state.
   if (!scratchDir || !record.promptDir
     || dirname(resolve(scratchDir)) !== resolve(record.promptDir)
     || !basename(scratchDir).startsWith('hammer-scratch-')) return false;
+  // Cancellation can settle a run before its subprocess finishes draining.
+  // Retry later rather than unlink files under a recorded live process.
+  const pid = record.pid ?? record.worker_process_pid;
+  if (pid != null && isPidAlive(pid, options.processKillImpl) !== false) return false;
   try {
+    if (hammerScratchLeaseHeld(options.rootDir, record, options)) return false;
     rmSync(scratchDir, { recursive: true, force: true });
     return true;
   }
@@ -1048,14 +1075,15 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
   'succeeded', 'completed', 'failed', 'failed-without-merge', 'superseded',
   'cancelled', 'canceled', 'terminal', 'not-found', 'unverified-terminal-success',
   'operator_triage_required', 'reaped_stuck_requested', 'pr-closed-externally',
-  'no-merge:pr-closed-externally',
+  'no-merge', 'pr-merged-externally', 'no-merge:pr-closed-externally',
 ]);
 
 export function isTerminalHammerScratchRecord(record) {
   if (!record || record.state === 'dispatching') return false;
   return record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
     || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
-      .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value)));
+      .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value))
+        || normalizeWorkerRunStatus(value).startsWith('no-merge:'));
 }
 
 async function cleanupHammerCloserWorker({
@@ -2198,7 +2226,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
       terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
     }, null, 2)}\n`);
-    (options.cleanupScratchImpl || cleanupHammerScratchDir)(current, options.log || options.logger);
+    (options.cleanupScratchImpl || cleanupHammerScratchDir)(current, options.log || options.logger,
+      { ...options, rootDir });
     logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
       repo: record.repo, prNumber: record.prNumber, launchRequestId: record.launchRequestId,
       terminalStatus, backend: probe.target?.backend || options.ledgerTarget?.backend || null,
@@ -2642,7 +2671,7 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
   if (next.state !== 'dispatching'
     && (existing?.state !== 'dispatching' || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
-    cleanupScratchImpl(next);
+    cleanupScratchImpl(next, undefined, { rootDir });
   }
   return next;
 }
@@ -4615,7 +4644,8 @@ export async function maybeDispatchAmaCloser(args) {
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
       cleanupScratchImpl: (record, logger) => {
         if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(targetPrNumber)) {
-          cleanupHammerScratchDir(record, logger);
+          cleanupHammerScratchDir(record, logger, { rootDir: dispatchContext?.rootDir,
+            processKillImpl: args.processKillImpl });
         } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
     });
@@ -4627,7 +4657,8 @@ export async function maybeDispatchAmaCloser(args) {
     for (const { record, logger } of admissionCompleted ? pendingCleanup.values() : []) {
       const predecessor = record.repo === targetRepo
         && Number(record.prNumber) === Number(targetPrNumber);
-      if (!preservePredecessor || !predecessor) cleanupHammerScratchDir(record, logger);
+      if (!preservePredecessor || !predecessor) cleanupHammerScratchDir(record, logger,
+        { rootDir: dispatchContext?.rootDir, processKillImpl: args.processKillImpl });
     }
   }
 }
@@ -7592,8 +7623,8 @@ async function maybeDispatchAmaCloserAttempt({
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
-  const dispatchEnv = { ...withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs),
-    TMPDIR: scratchDir };
+  const dispatchEnv = hammerScratchEnvironment(scratchDir,
+    withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs));
   const promoteLaunchedLease = parsed => {
     try {
       updateAmaCloserLease({ rootDir, ...leaseIdentity,

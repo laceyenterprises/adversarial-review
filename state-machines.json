@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "hammerScratchLifetime": "SCRATCHLEAK-01: terminal cleanup retains recorded draining processes and live launch leases; pytest uses one replaceable tmp-tests base under scratch. Startup sweeps reclaim old terminal backlog; cwd-only probe timeouts expire after the idle bound plus twice the existing launch/lease window, requiring readable ps, terminal retry chains and no positive holder. Partial size accounting cannot prevent terminal reclamation. No merge-authority transitions change.",
   "fleetStopGuard": {
     "source": "src/fleet-stop.mjs",
     "consumers": ["src/ama-closure-orchestration.mjs", "src/daemon-clean-merge.mjs", "bin/ama-check.mjs"],
@@ -278,7 +279,7 @@
     "src/ama-closure-orchestration.mjs": "8df2a587d74b481e6a0764f1a9ce8d8b3b79d81721aab7bb1f946ee975563529",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "9e392ed7be1df283394292f3177d7f38836e0f475ab1ae22ea980b2278702de9",
+    "src/ama/dispatch-closer.mjs": "adf0130c0fe0a08ac3de7c6128a9930ed8fe3095b6f452b783dc814e46bf3515",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",

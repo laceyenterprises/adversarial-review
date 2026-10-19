@@ -195,6 +195,13 @@ scan budget. Large terminal trees have only a 25ms byte-accounting budget: parti
 accounting does not prevent deletion, and `bytesFreedIsLowerBound: true` marks
 that measurement. Directory removal itself may take longer than the scan budget.
 
+SCRATCHLEAK-02 orders candidates by directory mtime, oldest first, with name as
+the tie-breaker. An atomic candidate cursor resumes after the last examined
+ordering key, even when that directory was kept or has since disappeared.
+Each pass visits at most one lap, wrapping to the oldest remaining key after
+the newest. A full lap with no removals retains its position. Budget, removal-cap
+and census pauses preserve completed candidate progress across watcher restarts.
+
 The in-use probe runs `ps -Eww` on Darwin (`ps eww` on Linux) for process
 arguments and environments, plus `lsof -nP -a -u <runtime-uid> -d cwd -F n` for
 working directories. It never uses `lsof +D` or enumerates open test files.
@@ -226,6 +233,8 @@ and terminal/orphan reason. Every pass emits `ama_closer.scratch_sweep_summary`
 with `removed`, `remainingCandidates`, `deferredCandidates`, `completed` and
 first-match protection counts: `too-young`, `non-terminal`, `live-owner`,
 `process-references-path`, `process-references-id` and `probe-timeout`.
+`deferredCandidates` includes ledger-timeout candidates already visited in this
+pass; `remainingCandidates` counts entries not yet visited in its rotated lap.
 `ama_closer.scratch_process_census` logs command duration, byte counts and
 readability only. Budget, removal-cap and expired-census pauses emit
 `ama_closer.scratch_sweep_paused`; already completed deletions remain complete.
@@ -237,6 +246,20 @@ forces a cold scan. Source device, inode, size, modification and change time are
 validated on every pass; no deletion precedes a complete current record census.
 Unreadable or changed ownership preserves scratch, and dispatch evidence is
 never pruned. Scratch and parent symlinks are never followed.
+The independent scheduling checkpoint is
+`data/follow-up-jobs/hammer-scratch-candidate-cursor.json` (see the
+[scratch sweep data model](data-model/hammer-scratch-sweep.md)). Missing,
+invalid or unreadable cursor state restarts oldest first; cursor state never
+authorizes deletion. Checkpoint write failures warn without adding a merge gate.
+
+Launch/retry and worker ledger probes each have a separate 10-second timeout by
+default. Callers of `sweepHammerScratchDirs` may set `ledgerTimeoutMs` to override
+both the probe deadline and abort timer (for example, for offline timeout tests).
+Their elapsed time is added back to the scan deadline, as for the process census.
+A timed-out probe retains that candidate, increments `deferredCandidates` and
+advances past it, allowing independent candidates to proceed. An async timeout
+aborts the probe; a late synchronous result is also discarded. No timeout is
+interpreted as terminal ownership or an absent worker.
 
 For legacy owners without a surviving launch row, the sweep falls back to live
 PR state. A failed PR lookup preserves that owner's scratch and continues with
@@ -245,13 +268,15 @@ by closer dispatch use the current observation time, rather than the original
 dispatch timestamp, for `lastObservedAt`.
 Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'s
 `now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
-while retaining the scan deadline on each subprocess call.
+while retaining the independent ledger deadline on each subprocess call.
 
 After deployment, SRE confirms that the watcher restarted. The initial pass
 and minute-spaced continuation passes should reclaim the old terminal backlog
 without manual deletion. Confirm `scratch_swept` and summary progress, with only
 live, protected or recent scratch remaining; the reported incident backlog
-should shrink by roughly 13 GB. A timeout on an already aged terminal run must
+should show `removed > 0` within two passes, fall from more than 120 directories
+to a handful of young/live trees within about a day, and shrink by roughly
+13 GB. A timeout on an already aged terminal run must
 produce bounded reclamation rather than endless deferral. Check that size stays
 roughly flat over a day of hammer runs. These are post-deploy acceptance checks;
 the offline tests do not inspect or remove live state.

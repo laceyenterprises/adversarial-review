@@ -766,7 +766,11 @@ unlaunched attempts remove their own prompt and scratch. SCRATCHLEAK-01 keeps
 terminal disk cleanup separate from merge authority: recorded draining processes
 and live launch lease holders retain scratch, pytest has one replaceable private
 test tree, and the sweep's cwd timeout expires only for aged terminal owners
-with readable process and retry evidence. No closure transitions change.
+with readable process and retry evidence. SCRATCHLEAK-02 adds a durable
+oldest-first candidate cursor across passes and restarts, including kept trees
+and full zero-removal laps. Ledger probe elapsed time is excluded from the
+scan budget; a timed-out probe retains its tree and advances the cursor.
+No closure transitions change.
 
 LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and
 terminal-worker/lease reconciliation, before dispatch, when latest live

@@ -376,6 +376,17 @@ test('hammer stop reader uses attempt provenance with an explicit legacy compati
   }] }), null, 'a later hammer defer clears the stop');
 });
 
+test('hammer stop reader ignores unpopulated audit attempts', () => {
+  const read = doc => readHammerStopForHead({
+    hqRoot: '/fixture', repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+    readAuditImpl: () => doc,
+  });
+  assert.equal(read({ attempts: [null, undefined, {}], appendedRecords: [null, undefined] }), null);
+  const stop = read({ attempts: [null, { outcome: 'failed-without-merge', reason: 'ci-not-green' }, undefined] });
+  assert.equal(stop.predicate, 'ci-not-green');
+  assert.deepEqual(stop.inputEvidence, { inputs: {} });
+});
+
 test('daemon failure followed by capacity deferral does not hold the first repair hammer on the next dirty tick', async (t) => {
   const rootDir = tmpRoot(t, 'noowner-daemon-fallback-');
   writeAmaAuditEntry({
@@ -1064,7 +1075,10 @@ function reviewStopFixture(t, predicate = 'exact-head-review-required', attempt 
 
 for (const predicate of ['exact-head-review-required', 'stale-review-head']) {
   test(`STOPHOLDREVIEW-01 ${predicate}: stop T0, review T1, first observation T2 releases without a page`, async t => {
-    const f = reviewStopFixture(t, predicate);
+    const f = reviewStopFixture(t, predicate, { eligibilityTrace: { trace: {
+      headMatch: { current: REVIEW_STOP_HEAD, reviewed: REVIEW_STOP_HEAD },
+      verdict: { normalized: 'comment-only', nonBlockingFindings: { state: 'present', count: 16 } },
+    } } });
     const result = await f.evaluate();
     assert.equal(result.action, 'release');
     assert.deepEqual(result.changed, ['review']);
@@ -1112,7 +1126,6 @@ test('STOPHOLDREVIEW-01 a post-stop review at first observation does not satisfy
 for (const [dimension, attempt] of [
   ['base', { rebasedOntoBase: 'c'.repeat(40) }],
   ['mergeability', { githubGate: { mergeable: 'CONFLICTING' } }],
-  ['review', { eligibilityTrace: { trace: { verdict: { normalized: 'request-changes' } } } }],
 ]) {
   test(`STOPHOLDREVIEW-01 terminal audit ${dimension} reading wins over first observation`, async t => {
     const f = reviewStopFixture(t, 'ci-not-green', attempt);
@@ -1120,6 +1133,28 @@ for (const [dimension, attempt] of [
     assert.equal(result.action, 'release');
     assert.deepEqual(result.changed, [dimension]);
     assert.equal(f.alerts.length, 0);
+  });
+}
+
+for (const predicate of ['ci-not-green', 'exact-head-review-required', 'stale-review-head']) {
+  test(`STOPHOLDREVIEW-01 ${predicate}: unchanged review with eligibility trace remains held and pages once`, async t => {
+    const f = reviewStopFixture(t, predicate, { eligibilityTrace: { trace: {
+      headMatch: { current: REVIEW_STOP_HEAD, reviewed: REVIEW_STOP_HEAD },
+      verdict: { normalized: 'request-changes', remediationPending: false,
+        originalBlockingFindings: { state: 'absent', count: 0 },
+        nonBlockingFindings: { state: 'present', count: 16 } },
+    } } });
+    const review = { ...f.args.reviewState, verdict: 'Request changes',
+      blockingFindingCount: 0, postedAt: '2025-12-31T23:59:00Z' };
+    for (let i = 0; i < 2; i++) assert.equal((await f.evaluate(review)).action, 'hold');
+    assert.equal(f.alerts.length, 1);
+    const held = JSON.parse(readFileSync(join(f.rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold',
+      'fixture-review-stop-pr-42.json'), 'utf8')).heads[REVIEW_STOP_HEAD];
+    assert.equal(held.inputs.review, hammerStopInputs(f.args.prMetadata, { reviewState: review }).review);
+    const result = await f.evaluate({ ...review, nonBlockingFindingCount: 15 });
+    assert.equal(result.action, 'release', 'a real change in canonical review evidence still releases');
+    assert.deepEqual(result.changed, ['review']);
+    assert.equal(f.alerts.length, 1);
   });
 }
 

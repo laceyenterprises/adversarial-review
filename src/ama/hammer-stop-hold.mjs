@@ -277,34 +277,21 @@ export function readHammerStopForHead({
 // Only compare readings actually present in the terminal attempt. In particular,
 // checksConclusion/badChecks cannot reconstruct the full external check rollup.
 function recordedStopInputs(attempt) {
-  const trace = attempt.eligibilityTrace?.trace;
+  const trace = attempt?.eligibilityTrace?.trace;
   const inputs = {};
-  const head = attempt.githubGate?.liveHead || trace?.headMatch?.current;
+  const head = attempt?.githubGate?.liveHead || trace?.headMatch?.current;
   if (head) inputs.headSha = head;
-  if (attempt.rebasedOntoBase) inputs.baseSha = attempt.rebasedOntoBase;
-  const mergeability = String(attempt.githubGate?.mergeable || trace?.mergeability?.mergeableState || '').trim().toUpperCase();
+  if (attempt?.rebasedOntoBase) inputs.baseSha = attempt.rebasedOntoBase;
+  const mergeability = String(attempt?.githubGate?.mergeable || trace?.mergeability?.mergeableState || '').trim().toUpperCase();
   if (mergeability) inputs.mergeability = ['MERGEABLE', 'CONFLICTING'].includes(mergeability) ? mergeability : null;
-  const review = {};
-  if (trace?.headMatch?.reviewed) review.headSha = trace.headMatch.reviewed;
-  const verdict = trace?.verdict;
-  if (typeof verdict?.normalized === 'string') review.verdict = verdict.normalized;
-  if (typeof verdict?.remediationPending === 'boolean') review.remediationPending = verdict.remediationPending;
-  for (const [field, evidence] of [['blocking', verdict?.originalBlockingFindings || verdict?.blockingFindings],
-    ['nonBlocking', verdict?.nonBlockingFindings]]) {
-    if (!evidence) continue;
-    if (typeof evidence.state === 'string') review[`${field}FindingState`] = evidence.state;
-    if (Number.isFinite(evidence.count)) review[`${field}FindingCount`] = evidence.count;
-  }
-  return { inputs, review };
+  // Eligibility traces normalize verdicts and summarize findings differently
+  // from closer reviewState. They cannot reconstruct its canonical fingerprint.
+  // Review-required stops instead use the exact-head posting receipt below.
+  return { inputs };
 }
 
 function stopBaseline(stop, fallback) {
-  const { inputs, review } = stop.inputEvidence;
-  let observedReview;
-  try { observedReview = JSON.parse(fallback.review || 'null'); } catch { /* Legacy/unreadable fingerprint. */ }
-  return { ...fallback, ...inputs,
-    ...(Object.keys(review).length
-      ? { review: JSON.stringify(stable({ ...observedReview, ...review })) } : {}) };
+  return { ...fallback, ...stop.inputEvidence.inputs };
 }
 
 function checkName(item) {

@@ -1693,6 +1693,11 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   terminal attempt, including before the first hold observation. It records
   `review` and sends no hold page when already satisfied. Findings still route
   to a remediating hammer under ordinary strict policy, leases and retry caps.
+  Review fingerprints use only closer observations or prior-release inputs;
+  normalized eligibility-trace verdicts and finding summaries cannot replace
+  them. An unchanged review therefore retains the hold and pages once, even
+  when the terminal audit contains an eligibility trace. The posting-time
+  release applies only to those two review-required predicates.
   HAMUNKNOWN-02 re-evaluates GitHub-read predicates (`github-gate-not-green`,
   `pr-mergeability-unknown`) on every pass: fresh green checks and MERGEABLE
   mergeability on the same open head release with `github-gate-cleared`, even

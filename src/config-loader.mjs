@@ -19,6 +19,8 @@
 //      refuses to compute a sibling and skips Layer 4 for that file; the
 //      Python sibling appends `.local` literally (producing odd siblings
 //      like `config.conf.local`).
+//   4. Worker-class vault token refs: this loader applies PATTERN_OP_REF;
+//      the Python sibling currently checks only the nullable string type.
 // LOADER-CONTRACT.md should land these as the canonical contract on the
 // agent-os side so the divergences narrow back to zero.
 
@@ -294,6 +296,25 @@ function buildRoleFallbackEnvAliases() {
 }
 
 function schemaV1() {
+  const workerClassVaultSchema = {
+    __type: TYPE_DICT,
+    __strict: true,
+    __keys: {
+      vault: { __type: TYPE_STRING, __default: null, __nullable: true },
+      service_account_token_ref: {
+        __type: TYPE_STRING,
+        __default: null,
+        __nullable: true,
+        __pattern: PATTERN_OP_REF,
+        __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+      },
+      shared_vault_optin: {
+        __type: TYPE_LIST,
+        __default: [],
+        __item: { __type: TYPE_STRING },
+      },
+    },
+  };
   return {
     __type: TYPE_DICT,
     __strict: true,
@@ -2738,25 +2759,14 @@ function schemaV1() {
                 __pattern: PATTERN_OP_REF,
                 __pattern_description: PATTERN_OP_REF_DESCRIPTION,
               },
-              // Python owns this extensible worker-class map. Mirror its known
-              // entries and preserve fleet-defined classes during strict loads.
+              // Python owns this extensible worker-class map. Known and fleet
+              // entries share validation and post-merge leaf defaults.
               worker_class_vaults: {
                 __type: TYPE_DICT,
                 __strict: false,
                 __default: {},
-                __keys: Object.fromEntries(['research', 'dream'].map(name => [name, {
-                  __type: TYPE_DICT,
-                  __strict: true,
-                  __keys: {
-                    vault: { __type: TYPE_STRING, __default: null, __nullable: true },
-                    service_account_token_ref: { __type: TYPE_STRING, __default: null, __nullable: true },
-                    shared_vault_optin: {
-                      __type: TYPE_LIST,
-                      __default: [],
-                      __item: { __type: TYPE_STRING },
-                    },
-                  },
-                }])),
+                __keys: Object.fromEntries(['research', 'dream'].map(name => [name, workerClassVaultSchema])),
+                __extra_keys_schema: workerClassVaultSchema,
               },
               op_read_cache: {
                 __type: TYPE_DICT,

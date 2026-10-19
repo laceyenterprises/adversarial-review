@@ -632,9 +632,10 @@
         "src/ama/operator-hold-refund.mjs"
       ],
       "owner": "AMA closer retry admission",
+      "infrastructureRelease": "Only all-infrastructure holds retire with infrastructure-stop; cleanup without a current stop returns none. Packaging stops and deferrals preserve earlier deterministic refusals until success; packaging-only audit history reasserts an unreleased persisted refusal without writing or paging when inputs are unchanged, including ownerless recovery; changed inputs record release and the new baseline. Closer preflight evaluates cleanup without audit history. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain the deterministic refusal with packaging reasons stripped. Released infrastructure holds return none without rewriting state. Release write failures log and preserve the in-memory decision.",
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
       "baseline": "Comparable terminal audit head/base/mergeability readings, with mergeability trimmed and uppercased as for live metadata; other inputs, including the canonical closer review fingerprint, come from first observation or prior release, never synthetic eligibility-trace review fields. Review-required predicates additionally accept exact-head posted_at strictly after the terminal timestamp, including before first observation; this receipt requires a matching local posted row, so live bodies alone cannot provide posting-time release before SQLite reconciliation",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop"]
     },
     {
       "id": "ama-closer-leases",

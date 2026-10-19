@@ -31,10 +31,36 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`; comparable terminal audit head/base/mergeability readings take precedence, with first-observation or prior-release inputs filling unrecorded dimensions. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical closer review evidence fingerprint described below, never reconstructed from an eligibility trace. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02). |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02), `infrastructure-stop` (STOPHOLDINFRA-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
+
+STOPHOLDINFRA-01 excludes dispatch packaging failures from deterministic
+refusals and holds: `missing-dispatch-phase-scripts`,
+`unrendered-dispatch-phase-scripts` and
+`unrendered-dispatch-phase-script-placeholders`. These predicates describe
+missing scratch scripts or unrendered dispatch paths, so fresh dispatch can
+repair them without a PR input change. A new stop returns `none` without a
+hold page. Only an unreleased persisted infrastructure hold releases, once, with
+`releasedBy: ['infrastructure-stop']`, without another page, even if the audit
+has since cleared. Without a current stop this cleanup returns `none`, so it
+does not grant redispatch admission. Packaging failures leave unrelated
+deterministic holds in force: audit selection looks past packaging stops and
+deferrals to the earlier refusal, but never past success. If only packaging
+audit history remains, an unreleased persisted deterministic refusal returns
+`hold` without a state write or another page when inputs are unchanged, including
+before ownerless recovery. Changed base, mergeability, checks or review inputs
+release that refusal with `releasedAt`, `releasedBy` and `releasedInputs`.
+Closer preflight evaluates cleanup even when audit history is absent. Unknown
+or transient predicates prevent classification as a pure infrastructure stop.
+Mixed reasons strip packaging reasons from the computed deterministic refusal;
+legacy mixed holds are not released as infrastructure. Already-released
+infrastructure holds return `none` without rewriting state, whether the
+packaging audit remains or has cleared. Release write failures are logged and
+the in-memory decision still applies for that tick.
+Release does not refund attempts; ordinary gates, leases,
+the per-PR retry cap and lifetime ceiling still apply.
 
 HAMUNKNOWN-02 re-evaluates `github-gate-not-green` and
 `pr-mergeability-unknown` stops against each closer pass's fresh PR metadata.
@@ -63,8 +89,9 @@ the separate [retry-cap refund](hammer-retry-cap.md). Refund write failures
 log a warning and leave charges intact without suppressing the hold release.
 
 The closer reads fresh audit evidence on each tick; the hold file alone cannot
-create a decision. Known current SHA or mergeability readings can release an
-unknown baseline; missing current SHA readings and `UNKNOWN` mergeability
+create a decision without a current stop. A packaging stop retains a persisted
+deterministic refusal as described above. Known current SHA or mergeability
+readings can release an unknown baseline; missing current SHA readings and `UNKNOWN` mergeability
 cannot prove change. Checks use the canonical latest-run and own-status
 exclusion helpers: only matching `StatusContext` entries (or legacy entries
 with `context` and no type) are excluded. A same-name external `CheckRun`

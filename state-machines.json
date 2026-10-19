@@ -10,6 +10,13 @@
     "observability": "Unreadable state retains the hold, logs its path class and error code, and pages through deliverAlert once per distinct root/path-class/error-code cause per process lifetime. Readability recovery logs only for the state root that recovered; deliberate stops never page from this evaluator.",
     "lifecycleChange": "No new persisted lifecycle states or transitions"
   },
+  "hammerStopGuard": {
+    "source": "src/ama/hammer-stop-hold.mjs",
+    "consumer": "src/ama/dispatch-closer.mjs",
+    "authority": "Packaging stops and deferrals retain earlier deterministic refusals until success. Packaging-only audit history reasserts an unreleased persisted refusal before every route, including ownerless recovery, without state writes or another page when inputs are unchanged; changed inputs release and record the new baseline.",
+    "recovery": "All-infrastructure holds release once; closer preflight evaluates cleanup without audit history, returning none without a current stop so it cannot widen admission. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain deterministic refusal reasons. Release write failures log and preserve the current decision.",
+    "lifecycleChange": "Existing refusal fence restored; no new dispatch statuses or lifecycle edges"
+  },
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",
   "knownDeadEnds": [
     {"state": "closer-lease.pending", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},

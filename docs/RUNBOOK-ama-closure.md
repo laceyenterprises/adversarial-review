@@ -1736,8 +1736,26 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   `lastRunAt` anchors it across skips and restarts; wake priority and the idle
   starvation floor respect the interval. FINALCLOSE-01 releases
   `history-read-failed` immediately for capped retry rather than installing an
-  evidence hold or a separate ten-minute page. Other predicates retain their
-  holds and page rules. Released stops return to ordinary backoff.
+  evidence hold or a separate ten-minute page. STOPHOLDINFRA-01 excludes
+  missing dispatch phase scripts and unrendered phase-script placeholders from
+  holds and hold pages. Existing holds for those infrastructure predicates
+  release once with `infrastructure-stop` on the next evaluation; fresh dispatch
+  renders scripts again. Packaging failures preserve unrelated deterministic
+  holds in force: audit selection looks past packaging stops and deferrals to
+  the earlier refusal (but not past success). The pre-route fence also checks
+  packaging stops against persisted refusals, including ownerless recovery.
+  Unchanged refusals return `hold` without rewriting state or paging again.
+  With packaging-only audit history, changed base, mergeability, checks or review
+  inputs release the persisted refusal and record the new input baseline. Unknown
+  or transient predicates prevent classification as a pure packaging stop.
+  Preflight evaluates legacy cleanup even when no audit stop remains.
+  Stops combining packaging and deterministic reasons retain the refusal after
+  stripping packaging reasons. Without a current stop, legacy infrastructure state is marked released
+  but returns `none`, so cleanup cannot widen admission. Released infrastructure
+  holds return `none` without writing state on later ticks. Release write failures
+  are logged and retain the in-memory decision for that tick. No attempts are
+  refunded, so ordinary gates, leases and retry caps continue to bound recovery.
+  Other predicates retain their holds and page rules. Released stops return to ordinary backoff.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence
   stops on the live head; an older head's no-merge does not terminate ownership

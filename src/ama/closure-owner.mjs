@@ -1,7 +1,8 @@
 import { checkPrimaryChange } from './primary-change.mjs';
 import { isDaemonMergeReviewAllowed } from './daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
-import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS } from './closer-lease.mjs';
+import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  isReclaimablePendingAmaCloserLease, isReclaimableDispatchedAmaCloserLease } from './closer-lease.mjs';
 import { ciBlockedHammerReasonsCovered } from './review-cycle-cap-route.mjs';
 
 export const CLOSURE_OWNER_WAIT_MS = 30_000;
@@ -14,7 +15,7 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
   waitExhausted = false, primaryChange = null, reviewCeilingReached = false,
   diffEmpty = false, followUpJob = null, strictMode = true, strictNonBlockingRemediation = true,
-  ciBlockedHammerOwner = false } = {}) {
+  ciBlockedHammerOwner = false, now = null, processKillImpl = process.kill } = {}) {
   const action = (owner, reason, extra = {}) => ({ owner, reason, ...extra });
   if (diffEmpty) return action('close', 'empty-diff');
   if (primaryChange) {
@@ -24,6 +25,9 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
       return waitExhausted ? action('page', primary.reason) : action('wait', primary.reason, { boundedMs: CLOSURE_OWNER_WAIT_MS, retryAfterMs: CLOSURE_OWNER_WAIT_MS });
     }
   }
+  // Reclaimability is shared with dispatch; only acquisition mutates the lease.
+  if (isReclaimablePendingAmaCloserLease(lease, { now, processKillImpl })
+    || isReclaimableDispatchedAmaCloserLease(lease, { now })) lease = null;
   if (lease && ['pending', 'dispatched'].includes(lease.status)) {
     return waitExhausted
       ? action('page', 'in-flight-lease-expired')

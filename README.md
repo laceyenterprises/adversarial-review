@@ -856,6 +856,16 @@ status. Its initial/final node is an evaluation boundary. Lease removal is not
 permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
+
+LEASEDEADPID-01: ownership ignores pending leases whose watcher is dead or whose
+pending reclaim window expired, using the same predicates as closer dispatch.
+Dispatched leases retain their existing age/outcome rule, including sticky
+success. Live pending leases still wait and page at the existing bound.
+The next evaluation routes a reclaimable lease through ordinary arbitration;
+the acquisition path owns reclamation. The offline `ci-blocked` smoke verifies
+dead-watcher final comment findings route to hammer, live watchers wait, and
+ownership evaluation leaves the lease intact. No operator action is needed.
+
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.

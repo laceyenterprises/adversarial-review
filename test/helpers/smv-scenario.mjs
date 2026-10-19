@@ -285,6 +285,16 @@ if (scenario === 'clean') {
   assert.equal(requestEligibleHammerWake({ ...identity(), prNumber: ceilingPr,
     eligibility: ceilingEligibility, eligibilityReason: 'review-ceiling-terminal-remediation',
     log: quiet, requestWatcherWakeImpl: () => ({ requested: true }) }).outcome, 'requested');
+  const pendingIdentity = { ...identity(), headSha: base };
+  const pendingLease = acquireAmaCloserLease({ ...pendingIdentity, watcherPid: 4242 }).lease;
+  const closureInput = { currentHead: base, lease: pendingLease, roundsLeft: false,
+    reviewState: { verdict: 'comment-only', headSha: base, blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1, remediationPending: false } };
+  assert.equal(decideClosureOwner({ ...closureInput, processKillImpl() {} }).reason, 'in-flight:4242');
+  assert.equal(decideClosureOwner({ ...closureInput, waitExhausted: true, processKillImpl() {
+    throw Object.assign(new Error('synthetic dead watcher'), { code: 'ESRCH' });
+  } }).owner, 'hammer');
+  assert.deepEqual(readAmaCloserLease(rootDir, pendingIdentity), pendingLease);
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {
     const admission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
@@ -349,6 +359,7 @@ if (scenario === 'clean') {
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
+    deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };

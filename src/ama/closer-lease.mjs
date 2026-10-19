@@ -80,6 +80,48 @@ const AMA_CLOSER_LAUNCH_OVERHEAD_MS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS
 export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 600_000 * AMA_CLOSER_LAUNCH_ATTEMPTS + AMA_CLOSER_LAUNCH_OVERHEAD_MS;
 export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 
+export function isAmaCloserPidAlive(pid, processKillImpl = process.kill) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
+  try {
+    processKillImpl(numericPid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return true;
+  }
+}
+
+export function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
+  if (lease?.status !== PENDING) return false;
+
+  const pidAlive = isAmaCloserPidAlive(lease.watcherPid, processKillImpl);
+  if (pidAlive === false) return true;
+
+  const acquiredAtMs = Date.parse(String(lease.acquiredAt || ''));
+  const nowMs = Date.parse(String(now || new Date().toISOString()));
+  return Number.isFinite(acquiredAtMs)
+    && Number.isFinite(nowMs)
+    && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+}
+
+export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}) {
+  if (lease?.status !== DISPATCHED) return false;
+  // Success stays sticky; other recorded outcomes retain the existing age
+  // bound and the separate hammer retry/lifetime limits.
+  const terminalOutcome = lease.terminalOutcome ?? null;
+  if (terminalOutcome !== null && !AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(terminalOutcome)) {
+    return false;
+  }
+
+  const updatedAtMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
+  const nowMs = Date.parse(String(now || new Date().toISOString()));
+  return Number.isFinite(updatedAtMs)
+    && Number.isFinite(nowMs)
+    && nowMs - updatedAtMs >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+}
+
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
   const launchWindowMs = Number(dispatchTimeoutMs);
   return Number.isFinite(launchWindowMs) && launchWindowMs > 0

@@ -1,3 +1,4 @@
+import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import test from 'node:test';
@@ -7,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { amaCloserDispatchFilePath, createHammerScratchDir } from '../src/ama/dispatch-closer.mjs';
 import { createHammerScratchSweepTicker, HAMMER_SCRATCH_MAX_AGE_MS,
-  HAMMER_SCRATCH_SWEEP_INTERVAL_MS, readHammerScratchProcessSnapshot, sweepHammerScratchDirs } from '../src/ama/hammer-scratch-sweep.mjs';
+  HAMMER_SCRATCH_SWEEP_INTERVAL_MS, HAMMER_SCRATCH_PROBE_GRACE_MS, readHammerScratchProcessSnapshot, sweepHammerScratchDirs } from '../src/ama/hammer-scratch-sweep.mjs';
 
 const nowMs = Date.parse('2026-10-16T12:00:00Z');
 const old = new Date(nowMs - HAMMER_SCRATCH_MAX_AGE_MS - 60_000);
@@ -32,7 +33,7 @@ for (const platform of ['darwin', 'linux']) {
     assert.match(snapshot.lsof, /n\/fixture\/open-file/);
     assert.deepEqual(calls[0].args, [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command=']);
     assert.equal(calls[1].command, 'lsof');
-    assert.deepEqual(calls[1].args, ['-nP', '-a', '-u', String(process.getuid()), '-F', 'n']);
+    assert.deepEqual(calls[1].args, ['-nP', '-a', '-u', String(process.getuid()), '-d', 'cwd', '-F', 'n']);
     assert.ok(calls.every(call => call.options.timeout === 1234 && call.options.maxBuffer > 0));
     await assert.rejects(readHammerScratchProcessSnapshot({ timeout: 1234,
       execFileImpl: async command => {
@@ -153,7 +154,7 @@ test('SCRATCHCENSUS-02: summary counts each kept candidate by its first protecti
   assert.equal(removed.length, 1);
   const summary = sweepSummary(f);
   assert.deepEqual(summary.kept, { 'live-owner': 1, 'non-terminal': 1,
-    'process-references-path': 1, 'process-references-id': 1, 'too-young': 2 });
+    'process-references-path': 1, 'process-references-id': 1, 'too-young': 2, 'probe-timeout': 0 });
   assert.equal(summary.removed, 1);
   assert.equal(summary.remainingCandidates, 0);
   assert.equal(summary.completed, true);
@@ -898,3 +899,72 @@ for (const status of ['requested', 'failed']) {
     assert.equal(existsSync(scratch), status === 'requested', JSON.stringify(result));
   });
 }
+
+function timedOutCwd(args) {
+  return readHammerScratchProcessSnapshot({ ...args, execFileImpl: async command => {
+    if (command === 'lsof') throw Object.assign(new Error('synthetic-secret-timeout'), { killed: true });
+    return { stdout: '123 synthetic-idle-process' };
+  } });
+}
+
+test('SCRATCHLEAK-01: timed-out cwd probe retries then reclaims an aged terminal run even after restart', async t => {
+  const f = fixture(t);
+  const scratch = f.scratch();
+  f.record(scratch);
+  const options = { ...f.options, readProcessSnapshotImpl: timedOutCwd };
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, options), []);
+  assert.equal(existsSync(scratch), true);
+  const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+  const removed = await restartedSweep(f.root, { ...options,
+    nowMs: nowMs + HAMMER_SCRATCH_PROBE_GRACE_MS });
+  assert.equal(removed.length, 1);
+  assert.equal(existsSync(scratch), false);
+  assert.ok(f.logs.some(line => line.includes('timed-out-aged-terminal')));
+  assert.ok(f.logs.every(line => !line.includes('synthetic-secret')));
+});
+
+for (const hold of ['worker', 'retry', 'pending-lease', 'different-launch-lease', 'cwd', 'ps', 'orphan']) {
+  test(`SCRATCHLEAK-01: timeout age escape still protects ${hold}`, async t => {
+    const f = fixture(t);
+    const scratch = f.scratch();
+    if (hold !== 'orphan') f.record(scratch);
+    const late = nowMs + HAMMER_SCRATCH_PROBE_GRACE_MS;
+    if (hold.includes('lease')) {
+      acquireAmaCloserLease({ rootDir: f.root, ...identity, watcherPid: 12345,
+        now: new Date(late).toISOString(), host: 'synthetic-host' });
+      if (hold === 'different-launch-lease') updateAmaCloserLease({ rootDir: f.root, ...identity,
+        status: 'dispatched', lrqId: 'synthetic-other-launch', now: new Date(late).toISOString() });
+    }
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, nowMs: late,
+      processKillImpl: hold === 'pending-lease' ? () => {} : f.options.processKillImpl,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: hold === 'retry' ? 'requested' : 'succeeded' } }),
+      readWorkerStatusImpl: () => ({ ok: true, row: { status: hold === 'worker' ? 'running' : 'succeeded' } }),
+      readProcessSnapshotImpl: args => readHammerScratchProcessSnapshot({ ...args,
+        execFileImpl: async command => {
+          if (command === 'lsof') throw Object.assign(new Error('synthetic timeout'), {
+            code: 'ETIMEDOUT', stdout: hold === 'cwd' ? `p123\nn${scratch}/tmp-tests` : '',
+          });
+          return { stdout: hold === 'ps' ? `123 synthetic-hammer TMPDIR=${scratch}` : '123 synthetic-idle-process' };
+        } }),
+    });
+    assert.deepEqual(removed, []);
+    assert.equal(existsSync(scratch), true);
+  });
+}
+
+test('SCRATCHLEAK-01: terminal tree accounting cannot exhaust the deletion budget', async t => {
+  const f = fixture(t);
+  const scratch = f.scratch();
+  f.record(scratch);
+  const nested = join(scratch, 'pytest-of-synthetic');
+  mkdirSync(nested);
+  // Recent nested mtimes do not extend a terminal run indefinitely.
+  for (let n = 0; n < 100; n += 1) writeFileSync(join(nested, `fixture-${n}`), 'synthetic');
+  utimesSync(scratch, old, old);
+  let clock = 1000;
+  t.mock.method(Date, 'now', () => clock++);
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 1000 });
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0].bytesFreedIsLowerBound, true);
+  assert.equal(existsSync(scratch), false);
+});

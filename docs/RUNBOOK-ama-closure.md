@@ -164,73 +164,75 @@ its scratch; launched and ambiguous-launch prompts remain available.
 After deployment, verify that a fleet-retried hammer following a spawn timeout
 can source its phase helpers and produces no missing-phase-script no-merge note.
 
-At watcher startup, a sweep reclaims terminal or orphan directories whose entire
-tree has been idle for at least two hours. Until one full sweep completes, the
-first poll at least a minute after the previous attempt retries it; subsequent
-sweeps run hourly. Overlapping passes are suppressed. A pass removes at most 64
-directories and has a 10-second scan budget, with no production record-count cap.
-Process census time is excluded from that scan budget: parallel `ps` and `lsof`
-commands each have their own fixed 15-second timeout. The census is read once,
-just before the first eligible deletion, and refreshed only if 30 seconds have
-elapsed since that read started. At most two censuses run per pass; if the
-second ages out, remaining candidates wait for another pass. With the default
-10-second scan budget and a census completing within its 15-second timeout,
-the pass ends before the 30-second freshness limit; refresh and `census-expired`
-are safeguards for extended `scanBudgetMs` callers or scheduling/filesystem
-delays, not expected stages of every production pass. If the first census ages
-out during final path and ownership checks, the sweep reads its second census
-and repeats all checks for that candidate, including owner and live-worker
-validation. The census keeps process command lines and environments (`ps`)
-separate from open-file and working-directory names (`lsof`). Before each
-deletion, the candidate's distinct lexical and real paths are checked against both
-sources. Both LF and CRLF census line endings are accepted; an open-file name
-must equal one of those paths or begin with that
-path followed by `/`. Launch-request and worker IDs are checked only against
-`ps`. An unrelated process holding an audit file named after a launch or worker
-does not keep terminal scratch alive. A process retaining an ID in its arguments
-or environment, TMPDIR in scratch, or a cwd or open file inside scratch still
-protects it. The existing owner, worker and directory identity checks still apply.
+SCRATCHLEAK-01: the hammer environment keeps `TMPDIR` inside scratch and appends
+`--basetemp="<scratch>/tmp-tests" -o tmp_path_retention_count=1` to
+`PYTEST_ADDOPTS`. Existing options are preserved before these enforced options.
+Pytest replaces that base on each invocation, so one test tree remains per run;
+terminal scratch removal removes it too. Concurrent pytest invocations within
+one hammer must use distinct explicit base directories inside scratch.
 
-`ama_closer.scratch_process_census` records duration, UTF-8 byte counts for each
-command and whether the census was readable. Census contents and subprocess
-error output are never logged because they may contain credentials. A genuinely
-unreadable census still defers deletion. Scan-budget exhaustion instead emits
-`ama_closer.scratch_sweep_paused` with the number removed and remaining
-candidates; completed deletions are retained. The same progress event reports
-the removal cap or an expired second census. Remaining candidates count the
-unprocessed directory list, including any current candidate interrupted by the
-budget; directories created after enumeration wait for the next pass.
+Terminal writer and reconciliation cleanup preserve a recorded live process,
+including a process draining after cancellation. A live pending launch lease or
+a different launch's unreclaimable dispatched lease also preserves scratch.
+A terminal launch's own merge-authority lease may remain for PR reconciliation;
+that lease alone is not evidence of a live worker (HAMTMP-05). These disk checks
+never grant merge authority or change lease state. Existing deferred predecessor
+cleanup and transitive retry-chain protection remain in force.
 
-Every pass also emits one `ama_closer.scratch_sweep_summary`, including empty,
-paused and deferred passes. Its `kept` object counts the first applicable
-protection for each evaluated candidate: `too-young` for a directory or nested
-file younger than the idle bound, `non-terminal` for a nonterminal or changed
-owner, `live-owner` for live or unreadable worker evidence,
-`process-references-path` for a path in `ps` or a matching `lsof` path, and
-`process-references-id` for an owner ID in `ps`. Age is checked before ownership,
-then ownership before process paths and IDs, so a candidate contributes at most
-one reason. The summary includes `removed`, `remainingCandidates` and
-`completed`; `deferredCandidates` counts evaluated candidates that could not be
-removed because final filesystem identity checks or cleanup failed. Census
-contents, owner IDs and open-file names are absent from the summary.
+At watcher startup, the sweep reclaims terminal directories after the two-hour
+bound (four existing 30-minute dispatched-lease windows). Age uses the latest of
+the scratch directory mtime and its owners' terminal observation timestamps,
+falling back to update/dispatch time for legacy records. Nested file mtimes do
+not extend a terminal run. Orphans still require the entire tree to be idle for
+two hours. Until one full sweep completes, the first poll at least a minute
+after the previous attempt retries it; subsequent sweeps run hourly. Overlapping
+passes are suppressed. Each pass removes at most 64 directories with a 10-second
+scan budget. Large terminal trees have only a 25ms byte-accounting budget: partial
+accounting does not prevent deletion, and `bytesFreedIsLowerBound: true` marks
+that measurement. Directory removal itself may take longer than the scan budget.
 
-A metadata-validated index reuses unchanged historical dispatch records. Partial
-progress is atomically checkpointed to
-`data/follow-up-jobs/hammer-scratch-record-index.json`, including on a deferred
-pass, so deploy restarts cannot repeatedly discard the indexed prefix. The
-checkpoint is disposable: missing or invalid cache data forces a cold scan.
-Each pass verifies every source record's device, inode, size, modification time
-and change time before reusing an entry. No scratch is removed until the complete
-current metadata census fits within the budget; unreadable or changed evidence
-still defers the pass. Record age never excludes an owner, and matching owners
-are re-read before deletion. Dispatch evidence is never pruned.
-The sweep preserves nonterminal records, live worker PIDs, process references in arguments
-or environments, and open files or working directories. `ps` and `lsof` must be
-available to the watcher (`ps -Eww` on Darwin, `ps eww` on Linux, to include
-environments); unavailable process evidence, unreadable worker
-evidence or corrupt dispatch records preserve scratch rather than imply an
-absent owner. Directory symlinks are never followed. Each removal emits one
-`ama_closer.scratch_swept` line with the scratch name and allocated `bytesFreed`.
+The in-use probe runs `ps -Eww` on Darwin (`ps eww` on Linux) for process
+arguments and environments, plus `lsof -nP -a -u <runtime-uid> -d cwd -F n` for
+working directories. It never uses `lsof +D` or enumerates open test files.
+Recorded PIDs, current launch/retry and worker ledger state, and launch leases
+are checked separately. Paths are matched against both lexical and real paths;
+cwd paths must equal scratch or begin with scratch followed by `/`. Launch and
+worker IDs are checked only in `ps`, so unrelated audit filenames cannot hold
+finished runs. Both LF and CRLF cwd output are accepted. Census output and child
+error text are never logged because process environments may contain secrets.
+
+The two census commands run in parallel, each bounded to 15 seconds, outside
+the scan budget. A pass shares one census, refreshes after 30 seconds and never
+reads more than two censuses. If the second expires, remaining candidates wait
+for the next pass. Final checks repeat after a refresh and preserve changed
+owner records, replaced directories and newly held leases.
+
+A cwd timeout is retried on a later sweep for recent terminal runs. After an
+additional grace of twice the larger launch-admission or dispatched-lease window
+(about 61 minutes by default, extended by a record's existing dispatch timeout),
+it cannot defer a terminal directory forever. That escape still requires readable
+`ps`, a terminal launch and retry chain, absent recorded worker processes, and no
+live lease or path/ID reference. Positive cwd evidence returned before a timeout
+also protects the run. Orphans, unreadable `ps`, other census errors, unreadable
+worker/launch evidence and incomplete retry chains never use this escape.
+A timeout-based removal logs `cwdProbe: timed-out-aged-terminal`.
+
+Every removal emits `ama_closer.scratch_swept` with name, allocated bytes counted
+and terminal/orphan reason. Every pass emits `ama_closer.scratch_sweep_summary`
+with `removed`, `remainingCandidates`, `deferredCandidates`, `completed` and
+first-match protection counts: `too-young`, `non-terminal`, `live-owner`,
+`process-references-path`, `process-references-id` and `probe-timeout`.
+`ama_closer.scratch_process_census` logs command duration, byte counts and
+readability only. Budget, removal-cap and expired-census pauses emit
+`ama_closer.scratch_sweep_paused`; already completed deletions remain complete.
+
+A metadata-validated record index reuses unchanged history and atomically
+checkpoints partial progress to
+`data/follow-up-jobs/hammer-scratch-record-index.json`. Missing or invalid cache
+forces a cold scan. Source device, inode, size, modification and change time are
+validated on every pass; no deletion precedes a complete current record census.
+Unreadable or changed ownership preserves scratch, and dispatch evidence is
+never pruned. Scratch and parent symlinks are never followed.
 
 For legacy owners without a surviving launch row, the sweep falls back to live
 PR state. A failed PR lookup preserves that owner's scratch and continues with
@@ -241,13 +243,14 @@ Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'
 `now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
 while retaining the scan deadline on each subprocess call.
 
-After deployment, SRE confirms that the watcher restarted. Within a few sweeps,
-`removed` should be above zero and the total `hammer-scratch-*` size should
-fall below 1 GB, except directories with a live process inside them. No
-directory older than the maximum age should remain unless a live process holds
-it. Verify that no `deferred: unreadable process census` lines appear while
-`ps` and `lsof` work, then check that size remains roughly flat over a day of
-hammer runs. No manual cleanup of live runs is required.
+After deployment, SRE confirms that the watcher restarted. The initial pass
+and minute-spaced continuation passes should reclaim the old terminal backlog
+without manual deletion. Confirm `scratch_swept` and summary progress, with only
+live, protected or recent scratch remaining; the reported incident backlog
+should shrink by roughly 13 GB. A timeout on an already aged terminal run must
+produce bounded reclamation rather than endless deferral. Check that size stays
+roughly flat over a day of hammer runs. These are post-deploy acceptance checks;
+the offline tests do not inspect or remove live state.
 
 Merge execution evidence (OPSEV1-03) is appended under
 `$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge

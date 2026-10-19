@@ -51,7 +51,7 @@
     },
     {
       "id": "handoff",
-      "description": "Terminal no-merge lease/capacity release and wake re-arm; armed auto-merge retains ownership inside the 30-minute lease window and releases at expiry; unreadable fresh launches reserve capacity.",
+      "description": "Terminal scratch cleanup preserves a draining recorded process and removes its private pytest tree after exit; aged terminal cwd-timeout recovery; terminal no-merge lease/capacity release and wake re-arm; armed auto-merge retains ownership inside the 30-minute lease window and releases at expiry; unreadable fresh launches reserve capacity.",
       "promise": "smv-handoff",
       "edges": [
         "review-row.10",

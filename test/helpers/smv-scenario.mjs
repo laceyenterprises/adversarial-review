@@ -1,9 +1,9 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import net from 'node:net';
 import { syncBuiltinESMExports } from 'node:module';
 net.Socket.prototype.connect = () => { throw new Error('SMV network boundary refused'); };
@@ -184,7 +184,41 @@ if (scenario === 'clean') {
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }), log: quiet,
   });
   assert.equal(unreadableActive.find(row => row.launchRequestId === 'synthetic-unreadable').holdsCapacity, true);
-  evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  const { createHammerScratchDir, cleanupHammerScratchDir, hammerScratchEnvironment,
+    amaCloserDispatchFilePath } = await import('../../src/ama/dispatch-closer.mjs');
+  const { sweepHammerScratchDirs, HAMMER_SCRATCH_MAX_AGE_MS,
+    HAMMER_SCRATCH_PROBE_GRACE_MS } = await import('../../src/ama/hammer-scratch-sweep.mjs');
+  const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+  const scratchDir = createHammerScratchDir(promptDir);
+  const tempEnv = hammerScratchEnvironment(scratchDir, {});
+  assert.equal(tempEnv.TMPDIR, scratchDir);
+  assert.equal(tempEnv.PYTEST_ADDOPTS,
+    `--basetemp=${JSON.stringify(join(scratchDir, 'tmp-tests'))} -o tmp_path_retention_count=1`);
+  mkdirSync(join(scratchDir, 'tmp-tests'));
+  const scratchRecord = { scratchDir, promptDir, pid: 12345 };
+  assert.equal(cleanupHammerScratchDir(scratchRecord, quiet, { processKillImpl: () => {} }), false);
+  assert.equal(existsSync(scratchDir), true);
+  assert.equal(cleanupHammerScratchDir(scratchRecord, quiet, { processKillImpl: () => {
+    throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' });
+  } }), true);
+  assert.equal(existsSync(join(scratchDir, 'tmp-tests')), false);
+  const staleScratch = createHammerScratchDir(promptDir);
+  const scratchNow = Date.now();
+  const scratchOld = new Date(scratchNow - HAMMER_SCRATCH_MAX_AGE_MS - HAMMER_SCRATCH_PROBE_GRACE_MS - 60_000);
+  utimesSync(staleScratch, scratchOld, scratchOld);
+  const scratchOwner = amaCloserDispatchFilePath(rootDir, { repo, prNumber: 987, headSha: 'synthetic-scratch-head' });
+  mkdirSync(dirname(scratchOwner), { recursive: true });
+  writeFileSync(scratchOwner, JSON.stringify({ repo, prNumber: 987, headSha: 'synthetic-scratch-head',
+    scratchDir: staleScratch, promptDir, state: 'launch-terminal', lastObservedStatus: 'succeeded' }));
+  const scratchOptions = { logger: quiet,
+    readProcessSnapshotImpl: () => ({ ps: '123 synthetic-idle-process', lsof: '', cwdTimedOut: true }),
+    readWorkerStatusImpl: refuse, readLaunchRequestStatusImpl: refuse, readPullRequestStateImpl: refuse };
+  assert.equal((await sweepHammerScratchDirs(rootDir, { ...scratchOptions,
+    nowMs: scratchNow - HAMMER_SCRATCH_PROBE_GRACE_MS })).length, 0);
+  assert.equal(existsSync(staleScratch), true);
+  assert.equal((await sweepHammerScratchDirs(rootDir, { ...scratchOptions, nowMs: scratchNow })).length, 1);
+  assert.equal(existsSync(staleScratch), false);
+  evidence = { hammers, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };

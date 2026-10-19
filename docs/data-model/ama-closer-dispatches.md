@@ -46,6 +46,10 @@ then `prMetadata.repo`, then top-level `repo`) and PR number (`dispatchContext.p
 then `prMetadata.prNumber`, then top-level `prNumber`). Unlaunched attempts remove their
 own unique prompt and scratch; launched prompts remain retained evidence. The
 scratch sweep applies the same launch-chain rule over terminal owner records.
+SCRATCHLEAK-01 changes scratch lifetime without adding dispatch fields: terminal
+cleanup retains recorded live PIDs and launch lease holders, and the sweep uses
+existing observation/update/dispatch timestamps plus directory age for bounded
+cwd-timeout recovery. No timeout ages away a positive holder or live retry.
 Historical terminal records are probed only to discover live descendants;
 missing or unreadable probes preserve their stronger evidence without poisoning
 other records' capacity reconciliation.

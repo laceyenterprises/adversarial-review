@@ -13,10 +13,10 @@ import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  amaCloserDispatchFilePath, composeCloserPrompt, createHammerScratchDir,
+  amaCloserDispatchFilePath, composeCloserPrompt, createHammerScratchDir, cleanupHammerScratchDir, hammerScratchEnvironment,
   maybeDispatchAmaCloser, reconcileAmaCloserDispatches, reconcileAmaCloserLease, substituteTemplate, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
-import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, amaCloserLeaseFilePath, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
 const head = 'b'.repeat(40);
@@ -852,3 +852,63 @@ for (const interrupted of ['prelaunch', 'dispatch']) {
     }
   });
 }
+
+for (const status of ['merged', 'closed', 'no-merge', 'no-merge:synthetic-stop', 'failed', 'superseded']) {
+  test(`SCRATCHLEAK-01: ${status} terminal writer removes the unheld run and test tree`, t => {
+    const root = fixture(t);
+    const scratchDir = createHammerScratchDir(root);
+    mkdirSync(join(scratchDir, 'tmp-tests'));
+    writeFileSync(join(scratchDir, 'tmp-tests', 'synthetic-test'), 'synthetic');
+    updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 42, headSha: head },
+      () => ({ state: 'dispatched', outcome: status, scratchDir, promptDir: root }));
+    assert.equal(existsSync(scratchDir), false);
+  });
+}
+
+test('SCRATCHLEAK-01: draining recorded process retains scratch until it exits', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const record = { state: 'launch-terminal', scratchDir, promptDir: root, pid: 12345 };
+  assert.equal(cleanupHammerScratchDir(record, logger, { processKillImpl: () => {} }), false);
+  assert.equal(existsSync(scratchDir), true);
+  assert.equal(cleanupHammerScratchDir(record, logger, { processKillImpl: () => {
+    throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' });
+  } }), true);
+  assert.equal(existsSync(scratchDir), false);
+});
+
+test('SCRATCHLEAK-01: dispatch environment contains one private pytest base temp with retention one', async t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(join(root, 'synthetic directory with spaces'));
+  const env = hammerScratchEnvironment(scratchDir, { PYTEST_ADDOPTS: '-q -o tmp_path_retention_count=3', SYNTHETIC: 'retained' });
+  assert.equal(env.TMPDIR, scratchDir);
+  assert.equal(env.SYNTHETIC, 'retained');
+  assert.equal(env.PYTEST_ADDOPTS, `-q -o tmp_path_retention_count=3 --basetemp=${JSON.stringify(join(scratchDir, 'tmp-tests'))} -o tmp_path_retention_count=1`);
+  let dispatchEnv;
+  const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root), execFileImpl: async (_cmd, argv, options) => {
+    if (argv[0] === 'dispatch') dispatchEnv = options.env;
+    return { stdout: JSON.stringify({ launchRequestId: 'synthetic-temp-lrq' }) };
+  } });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head })));
+  assert.equal(dispatchEnv.TMPDIR, record.scratchDir);
+  assert.ok(dispatchEnv.PYTEST_ADDOPTS.includes(`--basetemp=${JSON.stringify(join(record.scratchDir, 'tmp-tests'))}`));
+  assert.ok(dispatchEnv.PYTEST_ADDOPTS.endsWith('-o tmp_path_retention_count=1'));
+});
+
+test('SCRATCHLEAK-01: unreadable lease defers disk cleanup without failing terminal status persistence', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  const leasePath = amaCloserLeaseFilePath(root, identity);
+  mkdirSync(resolve(leasePath, '..'), { recursive: true });
+  writeFileSync(leasePath, 'synthetic unreadable lease');
+  const messages = [];
+  const record = { ...identity, scratchDir, promptDir: root, state: 'launch-terminal' };
+  assert.equal(cleanupHammerScratchDir(record, { warn: message => messages.push(message) }, { rootDir: root }), false);
+  assert.equal(messages.length, 1);
+  const next = updateAmaCloserDispatchRecord(root, identity, () => record,
+    { cleanupScratchImpl: candidate => cleanupHammerScratchDir(candidate, logger, { rootDir: root }) });
+  assert.equal(next.state, 'launch-terminal');
+  assert.equal(existsSync(scratchDir), true);
+});

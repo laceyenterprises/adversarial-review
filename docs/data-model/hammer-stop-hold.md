@@ -138,6 +138,11 @@ no hold page. Missing/unparseable timestamps, an older review, or another head
 do not satisfy this predicate. The orchestration passes the posted row's
 `posted_at` only when its `reviewer_head_sha` matches the settled reviewed head.
 This posting receipt is admission evidence, separate from the review fingerprint.
+Live review reconciliation supplies bodies without verified submission
+timestamps. A resolved live body therefore cannot substitute for the matching
+local `posted` row's receipt. If no other input changes, a review-required hold
+remains until a later closer pass observes that row after SQLite reconciliation;
+same-tick posting-time release from live bodies is not guaranteed.
 
 Comparable terminal audit readings (rebased base, live head and mergeability)
 override observed baselines, including holds created before this fix.

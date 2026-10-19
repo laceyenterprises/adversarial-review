@@ -1698,6 +1698,12 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   them. An unchanged review therefore retains the hold and pages once, even
   when the terminal audit contains an eligibility trace. The posting-time
   release applies only to those two review-required predicates.
+  Posting-time release requires the local `reviewed_prs` row to be `posted`
+  with `reviewer_head_sha` matching the settled reviewed head. Live review
+  reconciliation supplies bodies without verified submission timestamps; it
+  cannot supply this receipt before SQLite reconciliation. If no other input
+  changes, the hold remains until a later closer pass observes that matching
+  posted row. Same-tick posting-time release from live bodies is not guaranteed.
   HAMUNKNOWN-02 re-evaluates GitHub-read predicates (`github-gate-not-green`,
   `pr-mergeability-unknown`) on every pass: fresh green checks and MERGEABLE
   mergeability on the same open head release with `github-gate-cleared`, even

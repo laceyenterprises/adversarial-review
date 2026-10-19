@@ -3197,14 +3197,19 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
         consumeRereviewWakesImpl(payload) {
           assert.equal(payload.log, ceilingLog, 'closeout drain receives the configured sink');
           if (++ceilingDrainCount === 2) throw new Error('synthetic closeout drain failure');
-          return wakeModule.consumeRereviewWakes(payload);
+          return wakeModule.consumeRereviewWakes({ ...payload, rootDir: ${JSON.stringify(tmp)} });
         },
       };
       const wakeRepo = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get().repo;
-      if (${postedCount} === 5) wakeModule.requestRereviewWake({
-        rootDir: ${JSON.stringify(REPO_ROOT)}, db, repo: wakeRepo, prNumber: 101,
-        headSha: ${JSON.stringify(head)}, reason: 'remediation-closeout',
-        requestWatcherWakeImpl: () => ({ requested: true }) });
+      if (${postedCount} === 5) {
+        // Settled wakes suppress duplicate requests; keep this replay's queue
+        // separate from prior runs as well as from the watcher's real queue.
+        const wakeRequest = wakeModule.requestRereviewWake({
+          rootDir: ${JSON.stringify(tmp)}, db, repo: wakeRepo, prNumber: 101,
+          headSha: ${JSON.stringify(head)}, reason: 'remediation-closeout',
+          requestWatcherWakeImpl: () => ({ requested: true }) });
+        assert.equal(wakeRequest.requested, true, 'fixture enqueues a fresh closeout wake');
+      }
     `, afterFirstPoll: postedCount < 5 ? `
       const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
       assert.equal(spawns.length, 1, 'raised budget admits the moved head');
@@ -3223,7 +3228,7 @@ for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCo
       assert.equal(row.review_status, 'posted');
       assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
       assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
-      const pending = wakeModule.rereviewWakeBacklog({ rootDir: ${JSON.stringify(REPO_ROOT)} });
+      const pending = wakeModule.rereviewWakeBacklog({ rootDir: ${JSON.stringify(tmp)} });
       assert.equal(pending.pending, 0, 'CEILINGPUSH-01 posted lane drains the closeout wake');
       const events = db.prepare("SELECT reason FROM review_latency_events WHERE event_type='rereview_wake'").all();
       assert.ok(events.some(event => event.reason === 'review-ceiling-hammer-owned'));

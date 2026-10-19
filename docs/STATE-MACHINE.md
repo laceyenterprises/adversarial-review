@@ -670,6 +670,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+BRANCHPROBE-01: before hammer launch, null head-repository metadata requires
+Git confirmation of the exact head ref, using the base repository URL when
+head identity is unavailable. Only `ls-remote` exit 2 permits branch-missing
+abandonment. Unknown branch reads take `dispatching` →
+`dispatch-deferred-transient` → `dispatching` on a later poll, release the
+unlaunched pending lease and preserve retry budget. The record's reason is
+`live-head-branch-unknown`; the return requests a 30-second retry. Confirmed
+merged/closed PRs retain their existing terminal handling.
+
 > **Status: current.** This is the live closure model on AMA-enabled hosts
 > (`roles.adversarial.merge_authority.enabled: true`). It supersedes the
 > standing merge-agent closure path for normal PRs; merge-agent survives only

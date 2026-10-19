@@ -19,7 +19,7 @@ const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-u
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
-  updateAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
+  updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
@@ -107,7 +107,30 @@ if (scenario === 'clean') {
       resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
       readBuildCompletionSignalForPrImpl: () => ({ ok: false }), readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }), logger: quiet,
     };
+    const normalLiveProbe = closerArgs.dispatchContext.livePrProbeImpl;
+    let branchReadable = false;
+    closerArgs.dispatchContext.livePrProbeImpl = () => __testables__.defaultAmaLivePrProbe({
+      repo, prNumber, retryDelaysMs: [],
+      execFileImpl: async (command, args) => {
+        if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN',
+          headRefName: 'synthetic', headRefOid: headSha, headRepository: null, isCrossRepository: false }) };
+        assert.equal(command, 'git');
+        assert.deepEqual(args, ['ls-remote', '--exit-code', '--heads',
+          'https://github.com/fixture/repo.git', 'refs/heads/synthetic']);
+        if (!branchReadable) throw Object.assign(new Error('synthetic transport failure'), { code: 128 });
+        return { stdout: `${headSha}\trefs/heads/synthetic\n` };
+      },
+    });
+    const unknown = await maybeDispatchAmaCloser(closerArgs);
+    assert.equal(unknown.reason, 'live-head-branch-unknown');
+    assert.equal(unknown.recoveryWait, true);
+    assert.equal(unknown.retryAfterMs, 30_000);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-deferred-transient');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).retryCount, 0);
+    assert.equal(readAmaCloserLease(identity()), null);
+    branchReadable = true;
     const deferred = await maybeDispatchAmaCloser(closerArgs);
+    closerArgs.dispatchContext.livePrProbeImpl = normalLiveProbe;
     assert.equal(deferred.reason, 'deferred-by-drain');
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).drainEpoch, '7');
     const laneGate = createNoProgressLaneGate({ rootDir, hqRoot: join(rootDir, 'hq'), logger: quiet, readReviewRow: () => null });
@@ -251,7 +274,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };

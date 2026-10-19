@@ -689,7 +689,7 @@ async function defaultAmaLivePrProbe({
     '--repo',
     repo,
     '--json',
-    'state,headRefName,headRefOid,headRepository,autoMergeRequest',
+    'state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest',
   ], {
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
@@ -707,11 +707,12 @@ async function defaultAmaLivePrProbe({
   let headBranchProbeError = null;
   const headRefName = String(payload?.headRefName || '').trim();
   const hasHeadRepository = Object.prototype.hasOwnProperty.call(payload || {}, 'headRepository');
+  // GitHub can transiently omit the head repository. Confirm branch existence
+  // against the base repository only when the PR is not identified as a fork.
   const repoUrl = githubHeadRepositoryHttpUrl(payload?.headRepository)
-    || (!hasHeadRepository ? githubRepoHttpUrl(repo) : null);
-  if (state === 'OPEN' && headRefName && hasHeadRepository && payload?.headRepository === null) {
-    headBranchExists = false;
-  } else if (state === 'OPEN' && headRefName && repoUrl) {
+    || ((!hasHeadRepository || payload?.headRepository === null) && payload?.isCrossRepository !== true
+      ? githubRepoHttpUrl(repo) : null);
+  if (state === 'OPEN' && headRefName && repoUrl) {
     try {
       const probe = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'git', [
         'ls-remote',
@@ -730,7 +731,11 @@ async function defaultAmaLivePrProbe({
         signal,
       });
       throwIfAborted(signal);
-      headBranchExists = String(probe?.stdout || '').trim().length > 0;
+      if (String(probe?.stdout || '').trim()) {
+        headBranchExists = true;
+      } else {
+        headBranchProbeError = 'git ls-remote returned empty output without exit code 2';
+      }
     } catch (err) {
       throwIfAborted(signal);
       if (Number(err?.code) === 2) {
@@ -7461,6 +7466,24 @@ async function maybeDispatchAmaCloserAttempt({
       reason: 'dispatch-head-context-changed',
       reasons: ['live head moved after review context derivation; awaiting a fresh review binding'],
     });
+  }
+
+  if (livePrProbe?.state === 'OPEN' && livePrProbe.headBranchExists === null) {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => current ? {
+      ...current,
+      state: 'dispatch-deferred-transient',
+      reason: 'live-head-branch-unknown',
+      prState: livePrProbe.state,
+      headBranchExists: null,
+      headRefName: livePrProbe.headRefName || null,
+      retryCount: priorRetryCount,
+      lastFailureTransient: true,
+      lastError: livePrProbe.headBranchProbeError || 'head branch existence is unknown',
+    } : null);
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: head branch existence is unknown; retrying next poll`);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, retryAfterMs: 30_000, reason: 'live-head-branch-unknown' });
   }
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see

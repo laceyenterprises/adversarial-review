@@ -297,7 +297,7 @@ test('DCR-02: default live probe checks fork head repository branches', async ()
   assert.equal(result.state, 'OPEN');
   assert.equal(result.headBranchExists, true);
   assert.deepEqual(calls.map((call) => call.cmd), ['gh', 'git']);
-  assert.ok(calls[0].args.includes('state,headRefName,headRefOid,headRepository,autoMergeRequest'));
+  assert.ok(calls[0].args.includes('state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest'));
   assert.deepEqual(result.autoMergeRequest, { enabledAt: '2026-07-20T12:00:00Z' });
   assert.deepEqual(calls[1].args, [
     'ls-remote',
@@ -308,34 +308,102 @@ test('DCR-02: default live probe checks fork head repository branches', async ()
   ]);
 });
 
-test('DCR-02: default live probe treats missing head repository as missing branch', async () => {
-  const calls = [];
-
-  const result = await __testables__.defaultAmaLivePrProbe({
-    repo: 'acme/repo',
-    prNumber: 404,
-    retryDelaysMs: [],
-    sleepImpl: async () => {},
-    execFileImpl: async (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === 'gh') {
-        return {
-          stdout: JSON.stringify({
-            state: 'OPEN',
-            headRefName: 'codex/deleted-fork',
-            headRefOid: HEAD,
-            headRepository: null,
-          }),
-          stderr: '',
-        };
+for (const outcome of ['exists', 'missing', 'failed', 'timeout', 'empty']) {
+  test(`BRANCHPROBE-01: null head repository with ${outcome} branch confirmation`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'branchprobe-01-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const calls = [];
+    const deps = testDeps();
+    let confirmation = outcome;
+    const args = {
+      ...mechanicalHammerArgs(rootDir, { dispatchContext: { livePrProbeImpl: null } }),
+      ...deps,
+      execFileImpl: async (cmd, args, options) => {
+        calls.push({ cmd, args, options });
+        if (cmd === 'gh') return { stdout: JSON.stringify({
+          state: 'OPEN', headRefName: 'synthetic/topic', headRefOid: HEAD, headRepository: null, isCrossRepository: false,
+        }), stderr: '' };
+        if (cmd === 'git') {
+          assert.deepEqual(args, ['ls-remote', '--exit-code', '--heads',
+            'https://github.com/acme/repo.git', 'refs/heads/synthetic/topic']);
+          assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
+          assert.ok(options.timeout > 0 && options.timeout <= 30_000);
+          if (confirmation === 'missing') throw Object.assign(new Error('no matching remote ref'), { code: 2 });
+          if (confirmation === 'failed') throw Object.assign(new Error('authentication failed'), { code: 128 });
+          if (confirmation === 'timeout') throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+          return { stdout: confirmation === 'empty' ? '' : `${HEAD}\trefs/heads/synthetic/topic\n`, stderr: '' };
+        }
+        return deps.execFileImpl(cmd, args);
+      },
+    };
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const result = await maybeDispatchAmaCloser(args);
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.deepEqual(calls.slice(0, 2).map(call => call.cmd), ['gh', 'git']);
+    if (outcome === 'exists') {
+      assert.equal(result.dispatched, true);
+      assert.equal(record.state, 'dispatched');
+      assert.equal(record.retryCount, 1);
+      assert.equal(deps.calls.length, 1);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+    } else if (outcome === 'missing') {
+      assert.equal(result.dispatched, false);
+      assert.equal(result.reason, 'live-head-branch-missing');
+      assert.equal(record.state, 'no-dispatch');
+      assert.equal(record.status, 'abandoned-pr-closed');
+      assert.equal(record.headBranchExists, false);
+      assert.equal(deps.calls.length, 0);
+      assert.equal(readAmaCloserLease(rootDir, identity), null);
+    } else {
+      assert.equal(result.dispatched, false);
+      assert.equal(result.reason, 'live-head-branch-unknown');
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(result.recoveryWait, true);
+      assert.equal(result.retryAfterMs, 30_000);
+      assert.equal(record.state, 'dispatch-deferred-transient');
+      assert.equal(record.reason, 'live-head-branch-unknown');
+      assert.notEqual(record.status, 'abandoned-pr-closed');
+      assert.equal(record.headBranchExists, null);
+      assert.equal(record.retryCount, 0, 'unlaunched probe deferrals must preserve launch budget');
+      assert.equal(record.launchRequestId, null);
+      assert.equal(deps.calls.length, 0);
+      assert.equal(readAmaCloserLease(rootDir, identity), null, 'release the pending lease for the next poll');
+      assert.match(record.lastError, outcome === 'failed' ? /authentication failed/
+        : outcome === 'timeout' ? /timeout/ : /empty output/);
+      assert.equal(calls.filter(call => call.cmd === 'git').length, outcome === 'timeout' ? 3 : 1);
+      // Repeated unknown reads must not strand the PR at the redispatch cap.
+      if (outcome === 'failed') {
+        for (let i = 0; i <= AMA_CLOSER_REDISPATCH_BOUND; i++) {
+          assert.equal((await maybeDispatchAmaCloser(args)).reason, 'live-head-branch-unknown');
+          assert.equal(readAmaCloserDispatchRecord(rootDir, identity).retryCount, 0);
+        }
       }
-      assert.fail(`unexpected command: ${cmd}`);
+      confirmation = 'exists';
+      assert.equal((await maybeDispatchAmaCloser(args)).dispatched, true, 'next poll resumes after recovery');
+      assert.equal(readAmaCloserDispatchRecord(rootDir, identity).retryCount, 1);
+    }
+  });
+}
+
+test('BRANCHPROBE-01: an unidentified fork remains unknown without probing the base repository', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'branchprobe-01-fork-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const result = await maybeDispatchAmaCloser({
+    ...mechanicalHammerArgs(rootDir, { dispatchContext: { livePrProbeImpl: null } }),
+    ...testDeps(),
+    execFileImpl: async (cmd, args) => {
+      assert.equal(cmd, 'gh', 'must not infer fork deletion from the base repository');
+      assert.ok(args.includes('state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest'));
+      return { stdout: JSON.stringify({ state: 'OPEN', headRefName: 'synthetic/topic',
+        headRefOid: HEAD, headRepository: null, isCrossRepository: true }) };
     },
   });
-
-  assert.equal(result.state, 'OPEN');
-  assert.equal(result.headBranchExists, false);
-  assert.deepEqual(calls.map((call) => call.cmd), ['gh']);
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'live-head-branch-unknown');
+  assert.equal(result.recoveryWait, true);
+  const record = readAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD });
+  assert.equal(record.headBranchExists, null);
+  assert.equal(record.retryCount, 0);
 });
 
 test('DCR-02: default live probe retries transient gh and git failures', async () => {

@@ -127,6 +127,16 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 
 ## Operational Contract
 
+BRANCHPROBE-01 reuses `dispatch-deferred-transient` for an open PR whose exact
+head ref cannot be confirmed. `reason: live-head-branch-unknown`,
+`headBranchExists: null`, `prState: OPEN` and `headRefName` describe the probe;
+`lastError` records the read failure and `lastFailureTransient` is true.
+No launch receipt is assigned, `retryCount` is restored to its pre-attempt
+value, and the pending lease is released for the next poll. Only confirmed
+Git exit code 2 writes `headBranchExists: false` and the existing
+`abandoned-pr-closed / live-head-branch-missing` annotations. A null head
+repository alone cannot authorize abandonment. No store shape is added.
+
 After a native CI-blocked handoff actually invokes the closer and settles with
 `dispatched: false`, settlement
 retires its unchanged `dispatching` intent only when the matching unlaunched

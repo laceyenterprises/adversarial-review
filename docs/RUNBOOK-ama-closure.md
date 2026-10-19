@@ -252,7 +252,9 @@ The independent scheduling checkpoint is
 invalid or unreadable cursor state restarts oldest first; cursor state never
 authorizes deletion. Checkpoint write failures warn without adding a merge gate.
 
-Launch/retry and worker ledger probes each have a separate 10-second timeout.
+Launch/retry and worker ledger probes each have a separate 10-second timeout by
+default. Callers of `sweepHammerScratchDirs` may set `ledgerTimeoutMs` to override
+both the probe deadline and abort timer (for example, for offline timeout tests).
 Their elapsed time is added back to the scan deadline, as for the process census.
 A timed-out probe retains that candidate, increments `deferredCandidates` and
 advances past it, allowing independent candidates to proceed. An async timeout

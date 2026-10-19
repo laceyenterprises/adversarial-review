@@ -231,7 +231,8 @@ function ledgerReadArgs(record, options, deadline, signal) {
 }
 
 async function readScratchLedger(record, options, readImpl) {
-  const ledgerDeadline = Date.now() + LEDGER_READ_TIMEOUT_MS;
+  const ledgerTimeoutMs = options.ledgerTimeoutMs ?? LEDGER_READ_TIMEOUT_MS;
+  const ledgerDeadline = Date.now() + ledgerTimeoutMs;
   const controller = new AbortController();
   let timer;
   const timeoutError = () => new ScratchLedgerReadTimedOut('scratch ledger read timed out');
@@ -241,7 +242,7 @@ async function readScratchLedger(record, options, readImpl) {
       new Promise((_, reject) => { timer = setTimeout(() => {
         controller.abort();
         reject(timeoutError());
-      }, LEDGER_READ_TIMEOUT_MS); }),
+      }, ledgerTimeoutMs); }),
     ]);
     // Also discard late synchronous fixture/SQLite results. A late terminal
     // answer never authorizes deletion, even if it beat the timer callback.

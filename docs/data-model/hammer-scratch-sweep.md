@@ -38,8 +38,9 @@ the disk cursor, so watcher restarts retain progress. An invalid version, unsafe
 basename, non-finite mtime or unreadable checkpoint restarts oldest first.
 Write failure warns and does not inhibit safe reclamation in the current pass.
 
-Ledger reads have independent 10-second timeouts; elapsed time is refunded to
-the unchanged scan budget. Timeout is inconclusive and retains the candidate.
+Ledger reads have independent timeouts (10 seconds by default, overridden by the
+caller's `ledgerTimeoutMs` option); elapsed time is refunded to the unchanged
+scan budget. Timeout is inconclusive and retains the candidate.
 Summary `deferredCandidates` counts these visited deferrals alongside other
 inconclusive candidates; `remainingCandidates` counts the unvisited portion of
 the current rotated lap. Neither checkpoint changes dispatch or lease state.

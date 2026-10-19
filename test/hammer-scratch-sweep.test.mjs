@@ -168,8 +168,9 @@ for (const reader of ['readLaunchRequestStatusImpl', 'readWorkerStatusImpl']) {
     let clock = nowMs;
     t.mock.method(Date, 'now', () => clock);
     let reads = 0;
-    const options = { ...f.options, scanBudgetMs: 100,
+    const options = { ...f.options, scanBudgetMs: 100, ledgerTimeoutMs: 25,
       [reader]: ({ timeoutMs }) => {
+        assert.equal(timeoutMs, 25);
         reads += 1;
         if (reads === 1) clock += timeoutMs;
         return { ok: true, row: { status: 'succeeded' } };
@@ -217,6 +218,28 @@ test('SCRATCHLEAK-02: an unresolved async ledger read is aborted and checkpointe
   assert.equal(sweepSummary(f).deferredCandidates, 1);
   assert.equal(readCursor(f).after.name, paths[1].split('/').at(-1));
 });
+
+for (const reader of ['readLaunchRequestStatusImpl', 'readWorkerStatusImpl']) {
+  test(`SCRATCHLEAK-02: ledgerTimeoutMs aborts an unresolved ${reader} without timer mocks`, { timeout: 2000 }, async t => {
+    const f = fixture(t);
+    const paths = terminalCandidates(f, 2);
+    let signal;
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, ledgerTimeoutMs: 25,
+      [reader]: args => {
+        if (signal) return f.options[reader](args);
+        assert.ok(args.timeoutMs > 0 && args.timeoutMs <= 25);
+        signal = args.signal;
+        return new Promise(() => {});
+      },
+    });
+    assert.equal(signal.aborted, true);
+    assert.deepEqual(removed.map(entry => entry.name), [paths[1].split('/').at(-1)]);
+    assert.equal(existsSync(paths[0]), true, 'a timed-out probe never authorizes removal');
+    assert.equal(sweepSummary(f).deferredCandidates, 1);
+    assert.equal(sweepSummary(f).completed, true);
+    assert.equal(readCursor(f).after.name, paths[1].split('/').at(-1));
+  });
+}
 
 test('SCRATCHLEAK-02: kept candidates advance across restarts and zero-removal laps preserve the cursor', async t => {
   const f = fixture(t);

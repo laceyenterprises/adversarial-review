@@ -900,7 +900,12 @@ Terminal retry chains still permit cleanup. Repository fallback inputs share the
 same ownership identity, including PR-number fallbacks from dispatch context,
 PR metadata and top-level input; interrupted admission preserves the current PR's deferred predecessor artifacts;
 other PRs' terminal scratch is reclaimed immediately. Unlaunched attempts remove
-their own prompt and scratch. The offline scratch suites pin retention and
+their own prompt and scratch. SCRATCHLEAK-01 additionally retains recorded live
+processes and launch lease holders during terminal cleanup, gives pytest one
+replaceable `tmp-tests` base under scratch, and sweeps aged terminal backlog
+without a recursive in-use probe or an unbounded size prerequisite. Cwd probe
+timeouts have a bounded terminal-only escape while positive process/lease/retry
+evidence remains protective. The offline scratch suites pin retention and
 admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. See the
@@ -963,7 +968,10 @@ summaries cannot release an unchanged review or suppress its hold page.
 merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
-<a id="smv-handoff"></a>**smv-handoff:** drain refusal persists an epoch without
+<a id="smv-handoff"></a>**smv-handoff:** terminal scratch cleanup retains a draining
+recorded process, removes its test tree after exit, and pins private pytest temp
+with retention one. The synthetic sweep also proves timeout recovery after the
+existing launch/lease grace. Existing handoff promises: drain refusal persists an epoch without
 charging no-progress counters; the first clear pass resumes dispatch. A stale
 hint expires after five minutes without closer polling and normal backoff
 resumes. Findings dispatch one hammer through the

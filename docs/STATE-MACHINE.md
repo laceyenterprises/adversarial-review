@@ -744,7 +744,11 @@ refusal returns `dispatching` to `dispatched` with reason `dispatch-retry-live`,
 restoring predecessor ownership without consuming an attempt. Prompts are
 unique per attempt; all-terminal chains still permit scratch cleanup. Interrupted
 admission preserves deferred predecessor artifacts for a later completed pass;
-unlaunched attempts remove their own prompt and scratch.
+unlaunched attempts remove their own prompt and scratch. SCRATCHLEAK-01 keeps
+terminal disk cleanup separate from merge authority: recorded draining processes
+and live launch lease holders retain scratch, pytest has one replaceable private
+test tree, and the sweep's cwd timeout expires only for aged terminal owners
+with readable process and retry evidence. No closure transitions change.
 
 LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and
 terminal-worker/lease reconciliation, before dispatch, when latest live

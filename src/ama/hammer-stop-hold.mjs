@@ -78,6 +78,20 @@ export const HISTORY_READ_FAILURE_PAGE_GRACE_MS = 10 * 60_000;
 const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
+const INFRASTRUCTURE_STOP_REASONS = new Set([
+  // Dispatch-owned scratch scripts disappeared; fresh dispatch renders them again.
+  'missing-dispatch-phase-scripts',
+  // Dispatch left template placeholders in the phase-script paths.
+  'unrendered-dispatch-phase-scripts',
+  // The closing note's alternate name for the same unrendered dispatch paths.
+  'unrendered-dispatch-phase-script-placeholders',
+]);
+
+function isInfrastructureStop(stop) {
+  return [stop?.predicate, stop?.reason, ...(stop?.reasons || []),
+    ...(stop?.refusal?.reasons || [])].some(reason => INFRASTRUCTURE_STOP_REASONS.has(reason));
+}
+
 const DETERMINISTIC_STOP_REASONS = new Set([
   'primary-change-reverted', 'primary-change-unknown', 'stale-review-head',
   'verdict-not-eligible', 'verdict-not-settled-success', 'permanent-merge-rejection',
@@ -106,6 +120,7 @@ function stable(value) {
 
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   const reasons = stopReasons(attempt);
+  if (isInfrastructureStop({ ...attempt, reasons })) return null;
   if (!reasons.length && DETERMINISTIC_STOP_REASONS.has(attempt.reason)) reasons.push(attempt.reason);
   if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
@@ -386,6 +401,18 @@ export async function evaluateHammerStopHold({
     writeHoldState(rootDir, repo, prNumber, state);
   }
   const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
+  const prior = state.heads[headSha];
+  // STOPHOLDINFRA-01: packaging failures say nothing about the PR. Retire old
+  // holds without paging or refunding attempts; ordinary gates, leases and
+  // retry caps still own re-dispatch. The audit may already have been cleared.
+  if (isInfrastructureStop(stop) || (!stop && isInfrastructureStop(prior))) {
+    if (!prior) return { action: 'none' };
+    const changed = ['infrastructure-stop'];
+    const entry = { ...prior, releasedAt: prior.releasedAt || now, releasedBy: changed };
+    writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha,
+      heads: { ...state.heads, [headSha]: entry } });
+    return { action: 'release', hammerStop: stop || prior, changed };
+  }
   if (!stop) return { action: 'none' };
   // FINALCLOSE-01: transport evidence cannot become an input-change hold. The
   // launched hammer owns a fresh read; ordinary series/lifetime caps own retries.
@@ -398,7 +425,6 @@ export async function evaluateHammerStopHold({
   }
 
   const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
-  const prior = state.heads[headSha];
   const sameRefusal = stop.refusal && prior?.refusal?.key === stop.refusal.key;
   const reuseEntry = prior && (stop.refusal ? sameRefusal : prior.stopKey === stop.stopKey)
     && !(prior.releasedAt && prior.stopKey !== stop.stopKey);

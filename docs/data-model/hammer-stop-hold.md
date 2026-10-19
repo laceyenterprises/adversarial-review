@@ -31,10 +31,21 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`; comparable terminal audit head/base/mergeability readings take precedence, with first-observation or prior-release inputs filling unrecorded dimensions. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical closer review evidence fingerprint described below, never reconstructed from an eligibility trace. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02). |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02), `infrastructure-stop` (STOPHOLDINFRA-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
+
+STOPHOLDINFRA-01 excludes dispatch packaging failures from deterministic
+refusals and holds: `missing-dispatch-phase-scripts`,
+`unrendered-dispatch-phase-scripts` and
+`unrendered-dispatch-phase-script-placeholders`. These predicates describe
+missing scratch scripts or unrendered dispatch paths, so fresh dispatch can
+repair them without a PR input change. A new stop returns `none` without a
+hold page. A persisted hold releases on its next evaluation with
+`releasedBy: ['infrastructure-stop']`, without another page, even if the audit
+has since cleared. Release does not refund attempts; ordinary gates, leases,
+the per-PR retry cap and lifetime ceiling still apply.
 
 HAMUNKNOWN-02 re-evaluates `github-gate-not-green` and
 `pr-mergeability-unknown` stops against each closer pass's fresh PR metadata.

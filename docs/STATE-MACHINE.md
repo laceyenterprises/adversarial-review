@@ -710,6 +710,10 @@ Before routing another hammer, the closer holds an unchanged deterministic
 refusal keyed by head, sorted reasons and full missing evidence, and pages once
 with the unblock action. A changed head, review, check status or verified missing
 authority releases the hold through the existing stop-store path.
+STOPHOLDINFRA-01 skips holds and hold pages for missing dispatch phase scripts
+and unrendered phase-script placeholders. Existing infrastructure holds release
+with `infrastructure-stop`; ordinary gates, leases and retry caps still decide
+re-dispatch, without an attempt refund.
 HAMUNKNOWN-02 also releases GitHub-read stops once fresh metadata shows the
 same open head is MERGEABLE with green external checks, even if the hold's
 baseline already captured that state. UNKNOWN at hammer merge time is sampled

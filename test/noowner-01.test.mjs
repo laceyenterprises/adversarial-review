@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import {
   __testables__,
+  _resetHammerRetryCapAlertDebounceForTests,
   maybeDispatchAmaCloser,
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
@@ -30,7 +31,7 @@ import {
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
-import { recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
+import { readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import { recoverAmaAutomation } from '../src/ama/automated-recovery.mjs';
 import {
   closerHeadRereviewDeclinedReason,
@@ -137,6 +138,124 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
 }
 
 const hqLaunches = (deps) => deps.execCalls.filter((call) => call.args[0] === 'dispatch' && call.args[1] !== 'status');
+
+const INFRA_REASONS = ['missing-dispatch-phase-scripts', 'unrendered-dispatch-phase-scripts',
+  'unrendered-dispatch-phase-script-placeholders'];
+
+function infrastructureFixture(t, reason) {
+  const rootDir = tmpRoot(t, 'stopholdinfra-');
+  const identity = { repo: 'example/project', prNumber: 41, headSha: 'a'.repeat(40) };
+  const at = '2026-10-01T12:00:00Z';
+  const recordStop = (now = at, structured = true) => writeAmaAuditEntry({
+    hqRoot: join(rootDir, 'hq-root'), ...identity, now,
+    attempt: { outcome: 'failed-without-merge', reason, ...(structured ? { reasons: [reason] } : {}),
+      head: identity.headSha, attemptPhase: 'hammer-close',
+      closingStatus: `HAM_NO_MERGE_NOTE: ${reason}` },
+  });
+  const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
+    prMetadata: { baseSha: 'b'.repeat(40) }, dispatchContext: { dispatchedAt: at } });
+  const statePath = join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'example-project-pr-41.json');
+  const evaluate = (deps = {}) => evaluateHammerStopHold({ rootDir,
+    hqRoot: args.dispatchContext.hqRoot, ...identity, prMetadata: args.prMetadata,
+    now: at, logger: SILENT, ...deps });
+  recordStop();
+  return { rootDir, identity, at, args, statePath, recordStop, evaluate };
+}
+
+for (const reason of INFRA_REASONS) {
+  test(`STOPHOLDINFRA-01 ${reason}: no refusal, hold or page; ordinary dispatch stays single-flight`, async t => {
+    const f = infrastructureFixture(t, reason);
+    const deps = closerDeps();
+    for (const structured of [true, false]) {
+      f.recordStop(f.at, structured);
+      const stop = readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot });
+      assert.equal(stop.refusal, null, 'structured and legacy packaging reasons are non-deterministic');
+      assert.deepEqual(await f.evaluate(deps), { action: 'none' });
+      assert.throws(() => readFileSync(f.statePath), { code: 'ENOENT' }, 'no hold is persisted');
+    }
+    const result = await maybeDispatchAmaCloser({ ...f.args, ...deps });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(hqLaunches(deps).length, 1);
+    assert.equal(deps.alerts.length, 0);
+    await maybeDispatchAmaCloser({ ...f.args, ...deps });
+    assert.equal(hqLaunches(deps).length, 1, 'the live lease still prevents duplicate dispatch');
+    assert.equal(deps.alerts.length, 0);
+  });
+
+  test(`STOPHOLDINFRA-01 ${reason}: a later deferral does not preserve an infrastructure refusal`, async t => {
+    const f = infrastructureFixture(t, reason);
+    writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, ...f.identity,
+      now: minutesAfter(f.at, 1), attempt: { outcome: 'deferred', reason: 'capacity-deferred',
+        head: f.identity.headSha, attemptPhase: 'hammer-close' } });
+    assert.equal(readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot }), null);
+    assert.deepEqual(await f.evaluate({ deliverAlertImpl: async () => assert.fail('deferral must not page') }),
+      { action: 'none' });
+  });
+
+  test(`STOPHOLDINFRA-01 ${reason}: existing hold releases without input changes or another page`, async t => {
+    const f = infrastructureFixture(t, reason);
+    const stop = readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot });
+    mkdirSync(dirname(f.statePath), { recursive: true });
+    const prior = { stopKey: stop.stopKey, predicate: reason, firstObservedAt: f.at,
+      inputs: hammerStopInputs(f.args.prMetadata), pagedAt: f.at,
+      refusal: { key: 'legacy-infrastructure-refusal', reasons: [reason] } };
+    writeFileSync(f.statePath, JSON.stringify({ currentHead: f.identity.headSha,
+      heads: { [f.identity.headSha]: prior } }));
+    for (let tick = 0; tick < 2; tick++) {
+      const result = await f.evaluate({ deliverAlertImpl: async () => assert.fail('release must not page'),
+        ...(tick ? { readAuditImpl: () => null } : {}) });
+      assert.equal(result.action, 'release');
+      assert.deepEqual(result.changed, ['infrastructure-stop']);
+    }
+    const entry = JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha];
+    assert.equal(entry.releasedAt, f.at);
+    assert.deepEqual(entry.releasedBy, ['infrastructure-stop']);
+    const deps = closerDeps();
+    assert.equal((await maybeDispatchAmaCloser({ ...f.args, ...deps })).dispatched, true);
+    assert.equal(deps.alerts.length, 0);
+  });
+
+  test(`STOPHOLDINFRA-01 ${reason}: repeated stops still exhaust the per-PR retry cap`, async t => {
+    _resetHammerRetryCapAlertDebounceForTests();
+    const f = infrastructureFixture(t, reason);
+    recordHammerRetryDispatch(f.rootDir, f.identity, { jobKey: f.identity.headSha,
+      headSha: f.identity.headSha, now: f.at });
+    const deps = closerDeps();
+    assert.equal((await maybeDispatchAmaCloser({ ...f.args, ...deps })).dispatched, true);
+    assert.equal(hqLaunches(deps).length, 1);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).attemptCount, 2);
+    f.recordStop(minutesAfter(f.at, 5));
+    const capped = closerDeps({ status: { status: 'succeeded' } });
+    let result;
+    for (const minutes of [30, 31]) {
+      result = await maybeDispatchAmaCloser({ ...f.args, dispatchContext: {
+        ...f.args.dispatchContext, dispatchedAt: minutesAfter(f.at, minutes) }, ...capped });
+      if (result.reason !== 'stale-dispatched-lease-terminalized') break;
+    }
+    assert.equal(result.reason, 'hammer-retry-cap-exhausted', JSON.stringify(result));
+    assert.equal(hqLaunches(capped).length, 0);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).attemptCount, 2, 'no infrastructure refund');
+    assert.equal(deps.alerts.length, 0);
+    assert.equal(capped.alerts.filter(alert => alert.options.event === 'ama_closer.hammer_stop_hold').length, 0);
+    assert.equal(capped.alerts.filter(alert => alert.options.event === 'ama_closer.hammer_retry_cap_exhausted').length, 1);
+  });
+}
+
+test('STOPHOLDINFRA-01 deterministic primary-change-reverted still holds and pages once', async t => {
+  _resetHammerStopHoldPageDebounceForTests();
+  const f = infrastructureFixture(t, 'primary-change-reverted');
+  const alerts = [];
+  for (let tick = 0; tick < 2; tick++) {
+    const result = await f.evaluate({
+      fetchPrimaryChangeImpl: async () => { throw new Error('synthetic unavailable evidence'); },
+      deliverAlertImpl: async (...args) => alerts.push(args),
+    });
+    assert.equal(result.action, 'hold');
+    assert.equal(result.hammerStop.predicate, 'primary-change-reverted');
+    assert.equal(result.hammerStop.paged, true);
+  }
+  assert.equal(alerts.length, 1);
+});
 
 function minutesAfter(iso, minutes) {
   return new Date(Date.parse(iso) + minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z');

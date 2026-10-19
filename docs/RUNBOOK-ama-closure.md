@@ -1736,7 +1736,12 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   `lastRunAt` anchors it across skips and restarts; wake priority and the idle
   starvation floor respect the interval. FINALCLOSE-01 releases
   `history-read-failed` immediately for capped retry rather than installing an
-  evidence hold or a separate ten-minute page. Other predicates retain their
+  evidence hold or a separate ten-minute page. STOPHOLDINFRA-01 excludes
+  missing dispatch phase scripts and unrendered phase-script placeholders from
+  holds and hold pages. Existing holds for those infrastructure predicates
+  release with `infrastructure-stop` on the next evaluation; fresh dispatch
+  renders scripts again. No attempts are refunded, so ordinary gates, leases
+  and retry caps continue to bound recovery. Other predicates retain their
   holds and page rules. Released stops return to ordinary backoff.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence

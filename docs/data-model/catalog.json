@@ -634,7 +634,7 @@
       "owner": "AMA closer retry admission",
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
       "baseline": "Comparable terminal audit head/base/mergeability readings, with mergeability trimmed and uppercased as for live metadata; other inputs, including the canonical closer review fingerprint, come from first observation or prior release, never synthetic eligibility-trace review fields. Review-required predicates additionally accept exact-head posted_at strictly after the terminal timestamp, including before first observation; this receipt requires a matching local posted row, so live bodies alone cannot provide posting-time release before SQLite reconciliation",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop"]
     },
     {
       "id": "ama-closer-leases",

@@ -158,6 +158,22 @@ export function parseHqFleetQuotaStatus(stdout) {
   return quotaStatusesFromSnapshot(parseHqFleetQuotaSnapshot(stdout));
 }
 
+// `hq fleet quota status --json` reports each reserve floor's weekly reading as
+// `measurement` ({confidence, inferred, percentRemaining}). Older payloads and
+// fixtures used `weeklyMeasurement` ({status, percentRemaining}). Account routing
+// must accept both, or every healthy account reads as unknown evidence and holds.
+export function reserveFloorWeeklyMeasurement(floor) {
+  const legacy = floor?.weeklyMeasurement;
+  if (legacy && typeof legacy === 'object') return legacy;
+  const current = floor?.measurement;
+  if (!current || typeof current !== 'object') return null;
+  const measured = current.confidence === 'measured' && current.inferred !== true;
+  return {
+    status: measured ? 'measured' : (current.inferred === true ? 'inferred' : String(current.confidence || 'unknown')),
+    percentRemaining: Number(current.percentRemaining),
+  };
+}
+
 export function quotaStatusesFromSnapshot(payload) {
   const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
   return providerStatuses.map((entry) => ({

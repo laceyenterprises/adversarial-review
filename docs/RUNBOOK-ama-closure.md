@@ -4036,9 +4036,24 @@ running/starting closer's recorded launch or confirmed dispatched lease progress
 a closer with no progress for thirty minutes still pages. A future timestamp
 seeds a new row at its first observation, but cannot advance an existing wait
 until the timestamp is reached. Only running/starting retained dispatches supply launch progress;
-stalled, blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Pending/uncertain ownership, held
-dispatches, exhausted fallbacks, daemon failures and review handoffs retain their
-existing waits; immediate pages remain immediate.
+stalled, blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none.
+HAMCLOSEWAIT-02 credits a background dispatch while its process queue reports
+it running, including its own pending lease. This provisional credit starts at
+actual execution, excludes time queued, and lasts for the existing dispatch
+timeout (15 minutes when absent). It preserves the original final-round clock:
+an undispatched settlement resumes that clock and pages with the settled
+reasons. An in-progress overrun pages once with `ama-closer-dispatch-overrun`,
+`elapsed_ms` and `bound_ms`. Successful settlement credits the fixed launch
+time. Background work logs “closer is launching” only when it carries actual
+execution-start evidence; queued submissions and foreign or unconfirmed in-flight
+leases without a valid progress timestamp do not emit that launch hint.
+Inner lease and retriable-refusal observations use the shared final-round
+wait wrapper, preserving the final-round clock and page receipt independently
+of older bounded-wait rows.
+Restart intent alone supplies
+no progress. Other pending/uncertain ownership, held dispatches, exhausted
+fallbacks, daemon failures and review handoffs retain their existing waits;
+immediate pages remain immediate.
 
 After deploy, SRE owns these checks:
 
@@ -4047,6 +4062,8 @@ After deploy, SRE owns these checks:
    its head and blocker, within about thirty minutes under normal load and load
    above eighty. Confirm future-dated progress does not refresh an existing wait
    and retained stalled/blocked/unknown/succeeded-awaiting-signal dispatches preserve its original clock.
+   Confirm running background dispatches use their fixed launch window, refused
+   launches name their settled blocker, and overruns name elapsed time and bound.
 3. Over the following day, confirm no operator hand merge was needed because
    final-round closure stalled.
 

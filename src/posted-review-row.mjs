@@ -36,6 +36,7 @@ import {
   clearPendingAmaHammerDispatch,
   clearPendingAmaHammerDispatchForTerminalPr,
   readPendingAmaHammerDispatch,
+  isAmaCloserLaunching,
 } from './ama-hammer-background-dispatch.mjs';
 import {
   namedAmaNoDispatchReason,
@@ -770,6 +771,7 @@ async function handlePostedReviewRowWithinReadCache({
         logger.log(
           `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
           `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+          (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
           `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
           `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
         );
@@ -805,8 +807,9 @@ async function handlePostedReviewRowWithinReadCache({
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
         `(${namedReason}; reasons: ${reasonsHint}` +
         `${amaClosureResult?.missingEvidence?.summary ? `; missing evidence: ${amaClosureResult.missingEvidence.summary}` : ''}` +
-        '); safety hold requires operator action ' +
-        recoveryHint
+        (isAmaCloserLaunching(amaClosureResult)
+          ? '); closer is launching; awaiting dispatch outcome'
+          : '); safety hold requires operator action ' + recoveryHint)
       );
       return {
         handled: true,

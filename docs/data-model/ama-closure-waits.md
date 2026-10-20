@@ -41,6 +41,15 @@ blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none
 observations of the same timestamp do not extend the deadline;
 thirty minutes without further progress still pages. Pending or uncertain
 ownership and other blockers retain their existing clocks and page receipts.
+HAMCLOSEWAIT-02 adds an ephemeral `launchWait: { startedAt, boundMs }` observation
+for a running process-queue background dispatch, including its own pending lease.
+It uses actual execution start and the dispatch timeout (15-minute fallback),
+never queue submission or poll time. It returns that launch boundary without
+advancing the durable `started`; refusal resumes the original debt with settled
+reasons. At its own bound the dispatch pages once with an explicit overrun and
+elapsed milliseconds. Successful settlement supplies fixed launch progress
+through the existing timestamp path. Queued, cancelled or restarted intent alone
+cannot supply launch credit. There is no store schema change.
 Explicit immediate observations still page regardless of launch progress.
 For `final-round`, head movement replaces prior class rows and restarts the
 deadline while carrying the maximum `paged` value forward. Final-round stalls

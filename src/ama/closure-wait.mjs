@@ -15,7 +15,8 @@ async function page(text, options) {
 // SQLite serializes observations across ticks/processes. Reserve the page before
 // sending it, refund on transport refusal, and keep the original wait deadline.
 export async function observeClosureWait({ rootDir, repo, prNumber, headSha, reason,
-  now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false }) {
+  now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
+  launchWait = null }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const boundMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -47,9 +48,16 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       }
       const row = db.prepare('SELECT * FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass);
       if (progress) db.prepare('UPDATE waits_by_class SET started=? WHERE head=? AND class=?').run(now, headSha, reasonClass);
-      const exhausted = immediate || (!progress && now - row.started >= boundMs);
+      // A running background launch borrows its own fixed window without
+      // erasing the original wait debt. Refusal or restart removes this credit.
+      const launching = reasonClass === 'final-round' && Number.isFinite(launchWait?.startedAt)
+        && launchWait.startedAt <= now && Number.isFinite(launchWait.boundMs) && launchWait.boundMs > 0;
+      const exhausted = immediate || (launching
+        ? now - launchWait.startedAt >= launchWait.boundMs
+        : !progress && now - row.started >= boundMs);
       const notify = exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
-      return { exhausted, notify, startedAt: progress ? now : row.started, boundedMs: boundMs };
+      return { exhausted, notify, startedAt: launching ? launchWait.startedAt : progress ? now : row.started,
+        boundedMs: launching ? launchWait.boundMs : boundMs };
     }).immediate();
     if (result.notify) {
       try {

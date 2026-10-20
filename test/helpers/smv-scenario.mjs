@@ -483,6 +483,34 @@ if (scenario === 'clean') {
     assert.equal(wait.exhausted, now >= 30);
   }
   assert.equal(pages, 3, 'future-dated progress still pages once at the original deadline');
+  const { createAmaHammerBackgroundQueue, amaHammerBackgroundProgress } = await import('../../src/ama-hammer-background-dispatch.mjs');
+  for (const dispatched of [true, false]) {
+    let clock = 0, finish, launchPages = 0;
+    const wait = { ...finalWait, prNumber: prNumber + (dispatched ? 101 : 102),
+      pageImpl: async () => { launchPages++; } };
+    await observeClosureWait({ ...wait, now: clock });
+    clock = 40 * 60_000;
+    const queue = createAmaHammerBackgroundQueue({ nowMs: () => clock });
+    const entry = queue.submit({ key: `${repo}#${wait.prNumber}@${headSha}`,
+      run: () => new Promise(resolve => { finish = resolve; }) });
+    const progress = amaHammerBackgroundProgress(entry, clock);
+    const launchAt = Date.parse(progress.closerProgressAt);
+    assert.equal((await observeClosureWait({ ...wait, now: clock,
+      launchWait: { startedAt: launchAt, boundMs: progress.closerLaunchBoundMs } })).exhausted, false);
+    clock += 200_000;
+    finish({ dispatched, reason: dispatched ? 'dispatched' : 'ci-not-green' });
+    await queue.drain();
+    const settled = queue.takeSettled(entry.key).result;
+    await observeClosureWait({ ...wait, now: clock, reason: settled.reason,
+      ...(dispatched ? { startedAt: Date.parse(settled.closerProgressAt) } : {}) });
+    // Reopen without launch evidence: only successful settlement persists credit.
+    const persisted = await observeClosureWait({ ...wait, now: clock });
+    assert.equal(persisted.startedAt, dispatched ? launchAt : 0);
+    assert.equal(persisted.exhausted, !dispatched);
+    assert.equal(launchPages, dispatched ? 0 : 1);
+    assert.equal((await observeClosureWait({ ...wait, now: launchAt + 30 * 60_000 })).exhausted, true);
+    assert.equal(launchPages, 1, 'fixed launch progress preserves one exhaustion receipt');
+  }
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);

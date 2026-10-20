@@ -39,6 +39,29 @@ export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
 export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 3;
 export const AMA_HAMMER_BACKGROUND_PROCESS_CEILING = 32;
 export const AMA_HAMMER_BACKGROUND_REASON = 'ama-closer-dispatch-backgrounded';
+export const DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS = 15 * 60 * 1000;
+
+export function isAmaCloserLaunching(result) {
+  return (result?.reason === AMA_HAMMER_BACKGROUND_REASON
+      && Number.isFinite(Date.parse(result?.closerProgressAt || '')))
+    || (result?.reason?.startsWith('in-flight:')
+      && Number.isFinite(Date.parse(result?.closerProgressAt || '')))
+    || result?.reason?.startsWith('ama-closer-dispatch-overrun:');
+}
+
+// Only this process's running queue entry is evidence of a launch in progress.
+// Durable retry intent and queued entries do not prove that dispatch has started.
+export function amaHammerBackgroundProgress(entry, now) {
+  if (!entry || !['running', 'started', 'in-flight'].includes(entry.state)
+    || !Number.isFinite(entry.startedAtMs) || entry.startedAtMs > now) return {};
+  const elapsedMs = now - entry.startedAtMs;
+  return {
+    closerProgressAt: new Date(entry.startedAtMs).toISOString(),
+    closerLaunchBoundMs: entry.boundMs,
+    ...(elapsedMs >= entry.boundMs
+      ? { reason: `ama-closer-dispatch-overrun: elapsed_ms=${elapsedMs} bound_ms=${entry.boundMs}` } : {}),
+  };
+}
 // A settled outcome is only meaningful to the next tick or two for that PR@head.
 // Past this age the PR has moved on (new head, closed) and the outcome is dropped.
 export const DEFAULT_AMA_HAMMER_SETTLED_TTL_MS = 60 * 60 * 1000;
@@ -206,7 +229,9 @@ export function createAmaHammerBackgroundQueue({
     entry.promise = settled
       .then(
         (result) => {
-          if (!entry.controller.signal.aborted) recordSettled(entry.key, { ok: true, result });
+          if (!entry.controller.signal.aborted) recordSettled(entry.key, { ok: true,
+            result: result?.dispatched === true
+              ? { ...result, closerProgressAt: new Date(entry.startedAtMs).toISOString() } : result });
           entry.onSettled?.({ ok: true, result, elapsedMs: nowMs() - entry.startedAtMs });
           return result;
         },
@@ -234,9 +259,9 @@ export function createAmaHammerBackgroundQueue({
     /** Cancel waiting work or signal a running task without freeing its slot early. */
     abort,
     /**
-     * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number}}
+     * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number, startedAtMs?: number, boundMs: number}}
      */
-    submit({ key, run, onSettled = null, pendingDispatch = null }) {
+    submit({ key, run, onSettled = null, pendingDispatch = null, timeoutMs = null }) {
       discardOlderHeads(key);
       for (const oldKey of settled.keys()) {
         if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
@@ -249,19 +274,34 @@ export function createAmaHammerBackgroundQueue({
           state: existing.state === 'running' ? 'in-flight' : 'queued',
           key,
           queuedAtMs: existing.queuedAtMs,
+          startedAtMs: existing.controller.signal.aborted ? undefined : existing.startedAtMs,
+          boundMs: existing.boundMs,
         };
       }
       const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
+      const dispatchTimeoutMs = Number(timeoutMs);
+      entry.boundMs = Number.isFinite(dispatchTimeoutMs) && dispatchTimeoutMs > 0
+        ? dispatchTimeoutMs : DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS;
       // Persist before invoking any run, including a synchronous launch. Failure
       // to save refuses submission rather than launching untracked work.
       entry.pendingDispatch = persistPendingDispatch(pendingDispatch, entry.queuedAtMs);
       entries.set(key, entry);
       if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
-        return { state: 'started', key, queuedAtMs: entry.queuedAtMs };
+        return { state: 'started', key, queuedAtMs: entry.queuedAtMs,
+          startedAtMs: entry.startedAtMs, boundMs: entry.boundMs };
       }
       waiting.push(entry);
-      return { state: 'queued', key, queuedAtMs: entry.queuedAtMs };
+      return { state: 'queued', key, queuedAtMs: entry.queuedAtMs, boundMs: entry.boundMs };
+    },
+    /** Read launch evidence without consuming the next tick's settled outcome. */
+    get(key) {
+      const entry = entries.get(key);
+      if (entry && !entry.controller.signal.aborted) return {
+        state: entry.state, startedAtMs: entry.startedAtMs, boundMs: entry.boundMs,
+      };
+      const outcome = settled.get(key);
+      return outcome && nowMs() - outcome.settledAtMs <= settledTtlMs ? { state: 'settled' } : null;
     },
     /**
      * Consume the settled outcome for `key` (`{ ok, result | error, settledAtMs }`),

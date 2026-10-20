@@ -1073,7 +1073,11 @@ review identity, and logs only one routing transition.
 claim; exhaustion selects operator paging. Final-round waits honor a retained
 closer's launch timestamp on existing rows and still exhaust when that timestamp
 ages past thirty minutes. Future-dated progress cannot refresh existing rows
-on every poll or suppress their stall page. Disposable halt files return distinct
+on every poll or suppress their stall page.
+Background dispatches borrow a fixed execution window; successful settlement
+persists the launch timestamp across SQLite reopen, while refusal restores the
+original wait debt. Both still exhaust once without further progress.
+Disposable halt files return distinct
 `fleet-stop-active` and `fleet-stop-merge-kill` refusals and unlinking each
 restores eligibility without reloading. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).

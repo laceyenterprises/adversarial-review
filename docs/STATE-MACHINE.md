@@ -968,7 +968,13 @@ confirmed dispatched lease progress, advancing existing final-round waits too.
 An unchanged timestamp cannot extend the bound. Future timestamps seed new rows
 at observation time but cannot advance existing waits until reached; retained
 stalled/blocked/unknown/succeeded-awaiting-audit-or-merged-signal dispatches supply no launch progress. Other blockers and
-immediate pages keep their existing behavior. Merge authority and lifecycle edges stay unchanged.
+immediate pages keep their existing behavior. HAMCLOSEWAIT-02 additionally
+credits the process queue's running background dispatch, and its own pending
+lease, from actual start for the existing dispatch timeout (15-minute fallback).
+This credit is provisional: queued/restarted intent supplies none; undispatched
+settlement restores the original clock and settled blocker; an overrun pages
+once naming elapsed time and bound. Successful settlement retains the fixed
+launch timestamp. Merge authority and lifecycle edges stay unchanged.
 There are no new lifecycle states or review rounds. STOPHOLDREVIEW-01 posting
 receipts and REVERSALPROV-01 reversal provenance remain independent requirements.
 

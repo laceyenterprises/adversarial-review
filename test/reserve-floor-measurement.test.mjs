@@ -58,6 +58,19 @@ test('healthy accounts in the current shape are ready, not unknown', () => {
   assert.equal(claude.hold, false);
 });
 
+test('Anthropic floors carry the current shape under weeklyMeasurement', () => {
+  const anthropic = { weeklyMeasurement: { confidence: 'measured', inferred: false, percentRemaining: 68 },
+    measurement: { confidence: 'measured', inferred: false, percentRemaining: 68 } };
+  assert.deepEqual(reserveFloorWeeklyMeasurement(anthropic), { status: 'measured', percentRemaining: 68 });
+  const stale = { weeklyMeasurement: { confidence: 'stale', inferred: false, percentRemaining: 0 } };
+  assert.equal(reserveFloorWeeklyMeasurement(stale).status, 'stale');
+});
+
+test('OpenAI floors carry a null weeklyMeasurement and the reading under measurement', () => {
+  const openai = { weeklyMeasurement: null, measurement: { confidence: 'measured', inferred: false, percentRemaining: 10 } };
+  assert.deepEqual(reserveFloorWeeklyMeasurement(openai), { status: 'measured', percentRemaining: 10 });
+});
+
 test('a measured zero in the current shape still counts as exhausted', () => {
   const s = snapshot();
   s.reserveFloors['openai-oauth'] = floor(0);

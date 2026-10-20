@@ -284,7 +284,7 @@ export async function resolveRemediationWorkerClassWithFallback({
       : primaryCap.available ? 'primary-available' : 'primary-not-grounded';
     return {
       ...base,
-      reason,
+      reason: base.reason || reason,
       primaryState: primaryCap.state,
       ...(statuses === null && error ? { error } : {}),
     };

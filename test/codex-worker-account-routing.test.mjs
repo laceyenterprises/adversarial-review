@@ -57,6 +57,7 @@ for (const [label, mutate, corporate, hold] of [
     assert.equal(hammer.workerClass, corporate ? 'hammer-corp' : 'hammer');
     assert.equal(recovery.workerClass, hammer.workerClass);
     assert.equal(remediation.workerClass, corporate ? 'remediator-codex-corp' : 'codex');
+    assert.equal(remediation.reason, hammer.reason, 'worker lanes retain the same account decision reason');
   }
 });
 
@@ -122,7 +123,8 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
     assert.equal(dispatches[0].env.CODEX_BROKER_PROVIDER, account === 'corporate' ? 'codex-corp' : 'codex');
     const choices = logs.filter(line => line.includes('codex_account='));
     assert.equal(choices.length, 1);
-    assert.match(choices[0], new RegExp(`codex_account=${account} .*reason=`));
+    const reason = account === 'personal' ? 'personal-ready' : 'personal-unavailable-corporate-ready';
+    assert.match(choices[0], new RegExp(`codex_account=${account} .*reason=${reason}$`));
   }
 });
 
@@ -227,4 +229,15 @@ for (const corporate of [false, true]) test(`real recovery dispatch logs ${corpo
   const accountLogs = logs.filter(line => line.includes('codex_account='));
   assert.equal(accountLogs.length, 1);
   assert.match(accountLogs[0], new RegExp(`codex_account=${corporate ? 'corporate' : 'personal'} .*reason=`));
+});
+
+test('worker account policy accepts get-only custom config loaders', () => {
+  for (const [key, workerClass] of [
+    ['roles.remediator', 'codex'],
+    ['roles.adversarial.merge_authority.worker_class', 'hammer'],
+  ]) {
+    assert.equal(codexWorkerAccountPolicy(key, workerClass, {
+      loaderImpl: () => ({ get: () => workerClass }),
+    }), 'personal-first');
+  }
 });

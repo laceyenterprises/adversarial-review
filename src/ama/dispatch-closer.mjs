@@ -6675,11 +6675,11 @@ async function maybeDispatchAmaCloserAttempt({
           nextDispatchDiffersImpl: async () => {
             const next = await resolveCloserDispatchHarnessImpl({
               workerClass,
-              codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass),
+              codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass, { env }),
               fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
               hqPath,
               execFileImpl,
-              env: process.env,
+              env,
               signal,
             });
             const died = existingRecord.dispatchWorkerClass || existingRecord.workerClass || workerClass;
@@ -7044,11 +7044,11 @@ async function maybeDispatchAmaCloserAttempt({
     throwIfAborted(signal);
     harnessFallback = await resolveCloserDispatchHarnessImpl({
       workerClass,
-      codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass),
+      codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass, { env }),
       fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
       hqPath,
       execFileImpl,
-      env: process.env,
+      env,
       signal,
     });
     throwIfAborted(signal);

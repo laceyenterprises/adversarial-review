@@ -531,7 +531,7 @@ export function codexWorkerAccountPolicy(key, workerClass, options = {}) {
   if (!['hammer', 'codex'].includes(workerClass)) return 'pinned';
   const cfg = loadRoleConfig({ ...options, contextKey: key });
   if (cfg.get(key) !== workerClass) return 'personal-first';
-  const trace = cfg.resolutionTrace(key);
+  const trace = typeof cfg.resolutionTrace === 'function' ? cfg.resolutionTrace(key) : [];
   const source = trace.at(-1)?.source || 'code-default';
   return source === 'code-default' ? 'personal-first' : 'pinned';
 }

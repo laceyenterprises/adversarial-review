@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
-import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS } from '../src/ama/orphan-watchdog.mjs';
+import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS, isOrphanRecoveryWait } from '../src/ama/orphan-watchdog.mjs';
+import Database from 'better-sqlite3';
+import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
@@ -29,6 +31,118 @@ function setup(t) {
   };
   return { args, calls, tick, record };
 }
+
+function recoveryState(rootDir) {
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog');
+  const db = new Database(join(dir, readdirSync(dir).find(name => name.endsWith('.db'))), { readonly: true });
+  try { return db.prepare('SELECT * FROM heads WHERE head=?').get('current'); }
+  finally { db.close(); }
+}
+
+test('ORPHANACTION-01: settled Comment-only final round selects hammer after a newer push', async t => {
+  const { tick, calls, record } = setup(t);
+  record('completed', { status: 'completed', revisionRef: 'old', finalRound: 'comment-only',
+    reviewBody: '## Non-blocking issues\n- Clarify the example.\n## Verdict\nComment only',
+    reReview: { suppressed: 'comment-only-final-round' },
+    completion: { workerPushedHeadSha: 'a'.repeat(40) } });
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    result: { amaEnabled: true, ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only' } } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 1);
+  assert.equal(calls.reviews.length, 0);
+});
+
+test('ORPHANACTION-01: review admission and recovery share captured-pass settlement evidence', async t => {
+  const { args, tick, calls } = setup(t);
+  const db = openReviewStateDb(args.rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewer_passes
+      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, head_sha, body_md)
+      VALUES (?, ?, 1, 'codex', 'first-pass', '2026-10-01T00:00:00Z', 'completed', ?, ?)`)
+      .run(args.repo, args.prNumber, args.headSha, '## Verdict\nComment only');
+  } finally { db.close(); }
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 1);
+  assert.equal(calls.reviews.length, 0);
+});
+
+test('ORPHANACTION-01: an older Comment-only verdict without a settled final round leaves review open', async t => {
+  const { tick, calls, record } = setup(t);
+  record('completed', { status: 'completed', revisionRef: 'old', reviewBody: '## Verdict\nComment only' });
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    result: { amaEnabled: true, ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only' } } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 0);
+  assert.equal(calls.reviews.length, 1);
+  assert.equal(calls.reviews[0].targetRevisionRef, 'current');
+});
+
+for (const evidence of [
+  { result: { amaEnabled: true, ownerProofFacts: { reviewCycleExhausted: true } } },
+  { result: { amaEnabled: true, ownerProofFacts: { commentOnlyFinalRoundCompleted: true } } },
+  { reviewStateRow: { rereview_reason: 'system-review-ceiling-closure' } },
+  { dispatchJob: { reviewCycleCapReached: true } },
+  { dispatchJob: { remediationStopCode: 'max-rounds-reached' } },
+]) test(`ORPHANACTION-01: closed re-review evidence selects hammer: ${JSON.stringify(evidence)}`, async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' }, ...evidence };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 1);
+  assert.equal(calls.reviews.length, 0);
+});
+
+for (const hold of [
+  { reason: 'all-fallbacks-grounded', holdReason: 'fleet-quota-status-unavailable' },
+  { reason: 'all-fallbacks-grounded', holdReason: 'fleet-quota-status-unreadable' },
+  { reason: 'harness-hold:fleet-quota-status-unavailable' },
+  { reason: 'harness-hold:fleet-quota-status-unreadable' },
+  { reason: 'stacked-base-read-failed' },
+]) test(`ORPHANACTION-01: transient hold refunds recovery: ${JSON.stringify(hold)}`, async t => {
+  const { args, tick, calls } = setup(t);
+  assert.equal(isOrphanRecoveryWait(hold), true);
+  const overrides = { dispatchHammer: async () => ({ dispatched: false, ...hold }) };
+  await tick(0);
+  for (const minute of [15, 16, 17]) await tick(minute, overrides);
+  const state = recoveryState(args.rootDir);
+  assert.equal(state.attempts, 0);
+  assert.deepEqual(JSON.parse(state.outcomes), []);
+  assert.equal(JSON.parse(state.evidence).reason, hold.reason);
+  assert.equal(calls.pages.length, 0);
+  // A route-level observation also holds without spending or probing ownership.
+  await tick(18, { result: { amaEnabled: true, ...hold },
+    hasOwnerImpl: async () => assert.fail('wait cannot start an ownership read') });
+  assert.equal(recoveryState(args.rootDir).attempts, 0);
+  await tick(19); await tick(20);
+  assert.equal(calls.launches.length, 2);
+  assert.equal((await tick(21)).outcome, 'recovery-exhausted');
+});
+
+for (const hold of [
+  { reason: 'all-fallbacks-grounded' },
+  { reason: 'all-fallbacks-grounded', holdReason: 'all-fallbacks-grounded' },
+  { reason: 'harness-hold:all-fallbacks-grounded' },
+  { reason: 'all-fallbacks-grounded', holdReason: 'unknown-hold' },
+]) test(`ORPHANACTION-01: grounded or unknown hold spends recovery: ${JSON.stringify(hold)}`, async t => {
+  const { args, tick, calls } = setup(t);
+  assert.equal(isOrphanRecoveryWait(hold), false);
+  const overrides = { dispatchHammer: async () => ({ dispatched: false, ...hold }) };
+  await tick(0); await tick(15, overrides); await tick(16, overrides);
+  assert.equal(recoveryState(args.rootDir).attempts, 2);
+  assert.equal((await tick(17)).outcome, 'recovery-exhausted');
+  assert.equal(calls.pages.length, 1);
+});
+
+test('ORPHANACTION-01: exhausted page text names both outcome reasons and underlying hold', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0);
+  await tick(15, { dispatchHammer: async () => ({ reason: 'all-fallbacks-grounded', holdReason: 'quota-exhausted' }) });
+  await tick(16, { dispatchHammer: async () => ({ reason: 'launch-refused' }) });
+  await tick(17);
+  assert.match(calls.pages[0][0], /attempt 1: all-fallbacks-grounded \(quota-exhausted\); attempt 2: launch-refused/);
+  assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason), ['all-fallbacks-grounded', 'launch-refused']);
+});
 
 test('one elapsed-time bound, with a positive environment override', () => {
   assert.equal(OWNERLESS_BOUND_MS, 900000);

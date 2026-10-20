@@ -1655,6 +1655,7 @@ async function dispatchAmaClosureFor({
   if (ownerProofFactsSink) ownerProofFactsSink.value = {
     headSha: currentPrHeadSha, reviewedHeadSha: gateSnapshot?.reviewedHeadSha,
     verdict: gateSnapshot?.settledReview?.verdict || null,
+    reviewCycleExhausted, commentOnlyFinalRoundCompleted: finalRoundKnown,
     checks: prMetadata.statusCheckRollup, mergeable: prMetadata.mergeableState,
   };
   const strictMode = cfg?.strictMode !== false;

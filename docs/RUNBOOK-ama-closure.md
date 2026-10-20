@@ -2519,11 +2519,20 @@ check; competing leases and other live ownership evidence still hold dispatch.
 Queued jobs, other leases, refusal reasons and unreadable ledger results alone
 do not prove ownership. A proven owner clears the clock; head movement does not.
 After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override), request
-current-head review when no authoritative review exists, otherwise request HAM
-repair. Historical stops and retry counters do not prevent that dispatch.
+current-head review when no authoritative review exists and re-review remains
+open, otherwise request HAM repair. Settled Comment-only verdicts share the
+review service's refusal predicate; terminal final-round ledger evidence and
+exhausted review cycles select HAM even after head movement.
+Historical stops and retry counters do not prevent that dispatch.
 Each external action reserves one of two per-head attempts before launch;
-refusals, exceptions and missing receipts still consume the attempt. The next
-ownerless observation pages with both durable outcomes, once delivery succeeds.
+proven transient waits refund that reservation. In addition to existing
+coexistence/background and rate-limit waits, `stacked-base-read-failed` and
+quota status read failures (`fleet-quota-status-unavailable` or
+`fleet-quota-status-unreadable`) wait. The latter may arrive as
+`harness-hold:<reason>` or `all-fallbacks-grounded` with `holdReason`. Genuine
+quota exhaustion and unknown holds, other refusals, exceptions and missing
+receipts still consume the attempt. The next ownerless observation pages with
+both durable outcomes' reasons in the message and payload, once delivery succeeds.
 Pending/failed review rows visit this watchdog before ordinary retry admission;
 posted rows visit it through closure orchestration. A daemon merge completed on
 this tick settles as terminal before the watchdog, even if the earlier PR read

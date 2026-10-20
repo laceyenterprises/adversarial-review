@@ -55,6 +55,43 @@ test('signature failure, absent dependencies and cancelled requests never start 
   assert.equal(fixture.service.starts, 0);
 });
 
+test('authentication precedes JSON and schema validation without admitting malformed signed orders', async () => {
+  for (const [orderBytes, expectedError] of [
+    ['{', SyntaxError],
+    [JSON.stringify(orderFixture({ effectPolicy: 'merge' })), /Unsupported review execution policy/],
+  ]) {
+    const verified = [];
+    let originReads = 0;
+    const fixture = setup({
+      verifyOrder: (bytes, signature) => {
+        verified.push(bytes);
+        return verifies(bytes, signature);
+      },
+      readCurrent: async () => { originReads += 1; return null; },
+    });
+    fixture.request.orderBytes = orderBytes;
+    await assert.rejects(fixture.execute, /Unauthenticated review order/);
+    fixture.request.signature = signatureFor(orderBytes);
+    await assert.rejects(fixture.execute, expectedError);
+    assert.deepEqual(verified, [orderBytes, orderBytes]);
+    assert.equal(originReads, 0);
+    assert.equal(fixture.service.active.size, 0);
+    assert.equal(fixture.service.starts, 0);
+  }
+});
+
+test('wire type and UTF-8 byte cap are enforced before calling the verifier', async () => {
+  for (const orderBytes of [undefined, null, 42, ' '.repeat(MAX_ORDER_BYTES + 1), 'é'.repeat(MAX_ORDER_BYTES / 2 + 1)]) {
+    let verifications = 0;
+    const fixture = setup({ verifyOrder: () => { verifications += 1; return true; } });
+    fixture.request.orderBytes = orderBytes;
+    await assert.rejects(fixture.execute, /wire budget/);
+    assert.equal(verifications, 0);
+    assert.equal(fixture.service.active.size, 0);
+    assert.equal(fixture.service.starts, 0);
+  }
+});
+
 test('stale preflight refuses start; stale results on head, round, epoch or order retain spend', async () => {
   for (const field of ['headSha', 'round', 'epoch', 'orderHash', 'workOrderHash', 'originInstallId', 'executorInstallId', 'hostId', 'repo', 'prNumber']) {
     let calls = 0;
@@ -214,6 +251,22 @@ test('invalid verdicts, oversized output and unsafe/oversized artifacts preserve
     assert.equal(result.review, null);
     assert.deepEqual(result.usage, usage);
     assert.equal(result.seatRetained, true);
+  }
+});
+
+test('non-string snapshot output or diagnostics retain usage and the seat as invalid execution evidence', async () => {
+  for (const field of ['output', 'diagnostic']) {
+    for (const value of [undefined, null, 42, {}, []]) {
+      const service = fixtureService();
+      const fixture = setup({ service, supervisor: service.supervisor({ report: { [field]: value } }) });
+      const result = await fixture.execute();
+      assert.equal(result.status, 'execution-unknown');
+      assert.equal(result.failureClass, 'invalid-execution-evidence');
+      assert.equal(result.review, null);
+      assert.deepEqual(result.usage, usage);
+      assert.equal(result.seatRetained, true);
+      assert.equal(service.active.size, 1);
+    }
   }
 });
 

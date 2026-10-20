@@ -3,7 +3,7 @@ import { sanitizeCodexReviewPayload, normalizeEffectiveReviewVerdict } from '../
 import { classifyReviewerFailure } from '../cli-direct/classification.mjs';
 import { detectQuotaExhaustion, quotaHoldDecision } from '../../../quota-exhaustion.mjs';
 import { createHostSeatClient } from './host-seat-client.mjs';
-import { boundedInteger, freeze, readReviewOrder, sameBinding, sha256 } from './review-order.mjs';
+import { boundedInteger, freeze, MAX_ORDER_BYTES, readReviewOrder, sameBinding, sha256 } from './review-order.mjs';
 
 // Every dependency call is bounded, including unavailable control-plane reads.
 // Timeout aborts the call; it never asserts that a remote/local child has died.
@@ -77,11 +77,16 @@ export function createFederationExecutionAdapter({
   return Object.freeze({
     // No watcher registration, discovery, publication, remediation or merge port.
     async execute({ orderBytes, signature, grantId, signal: parentSignal } = {}) {
-      const { order, binding } = readReviewOrder(orderBytes);
+      // Bound untrusted wire input before handing it to the verifier, but defer
+      // parsing and schema validation until the exact bytes are authenticated.
+      if (typeof orderBytes !== 'string' || Buffer.byteLength(orderBytes) > MAX_ORDER_BYTES) {
+        throw new Error('Review order exceeds wire budget');
+      }
       if (typeof signature !== 'string' || !signature || signature.length > 4096
         || await control((signal) => verifyOrder(orderBytes, signature, { signal })) !== true) {
         throw new Error('Unauthenticated review order');
       }
+      const { order, binding } = readReviewOrder(orderBytes);
       const result = {
         version: 1, binding, status: 'stale', review: null, artifacts: [], usage: [],
         usageComplete: true, failureClass: null, retryAt: null, seatRetained: false,
@@ -119,8 +124,10 @@ export function createFederationExecutionAdapter({
       }
       let failurePhase = 'invalid-execution-evidence';
       try {
-        if (typeof snapshot.output !== 'string' || typeof snapshot.diagnostic !== 'string'
-          || Buffer.byteLength(snapshot.output) + Buffer.byteLength(snapshot.diagnostic) > order.budget.maxOutputBytes) {
+        if (typeof snapshot.output !== 'string' || typeof snapshot.diagnostic !== 'string') {
+          throw new Error('Invalid snapshot output or diagnostic type');
+        }
+        if (Buffer.byteLength(snapshot.output) + Buffer.byteLength(snapshot.diagnostic) > order.budget.maxOutputBytes) {
           throw new Error('Output budget exceeded');
         }
         result.artifacts = readArtifacts(snapshot.artifacts, order.budget.maxArtifactBytes);

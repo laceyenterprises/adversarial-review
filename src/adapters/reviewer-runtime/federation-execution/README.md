@@ -31,7 +31,12 @@ secret screening; this module's strict field validation is not a secret scanner.
 Signatures and `orderHash` cover the **exact supplied UTF-8 wire bytes**. This
 module defines no alternative JSON canonicalizer. The origin integration must
 use its canonical-content owner when constructing those bytes and preserve them
-on retry. Parsed inputs are recursively frozen before reaching any dependency.
+on retry. The adapter checks the wire type and 2 MiB cap first, then authenticates
+the exact bytes before parsing JSON or validating the schema. Within that cap,
+unauthenticated malformed payloads fail with `Unauthenticated review order`;
+authenticated payloads must still pass all wire/schema checks before any origin
+read or seat consumption. Parsed inputs are recursively frozen before reaching
+any dependency.
 There are no filesystem artifact paths: up to 64 uniquely named UTF-8 artifacts
 are returned inline with byte lengths and locally computed SHA-256 hashes.
 Binary/blob transfer belongs to the executor spool, outside this version.

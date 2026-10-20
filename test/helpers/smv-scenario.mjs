@@ -128,6 +128,30 @@ if (scenario === 'clean') {
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-deferred-transient');
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).retryCount, 0);
     assert.equal(readAmaCloserLease(identity()), null);
+    const forkIdentity = { ...identity(), prNumber: prNumber + 90 };
+    let forkProbes = 0;
+    const forkArgs = { ...closerArgs,
+      prMetadata: { ...closerArgs.prMetadata, prNumber: forkIdentity.prNumber },
+      dispatchContext: { ...closerArgs.dispatchContext, dispatchedAt: '2026-01-01T00:00:00Z',
+        livePrProbeImpl: () => __testables__.defaultAmaLivePrProbe({ repo, prNumber: forkIdentity.prNumber,
+          execFileImpl: async command => {
+            assert.equal(command, 'gh', 'an unidentified fork must not probe the base repository');
+            forkProbes++;
+            return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha,
+              headRefName: 'synthetic', headRepository: null, isCrossRepository: true }) };
+          } }),
+      },
+    };
+    assert.equal((await maybeDispatchAmaCloser(forkArgs)).reason, 'live-head-branch-unknown');
+    forkArgs.dispatchContext.dispatchedAt = '2026-01-01T06:00:00Z';
+    const forkExpired = await maybeDispatchAmaCloser(forkArgs);
+    assert.equal(forkExpired.reason, 'live-head-fork-unresolved');
+    assert.equal(forkExpired.needsOperator, true);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, forkIdentity).state, 'no-dispatch');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, forkIdentity).retryCount, 0);
+    assert.equal(readAmaCloserLease(forkIdentity), null);
+    assert.equal((await maybeDispatchAmaCloser(forkArgs)).needsOperator, true);
+    assert.equal(forkProbes, 2, 'operator inspection stops further same-head probes');
     branchReadable = true;
     const deferred = await maybeDispatchAmaCloser(closerArgs);
     closerArgs.dispatchContext.livePrProbeImpl = normalLiveProbe;

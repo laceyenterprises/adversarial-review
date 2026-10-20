@@ -51,7 +51,7 @@
     },
     {
       "id": "handoff",
-      "description": "BRANCHPROBE-01 verifies null head metadata uses Git confirmation, unknown reads defer without consuming budget, and recovery dispatches. Terminal scratch cleanup preserves a draining recorded process and removes its private pytest tree after exit; aged terminal cwd-timeout recovery; oldest-first scratch cursor resumes across passes and restarts with independent ledger timeouts; terminal no-merge lease/capacity release and wake re-arm; armed auto-merge retains ownership inside the 30-minute lease window and releases at expiry; unreadable fresh launches reserve capacity.",
+      "description": "BRANCHPROBE-01 verifies null head metadata uses Git confirmation, unknown reads defer without consuming budget, and recovery dispatches; unidentified forks stop for operator inspection after six hours without charging launch budget or continuing same-head probes. Terminal scratch cleanup preserves a draining recorded process and removes its private pytest tree after exit; aged terminal cwd-timeout recovery; oldest-first scratch cursor resumes across passes and restarts with independent ledger timeouts; terminal no-merge lease/capacity release and wake re-arm; armed auto-merge retains ownership inside the 30-minute lease window and releases at expiry; unreadable fresh launches reserve capacity.",
       "promise": "smv-handoff",
       "edges": [
         "review-row.10",
@@ -68,6 +68,7 @@
         "hammer-dispatch.02",
         "hammer-dispatch.03",
         "hammer-dispatch.12",
+        "hammer-dispatch.28",
         "hammer-dispatch.24",
         "hammer-dispatch.25",
         "hammer-dispatch.26",

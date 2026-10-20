@@ -671,13 +671,18 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 BRANCHPROBE-01: before hammer launch, null head-repository metadata requires
-Git confirmation of the exact head ref, using the base repository URL when
-head identity is unavailable. Only `ls-remote` exit 2 permits branch-missing
+Git confirmation of the exact head ref, using the base repository URL only
+when the PR is not identified as cross-repository. Only `ls-remote` exit 2 permits branch-missing
 abandonment. Unknown branch reads take `dispatching` →
 `dispatch-deferred-transient` → `dispatching` on a later poll, release the
 unlaunched pending lease and preserve retry budget. The record's reason is
 `live-head-branch-unknown`; the return requests a 30-second retry. Confirmed
-merged/closed PRs retain their existing terminal handling.
+merged/closed PRs retain their existing terminal handling. Unidentified forks
+retain `unresolvedForkHeadSince` across polls; after six hours still unknown,
+`dispatching` → `no-dispatch` with `live-head-fork-unresolved` requires operator
+inspection and stops further probes for that head. Metadata recovery before
+expiry clears the window; a new reviewed head or operator record reset re-arms
+confirmation. This never asserts branch deletion or spends launch budget.
 
 > **Status: current.** This is the live closure model on AMA-enabled hosts
 > (`roles.adversarial.merge_authority.enabled: true`). It supersedes the

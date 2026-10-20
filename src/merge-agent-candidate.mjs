@@ -68,10 +68,10 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
       ? guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
         repo, prNumber, execFileImpl, signal }) : null,
     hasOperatorApproved && operatorApprovalEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl, env })
       : operatorApprovalEvent ?? null,
     hasMergeAgentRequested && mergeAgentRequestEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl, env })
       : mergeAgentRequestEvent ?? null,
     (async () => {
       let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };

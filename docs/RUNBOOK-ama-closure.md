@@ -114,7 +114,11 @@ tasks per PR; every task settles before the candidate returns or rejects.
 Closure accepts an optional initialized `reviewStateDb` connection from the
 watcher for its rereview-round count and hammer-wake telemetry. It still executes
 the count query on each evaluation and records each wake receipt, without
-reopening the database or converging its schema for every PR. Callers without a connection retain the existing initialization path.
+reopening the database or converging its schema for every PR. The posted-review
+handler uses the shared watcher connection by default at the module's root;
+custom roots default to no connection. Its dispatch-job construction and closure
+evaluation both receive the selected connection, including an explicit override
+or `null`. Callers without a connection retain the existing initialization path.
 
 Object-addressed history evidence remains bounded to one closure evaluation.
 Completed immutable reads can now be shared across operation signals. Pending

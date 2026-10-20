@@ -9,7 +9,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setImmediate as turn } from 'node:timers/promises';
 import { POSTED_REVIEW_CONCURRENCY, createPostedReviewFairnessState,
   runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
@@ -18,6 +19,7 @@ import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHan
 import { readNoProgressLane, recordNoProgressLaneRun, recordNoProgressLaneSkip } from '../src/watcher-no-progress-lane.mjs';
 import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
+import { db } from '../src/review-state-db.mjs';
 import { fetchMergeAgentCandidateSnapshot } from '../src/merge-agent-candidate-snapshot.mjs';
 import { fetchPullRequestHeadAndState } from '../src/github-api.mjs';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -33,6 +35,39 @@ const otherHead = 'b'.repeat(40);
 const quiet = { log() {}, warn() {}, error() {} };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const handler = (prNumber, run) => ({ repoPath: repo, prNumber, headSha: head, run });
+
+test('handler production defaults and database overrides reach dispatch and closure', async t => {
+  const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const customRoot = mkdtempSync(join(tmpdir(), 'handler-db-'));
+  t.after(() => rmSync(customRoot, { recursive: true, force: true }));
+  const injectedDb = {};
+  const row = { review_status: 'posted', reviewer_head_sha: head };
+  for (const [options, expectedDb] of [
+    [{}, db], [{ rootDir }, db], [{ rootDir: customRoot }, null],
+    [{ rootDir: customRoot, reviewStateDb: injectedDb }, injectedDb],
+    [{ rootDir, reviewStateDb: null }, null],
+  ]) {
+    let dispatchDb, closureDb;
+    const result = await handlePostedReviewRow({
+      ...options, repoPath: repo, prNumber: 1, currentRevisionRef: head,
+      currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
+      latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+      fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),
+      buildMergeAgentDispatchJobImpl: (_root, _candidate, { reviewStateDb }) => {
+        dispatchDb = reviewStateDb;
+        return {};
+      },
+      resolveMergeAgentCoexistenceForWatcherImpl: async ({ reviewStateDb }) => {
+        closureDb = reviewStateDb;
+        return { outcome: 'ama-pending', amaClosureResult: { reason: 'synthetic-wait' } };
+      },
+      logger: quiet,
+    });
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(dispatchDb, expectedDb);
+    assert.equal(closureDb, expectedDb);
+  }
+});
 
 test('adoption readiness probes use the injected executor through the real snapshot reader', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closure-executor-'));
@@ -563,6 +598,50 @@ test('posted-review cache expires, retries errors and isolates credentials and e
     clock = 10_000;
     assert.equal(await read(), 5);
     assert.equal(await read(), 6, 'an expired scope cannot renew its freshness window');
+  });
+});
+
+test('posted-review resource accepts undefined options inside and outside a cache scope', async () => {
+  let calls = 0;
+  const read = () => readPostedReviewResource('fixture', repo, 1, undefined, async () => ++calls);
+  assert.equal(await read(), 1);
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    assert.equal(await read(), 2);
+    assert.equal(await read(), 2);
+  });
+  assert.equal(await read(), 3);
+});
+
+test('candidate label reads reuse caller environment provenance and isolate environment changes', async () => {
+  let calls = 0;
+  const tokens = [];
+  const labels = ['operator-approved', 'merge-agent-requested'];
+  const execFileImpl = async (_command, _args, options) => {
+    calls++;
+    tokens.push(options.env.GH_TOKEN);
+    return { stdout: JSON.stringify({ data: { repository: { pullRequest: {
+      headRefOid: head, timelineItems: { nodes: [
+        { __typename: 'PullRequestCommit', commit: { oid: head, committedDate: '2026-01-01T00:00:00Z' } },
+        ...labels.map(label => ({ __typename: 'LabeledEvent', id: label, label: { name: label },
+          actor: { login: 'fixture-operator' }, createdAt: '2026-01-01T00:01:00Z' })),
+      ] },
+    } } } }) };
+  };
+  const env = { GH_TOKEN: 'synthetic-caller-token', GH_HOST: 'fixture.example',
+    GH_CONFIG_DIR: '/fixture/config', AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false' };
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    const expected = await Promise.all(labels.map(label => fetchLatestLabelEvent(repo, 1, label, { execFileImpl, env })));
+    const readCandidate = overrides => fetchMergeAgentCandidate(repo, 1, {
+      execFileImpl, env: { ...env, ...overrides },
+      preparedSnapshot: { headRefOid: head, state: 'CLOSED', labels },
+    });
+    const candidate = await readCandidate({});
+    assert.deepEqual([candidate.operatorApprovalEvent, candidate.mergeAgentRequestEvent], expected);
+    assert.equal(calls, 1, 'both labels reuse evidence fetched with the caller environment');
+    await readCandidate({ GH_TOKEN: 'synthetic-other-token' });
+    assert.equal(calls, 2, 'changed credentials must fetch fresh label evidence');
+    assert.deepEqual(tokens, ['synthetic-caller-token', 'synthetic-other-token'],
+      'the timeline subprocess must use the same environment as its cache identity');
   });
 });
 

@@ -589,7 +589,7 @@ async function handlePostedReviewRowWithinReadCache({
     }
     operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
     mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
-    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb });
 
     if (gateDecision?.reason === 'operator-skip-label') {
       const terminalReason = liveCandidateTerminalReason(candidate);

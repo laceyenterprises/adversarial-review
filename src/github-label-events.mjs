@@ -200,7 +200,7 @@ async function fetchLatestLabelEventUncached(repo, prNumber, labelName, {
         `name=${name}`,
         '-F',
         `number=${Number(prNumber)}`,
-      ], { maxBuffer: 5 * 1024 * 1024 });
+      ], { maxBuffer: 5 * 1024 * 1024, env });
       const parsed = JSON.parse(String(stdout || '{}'));
       return parsed?.data?.repository?.pullRequest || null;
     });

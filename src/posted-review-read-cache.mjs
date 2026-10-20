@@ -32,7 +32,7 @@ export function observePostedReviewHead(repo, prNumber, headSha) {
 
 export function readPostedReviewResource(kind, repo, prNumber, {
   execFileImpl, env = process.env, currentHeadSha = null,
-}, run, { now = Date.now } = {}) {
+} = {}, run, { now = Date.now } = {}) {
   const scope = storage.getStore();
   if (!scope?.open || scope.repo !== repo || scope.prNumber !== prNumber) return run();
   const time = now();

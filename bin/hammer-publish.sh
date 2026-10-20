@@ -3,6 +3,8 @@
 ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
+ham_entitled_gh() { GH_TOKEN="$HAM_GH_TOKEN" ham_gh "$@"; }
+
 ham_publish_phase() {
 HAM_PHASE_OUTCOME=hammer-publish-error
 HAM_PUBLISHED_AUDIT_HEAD=""
@@ -21,7 +23,50 @@ ham_publish_abort() {
   return "${1:-1}"
 }
 ham_audit_comment_transient() {
-  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+  grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+# Fixed publication budget; these are procedure constants, not configuration.
+HAM_AUDIT_MAX_ATTEMPTS=5
+HAM_AUDIT_BACKOFF_SECONDS=2
+ham_audit_lease_current() {
+  [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ] || return 1
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs status --repo <<REPO>> --base "$BASE_BRANCH" \
+    > "<<RUN_DIR>>/audit-lease.json" || return 1
+  jq -e --arg id "$HAM_MERGE_LEASE_ID" --argjson pr <<PR_NUMBER>> '
+    .holder.leaseId == $id and .holder.holderPr == $pr and
+    .holder.pastDeadline == false and .holder.holderPidLive != false and
+    (.holder.ageSeconds | type == "number")' "<<RUN_DIR>>/audit-lease.json" >/dev/null
+}
+# Every network attempt (including recovery) rechecks the actual lease file.
+ham_audit_retry() {
+  local out="$1" err="$2" attempt=1
+  shift 2
+  HAM_AUDIT_FAILURE_KIND=permanent
+  while [ "$attempt" -le "$HAM_AUDIT_MAX_ATTEMPTS" ]; do
+    if ! ham_audit_lease_current; then
+      HAM_AUDIT_FAILURE_KIND=lease-lost
+      echo "hammer audit stopped: merge lease lost" >&2
+      return 1
+    fi
+    if "$@" > "$out" 2> "$err"; then return 0; fi
+    if ! ham_audit_lease_current; then
+      HAM_AUDIT_FAILURE_KIND=lease-lost
+      return 1
+    fi
+    if ham_audit_comment_transient "$err" || ham_audit_comment_transient "$out"; then
+      HAM_AUDIT_FAILURE_KIND=transient
+    else
+      HAM_AUDIT_FAILURE_KIND=permanent
+      echo "hammer audit failed on attempt $attempt/$HAM_AUDIT_MAX_ATTEMPTS; not retrying" >&2
+      return 1
+    fi
+    if [ "$attempt" -ge "$HAM_AUDIT_MAX_ATTEMPTS" ]; then return 1; fi
+    echo "hammer audit failed transiently on attempt $attempt/$HAM_AUDIT_MAX_ATTEMPTS; retrying" >&2
+    sleep $((HAM_AUDIT_BACKOFF_SECONDS << (attempt - 1)))
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 ham_audit_cleanup_tmp_files() {
@@ -45,21 +90,63 @@ HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.X
   ham_publish_abort 1; return 1
 }
 
-POST_REMEDIATION_SHA=""
-for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
-  if POST_REMEDIATION_SHA=$(ham_pr --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
-    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
-    break
-  fi
-  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
-    break
-  fi
-  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
-done
+HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
+if [ -z "$HAM_GH_TOKEN" ]; then
+  echo "HAM hard-blocker: no entitled hammer token present for audit comment identity" >&2
+  ham_publish_abort 1; return 1
+fi
+if ! ham_audit_retry "<<RUN_DIR>>/audit-head" "$HAM_AUDIT_PR_VIEW_STDERR" \
+  ham_pr --json headRefOid --jq '.headRefOid'; then
+  ham_publish_abort 1; return 1
+fi
+POST_REMEDIATION_SHA=$(cat "<<RUN_DIR>>/audit-head")
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
+fi
+if ! ham_audit_retry "<<RUN_DIR>>/audit-identity.json" "$HAM_AUDIT_PR_VIEW_STDERR" \
+  ham_entitled_gh api graphql -f 'query={ viewer { login databaseId } }' --jq '.data.viewer'; then
+  ham_publish_abort 1; return 1
+fi
+# Deliver a previous run's exact edge before evaluating starting-base provenance.
+if ! HAM_RECOVERED_BODY=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pending-attestation.mjs read \
+  <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" "<<RUN_DIR>>/audit-identity.json"); then
+  HAM_PHASE_OUTCOME=exact-head-review-required
+  ham_publish_abort 20; return 20
+fi
+if [ -n "$HAM_RECOVERED_BODY" ]; then
+  HAM_RECOVERED_BODY=$(printf '%s' "$HAM_RECOVERED_BODY" |
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || { ham_publish_abort 1; return 1; }
+  HAM_RECOVERY_HEAD_CHANGED=0
+  ham_recover_edge() {
+    local current comments existing
+    comments=$(ham_entitled_gh api --paginate --slurp "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments") || return 1
+    existing=$(printf '%s\n' "$comments" | "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-audit-comment-id.mjs \
+      <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" '<!-- hq:ham-recovered-attestation -->') || return 1
+    [ -z "$existing" ] || return 0
+    current=$(ham_pr --json headRefOid --jq '.headRefOid') || return 1
+    [ "$current" = "$POST_REMEDIATION_SHA" ] || {
+      HAM_RECOVERY_HEAD_CHANGED=1
+      echo "pending attestation head changed; exact-head review required" >&2
+      return 1
+    }
+    ham_audit_lease_current || { echo "merge lease lost before recovered audit post" >&2; return 1; }
+    ham_entitled_gh pr comment <<PR_URL>> --body "$HAM_RECOVERED_BODY"
+  }
+  if ! ham_audit_retry "<<RUN_DIR>>/audit-recovery.out" "$HAM_AUDIT_COMMENT_POST_STDERR" \
+    ham_recover_edge; then
+    if [ "$HAM_RECOVERY_HEAD_CHANGED" -eq 1 ]; then
+      HAM_PHASE_OUTCOME=exact-head-review-required
+      ham_publish_abort 20; return 20
+    fi
+    HAM_PHASE_OUTCOME=audit-comment-unavailable
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. Audit comment delivery failed; the pending validated edge remains durable for the next hammer to recover under its lease."
+    echo "$HAM_NO_MERGE_NOTE" >&2
+    if declare -F ham_mark_merge_lease_retryable_abort >/dev/null; then
+      ham_mark_merge_lease_retryable_abort audit-comment-unavailable
+    fi
+    ham_publish_abort 1; return 1
+  fi
 fi
 # Never publish a validation claim before the independent range proof. A
 # failed proof releases ownership; LEASEDEFER-01 recovers the unvalidated head
@@ -154,7 +241,10 @@ ham_existing_terminal_audit_comment_id() {
   # with --jq. The selector reads the complete array of comment pages.
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" ham_gh api \
     --paginate --slurp \
-    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || {
+      printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" >&2
+      return 1
+    }
   # Preserve earlier runs' base/head edges. Repeating publication of this exact
   # edge is idempotent, and only an entitled App author's comment can be edited.
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
@@ -166,56 +256,40 @@ if [ -z "${HAM_GH_TOKEN:-}" ]; then
   echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
   ham_publish_abort 1; return 1
 fi
-HAM_AUDIT_COMMENT_POSTED=0
-for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
-  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
-      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
-      break
+ham_audit_deliver() {
+  local existing
+  existing=$(ham_existing_terminal_audit_comment_id) || {
+    cat "$HAM_AUDIT_COMMENT_LOOKUP_STDERR" >&2
+    return 1
+  }
+  ham_audit_lease_current || { echo "merge lease lost before audit post" >&2; return 1; }
+  if [ -n "$existing" ]; then
+    ham_entitled_gh api --method PATCH "repos/<<REPO>>/issues/comments/$existing" -f body="$HAM_AUDIT_COMMENT_BODY" || return 1
+    echo "hammer audit comment refreshed in place ($existing) → $POST_REMEDIATION_SHA" >&2
+  else
+    ham_entitled_gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY"
+  fi
+}
+if ! ham_audit_retry "<<RUN_DIR>>/audit-post.out" "$HAM_AUDIT_COMMENT_POST_STDERR" ham_audit_deliver; then
+  # Persist only after this run proved the full reviewed -> validated range.
+  # Audit state outlives scratch cleanup and uses the existing atomic writer.
+  if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pending-attestation.mjs record \
+    <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" \
+    "<<RUN_DIR>>/audit-identity.json" "<<RUN_DIR>>/range.json" \
+    "$HAM_AUDIT_REMEDIATED_TOTAL" "$HAM_AUDIT_REMEDIATED_BLOCKING" "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
+    HAM_PHASE_OUTCOME=audit-comment-unavailable
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. Audit comment failed ($HAM_AUDIT_FAILURE_KIND); the next hammer will recover the durable validated edge under its lease if head, reviewed base and App identity still match."
+    if [ "$HAM_AUDIT_FAILURE_KIND" = transient ]; then
+      HAM_NO_MERGE_NOTE="HAM closing status — no merge. Audit comment failed transiently after $HAM_AUDIT_MAX_ATTEMPTS attempts; the next hammer will recover the durable validated edge under its lease if head, reviewed base and App identity still match."
     fi
-    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-    continue
-  fi
-  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
-    # A terminal-remediation audit from an earlier rebase attempt already exists.
-    # REFRESH it in place (new head trailer / findings) instead of skipping or
-    # duplicating, so the single audit tracks the merged head and a hammer's
-    # rebases never read as several hammers (agent-os#4090).
-    if GH_TOKEN="$HAM_GH_TOKEN" ham_gh api --method PATCH \
-      "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
-      -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-      HAM_AUDIT_COMMENT_POSTED=1
-      echo "hammer audit comment refreshed in place ($HAM_EXISTING_AUDIT_COMMENT_ID) → $POST_REMEDIATION_SHA" >&2
-      break
+    if declare -F ham_mark_merge_lease_retryable_abort >/dev/null; then
+      ham_mark_merge_lease_retryable_abort audit-comment-unavailable
     fi
-    HAM_AUDIT_COMMENT_POST_EXIT=1
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-      cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-      echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
-      ham_publish_abort "$HAM_AUDIT_COMMENT_POST_EXIT"; return "$HAM_AUDIT_COMMENT_POST_EXIT"
-    fi
-    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-    echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-    continue
+  else
+    HAM_PHASE_OUTCOME=audit-attestation-record-failed
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. Audit comment delivery and durable edge recording failed; provenance recovery remains unproven."
   fi
-  if GH_TOKEN="$HAM_GH_TOKEN" ham_gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    HAM_AUDIT_COMMENT_POSTED=1
-    break
-  fi
-  HAM_AUDIT_COMMENT_POST_EXIT=1
-  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
-    ham_publish_abort "$HAM_AUDIT_COMMENT_POST_EXIT"; return "$HAM_AUDIT_COMMENT_POST_EXIT"
-  fi
-  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-done
-if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
-  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
+  echo "$HAM_NO_MERGE_NOTE" >&2
   ham_publish_abort 1; return 1
 fi
 ham_audit_cleanup_tmp_files

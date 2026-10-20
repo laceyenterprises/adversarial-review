@@ -89,6 +89,7 @@ test('publish accepts supplied audit content and releases the lease on a failed 
   writeFileSync(gh, `#!/bin/sh
 case "$*" in
   *"pr view"*) echo ${'a'.repeat(40)} ;;
+  *"api graphql"*) echo '{"login":"hammer-worker","databaseId":77}' ;;
   *"api --paginate"*) echo '[]' ;;
   *"pr comment"*) if [ "\${FAIL_POST:-0}" = 1 ]; then exit 1; fi; printf '%s' "$5" > "\${POSTED_BODY_PATH}" ;;
   *) exit 1 ;;
@@ -97,7 +98,7 @@ esac
   chmodSync(gh, 0o755);
   writeFileSync(join(bin, 'git'), '#!/bin/sh\necho '+ 'a'.repeat(40) +'\n', { mode: 0o755 });
   const proof = join(bin, 'proof');
-  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\nif [ -n \"${RANGE_PROOF:-}\" ]; then printf \"%s\\n\" \"$RANGE_PROOF\"; else echo \"{}\"; fi\n', { mode: 0o755 });
+  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/merge-lease.mjs) echo \'{"holder":{"leaseId":"fixture-lease","holderPr":424242,"pastDeadline":false,"ageSeconds":0}}\'; exit 0;;\n  */bin/hammer-pending-attestation.mjs) exec "$REAL_NODE" "$@";;\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\nif [ -n \"${RANGE_PROOF:-}\" ]; then printf \"%s\\n\" \"$RANGE_PROOF\"; else echo \"{}\"; fi\n', { mode: 0o755 });
   const env = {
     HAM_NODE_BIN: proof, REAL_NODE: process.execPath, HAM_BASE_HEAD: 'a'.repeat(40),
     HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
@@ -115,6 +116,8 @@ esac
   const script = join(dir, 'publish.sh');
   writeFileSync(script, render.stdout);
   const shell = `HAM_MERGE_LEASE_HELD=1
+HAM_MERGE_LEASE_ID=fixture-lease
+BASE_BRANCH=main
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
 ham_is_full_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 source "$1"
@@ -219,7 +222,7 @@ test('API fallback push rejection releases the lease under set -e for both push 
   writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
     .replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
-    .replaceAll('<<REVIEWED_SHA>>', 'a'.repeat(40)).replaceAll('<<PR_NUMBER>>', '1');
+    .replaceAll('<<HQ_ROOT>>', dir).replaceAll('<<REVIEWED_SHA>>', 'a'.repeat(40)).replaceAll('<<PR_NUMBER>>', '1');
   const script = join(dir, 'publish.sh');
   writeFileSync(script, source);
   for (const result of [
@@ -1042,6 +1045,7 @@ case "$1" in
   */merge-lease.mjs)
     if [ "$2" = acquire ]; then echo '{"leaseId":"fixture-lease"}';
     elif [ "$2" = needs-revalidation ]; then echo '{"needsRevalidation":false}';
+    elif [ "$2" = status ]; then echo '{"holder":{"leaseId":"fixture-lease","holderPr":42,"pastDeadline":false,"ageSeconds":0}}';
     else echo '{}'; fi ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs) echo '{}' ;;
   *) exec "$REAL_NODE" "$@" ;;
@@ -1053,7 +1057,8 @@ fs.appendFileSync(process.env.TMPDIR + '/calls.jsonl', JSON.stringify(args) + '\
 if (args[0] === 'pr' && args[1] === 'merge') { fs.writeFileSync(process.env.TMPDIR + '/merged', '1'); process.exit(0); }
 if (args[0] === 'pr' && args[1] === 'comment') process.exit(0);
 const path = args.find(arg => arg.startsWith('repos/')) || '';
-if (path.includes('/check-runs')) console.log(JSON.stringify({total_count:1,check_runs:[{id:1,name:'fixture-ci',status:'completed',conclusion:'success',created_at:'2026-01-01T00:00:00Z'}]}));
+if (args.includes('graphql')) console.log('{"login":"hammer-worker","databaseId":77}');
+else if (path.includes('/check-runs')) console.log(JSON.stringify({total_count:1,check_runs:[{id:1,name:'fixture-ci',status:'completed',conclusion:'success',created_at:'2026-01-01T00:00:00Z'}]}));
 else if (path.includes('/statuses')) console.log('[]');
 else if (path.includes('/reviews') || path.includes('/files?')) console.log('[]');
 else if (path.includes('/comments')) console.log('[[]]');
@@ -1089,7 +1094,7 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(readFileSync(legacyPath, 'utf8'), 'foreign read-only evidence');
   assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
-  assert.equal(graphql.length, 2, 'the existing gh pr comment and merge commands use GraphQL');
+  assert.equal(graphql.length, 3, 'audit identity, comment and merge use GraphQL');
   assert.equal(rest.length, 43, 'includes the live stacked-base recheck immediately before merge');
 });
 

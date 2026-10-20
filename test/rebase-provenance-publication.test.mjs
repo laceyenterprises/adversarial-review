@@ -17,7 +17,7 @@ for (const kind of ['rebase', 'ordinary', 'malformed']) {
       verified: true, proof: 'reviewed-rebase-patch-equivalence', reviewedHead: reviewed,
       rebaseCoverage: { reviewedHead: kind === 'malformed' ? rebased : reviewed },
     }));
-    const rendered = renderHammerProcedure('hammer-publish', { RUN_DIR: root, ROOT_DIR: root,
+    const rendered = renderHammerProcedure('hammer-publish', { RUN_DIR: root, ROOT_DIR: root, HQ_ROOT: root,
       REPO: 'fixture/repo', PR_NUMBER: '42', PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: reviewed });
     assert.doesNotMatch(rendered, /<<[A-Z_]+>>/);
     // Exercise the source resolver directly with the runtime directory.

@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `bin/hammer-verify-head.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
+**Runtime surface:** `bin/ama-audit.mjs`, `bin/hammer-publish.sh`, `bin/hammer-pending-attestation.mjs`, `src/ama/hammer-pending-attestation.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `bin/hammer-verify-head.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
 
 ## Purpose
 
@@ -25,6 +25,7 @@ at mode `0640`.
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
 | `attempts[].waited_s` | optional number or null | Merge-lease timeout elapsed seconds from the lease CLI; missing or null duration evidence is recorded as JSON `null` so the deferred audit remains valid. |
 | `attempts[].configured_s` | optional number | Procedure-enforced merge-lease wait budget in seconds for a timeout attempt. |
+| `attempts[].pendingAttestation` | optional object | Hammer audit-delivery failure after a successful range proof: `baseHead` (last reviewed SHA), `validatedHead` (document head), `identity` (`login`, numeric `databaseId`), and `validationSummary` (`rangeVerified: true`, non-negative `total`, `blocking`, `nonBlocking` counts). Fixed fields only; no secrets, stderr or arbitrary bodies. |
 | `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, `daemon-deferred`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge`, `hammer-gate-attempt-cap` and `hammer-lease-admission`. Document-level authority alone does not identify the producer of a marked attempt. |
 | `attempts[].guardReversals` | optional array of `{ authorization, paths, failedCheckRun, passingCheckRun, failedHead, passingHead }` | Independently verified required-guard reversal authority from the latest completed in-lease eligibility evaluation. Daemon terminal attempts retain it on both success and failure, including when an independent gate such as CI refuses merge. Omitted when that evaluation returns no verified reversals. `authorization` is `Reversal-Authorized-By: guard:<check name>`; paths, run IDs and exact head SHAs identify the proof. This evidence does not waive other merge gates. |
 | `reconciliation.needsRepair` | boolean | Latest append's repair signal. Present on records auto-created by append. |
@@ -164,3 +165,13 @@ and omits `manualCloseRequired`, permitting a later same-head retry.
 Lease-admission attempts (`attemptPhase: hammer-lease-admission`) record live
 head/state/draft/label refusals but neither set nor clear a hammer stop decision.
 The stop reader skips them even when their outcome is deferred or failed.
+
+HAMATTESTRETRY-01 records pending edges with `attemptPhase: hammer-audit-comment`,
+`outcome: deferred`, and `reason: audit-comment-unavailable`. Recording requires
+this run's successful reviewed-to-validated range proof. Recovery reads only the
+matching repo/PR/head audit and selects a pending edge from that producer phase.
+The current live head, last reviewed base and authenticated App login plus
+numeric identity must match before posting under the next hammer's lease.
+The pending object alone is never provenance: the unchanged App-comment parser
+must accept the recovered comment before the normal range proof can succeed.
+These immutable historical attempts need no new lifecycle state or config key.

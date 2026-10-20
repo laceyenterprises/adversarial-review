@@ -231,6 +231,9 @@ if (args[0] === 'pr' && args[1] === 'comment') {
   fs.writeFileSync(commentsPath, JSON.stringify(comments)); output({ id: 1 });
 } else if (args[0] !== 'api') fail('unexpected fake service command');
 else if (args[1] === 'graphql') {
+  if (args.some(arg => arg.includes('viewer { login databaseId }'))) {
+    output({ login: 'hammer-worker', databaseId: 77 }); process.exit(0);
+  }
   if (route !== 'api') fail('HTTP 422 unsupported API publication');
   const input = JSON.parse(fs.readFileSync(0, 'utf8')).variables.input;
   if (input.expectedHeadOid !== head()) fail('HTTP 422 CAS mismatch');
@@ -273,12 +276,20 @@ else if (args[1] === 'graphql') {
   else fail('unrecorded fake service API ' + path);
 }
 `, { mode: 0o755 });
+    const leaseNode = join(bin, 'lease-node');
+    writeFileSync(leaseNode, `#!/bin/bash
+if [[ "$1" == */bin/merge-lease.mjs ]]; then
+  echo '{"holder":{"leaseId":"test-lease","holderPr":${pr},"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
+else
+  exec ${JSON.stringify(process.execPath)} "$@"
+fi
+`, { mode: 0o755 });
     const config = join(root, 'global.yaml');
     writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: true\n');
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root,
       AGENT_OS_CONFIG_PATH: config, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
       GH_TOKEN: 'synthetic-token', HAMMER_LACEY_GH_TOKEN: 'synthetic-token',
-      HAM_RUN_DIR: root, HAM_ROOT_DIR: repoRoot, HAM_NODE_BIN: process.execPath, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: pr,
+      HAM_RUN_DIR: root, HAM_ROOT_DIR: repoRoot, HAM_HQ_ROOT: root, HAM_NODE_BIN: leaseNode, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: pr,
       HAM_PR_URL: `https://github.com/fixture/repo/pull/${pr}`, HAM_REVIEWED_SHA: reviewed, HAM_BASE_HEAD: reviewed,
       HAM_AUDIT_REMEDIATED_TOTAL: '1', HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
       HAM_FAILING_TESTS_FIXED: 'suite already green', HAM_DOC_CURRENCY: 'not applicable',
@@ -294,6 +305,8 @@ else if (args[1] === 'graphql') {
     assert.equal(published === local, route !== 'api');
     await run('/bin/bash', ['-c', `set -e
 HAM_MERGE_LEASE_HELD=1
+HAM_MERGE_LEASE_ID=test-lease
+BASE_BRANCH=main
 ham_is_full_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 source "$1"
@@ -330,6 +343,6 @@ source "$1"
     }
     assert.equal(verdict.trace.ciGreen.green, true);
     const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
-    assert.equal(calls.some(args => args[1] === 'graphql'), route !== 'git-tracking');
+    assert.equal(calls.some(args => args[1] === 'graphql' && args.includes('--input')), route !== 'git-tracking');
   });
 }

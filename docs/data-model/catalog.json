@@ -172,6 +172,9 @@
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
         "bin/ama-audit.mjs",
+        "bin/hammer-publish.sh",
+        "bin/hammer-pending-attestation.mjs",
+        "src/ama/hammer-pending-attestation.mjs",
         "templates/hammer-prompt.md",
         "src/ama/daemon-merge.mjs",
         "bin/hammer-merge.sh",
@@ -181,6 +184,7 @@
         "src/daemon-clean-merge.mjs",
         "src/ama/hammer-stop-hold.mjs"
       ],
+      "pendingAttestationFields": ["attempts[].pendingAttestation.baseHead", "attempts[].pendingAttestation.validatedHead", "attempts[].pendingAttestation.identity", "attempts[].pendingAttestation.validationSummary"],
       "owner": "AMA merge authority",
       "guardReversalEvidenceFields": ["attempts[].guardReversals"],
       "guardReversalEntryFields": ["authorization", "paths", "failedCheckRun", "passingCheckRun", "failedHead", "passingHead"],

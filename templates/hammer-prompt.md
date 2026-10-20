@@ -309,24 +309,16 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    validated current head: refresh the live head, reacquire the lease, rerun only
    the fail-closed live-head validation below, and
    complete the merge/closing-comment sequence idempotently. Do not restart remediation.
-0b. **A run that does not merge must say so exactly once on the PR.** The provenance fallback below is a successful exact-head review handoff: post its route comment, release the lease and exit 0 without a no-merge status or operator escalation. For other exits, before the
-   run ends for any reason with the PR still open and unmerged, post exactly one
-   HAM-authored closing-status comment. State what the run completed, the exact
-   step and blocker where it stopped, whether the merge lease was released, and
-   what happens next (automatic bounded retry or operator escalation). This is
-   distinct from the existing single in-lease audit comment, which remains the
-   only comment for the successful merge path. If that audit was already posted,
-   edit it in place into closing status; do not leave the audit and add a second comment.
-   Include `HAM_NO_MERGE_NOTE`, or the measured `HAM_HEAD_WAITED_SECONDS` and
-   `HAM_REQUIRED_CHECKS_WAITED_SECONDS`, in the note. Missing exact-head CI is
-   a terminal reason only after the published-head visibility wait and the
-   existing required-checks wait; if head visibility times out, report that
-   the checks wait could not start (0s). A different live head keeps the race handling.
-   Either way, the comment must contain the line `HAM closing status — no merge.`
-   In the audit comment for the current head, the closer reads that line as
-   this head's terminal no-merge audit. Do
-   not post the no-merge comment if the PR merged, and do not report success
-   merely because remediation or a rebase completed.
+0b. **A run that does not merge must say so exactly once on the PR.** The provenance fallback is a successful exact-head review handoff: post its route comment, release the lease and exit 0 without escalation. For other exits while the PR remains open, state what the run completed, the exact step and blocker where it stopped, whether the merge lease was released, and what happens next. If the audit exists, edit it in place into closing status; do not leave the audit and add a second comment.
+   The single in-lease audit comment remains the only comment for the successful merge path.
+   Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures: the next hammer
+   recovers the durable edge; do not request source re-review for delivery failure.
+   Otherwise include that note or measured `HAM_HEAD_WAITED_SECONDS` and
+   `HAM_REQUIRED_CHECKS_WAITED_SECONDS`. Missing CI becomes terminal only after
+   the existing head/check waits; on head visibility timeout say checks could not
+   start (0s). A different live head keeps the race handling;
+   the comment must contain the line `HAM closing status — no merge.` for the closer's terminal audit. Never post
+   it after merge or claim success merely for remediation or rebase completion.
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.
 0c. **Run every step in the foreground (HAMBG-02).** Background work dies when
@@ -699,7 +691,7 @@ trap 'rm -f "$protection_err"; ham_release_merge_lease' EXIT
 # protected (HTTP 404)". ama-check classifies both inputs written below.
 protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)|upgrade to github pro|make this repository public'
 protection_not_protected_re='branch not protected'
-protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
+protection_transient_re='Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
 protection_attempt=1
 protection_max_attempts=3
 while true; do

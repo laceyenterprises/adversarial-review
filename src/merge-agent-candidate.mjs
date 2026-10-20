@@ -53,6 +53,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
+  fetchCachedAdversarialGateBranchProtectionImpl = fetchCachedAdversarialGateBranchProtection,
   guardStackedBaseImpl = guardStackedBase,
 } = {}) {
   const parsed = preparedSnapshot || await fetchMergeAgentCandidateSnapshot(repo, prNumber, { execFileImpl, signal });
@@ -77,7 +78,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
       let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
       if (parsed.baseRefName) {
         try {
-          const protection = await fetchCachedAdversarialGateBranchProtection({
+          const protection = await fetchCachedAdversarialGateBranchProtectionImpl({
             cache: branchProtectionCache,
             repoPath: repo,
             baseBranch: parsed.baseRefName,

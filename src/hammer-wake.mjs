@@ -130,6 +130,7 @@ function sweepHammerWakeAudits(
  */
 function requestEligibleHammerWake({
   rootDir = ROOT,
+  reviewStateDb = null,
   repo,
   prNumber,
   headSha,
@@ -226,10 +227,12 @@ function requestEligibleHammerWake({
           requestedAt: wake?.payload?.requested_at || observedAt,
         };
         writeFileAtomic(auditPath, `${JSON.stringify(requestedRecord, null, 2)}\n`);
-        let db = null;
+        let db = reviewStateDb;
         try {
-          db = openReviewStateDb(rootDir);
-          ensureReviewStateSchema(db);
+          if (!db) {
+            db = openReviewStateDb(rootDir);
+            ensureReviewStateSchema(db);
+          }
           recordReviewLatencyEvent(db, {
             repo: identity.repo,
             prNumber: identity.prNumber,
@@ -265,7 +268,7 @@ function requestEligibleHammerWake({
           );
         } finally {
           try {
-            db?.close?.();
+            if (!reviewStateDb) db?.close?.();
           } catch {
             // Best-effort cleanup only.
           }
@@ -293,6 +296,7 @@ function requestEligibleHammerWake({
                 renameSync(auditPath, archivePath);
                 return requestEligibleHammerWake({
                   rootDir,
+                  reviewStateDb,
                   ...identity,
                   reviewedHeadSha,
                   eligibility,
@@ -306,6 +310,7 @@ function requestEligibleHammerWake({
                 if (retryErr?.code === 'ENOENT') {
                   return requestEligibleHammerWake({
                     rootDir,
+                    reviewStateDb,
                     ...identity,
                     reviewedHeadSha,
                     eligibility,

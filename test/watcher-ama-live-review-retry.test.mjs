@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -223,4 +224,33 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+
+test('closure uses an initialized database while rereading the current round count each evaluation', async () => {
+  const rootDir = tempRoot();
+  try {
+    let count = 40, reads = 0;
+    const exhausted = [];
+    // A borrowed connection exposes only the query seam: schema initialization
+    // or closing this connection would fail this test.
+    const reviewStateDb = { prepare(sql) {
+      assert.match(sql, /SELECT COUNT\(\*\) AS count[\s\S]*FROM reviewer_passes/);
+      return { get() { reads++; return { count }; } };
+    } };
+    const options = { ...baseArgs(rootDir), repoPath: 'fixture/project', prNumber: 1,
+      reviewStateDb,
+      fetchLatestHeadReviewBodiesImpl: async () => ['## Verdict\n\nComment only'],
+      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'fixture-wait' }),
+      maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
+        exhausted.push(reviewState.reviewCycleExhausted);
+        return { dispatched: true, reason: 'fixture-dispatched' };
+      },
+    };
+    await maybeDispatchAmaClosureFor(options);
+    count = 0;
+    await maybeDispatchAmaClosureFor(options);
+    assert.equal(reads, 2);
+    assert.deepEqual(exhausted, [true, false]);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

@@ -28,9 +28,9 @@ export function createHistoryReader(options = {}) {
         return JSON.parse(stdout);
       };
       const env = ghOptions.env || process.env;
-      return await (immutable && !ghOptions.signal
+      return await (immutable
         ? readClosureImmutable(execGhWithRetryImpl, [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN,
-          env.GH_HOST, env.GH_CONFIG_DIR], execute, ghOptions.execFileImpl || execFileAsync)
+          env.GH_HOST, env.GH_CONFIG_DIR], execute, ghOptions.execFileImpl || execFileAsync, ghOptions.signal)
         : execute());
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'

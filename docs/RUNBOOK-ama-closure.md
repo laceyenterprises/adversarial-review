@@ -94,6 +94,54 @@ still close work when they land. This protection covers the generated merge
 message only. PR-description linking performed directly by GitHub is also
 outside this commit-message protection.
 
+## Posted-review read lifetime (WATCHERLATENCY-01)
+
+Gate projection and candidate evaluation share label events and their underlying
+GitHub timeline only within one PR handler in one poll. Reuse lasts at most ten
+seconds from the first successful response, so subprocess startup does not
+consume the reuse window. A candidate head change discards the prior head's
+entries; failed reads are evicted, and executor, credential, host and adapter
+identities remain separate. The live timeline still determines the head to
+which a label belongs.
+
+The handler closes this advisory cache before coexistence, including any gate
+reprojection after a changed review row. Closure, daemon merge and dispatch
+freshness probes therefore remain live. PR terminal state, reviews, CI, leases,
+receipts and eligibility rules retain their existing checks. Candidate guard,
+label-provenance and branch-protection reads run in at most four independent
+tasks per PR; every task settles before the candidate returns or rejects.
+
+Closure accepts an optional initialized `reviewStateDb` connection from the
+watcher for its rereview-round count and hammer-wake telemetry. It still executes
+the count query on each evaluation and records each wake receipt, without
+reopening the database or converging its schema for every PR. Callers without a connection retain the existing initialization path.
+
+Object-addressed history evidence remains bounded to one closure evaluation.
+Completed immutable reads can now be shared across operation signals. Pending
+reads share only when their signal is identical, so one operation's cancellation
+cannot cancel another operation. Mutable PR, review, label and base-ref reads
+are excluded from this immutable cache.
+
+Run the synthetic before/after profile from the repository root:
+
+```bash
+node test/helpers/run-posted-review-profile.mjs origin/main
+```
+
+It profiles 15 PR handlers with three operator controls, twelve checks and two
+review pages per PR, using injected executors with a stated 20 ms call delay
+after one unmeasured warm-up PR per version. Imports use an isolated fixture
+root, so the profile cannot change checkout state.
+It reports per-step GitHub command counts by kind, executor invocations and elapsed
+time, plus actual SQLite read counts and read execution time. Adapter internals
+and HTTP requests hidden inside high-level commands are outside this fixture,
+as is live merge execution: the daemon boundary returns
+a synthetic lease refusal. A separate three-consumer history fixture measures
+immutable evidence reuse across operation deadlines. These are local fixture
+measurements; verify the existing posted-review step logs after deployment to
+establish whether normal production PRs meet the ten-second target. No config
+change or new check is required.
+
 ## Live head branch confirmation (BRANCHPROBE-01)
 
 The closer's pre-launch PR read treats `headRepository: null` as unknown and

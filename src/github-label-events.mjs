@@ -1,3 +1,4 @@
+import { readPostedReviewResource } from './posted-review-read-cache.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { readAdapterLatestLabelEvent } from './github-adapter-client.mjs';
 
@@ -106,7 +107,12 @@ function latestMatchingScopedTimelineLabelEvent(nodes, labelName, currentHeadSha
   return latestScopedLabel;
 }
 
-async function fetchLatestLabelEvent(repo, prNumber, labelName, {
+async function fetchLatestLabelEvent(repo, prNumber, labelName, options = {}) {
+  return readPostedReviewResource(`label:${normalizeGithubLabelName(labelName)}`, repo, prNumber, options,
+    () => fetchLatestLabelEventUncached(repo, prNumber, labelName, options));
+}
+
+async function fetchLatestLabelEventUncached(repo, prNumber, labelName, {
   execFileImpl,
   currentHeadSha = null,
   env = process.env,
@@ -181,20 +187,23 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
     }
   `;
 
-  const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
-    'api',
-    'graphql',
-    '-f',
-    `query=${query}`,
-    '-F',
-    `owner=${owner}`,
-    '-F',
-    `name=${name}`,
-    '-F',
-    `number=${Number(prNumber)}`,
-  ], { maxBuffer: 5 * 1024 * 1024 });
-  const parsed = JSON.parse(String(stdout || '{}'));
-  const pullRequest = parsed?.data?.repository?.pullRequest || null;
+  const pullRequest = await readPostedReviewResource('label-timeline', repo, prNumber,
+    { execFileImpl, env, currentHeadSha }, async () => {
+      const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
+        'api',
+        'graphql',
+        '-f',
+        `query=${query}`,
+        '-F',
+        `owner=${owner}`,
+        '-F',
+        `name=${name}`,
+        '-F',
+        `number=${Number(prNumber)}`,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+      const parsed = JSON.parse(String(stdout || '{}'));
+      return parsed?.data?.repository?.pullRequest || null;
+    });
   return latestMatchingScopedTimelineLabelEvent(
     pullRequest?.timelineItems?.nodes || [],
     labelName,

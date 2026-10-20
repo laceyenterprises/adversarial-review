@@ -1,3 +1,4 @@
+import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
@@ -325,7 +326,12 @@ export async function timePostedReviewStep(
   }
 }
 
-export async function handlePostedReviewRow({
+export function handlePostedReviewRow(options = {}) {
+  return withPostedReviewReadCache({ repo: options.repoPath, prNumber: options.prNumber,
+    headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache(options));
+}
+
+async function handlePostedReviewRowWithinReadCache({
   rootDir = ROOT,
   repoPath,
   prNumber,
@@ -336,6 +342,7 @@ export async function handlePostedReviewRow({
   projectGateStatusSafe,
   execFileImpl = execFileAsync,
   preparedCandidate = null,
+  reviewStateDb = rootDir === ROOT ? db : null,
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
   branchProtectionCache = null,
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
@@ -540,6 +547,8 @@ export async function handlePostedReviewRow({
         },
       };
     }
+    // End advisory reuse before any closure, lease or dispatch freshness read.
+    closePostedReviewReadCache();
     const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence', {
       allowPending: true,
     });
@@ -635,6 +644,7 @@ export async function handlePostedReviewRow({
           resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
             reviewStateRow: existing,
+            reviewStateDb,
             dispatchJob,
             candidate,
             labelNames,

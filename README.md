@@ -1327,3 +1327,46 @@ stateDiagram-v2
 ```
 
 <!-- smv:diagrams:end -->
+
+## OAuth identity token pool declarations (ITP-01)
+
+The strict configuration loader accepts inert ITP-01 OAuth declarations under
+`oauth.token_accounts` and `oauth.identity_token_pools`, both empty by default.
+Descriptors contain family, allowed model IDs, positive bounded concurrency
+(1–64), and exactly one existing broker-provider or `family: gemini` (agy)
+`holder_user` binding; Gemini holder concurrency stays 1. Duplicate bindings,
+unknown account references, unknown fields and cross-family pools refuse.
+Each role retains its declared
+account order. Personal-first declarations for hammer/Codex remediators and
+corporate-first declarations for other in-scope Codex/Claude roles are operator
+conventions; this loader does not validate account order or change runtime routing.
+
+The same strict `oauth` root also mirrors the existing `litellm_vk_*` `op_ref`
+children declared by `schema_v1/core.py::_oauth_litellm_vk_schema_keys` and wired
+by `schema_v1/oauth_github_ci.py` in the Python `agent_os_config` owner. These
+nullable string keys preserve compatibility with existing shared YAML.
+
+`src/identity-token-pools.v1.json` and
+`test/fixtures/identity-token-pools.v1.json` are published copies of the
+agent-os-config vocabulary and shared vectors. Keep them byte-identical to
+that owner on publication. Standalone Node config loading remains offline and
+needs no Python or superproject checkout. Both maps replace whole prior-layer
+maps; an empty map clears declarations. Final effective config validates
+references after all layers without changing role/vault or signing authority.
+Public `validateSchema` validates declaration semantics within its single input
+document; cascade loading defers them until the final effective configuration,
+so references can span layers. Declaration errors report the winning source
+for the failing map and both maps' source/path metadata in `declarationSources`,
+without copying account or binding values into diagnostics.
+
+Both `loadConfig` and `loadConfigRuntime` deliberately fail closed on invalid
+declarations, including unknown roles or descriptor fields. Generic runtime
+unknown-key tolerance does not apply inside these atomic maps. Deploy updated
+Node vocabulary and validation before publishing Python-owner vocabulary changes
+or enabling new declarations in shared/local configuration; otherwise Node
+daemon config reads can fail until their loader is updated. The offline loader
+asserts vocabulary version 1 and required field shapes at import time; shared
+fixture tests pin the same version. The canonical cross-loader contract lives
+in the agent-os superproject (`projects/cfg/LOADER-CONTRACT.md`); its ITP rollout
+documentation must carry this deployment ordering alongside the Python schema PR.
+No persistent store, lifecycle state or post-deploy smoke promise changes here.

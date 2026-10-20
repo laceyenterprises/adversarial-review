@@ -1,0 +1,1474 @@
+{
+  "version": 1,
+  "declarations": [
+    {
+      "name": "two-codex-accounts",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "two-gemini-holders",
+      "oauth": {
+        "token_accounts": {
+          "agy-login-a": {
+            "family": "gemini",
+            "holder_user": "agy-a",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 1
+          },
+          "agy-login-b": {
+            "family": "gemini",
+            "holder_user": "agy-b",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "gemini-reviewer": [
+            "agy-login-a",
+            "agy-login-b"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "legacy-empty",
+      "oauth": {},
+      "valid": true
+    },
+    {
+      "name": "singleton",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "zero-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 0
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "bounded positive"
+    },
+    {
+      "name": "negative-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": -1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "bounded positive"
+    },
+    {
+      "name": "unbounded-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 65
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "bounded positive"
+    },
+    {
+      "name": "boolean-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": true
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "bounded positive"
+    },
+    {
+      "name": "fraction-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1.5
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "bounded positive"
+    },
+    {
+      "name": "unknown-account",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "missing"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown account reference"
+    },
+    {
+      "name": "duplicate-member",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-primary",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate account reference"
+    },
+    {
+      "name": "cross-family",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "claude-code": [
+            "openai-primary"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "cross-family membership"
+    },
+    {
+      "name": "unknown-role",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "responder": [
+            "openai-primary"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown canonical role"
+    },
+    {
+      "name": "empty-pool",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "nonempty bounded account"
+    },
+    {
+      "name": "duplicate-holder",
+      "oauth": {
+        "token_accounts": {
+          "agy-login-a": {
+            "family": "gemini",
+            "holder_user": "agy-a",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 1
+          },
+          "agy-login-b": {
+            "family": "gemini",
+            "holder_user": "agy-a",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "gemini-reviewer": [
+            "agy-login-a",
+            "agy-login-b"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate provider or holder"
+    },
+    {
+      "name": "holder-concurrency",
+      "oauth": {
+        "token_accounts": {
+          "agy-login-a": {
+            "family": "gemini",
+            "holder_user": "agy-a",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 2
+          },
+          "agy-login-b": {
+            "family": "gemini",
+            "holder_user": "agy-b",
+            "allowed_models": [
+              "gemini-pro"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "gemini-reviewer": [
+            "agy-login-a",
+            "agy-login-b"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "holder concurrency must be one"
+    },
+    {
+      "name": "duplicate-provider",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate provider or holder"
+    },
+    {
+      "name": "provider-family",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "claude-code",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "provider family mismatch"
+    },
+    {
+      "name": "unknown-field",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1,
+            "access_token": "synthetic-not-a-token"
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown descriptor field"
+    },
+    {
+      "name": "missing-models",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "missing descriptor field"
+    },
+    {
+      "name": "empty-models",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "nonempty bounded model"
+    },
+    {
+      "name": "duplicate-models",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "duplicate model"
+    },
+    {
+      "name": "secret-shaped-reference",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "/private/credential",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected opaque ID"
+    },
+    {
+      "name": "null-accounts",
+      "oauth": {
+        "token_accounts": null,
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected mapping"
+    },
+    {
+      "name": "null-pools",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": null
+      },
+      "valid": false,
+      "error": "expected mapping"
+    },
+    {
+      "name": "claude-role-orders",
+      "oauth": {
+        "token_accounts": {
+          "anthropic-corporate": {
+            "family": "claude",
+            "broker_provider": "claude-code-corp",
+            "allowed_models": [
+              "opus"
+            ],
+            "concurrency": 1
+          },
+          "anthropic-primary": {
+            "family": "claude",
+            "broker_provider": "claude-code",
+            "allowed_models": [
+              "opus"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "claude-code": [
+            "anthropic-corporate",
+            "anthropic-primary"
+          ],
+          "claude-reviewer": [
+            "anthropic-corporate",
+            "anthropic-primary"
+          ],
+          "hammer-claude": [
+            "anthropic-corporate",
+            "anthropic-primary"
+          ],
+          "remediator-claude": [
+            "anthropic-corporate",
+            "anthropic-primary"
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "reserved-field",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1,
+            "__secret": "synthetic"
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown descriptor field"
+    },
+    {
+      "name": "null-descriptor",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": null
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected descriptor"
+    },
+    {
+      "name": "bad-model-type",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              {}
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected model IDs"
+    },
+    {
+      "name": "empty-descriptor",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {}
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "missing descriptor field"
+    },
+    {
+      "name": "non-string-member",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            1
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected opaque ID"
+    },
+    {
+      "name": "unknown-family",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "other",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "unknown family"
+    },
+    {
+      "name": "wrong-binding",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1,
+            "holder_user": "agy-a"
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "exactly one family-compatible binding"
+    },
+    {
+      "name": "unknown-provider",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "other",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "provider family mismatch"
+    },
+    {
+      "name": "accounts-list",
+      "oauth": {
+        "token_accounts": [],
+        "identity_token_pools": {
+          "codex": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "codex-reviewer": [
+            "openai-corporate",
+            "openai-primary"
+          ],
+          "hammer": [
+            "openai-primary",
+            "openai-corporate"
+          ],
+          "remediator-codex": [
+            "openai-primary",
+            "openai-corporate"
+          ]
+        }
+      },
+      "valid": false,
+      "error": "expected mapping"
+    },
+    {
+      "name": "pools-list",
+      "oauth": {
+        "token_accounts": {
+          "openai-corporate": {
+            "family": "codex",
+            "broker_provider": "codex-corp",
+            "allowed_models": [
+              "gpt-6",
+              "gpt-6.1"
+            ],
+            "concurrency": 2
+          },
+          "openai-primary": {
+            "family": "codex",
+            "broker_provider": "codex",
+            "allowed_models": [
+              "gpt-6"
+            ],
+            "concurrency": 1
+          }
+        },
+        "identity_token_pools": []
+      },
+      "valid": false,
+      "error": "expected mapping"
+    }
+  ],
+  "model_subsets": [
+    {
+      "account": "openai-primary",
+      "identity_models": [
+        "gpt-6",
+        "gpt-6.1"
+      ],
+      "requested_models": [
+        "gpt-6.1"
+      ],
+      "allowed": false
+    },
+    {
+      "account": "openai-primary",
+      "identity_models": [
+        "gpt-6"
+      ],
+      "requested_models": [
+        "gpt-6"
+      ],
+      "allowed": true
+    },
+    {
+      "account": "openai-corporate",
+      "identity_models": [
+        "gpt-6"
+      ],
+      "requested_models": [
+        "gpt-6.1"
+      ],
+      "allowed": false
+    },
+    {
+      "account": "openai-corporate",
+      "identity_models": [
+        "gpt-6",
+        "gpt-6.1"
+      ],
+      "requested_models": [
+        "gpt-6",
+        "gpt-6.1"
+      ],
+      "allowed": true
+    },
+    {
+      "account": "openai-primary",
+      "identity_models": [
+        "gpt-6"
+      ],
+      "requested_models": [],
+      "allowed": false
+    }
+  ]
+}

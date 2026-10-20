@@ -94,6 +94,37 @@ still close work when they land. This protection covers the generated merge
 message only. PR-description linking performed directly by GitHub is also
 outside this commit-message protection.
 
+## Live head branch confirmation (BRANCHPROBE-01)
+
+The closer's pre-launch PR read treats `headRepository: null` as unknown and
+confirms the exact head ref with bounded, noninteractive `git ls-remote
+--exit-code --heads`, falling back to the base repository URL. An identified
+fork uses its own repository URL. A fork identified by `isCrossRepository`
+without a head repository stays unknown and retries without a base probe. Only exit code 2 authorizes
+`no-dispatch / abandoned-pr-closed / live-head-branch-missing`.
+
+A failed, timed-out or empty successful confirmation leaves branch existence
+unknown. The existing `dispatch-deferred-transient` state records
+`live-head-branch-unknown` and the error, releases the unlaunched pending lease,
+preserves launch budget and returns a 30-second retry hint for the next normal
+poll. No merge-agent fallback runs during that wait. After deployment, verify
+that existing branches never receive `live-head-branch-missing`, and that
+unknown reads resume normal dispatch after confirmation recovers.
+
+Unidentified forks have a separate six-hour window, recorded per head in
+`unresolvedForkHeadSince`. Repeated unknown fork reads preserve that timestamp
+and launch budget. Confirmed repository metadata clears the window. If the fork
+is still unidentified at the deadline, the closer writes `no-dispatch` with
+reason `live-head-fork-unresolved`, logs a warning, releases the pending lease,
+and returns `needsOperator: true`. It does not claim that the branch was deleted
+or fall back to a merge agent. Further closer calls for that head stop before
+the live PR probe. Inspect whether the fork was deleted or GitHub metadata is
+unavailable; after resolving the cause, an operator may clear that head's
+dispatch record to re-arm confirmation. A new reviewed head starts a new window.
+After deployment, verify persistent unknown forks reach this inspection state
+without a launch-budget charge or repeated GitHub probes. See the
+[incident report](postmortems/BRANCHPROBE-01-null-head-repository-2026-10-19.md).
+
 ## 1. Prerequisites
 
 ### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04 / SCRATCHCENSUS-01 / SCRATCHCENSUS-02)

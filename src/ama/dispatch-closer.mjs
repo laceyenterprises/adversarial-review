@@ -260,6 +260,7 @@ const CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY = 'critical';
 const CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY = 'normal';
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
 const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
+const AMA_UNRESOLVED_FORK_HEAD_WINDOW_MS = 6 * 60 * 60 * 1000;
 export const HARNESS_FALLBACK_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
 const HARNESS_FALLBACK_ALERT_STATE_DIRNAME = 'ama-harness-fallback-alerts';
 const HARNESS_FALLBACK_ALERT_STATE_DIR_MODE = 0o2775;
@@ -619,6 +620,7 @@ function normalizeAmaLivePrProbeResult(raw) {
     headRefName: typeof raw.headRefName === 'string' ? raw.headRefName : null,
     headRefOid: typeof raw.headRefOid === 'string' ? raw.headRefOid : null,
     autoMergeRequest: raw.autoMergeRequest ?? null,
+    unresolvedForkHead: raw.unresolvedForkHead === true,
     ...(raw.headBranchProbeError ? { headBranchProbeError: String(raw.headBranchProbeError) } : {}),
   };
 }
@@ -689,7 +691,7 @@ async function defaultAmaLivePrProbe({
     '--repo',
     repo,
     '--json',
-    'state,headRefName,headRefOid,headRepository,autoMergeRequest',
+    'state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest',
   ], {
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
@@ -707,11 +709,12 @@ async function defaultAmaLivePrProbe({
   let headBranchProbeError = null;
   const headRefName = String(payload?.headRefName || '').trim();
   const hasHeadRepository = Object.prototype.hasOwnProperty.call(payload || {}, 'headRepository');
+  // GitHub can transiently omit the head repository. Confirm branch existence
+  // against the base repository only when the PR is not identified as a fork.
   const repoUrl = githubHeadRepositoryHttpUrl(payload?.headRepository)
-    || (!hasHeadRepository ? githubRepoHttpUrl(repo) : null);
-  if (state === 'OPEN' && headRefName && hasHeadRepository && payload?.headRepository === null) {
-    headBranchExists = false;
-  } else if (state === 'OPEN' && headRefName && repoUrl) {
+    || ((!hasHeadRepository || payload?.headRepository === null) && payload?.isCrossRepository !== true
+      ? githubRepoHttpUrl(repo) : null);
+  if (state === 'OPEN' && headRefName && repoUrl) {
     try {
       const probe = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'git', [
         'ls-remote',
@@ -730,7 +733,11 @@ async function defaultAmaLivePrProbe({
         signal,
       });
       throwIfAborted(signal);
-      headBranchExists = String(probe?.stdout || '').trim().length > 0;
+      if (String(probe?.stdout || '').trim()) {
+        headBranchExists = true;
+      } else {
+        headBranchProbeError = 'git ls-remote returned empty output without exit code 2';
+      }
     } catch (err) {
       throwIfAborted(signal);
       if (Number(err?.code) === 2) {
@@ -748,6 +755,7 @@ async function defaultAmaLivePrProbe({
     autoMergeRequest: payload?.autoMergeRequest ?? null,
     headBranchExists,
     headBranchProbeError,
+    unresolvedForkHead: payload?.isCrossRepository === true && !repoUrl,
   });
 }
 
@@ -5343,13 +5351,13 @@ async function maybeDispatchAmaCloserAttempt({
     && targetRemediationSha
     && existingRecord.headSha !== targetRemediationSha
   );
-  const targetRecordForWorkerId = existingDispatchHeadAdvanced
+  const targetRecord = existingDispatchHeadAdvanced
     ? readAmaCloserDispatchRecord(rootDir, targetDispatchIdentity)
     : existingRecord;
   const workerId = isHammerWorkerClass(workerClass)
     ? hammerCloserWorkerIdFromRecord(
       prNumber,
-      targetRecordForWorkerId,
+      targetRecord,
       targetRemediationSha || dispatchRecordHeadSha || reviewedSha,
     )
     : null;
@@ -5678,6 +5686,13 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
+  // A persistently unidentified fork needs operator inspection, not a claim
+  // that its branch was deleted. A new head (or explicit record reset) re-arms it.
+  if (targetRecord?.state === 'no-dispatch'
+    && targetRecord.reason === 'live-head-fork-unresolved') {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      needsOperator: true, reason: 'live-head-fork-unresolved' });
+  }
   const existingRecordIsStaleLaunchOnlyDispatch = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
     && isStaleDispatchingAmaCloserRecord(existingRecord, { now: dispatchContext.dispatchedAt })
     && (
@@ -7301,6 +7316,7 @@ async function maybeDispatchAmaCloserAttempt({
       dispatchId: existingRecord?.dispatchId || null,
       launchRequestId: existingRecord?.launchRequestId || null,
       retryCount: priorRetryCount + 1,
+      unresolvedForkHeadSince: targetRecord?.unresolvedForkHeadSince || null,
       unexecutedRefundCount: existingDispatchHeadAdvanced ? 0 : Number(existingRecord?.unexecutedRefundCount || 0),
       previousUnexecutedLaunchRequestId: existingRecord?.previousUnexecutedLaunchRequestId || null,
       branchHolderBlockCount: existingBranchHolderBlockCount,
@@ -7461,6 +7477,42 @@ async function maybeDispatchAmaCloserAttempt({
       reason: 'dispatch-head-context-changed',
       reasons: ['live head moved after review context derivation; awaiting a fresh review binding'],
     });
+  }
+
+  if (livePrProbe?.state === 'OPEN' && livePrProbe.headBranchExists === null) {
+    const now = dispatchContext.dispatchedAt || new Date().toISOString();
+    const unresolvedForkHeadSince = livePrProbe.unresolvedForkHead
+      ? (targetRecord?.unresolvedForkHeadSince || now) : null;
+    const forkWindowExpired = unresolvedForkHeadSince !== null
+      && Date.parse(now) - Date.parse(unresolvedForkHeadSince) >= AMA_UNRESOLVED_FORK_HEAD_WINDOW_MS;
+    const reason = forkWindowExpired ? 'live-head-fork-unresolved' : 'live-head-branch-unknown';
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => current ? {
+      ...current,
+      state: forkWindowExpired ? 'no-dispatch' : 'dispatch-deferred-transient',
+      reason,
+      unresolvedForkHeadSince,
+      prState: livePrProbe.state,
+      headBranchExists: null,
+      headRefName: livePrProbe.headRefName || null,
+      retryCount: priorRetryCount,
+      lastFailureTransient: !forkWindowExpired,
+      lastError: livePrProbe.headBranchProbeError || 'head branch existence is unknown',
+    } : null);
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    if (forkWindowExpired) {
+      logger.warn?.(`[ama-closer] ${repo}#${prNumber}: fork head repository unresolved since ${unresolvedForkHeadSince}; retries stopped, operator inspection required`);
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, needsOperator: true, reason });
+    }
+    logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: head branch existence is unknown; retrying next poll`);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, retryAfterMs: 30_000, reason: 'live-head-branch-unknown' });
+  }
+
+  // Confirmed metadata breaks a consecutive unresolved-fork window, including
+  // when a later launch refusal preserves this dispatch record for another poll.
+  if (livePrProbe?.state === 'OPEN') {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => current?.unresolvedForkHeadSince
+      ? { ...current, unresolvedForkHeadSince: null } : null);
   }
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see

@@ -849,6 +849,15 @@ A new head still re-arms review through the existing REVIEWSTALL-01 policy.
 
 ## State machines and smoke verification (SMV v1)
 
+BRANCHPROBE-01: null head-repository metadata requires Git confirmation before
+branch-missing abandonment. Failed confirmation reuses the transient dispatch
+state, releases the unlaunched pending lease and preserves retry budget for the
+next poll (30-second hint). The handoff smoke verifies confirmation and recovery;
+after deployment, existing branches must never receive `live-head-branch-missing`.
+Unidentified forks retain a per-head six-hour window, then stop in `no-dispatch`
+with `live-head-fork-unresolved` and require operator inspection. The smoke also
+verifies expiry preserves launch budget and prevents further same-head probes.
+
 [state-machines.json](state-machines.json) maps the six owned lifecycle objects.
 A terminal flag means this attempt or decision is quiescent; explicit recovery
 may start another attempt. Closure owner is a computed decision, not a stored PR
@@ -989,7 +998,11 @@ dispatch reason or exhaustion snapshot. No review round or merge authority is ad
 merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
-<a id="smv-handoff"></a>**smv-handoff:** terminal scratch cleanup retains a draining
+<a id="smv-handoff"></a>**smv-handoff:** null same-repository head metadata
+requires Git confirmation; unknown reads release the lease and preserve launch
+budget, then resume after confirmation recovers. Unidentified forks still
+unresolved after six hours stop for operator inspection without charging launch
+budget or continuing same-head GitHub probes. Terminal scratch cleanup retains a draining
 recorded process, removes its test tree after exit, and pins private pytest temp
 with retention one. The synthetic sweep also proves timeout recovery after the
 existing launch/lease grace, oldest-first cursor resumption after a restart,
@@ -1267,7 +1280,8 @@ stateDiagram-v2
     s3 --> s3: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
     [*] --> s0: hammer-dispatch.01 persist launch intent
     s0 --> s1: hammer-dispatch.02 launch result: dispatched
-    s0 --> s4: hammer-dispatch.03 launch result: dispatch-deferred-transient
+    s0 --> s4: hammer-dispatch.03 transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget
+    s0 --> s9: hammer-dispatch.28 unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection
     s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
     s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
     s0 --> s7: hammer-dispatch.06 launch failure or settled unlaunched closer refusal with matching reclaimable pending lease
@@ -1276,7 +1290,7 @@ stateDiagram-v2
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
     s1 --> s7: hammer-dispatch.10 failed outcome reconciled
     s2 --> s0: hammer-dispatch.11 bounded same-head no-merge retry or changed context; merged success stays sticky
-    s4 --> s0: hammer-dispatch.12 bounded retry or changed context
+    s4 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
     s5 --> s0: hammer-dispatch.13 bounded retry or changed context
     s7 --> s0: hammer-dispatch.14 bounded retry or changed context
     s9 --> s0: hammer-dispatch.15 bounded retry or changed context

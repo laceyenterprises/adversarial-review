@@ -88,6 +88,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `headSha` | string | Dispatch-record identity SHA and filename key. Current stale-head redrive writers use the live remediation target SHA. |
 | `reviewedSha` | string or null | Commit SHA that carried the posted review verdict; preserved for audit/freshness even when `headSha` targets newer remediation. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation; may differ from `reviewedSha` during stale-review exhausted-lane redrive. |
+| `unresolvedForkHeadSince` | optional ISO timestamp or null | First unresolved fork-repository observation on this head. Preserved across unknown fork deferrals; cleared on confirmed metadata. Six hours of unresolved evidence stops retries for operator inspection. Legacy records start the window on their next unresolved observation. |
 | `observedHeadSha` | optional string or null | Head returned by the last pre-launch live probe when it differs from the targeted head; null if unavailable. Diagnostic evidence only. |
 | `dispatchReason` | string or null | Operator-visible reason for dispatch, such as `exhausted-final-hammer`. |
 | `workerClass` | string | Logical closer class requested by AMA, usually `hammer`. |
@@ -126,6 +127,26 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract
+
+BRANCHPROBE-01 reuses `dispatch-deferred-transient` for an open PR whose exact
+head ref cannot be confirmed. `reason: live-head-branch-unknown`,
+`headBranchExists: null`, `prState: OPEN` and `headRefName` describe the probe;
+`lastError` records the read failure and `lastFailureTransient` is true.
+No launch receipt is assigned, `retryCount` is restored to its pre-attempt
+value, and the pending lease is released for the next poll. Only confirmed
+Git exit code 2 writes `headBranchExists: false` and the existing
+`abandoned-pr-closed / live-head-branch-missing` annotations. A null head
+repository alone cannot authorize abandonment.
+
+When the probe identifies a fork but cannot resolve its repository URL,
+`unresolvedForkHeadSince` retains the first such observation. On an unresolved
+observation at least six hours later, state becomes `no-dispatch`, reason
+`live-head-fork-unresolved`, with `lastFailureTransient: false`. The pending
+lease is released and launch budget remains unchanged. Subsequent closer calls
+return `needsOperator: true` without re-probing that head. Confirmed metadata
+before expiry clears the timestamp; a new reviewed head or an operator reset of
+the dispatch record re-arms confirmation. This is an inspection hold, not an
+assertion that the PR or branch was deleted.
 
 After a native CI-blocked handoff actually invokes the closer and settles with
 `dispatched: false`, settlement

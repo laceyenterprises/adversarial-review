@@ -584,7 +584,9 @@
         "src/ama/prelaunch-refusal-retry.mjs"
       ],
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
-      "headContextFields": { "observedHeadSha": "optional string or null" },
+      "headContextFields": { "observedHeadSha": "optional string or null", "unresolvedForkHeadSince": "optional ISO timestamp or null" },
+      "unresolvedForkHeadWindowMs": 21600000,
+      "unresolvedForkHeadExpiry": "no-dispatch / live-head-fork-unresolved; needsOperator; no further same-head probes until operator record reset or a new reviewed head",
       "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],
       "foreignLaunchEvidenceFields": ["unadoptedLaunchRequestId"],
       "foreignLaunchRefusalReason": "non-hammer-launch-not-adopted",

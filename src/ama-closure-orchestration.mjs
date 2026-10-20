@@ -1769,10 +1769,20 @@ async function dispatchAmaClosureFor({
     const ownership = flight ? await probeClosureOwnershipImpl({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: 5000, logger }) : null;
     if (!flight || ownership?.owned !== false || ownership?.uncertain === true) {
+      // A confirmed running closer gets its own bounded window. Pending or
+      // uncertain ownership keeps the original stall clock; polling is no heartbeat.
+      const closerProgressAt = handoffLease.status === 'dispatched'
+        && ownership?.owned === true && ownership?.uncertain !== true
+        ? handoffLease.updatedAt || handoffLease.acquiredAt || null : null;
+      const progressAt = Date.parse(closerProgressAt || '');
       const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
-        headSha: currentPrHeadSha, reason: closureOwner.reason, env });
+        headSha: currentPrHeadSha, reason: closureOwner.reason, env,
+        ...(finalRoundSink?.value && Number.isFinite(progressAt)
+          ? { startedAt: Math.max(progressAt, Number.isFinite(finalRoundSink.value.startedAt)
+            ? finalRoundSink.value.startedAt : progressAt) } : {}) });
       return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
         reason: closureOwner.reason, retryAfterMs: boundedWait.retryAfterMs,
+        ...(closerProgressAt ? { closerProgressAt } : {}),
         ...(boundedWait.exhausted ? { needsOperator: true } : {}), boundedWait }, { amaEnabled: true });
     }
   }

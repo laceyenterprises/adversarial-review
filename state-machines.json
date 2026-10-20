@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewCeilingHandoff": "CEILINGPUSH-01: a moved head at the delivered-review ceiling retains the prior review as terminal hammer input, admits its native wake independently of the legacy exhaustion dispatch reason or exhaustion snapshot, and settles remediation-closeout as review-ceiling-hammer-owned. Repeated observations retain ownership without another row write or transition log. Existing final-round waits record refusal and page once after 1800 seconds. No new states, edges, review rounds or merge authority.",
+  "reviewCeilingHandoff": "CEILINGPUSH-01: a moved head at the delivered-review ceiling retains the prior review as terminal hammer input, admits its native wake independently of the legacy exhaustion dispatch reason or exhaustion snapshot, and settles remediation-closeout as review-ceiling-hammer-owned. Repeated observations retain ownership without another row write or transition log. Existing final-round waits record refusal and page once after 1800 seconds without progress. HAMCLOSEWAIT-01 advances existing waits to a retained running/starting closer launch or confirmed dispatched lease progress timestamp no later than observation time; future timestamps cannot refresh existing waits and only running/starting retained dispatches supply launch progress; stalled/blocked/unknown/succeeded-awaiting-audit-or-merged-signal holds supply none; polling alone never extends the deadline, and other blockers and immediate pages retain their behavior. No new states, edges, review rounds or merge authority.",
   "hammerScratchLifetime": "SCRATCHLEAK-01: terminal cleanup retains recorded draining processes and live launch leases; pytest uses one replaceable tmp-tests base under scratch. Startup sweeps reclaim old terminal backlog; cwd-only probe timeouts expire after the idle bound plus twice the existing launch/lease window, requiring readable ps, terminal retry chains and no positive holder. Partial size accounting cannot prevent terminal reclamation. SCRATCHLEAK-02: an atomic candidate cursor resumes oldest-first laps across passes and restarts, including kept candidates and zero-removal laps. Launch/retry and worker ledger reads have separate 10-second timeouts outside the scan budget; timed-out candidates are retained and advanced past. No merge-authority transitions change.",
   "fleetStopGuard": {
     "source": "src/fleet-stop.mjs",
@@ -286,7 +286,7 @@
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "b70bec4bfe7769e073439682fe3de1311fc4a67fb3e32316aeca12802fbc965a",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
-    "src/ama-closure-orchestration.mjs": "8df2a587d74b481e6a0764f1a9ce8d8b3b79d81721aab7bb1f946ee975563529",
+    "src/ama-closure-orchestration.mjs": "ec8519f4cf49aec3b06b965ac0040c45b2ed6c56baf90421b2b70ce5d8f3214a",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
     "src/ama/dispatch-closer.mjs": "dbd7e952faa9747e1543ff62cd963472d877d7b751d977c9874ce5f90aca62c5",

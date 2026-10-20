@@ -3975,7 +3975,8 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
     dispatched: false,
     skipMergeAgent: true,
     reason: `existing-dispatch-${status || 'unknown'}`,
-    closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null,
+    ...(status === 'running' || status === 'starting'
+      ? { closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null } : {}),
     workerClass: existingRecord.workerClass || workerClass,
     dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
     launchRequestId: existingRecord.launchRequestId || null,
@@ -6439,15 +6440,7 @@ async function maybeDispatchAmaCloserAttempt({
           lastObservedAt: dispatchContext.dispatchedAt,
           lastError: statusProbe?.error || null,
         }));
-        return {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: `existing-dispatch-${status}`,
-          workerClass: existingRecord.workerClass || workerClass,
-          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-          launchRequestId: existingRecord.launchRequestId || null,
-          promptPath: existingRecord.promptPath || null,
-        };
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
     }
     if (releaseUnprovenTerminalHold) {

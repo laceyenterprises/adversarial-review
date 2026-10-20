@@ -950,7 +950,14 @@ cursor across passes and restarts; ledger timeouts retain and advance past
 inconclusive candidates without spending the scan budget. The offline scratch
 suites pin retention, eventual backlog reclamation and admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
-alerts; successful launch/head progress restarts the stall deadline. See the
+alerts; successful launch/head progress restarts the stall deadline. A retained
+running/starting closer advances the deadline from its recorded launch or confirmed
+dispatched lease progress, including on existing wait rows. Only running/starting retained dispatches supply launch progress; stalled,
+blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Future-dated
+timestamps seed new rows at the first observation but cannot advance existing
+waits until reached. Repeated polls do not reset that clock; thirty minutes
+without progress still pages. Other blockers and immediate pages retain their
+existing behavior. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
 The follow-up graph maps operator-only review holds and preservation-refusal
 failures. A matching refusal sidecar fails an exited worker's round; successful
@@ -1057,7 +1064,10 @@ remediation independently of the legacy exhaustion reason/snapshot, keeps the ol
 review identity, and logs only one routing transition.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
-claim; exhaustion selects operator paging. Disposable halt files return distinct
+claim; exhaustion selects operator paging. Final-round waits honor a retained
+closer's launch timestamp on existing rows and still exhaust when that timestamp
+ages past thirty minutes. Future-dated progress cannot refresh existing rows
+on every poll or suppress their stall page. Disposable halt files return distinct
 `fleet-stop-active` and `fleet-stop-merge-kill` refusals and unlinking each
 restores eligibility without reloading. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).

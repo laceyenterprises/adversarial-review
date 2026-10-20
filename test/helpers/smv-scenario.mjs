@@ -469,6 +469,20 @@ if (scenario === 'clean') {
   let pages = 0;
   for (const now of [0, 1800001, 1800002]) await observeClosureWait({ ...identity(), now, reason: 'synthetic-stale-lease', pageImpl: async () => { pages++; } });
   assert.equal(pages, 1);
+  const finalWait = { ...identity(), waitClass: 'final-round', env: {},
+    reason: 'in-flight:synthetic-closer', pageImpl: async () => { pages++; } };
+  await observeClosureWait({ ...finalWait, now: 0, startedAt: 0 });
+  assert.equal((await observeClosureWait({ ...finalWait, now: 40 * 60_000, startedAt: 20 * 60_000 })).exhausted, false);
+  assert.equal(pages, 1, 'a closer launched twenty minutes ago must not page');
+  assert.equal((await observeClosureWait({ ...finalWait, now: 55 * 60_000, startedAt: 20 * 60_000 })).exhausted, true);
+  assert.equal(pages, 2, 'unchanged launch progress must still expire');
+  const skewedWait = { ...finalWait, prNumber: prNumber + 100, startedAt: 24 * 60 * 60_000 };
+  for (const now of [0, 10, 20, 30, 31]) {
+    const wait = await observeClosureWait({ ...skewedWait, now: now * 60_000 });
+    assert.equal(wait.startedAt, 0, 'future timestamps cannot turn polling into progress');
+    assert.equal(wait.exhausted, now >= 30);
+  }
+  assert.equal(pages, 3, 'future-dated progress still pages once at the original deadline');
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);

@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import { withPostedReviewReadCache, closePostedReviewReadCache, readPostedReviewResource } from '../src/posted-review-read-cache.mjs';
 import { fetchLatestLabelEvent } from '../src/github-label-events.mjs';

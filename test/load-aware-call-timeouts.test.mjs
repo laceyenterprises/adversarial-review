@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { createCpuBusySampler, loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
-import { loadConfig } from '../src/config-loader.mjs';
+import { loadConfig, __testYamlHooks } from '../src/config-loader.mjs';
 import { execGhWithRetry, GH_LOOKUP_TIMEOUT_MS } from '../src/gh-cli.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../src/fleet-quota-status.mjs';
 import { readAfhReviewerGrounding } from '../src/afh-reviewer-fallback.mjs';
@@ -19,7 +19,7 @@ import { collectBurstQuotaSignal } from '../src/reviewer-burst-cli.mjs';
 import { createWatcherReviewerQuotaPollFactory } from '../src/watcher-reviewer-quota.mjs';
 import { createQuotaHoldRevalidator } from '../src/remediation-admission.mjs';
 import { createRateLimitThrottle } from '../src/rate-limit-throttle.mjs';
-import { resolveMergeAgentCoexistenceStepDeadlineMs, resolveMergeAgentCoexistenceOperationTimeoutMs, preparePostedReviewHandlers } from '../src/posted-review-row.mjs';
+import { resolveMergeAgentCoexistenceStepDeadlineMs, resolveMergeAgentCoexistenceOperationTimeoutMs, preparePostedReviewHandlers, runQueuedReviewAdoptionPhase, resolveNominalMergeAgentCoexistenceStepDeadlineMs } from '../src/posted-review-row.mjs';
 import { resolvePostedReviewPhaseBudgetMs, runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
 
 const busyLoad = { enabled: true, maxMultiplier: 6, cpuCount: 4, cpuBusyPercent: 100 };
@@ -78,20 +78,20 @@ test('local config disables scaling and sets the multiplier cap', t => {
   const topPath = process.env.AGENT_OS_CONFIG_PATH;
   const localPath = join(dirname(topPath), 'config.local.yaml');
   const cfg = loadConfig({ topPath, env: {} });
-  assert.equal(cfg.get('timeouts.load_aware.enabled'), true);
-  assert.equal(cfg.get('timeouts.load_aware.max_multiplier'), 6);
-  writeFileSync(localPath, 'timeouts:\n  load_aware:\n    enabled: false\n    max_multiplier: 2.5\n');
+  assert.equal(cfg.get('adversarial.reviewer.load_aware.enabled'), true);
+  assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      enabled: false\n      max_multiplier: 2.5\n');
   assert.equal(loadAwareTimeoutMs(200, { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 100 }), 200);
   assert.equal(loadAwareTimeoutSeconds(200, { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 100 }), 200);
-  writeFileSync(localPath, 'timeouts:\n  load_aware:\n    enabled: true\n    max_multiplier: 2.5\n');
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      enabled: true\n      max_multiplier: 2.5\n');
   now = 5000;
   assert.equal(loadAwareTimeoutMs(200, { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 100 }), 500);
   // The cached policy refreshes without waiting in real time.
   const parsed = loadConfig({ topPath, env: {} });
-  assert.equal(parsed.get('timeouts.load_aware.max_multiplier'), 2.5);
+  assert.equal(parsed.get('adversarial.reviewer.load_aware.max_multiplier'), 2.5);
   for (const bad of ['enabled: invalid', 'max_multiplier: 0', 'max_multiplier: invalid']) {
-    writeFileSync(localPath, `timeouts:\n  load_aware:\n    ${bad}\n`);
-    assert.throws(() => loadConfig({ topPath, env: {} }), /timeouts.load_aware/);
+    writeFileSync(localPath, `adversarial:\n  reviewer:\n    load_aware:\n      ${bad}\n`);
+    assert.throws(() => loadConfig({ topPath, env: {} }), /adversarial.reviewer.load_aware/);
   }
 });
 
@@ -99,15 +99,15 @@ test('load-aware config accepts multiplier bounds 1 and 20 and rejects values ou
   const topPath = process.env.AGENT_OS_CONFIG_PATH;
   const localPath = join(dirname(topPath), 'config.local.yaml');
   for (const value of [1, 20]) {
-    writeFileSync(localPath, `timeouts:\n  load_aware:\n    max_multiplier: ${value}\n`);
-    assert.equal(loadConfig({ topPath, env: {} }).get('timeouts.load_aware.max_multiplier'), value);
+    writeFileSync(localPath, `adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: ${value}\n`);
+    assert.equal(loadConfig({ topPath, env: {} }).get('adversarial.reviewer.load_aware.max_multiplier'), value);
   }
   for (const [value, error] of [[0.5, /below minimum 1/], [21, /above maximum 20/]]) {
-    writeFileSync(localPath, `timeouts:\n  load_aware:\n    max_multiplier: ${value}\n`);
+    writeFileSync(localPath, `adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: ${value}\n`);
     assert.throws(() => loadConfig({ topPath, env: {} }), {
       name: 'AgentOSConfigError',
       message: error,
-      key: 'timeouts.load_aware.max_multiplier',
+      key: 'adversarial.reviewer.load_aware.max_multiplier',
     });
   }
 });
@@ -170,7 +170,7 @@ test('posted-review deadlines scale while phase cadence stays fixed', async t =>
     rootDir: dirname(process.env.AGENT_OS_CONFIG_PATH), logger: quiet,
     setTimeoutFn: (_fn, ms) => { timers.push(ms); return 1; }, clearTimeoutFn() {},
   });
-  assert.ok(timers.includes(180_000 * 6));
+  assert.ok(timers.some(ms => ms > 180_000 && ms <= 600_000));
   let probeBudget;
   t.mock.method(globalThis, 'setTimeout', (_fn, ms) => { if (ms !== 5000) probeBudget = ms; return { unref() {} }; });
   await preparePostedReviewHandlers([{ repoPath: 'example/project', prNumber: 1, headSha: 'head' }], {
@@ -179,4 +179,104 @@ test('posted-review deadlines scale while phase cadence stays fixed', async t =>
     fetchSnapshot: async () => ({ headRefOid: 'head', state: 'OPEN' }),
   });
   assert.equal(probeBudget, 60_000);
+});
+
+
+test('invalid local config degrades timeout sizing and caches failure until recovery', t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const originalLoad = __testYamlHooks.load;
+  let reads = 0;
+  t.mock.method(__testYamlHooks, 'load', (...args) => { reads++; return originalLoad(...args); });
+  const localPath = join(dirname(process.env.AGENT_OS_CONFIG_PATH), 'config.local.yaml');
+  const opts = { loadAvg1m: 12, cpuCount: 4, cpuBusyPercent: 100 };
+  writeFileSync(localPath, 'unrelated_invalid_key: true\n');
+  assert.equal(loadAwareTimeoutMs(200, opts), 1200);
+  const failedReads = reads;
+  for (let i = 0; i < 100; i++) {
+    assert.equal(loadAwareTimeoutSeconds(200, opts), 1200);
+    assert.equal(loadAwareTimeoutMs(200, { ...opts, loadAvg1m: 0 }), 200);
+  }
+  assert.equal(reads, failedReads);
+  assert.equal(warnings.length, 1);
+  now = 5000;
+  assert.equal(loadAwareTimeoutMs(200, opts), 1200);
+  assert.equal(warnings.length, 2);
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: 25\n');
+  now = 10000;
+  assert.equal(loadAwareTimeoutMs(200, opts), 1200);
+  assert.equal(warnings.length, 3);
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      enabled: false\n');
+  now = 15000;
+  assert.equal(loadAwareTimeoutMs(200, opts), 200);
+  assert.equal(warnings.length, 3);
+});
+
+for (const pressure of [false, true]) {
+  for (const maxMultiplier of [6, 20]) {
+    test(`loaded adoption starts handlers after preparation: pressure=${pressure}, cap=${maxMultiplier}`, async t => {
+      syntheticBusyHost(t);
+      t.mock.method(os, 'loadavg', () => [os.cpus().length * 10, 0, 0]);
+      const rootDir = dirname(process.env.AGENT_OS_CONFIG_PATH);
+      writeFileSync(join(rootDir, 'config.local.yaml'),
+        `adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: ${maxMultiplier}\n`);
+      let now = 0;
+      t.mock.method(Date, 'now', () => now);
+      let started = 0;
+      const deadlines = [];
+      await runQueuedReviewAdoptionPhase({
+        rootDir, logger: quiet, recoveryRoots: new Set([rootDir]),
+        drainReviewerDispatchCandidates: async () => ({ deferred: pressure ? 1 : 0 }),
+        postedReviewHandlers: [{ repoPath: 'example/project', prNumber: 1, run: async () => { started++; } }],
+        noProgressLaneGate: { evaluate: () => ({ run: true }) },
+        retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+        syncPRLifecycleImpl: async () => {},
+        retryPendingCloserCancelsImpl: async () => {},
+        sweepRereviewWakeQueueImpl: () => ({ scanned: 0 }),
+        rereviewWakeBacklogImpl: () => ({ pending: 0 }),
+        retryPendingTriageSyncsImpl: async () => ({ attempted: 0 }),
+        retryPendingDagAutowalkOnMergeImpl: async () => {},
+        retryPendingMergeCloseoutsImpl: async () => {},
+        retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0 }),
+        reportStalledRetriggerOutcomesImpl: async () => ({ checked: 0 }),
+        retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0 }),
+        preparePostedReviewHandlersImpl: async (handlers, { deadlineAt }) => {
+          now = deadlineAt; // Preparation consumes its entire allowed share.
+          return handlers;
+        },
+        runPostedReviewHandlersFairlyImpl: async options => {
+          assert.equal(options.minimumHandlerStartBudgetMs, 87_500);
+          assert.equal(resolveNominalMergeAgentCoexistenceStepDeadlineMs({}), 87_500);
+          const summary = await runPostedReviewHandlersFairly({ ...options,
+            setTimeoutFn: (_fn, ms) => { deadlines.push(ms); return 1; }, clearTimeoutFn() {},
+          });
+          assert.equal(summary.ran, 1);
+          assert.equal(summary.deferredByBudget, 0);
+          assert.deepEqual(deadlines, [options.budgetMs - now]);
+          return summary;
+        },
+      });
+      assert.equal(started, 1);
+    });
+  }
+}
+
+test('scaled handler timeout yields at the remaining phase deadline', async t => {
+  syntheticBusyHost(t);
+  let now = 200_000;
+  let expire;
+  const summary = await runPostedReviewHandlersFairly({
+    phaseStartedMs: 0, budgetMs: 360_000, nowMs: () => now, logger: quiet,
+    handlers: [{ repoPath: 'example/project', prNumber: 1, run: () => {
+      now = 360_000;
+      expire();
+      return new Promise(() => {});
+    } }],
+    setTimeoutFn: (fn, ms) => { assert.equal(ms, 160_000); expire = fn; return 1; },
+    clearTimeoutFn() {},
+  });
+  assert.equal(summary.timedOut, 1);
+  assert.equal(now, 360_000);
 });

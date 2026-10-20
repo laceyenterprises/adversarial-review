@@ -321,18 +321,6 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
-      timeouts: {
-        __type: TYPE_DICT, __strict: true,
-        __keys: {
-          load_aware: {
-            __type: TYPE_DICT, __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: true },
-              max_multiplier: { __type: TYPE_FLOAT, __default: 6, __min: 1, __max: 20 },
-            },
-          },
-        },
-      },
       // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
       apple: {
         __type: TYPE_DICT,
@@ -3216,6 +3204,15 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: false,
             __keys: {
+              // Shared forward-compatible extension point: Python and shell
+              // accept these leaves under adversarial.reviewer (__strict=false).
+              load_aware: {
+                __type: TYPE_DICT, __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  max_multiplier: { __type: TYPE_FLOAT, __default: 6, __min: 1, __max: 20 },
+                },
+              },
               memory: {
                 __type: TYPE_DICT,
                 __strict: true,

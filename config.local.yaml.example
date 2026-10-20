@@ -1,11 +1,12 @@
 # Local operator overrides for adversarial-review.
 # Copy relevant keys into config.local.yaml; this example is not loaded.
 
-timeouts:
-  load_aware:
-    enabled: true
-    # Multiplier cap: 1..20 inclusive (default 6).
-    max_multiplier: 6
+adversarial:
+  reviewer:
+    load_aware:
+      enabled: true
+      # Multiplier cap: 1..20 inclusive (default 6).
+      max_multiplier: 6
 
 reviewer:
   # Memory-pressure profile examples. Uncomment one profile on each host and

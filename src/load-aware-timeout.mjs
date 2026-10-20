@@ -70,7 +70,14 @@ export function createCpuBusySampler({
   };
 }
 
-export const hostCpuBusyPercent = createCpuBusySampler();
+let defaultCpuBusySampler = createCpuBusySampler();
+export function hostCpuBusyPercent() { return defaultCpuBusySampler(); }
+
+// Tests which mock host readings must not share a real or synthetic sample.
+export function resetLoadAwareTimeoutCachesForTesting() {
+  defaultCpuBusySampler = createCpuBusySampler();
+  policyCache = null;
+}
 
 // Use the service's config cascade, including config.local.yaml. Refresh at
 // most once per sample interval so timeout sizing has a constant-time hot path.
@@ -81,11 +88,18 @@ function timeoutPolicy() {
   if (policyCache && policyCache.path === path && now - policyCache.at < SAMPLE_INTERVAL_MS) {
     return policyCache.value;
   }
-  const cfg = loadRoleConfig();
-  const value = {
-    enabled: cfg.get('timeouts.load_aware.enabled', true),
-    maxMultiplier: cfg.get('timeouts.load_aware.max_multiplier', MAX_MULTIPLIER),
-  };
+  let value = { enabled: true, maxMultiplier: MAX_MULTIPLIER };
+  try {
+    const cfg = loadRoleConfig();
+    value = {
+      enabled: cfg.get('adversarial.reviewer.load_aware.enabled', true),
+      maxMultiplier: cfg.get('adversarial.reviewer.load_aware.max_multiplier', MAX_MULTIPLIER),
+    };
+  } catch {
+    // Timeout sizing must remain available when any part of the shared config
+    // is invalid. Cache failures too, bounding config reads and diagnostics.
+    console.warn('[load-aware-timeout] config unavailable; using default timeout policy for 5s');
+  }
   policyCache = { path, at: now, value };
   return value;
 }

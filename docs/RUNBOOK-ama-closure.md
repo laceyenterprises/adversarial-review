@@ -32,12 +32,39 @@ readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
 
-Set `timeouts.load_aware.enabled: false` in `config.local.yaml` to restore
-nominal budgets, or set `timeouts.load_aware.max_multiplier` (1..20 inclusive,
+Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
+nominal budgets, or set `adversarial.reviewer.load_aware.max_multiplier` (1..20 inclusive,
 default 6) to cap the extension. Policy changes are observed within five
-seconds. Posted-review phase budgets, polling/backoff, cache freshness,
+seconds. These keys use the shared `adversarial.reviewer` forward-compatible
+extension point accepted by the Python loader and its shell wrapper; do not add
+a top-level `timeouts` root. An invalid or unreadable config uses the default
+policy for five seconds and emits one warning per refresh interval, so timeout
+computations do not interrupt GitHub reads or lock/quota bookkeeping.
+
+Posted-review admission uses the nominal step deadline regardless of host load.
+Scaled handler waits are capped at the remaining phase budget (including time
+spent preparing handlers), allowing the next discovery phase to run. Child step
+waits are still bounded by that handler's outer deadline. Posted-review phase
+budgets, polling/backoff, cache freshness,
 leases, rate-limit windows and reviewer/worker run limits keep their existing
 meaning and duration.
+
+For quota reads, let `T` be the scaled 45-second child timeout: at the default
+6x cap, `T = 270s`; at the maximum 20x cap, `T = 900s`. Worst-case timeout
+budgets below exclude process teardown, parsing and any separate runtime probes;
+caches or outer handler deadlines can shorten them. Retry delays stay nominal.
+
+| Quota entry point | Default retry budget | Total at 6x / 20x |
+| --- | --- | --- |
+| AFH grounding and closer harness fallback | `T + 2 × 0.25T + 1.25s` | 406.25s / 1351.25s |
+| Watcher quota poll | `T + 0.25T + 0.25s` | 337.75s / 1125.25s |
+| Reviewer worker-class fallback | `3T + 1.25s` | 811.25s / 2701.25s |
+| Argus, remediation fallback, quota revalidation, burst CLI | `T` per read | 270s / 900s |
+
+The burst CLI uses a synchronous quota read and can block its caller for `T`.
+Operators needing faster hang detection should lower the multiplier cap or disable
+scaling with the configuration above. CPU corroboration still uses synchronous
+`ps` with a one-second bound, at most once per five-second sample interval.
 
 ## Table of contents
 

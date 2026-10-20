@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // WPS-01 regression suite — new-PR discovery must survive a backlog of PRs the
 // poll loop cannot advance, and a starved loop must page.
 //
@@ -621,8 +622,9 @@ test('RVHAND-02: timeout log reports phase elapsed at handler start', async () =
   assert.equal(summary.ran, 1);
   assert.equal(summary.timedOut, 1);
   assert.match(errors[0], /phase_elapsed_at_start=599000ms/);
-  assert.match(errors[0], /phase_elapsed_total=659000ms/);
-  assert.doesNotMatch(errors[0], /phase_elapsed=659000ms/);
+  assert.match(errors[0], /phase_elapsed_total=600000ms/);
+  assert.match(errors[0], /exceeded 1000ms/);
+  assert.doesNotMatch(errors[0], /phase_elapsed=600000ms/);
 });
 
 test('WPS-01: unadvanceable PRs back off to the slow lane while the new PR keeps full speed', async () => {

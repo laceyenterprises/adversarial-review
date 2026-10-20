@@ -526,7 +526,10 @@ export async function runPostedReviewHandlersFairly({
    */
   async function executeHandler({ handler, key, positionLabel, laneAdmission = null }) {
     const handlerStartedMs = nowMs();
-    const handlerDeadlineMs = loadAwareTimeoutMs(parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs));
+    const handlerDeadlineMs = Math.max(1, Math.min(
+      loadAwareTimeoutMs(parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs)),
+      effectiveBudgetMs - (handlerStartedMs - startedMs),
+    ));
     let resourceLimited = false;
     if (handler.mergeReady) summary.mergeReadyHandled += 1;
     const work = Promise.resolve().then(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {

@@ -214,7 +214,7 @@ function parsePositiveMs(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function resolveMergeAgentCoexistenceStepDeadlineMs(
+export function resolveNominalMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
   {
     handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
@@ -226,7 +226,11 @@ export function resolveMergeAgentCoexistenceStepDeadlineMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS,
     derivedDeadlineMs,
   );
-  return loadAwareTimeoutMs(Math.min(overrideDeadlineMs, derivedDeadlineMs));
+  return Math.min(overrideDeadlineMs, derivedDeadlineMs);
+}
+
+export function resolveMergeAgentCoexistenceStepDeadlineMs(env = process.env, opts = {}) {
+  return loadAwareTimeoutMs(resolveNominalMergeAgentCoexistenceStepDeadlineMs(env, opts));
 }
 
 export function resolveMergeAgentCoexistenceOperationTimeoutMs(
@@ -1261,7 +1265,8 @@ export async function runQueuedReviewAdoptionPhase({
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
-  minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
+  // Admission is a share of the fixed phase budget, not a child wait timeout.
+  minimumHandlerStartBudgetMs = resolveNominalMergeAgentCoexistenceStepDeadlineMs(
     process.env,
     { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
   ),

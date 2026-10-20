@@ -865,6 +865,20 @@ status. Its initial/final node is an evaluation boundary. Lease removal is not
 permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
+
+LEASEDEADPID-01: ownership ignores pending leases whose local watcher is dead or
+whose pending reclaim window expired, using the same predicates as closer dispatch.
+PID probes require a matching `holderHost` or a legacy hostless lease; foreign
+hosts use only age expiry. Both reclaim predicates accept ISO time or numeric
+epoch milliseconds (including zero) for `now`.
+Dispatched leases retain their existing age/outcome rule, including sticky
+success. Live pending leases still wait and page at the existing bound.
+The next evaluation routes a reclaimable lease through ordinary arbitration;
+the acquisition path owns reclamation. The offline `ci-blocked` smoke verifies
+dead-watcher final comment findings route to hammer, live watchers wait, foreign
+watchers expire by age using a numeric clock, and ownership evaluation leaves the
+lease intact. No operator action is needed.
+
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.
@@ -1031,7 +1045,9 @@ refusal reason regardless of wake outcome, while a fresh live-PID lease and its
 intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
 `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
 Settlement accepts a prompt first populated by that same captured attempt.
-The smoke also verifies a green moved head at the review ceiling wakes terminal
+The smoke also verifies foreign-host pending ownership waits without a local PID
+probe, then expires at the age boundary with numeric epoch milliseconds.
+A green moved head at the review ceiling wakes terminal
 remediation independently of the legacy exhaustion reason/snapshot, keeps the older
 review identity, and logs only one routing transition.
 

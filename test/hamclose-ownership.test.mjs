@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -9,7 +9,9 @@ import { collect } from './helpers/hamclose-history.mjs';
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { hammerAttestationChain, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
-import { acquireAmaCloserLease, updateAmaCloserLease, isHeldAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease, isHeldAmaCloserLease, readAmaCloserLease,
+  AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  isReclaimablePendingAmaCloserLease, isReclaimableDispatchedAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
@@ -26,6 +28,110 @@ const audit = (base, head, author = 'the-hammer-lacey[bot]') => ({
 const clean = { verdict: 'approved', headSha: reviewed, riskClass: 'low', remediationPending: false,
   blockingFindingState: 'known', blockingFindingCount: 0,
   nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 };
+
+const leaseNow = '2026-01-01T01:00:00.000Z';
+const finalCommentOwner = { reviewState: { ...clean, verdict: 'comment-only', nonBlockingFindingCount: 2 },
+  currentHead: reviewed, roundsLeft: false, strictMode: true, now: leaseNow };
+const leaseAtAge = age => new Date(Date.parse(leaseNow) - age).toISOString();
+const deadWatcher = (pid, signal) => {
+  assert.equal(pid, 4242);
+  assert.equal(signal, 0);
+  throw Object.assign(new Error('synthetic dead watcher'), { code: 'ESRCH' });
+};
+
+test('LEASEDEADPID-01 a dead pending watcher releases final comment findings without mutating its lease', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'dead-closer-owner-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { rootDir, repo: 'fixture/repo', prNumber: 8143, headSha: reviewed };
+  const { lease } = acquireAmaCloserLease({ ...identity, watcherPid: 4242, now: leaseAtAge(1_000) });
+  for (const waitExhausted of [false, true]) {
+    assert.deepEqual(decideClosureOwner({ ...finalCommentOwner, lease, waitExhausted, processKillImpl: deadWatcher }),
+      { owner: 'hammer', reason: 'review-findings' });
+  }
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
+});
+
+test('LEASEDEADPID-01 a live pending watcher waits until the existing reclaim boundary', () => {
+  for (const age of [1_000, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS - 1,
+    AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS + 1]) {
+    const lease = { status: 'pending', watcherPid: 4242, lrqId: null, acquiredAt: leaseAtAge(age) };
+    const options = { now: leaseNow, processKillImpl(pid, signal) { assert.equal(pid, 4242); assert.equal(signal, 0); } };
+    const reclaimable = age >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+    assert.equal(isReclaimablePendingAmaCloserLease(lease, options), reclaimable);
+    for (const waitExhausted of [false, true]) {
+      const result = decideClosureOwner({ ...finalCommentOwner, lease, ...options, waitExhausted });
+      assert.equal(result.owner, reclaimable ? 'hammer' : waitExhausted ? 'page' : 'wait');
+      assert.equal(result.reason, reclaimable ? 'review-findings' : waitExhausted ? 'in-flight-lease-expired' : 'in-flight:4242');
+      if (result.owner === 'wait') assert.equal(result.boundedMs, AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS);
+    }
+  }
+});
+
+test('LEASEDEADPID-01 foreign-host pending leases expire by age without probing a local PID', () => {
+  for (const age of [1_000, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS - 1,
+    AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS]) {
+    const lease = { status: 'pending', holderHost: `${hostname()}.foreign`, watcherPid: 4242, acquiredAt: leaseAtAge(age) };
+    let probes = 0;
+    const options = { now: leaseNow, processKillImpl() { probes++; return deadWatcher(4242, 0); } };
+    const reclaimable = age >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+    assert.equal(isReclaimablePendingAmaCloserLease(lease, options), reclaimable);
+    assert.equal(decideClosureOwner({ ...finalCommentOwner, lease, ...options }).owner, reclaimable ? 'hammer' : 'wait');
+    assert.equal(probes, 0, 'foreign PID must not be probed locally');
+  }
+  const malformed = { status: 'pending', holderHost: `${hostname()}.foreign`, watcherPid: 4242, acquiredAt: 'invalid' };
+  assert.equal(isReclaimablePendingAmaCloserLease(malformed, { now: leaseNow, processKillImpl: deadWatcher }), false);
+});
+
+test('LEASEDEADPID-01 local and legacy hostless pending leases still reclaim a dead PID immediately', () => {
+  for (const holderHost of [hostname(), undefined]) {
+    const lease = { status: 'pending', holderHost, watcherPid: 4242, acquiredAt: leaseAtAge(1_000) };
+    assert.equal(isReclaimablePendingAmaCloserLease(lease, { now: leaseNow, processKillImpl: deadWatcher }), true);
+    assert.equal(decideClosureOwner({ ...finalCommentOwner, lease, processKillImpl: deadWatcher }).owner, 'hammer');
+  }
+});
+
+test('LEASEDEADPID-01 numeric now preserves pending and dispatched expiry boundaries', () => {
+  for (const [status, reclaim, boundary] of [
+    ['pending', isReclaimablePendingAmaCloserLease, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS],
+    ['dispatched', isReclaimableDispatchedAmaCloserLease, AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS],
+  ]) {
+    for (const now of [Date.parse(leaseNow), 0]) {
+      for (const age of [boundary - 1, boundary, boundary + 1]) {
+        const lease = { status, acquiredAt: new Date(now - age).toISOString() };
+        assert.equal(reclaim(lease, { now }), age >= boundary, `${status} age ${age} at ${now}`);
+        assert.equal(reclaim(lease, { now: new Date(now).toISOString() }), age >= boundary);
+      }
+    }
+    for (const now of [NaN, Infinity, -Infinity]) {
+      assert.equal(reclaim({ status, acquiredAt: leaseAtAge(boundary) }, { now }), false);
+    }
+  }
+});
+
+test('LEASEDEADPID-01 unreadable or missing PID evidence preserves a fresh pending wait', () => {
+  for (const watcherPid of [null, 4242]) {
+    const lease = { status: 'pending', watcherPid, acquiredAt: leaseAtAge(1_000) };
+    const processKillImpl = () => { throw Object.assign(new Error('synthetic permission refusal'), { code: 'EPERM' }); };
+    assert.equal(decideClosureOwner({ ...finalCommentOwner, lease, processKillImpl }).owner, 'wait');
+  }
+});
+
+test('LEASEDEADPID-01 dispatched ownership follows existing age/outcome reclamation; succeeded stays sticky', () => {
+  for (const terminalOutcome of [null, 'failed-without-merge', 'deferred', 'superseded', 'succeeded']) {
+    for (const age of [AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS - 1, AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS]) {
+      const lease = { status: 'dispatched', lrqId: 'synthetic-closer', terminalOutcome,
+        acquiredAt: leaseAtAge(age + 10_000), updatedAt: leaseAtAge(age) };
+      const reclaimable = age >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS && terminalOutcome !== 'succeeded';
+      assert.equal(isReclaimableDispatchedAmaCloserLease(lease, { now: leaseNow }), reclaimable);
+      for (const waitExhausted of [false, true]) {
+        const result = decideClosureOwner({ ...finalCommentOwner, lease, waitExhausted,
+          processKillImpl() { throw new Error('dispatched liveness never probes the watcher'); } });
+        assert.equal(result.owner, reclaimable ? 'hammer' : waitExhausted ? 'page' : 'wait');
+        assert.equal(result.reason, reclaimable ? 'review-findings' : waitExhausted ? 'in-flight-lease-expired' : 'in-flight:synthetic-closer');
+      }
+    }
+  }
+});
 
 test('HAMCLOSE-01 git publication and earlier App-attested bases need no signatures or commit identities', async () => {
   for (const base of [reviewed, hammer]) {

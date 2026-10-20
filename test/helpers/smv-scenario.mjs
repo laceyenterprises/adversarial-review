@@ -17,7 +17,7 @@ const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
-const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
+const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
@@ -332,6 +332,26 @@ if (scenario === 'clean') {
   assert.equal(requestEligibleHammerWake({ ...identity(), prNumber: ceilingPr,
     eligibility: ceilingEligibility, eligibilityReason: 'review-ceiling-terminal-remediation',
     log: quiet, requestWatcherWakeImpl: () => ({ requested: true }) }).outcome, 'requested');
+  const pendingIdentity = { ...identity(), headSha: base };
+  const pendingLease = acquireAmaCloserLease({ ...pendingIdentity, watcherPid: 4242 }).lease;
+  const closureInput = { currentHead: base, lease: pendingLease, roundsLeft: false,
+    reviewState: { verdict: 'comment-only', headSha: base, blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1, remediationPending: false } };
+  assert.equal(decideClosureOwner({ ...closureInput, processKillImpl() {} }).reason, 'in-flight:4242');
+  assert.equal(decideClosureOwner({ ...closureInput, waitExhausted: true, processKillImpl() {
+    throw Object.assign(new Error('synthetic dead watcher'), { code: 'ESRCH' });
+  } }).owner, 'hammer');
+  assert.deepEqual(readAmaCloserLease(rootDir, pendingIdentity), pendingLease);
+  const leaseNowMs = Date.now();
+  const foreignPendingLease = { ...pendingLease, holderHost: `${pendingLease.holderHost}.foreign`,
+    acquiredAt: new Date(leaseNowMs).toISOString() };
+  let foreignPidProbes = 0;
+  const foreignInput = { ...closureInput, lease: foreignPendingLease, now: leaseNowMs,
+    processKillImpl() { foreignPidProbes++; throw Object.assign(new Error('synthetic ESRCH'), { code: 'ESRCH' }); } };
+  assert.equal(decideClosureOwner(foreignInput).owner, 'wait');
+  assert.equal(decideClosureOwner({ ...foreignInput,
+    now: leaseNowMs + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS }).owner, 'hammer');
+  assert.equal(foreignPidProbes, 0);
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {
     const admission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
@@ -396,6 +416,8 @@ if (scenario === 'clean') {
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
+    deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
+    foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
     nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };

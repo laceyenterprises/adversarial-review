@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -14,7 +14,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
-import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import {
@@ -1358,7 +1358,8 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });
 
-for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
+for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout',
+  'pending', 'pending-dead', 'pending-live', 'pending-expired']) {
   test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1368,14 +1369,29 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
       prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
     });
     const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
-    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt, host: 'synthetic', watcherPid: 123 });
-    if (status !== 'pending') updateAmaCloserLease({ ...identity, status: 'dispatched',
+    const pending = status.startsWith('pending');
+    const localWatcher = status === 'pending-dead' || status === 'pending-live';
+    const acquiredAt = status === 'pending-expired'
+      ? new Date(Date.parse(args.dispatchContext.dispatchedAt) - AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString()
+      : args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ ...identity, now: acquiredAt,
+      host: localWatcher ? hostname() : `${hostname()}.foreign`, watcherPid: 123 });
+    if (!pending) updateAmaCloserLease({ ...identity, status: 'dispatched',
       lrqId: 'lrq_synthetic', now: args.dispatchContext.dispatchedAt });
+    const beforeLease = readAmaCloserLease(rootDir, identity);
     updateAmaCloserDispatchRecord(rootDir, identity, () => ({ repo: identity.repo, prNumber: 404,
       headSha: HEAD, workerClass: 'hammer', state: 'dispatched', launchRequestId: 'lrq_synthetic',
       lastObservedStatus: 'running', dispatchedAt: args.dispatchContext.dispatchedAt }));
     let reads = 0;
+    let pidProbes = 0;
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      processKillImpl: (pid, signal) => {
+        pidProbes++;
+        assert.equal(localWatcher, true, 'foreign and dispatched leases must not probe local PIDs');
+        assert.equal(pid, 123);
+        assert.equal(signal, 0);
+        if (status === 'pending-dead') throw Object.assign(new Error('synthetic dead watcher'), { code: 'ESRCH' });
+      },
       readPullRequestStateImpl: () => status === 'succeeded-open' ? { state: 'OPEN' } : null,
       readLaunchRequestStatusImpl: () => {
         reads++;
@@ -1387,13 +1403,18 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
         } };
       },
     });
-    assert.equal(result.reason, 'not-eligible');
+    // Fresh foreign/live pending leases retain ownership before eligibility.
+    // Dead local and age-expired leases reach the red-CI refusal without launch.
+    const heldPending = status === 'pending' || status === 'pending-live';
+    assert.equal(result.reason, heldPending ? 'closer-lease-held-by-other-process' : 'not-eligible');
     assert.notEqual(result.reason, 'active-remediation-job');
-    assert.equal(reads, status === 'pending' ? 0 : 1);
+    assert.equal(reads, pending ? 0 : 1);
+    assert.equal(pidProbes, localWatcher ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = status === 'failed' || status === 'succeeded-open';
-    assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
+    assert.equal(lease.status, terminal ? 'terminal' : pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
+    if (pending) assert.deepEqual(lease, beforeLease, 'refused admission must not mutate pending ownership');
     assert.equal(deps.calls.length, 0);
   });
 }

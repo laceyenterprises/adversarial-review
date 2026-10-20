@@ -112,8 +112,10 @@ import {
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
   amaCloserPendingLeaseExpiryMs,
+  isAmaCloserPidAlive as isPidAlive,
+  isReclaimablePendingAmaCloserLease,
+  isReclaimableDispatchedAmaCloserLease,
   acquireAmaCloserLease,
-  AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES,
   deleteAmaCloserLease,
   readAmaCloserLease,
   findLiveAmaCloserLease,
@@ -121,6 +123,7 @@ import {
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 export {
+  isReclaimableDispatchedAmaCloserLease,
   AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
 } from './closer-lease.mjs';
@@ -1852,19 +1855,6 @@ function parseTimeMs(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function isPidAlive(pid, processKillImpl = process.kill) {
-  const numericPid = Number(pid);
-  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
-  try {
-    processKillImpl(numericPid, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === 'ESRCH') return false;
-    if (err?.code === 'EPERM') return true;
-    return true;
-  }
-}
-
 function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl = process.kill) {
   const stderr = String(err?.stderr || '').trim();
   // Accept only the provision-slot diagnostic, never a mixed refusal or receipt.
@@ -1877,53 +1867,6 @@ function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl = proc
   } catch (error) {
     return error?.code === 'EPERM';
   }
-}
-
-function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
-  if (lease?.status !== AMA_CLOSER_LEASE_STATUS.PENDING) return false;
-
-  const pidAlive = isPidAlive(lease.watcherPid, processKillImpl);
-  if (pidAlive === false) return true;
-
-  const acquiredAtMs = parseTimeMs(lease.acquiredAt);
-  const nowMs = parseTimeMs(now || new Date().toISOString());
-  return acquiredAtMs !== null
-    && nowMs !== null
-    && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
-}
-
-export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}) {
-  if (lease?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED) return false;
-  // Terminal outcomes are NOT uniformly sticky. SPEC 4.4 rule #5 makes
-  // `succeeded` sticky and refuses to demote it; `deferred` and `superseded`
-  // are explicitly not terminal failures and "further attempts may resume".
-  // `failed-without-merge` carries no such stickiness in the audit model -- it
-  // records that ONE attempt did not merge, not that closure authority is
-  // permanently spent.
-  //
-  // The lease was stricter than the audit contract: any terminalOutcome made
-  // the lease unreclaimable forever, so a single failed close pinned the head
-  // and no further closer could be dispatched for it. Measured 2026-09-05:
-  // 38 of 64 live leases were `terminal/failed-without-merge` (59%, versus 23
-  // `succeeded`), and the affected PRs still merged -- but only after 30min to
-  // ~3h, once some slower path picked them up (#6204 00:44->01:27,
-  // #6207 00:33->02:04, #6249 12:33->15:19). That delay is a plausible driver
-  // of the chronic review_ttm_budget_breach findings.
-  //
-  // So keep `succeeded` permanently unreclaimable, and let a failed close be
-  // retried under the SAME age bound every other dispatched lease uses. Retry
-  // volume stays bounded by the separate hammer-retry-cap, which is what is
-  // supposed to stop a persistently failing close, not a stuck lease file.
-  const terminalOutcome = lease.terminalOutcome ?? null;
-  if (terminalOutcome !== null && !AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(terminalOutcome)) {
-    return false;
-  }
-
-  const updatedAtMs = parseTimeMs(lease.updatedAt || lease.acquiredAt);
-  const nowMs = parseTimeMs(now || new Date().toISOString());
-  return updatedAtMs !== null
-    && nowMs !== null
-    && nowMs - updatedAtMs >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
 }
 
 function finalizeAmaCloserLeaseBestEffort({

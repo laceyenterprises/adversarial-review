@@ -3513,8 +3513,17 @@ and still uses atomic single-claim acquisition.
 `decideClosureOwner` in `src/ama/closure-owner.mjs` exposes the shared ownership
 answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
-remain enforced. The daemon retries lease contention after 250 and 500 ms in
-the same tick. Pending gates, uncertain/live ownership and deferred daemon
+remain enforced. LEASEDEADPID-01 shares pending/dispatched reclaim predicates
+with closer dispatch: a dead local watcher's pending lease or an aged reclaimable
+lease is treated as absent on the next ownership evaluation. Local PID probing
+requires `holderHost` to match the current hostname or be absent on a legacy
+lease; foreign-host pending leases rely only on age expiry. Both reclaim
+predicates accept ISO strings or numeric epoch milliseconds for `now`. Ordinary routing
+then selects the owner, including hammer for final comment-only findings in
+strict mode, without an operator step. The decision leaves lease files intact;
+the acquisition path reclaims them. Live pending leases and sticky succeeded
+outcomes retain their holds. The daemon retries lease contention after 250 and
+500 ms in the same tick. Pending gates, uncertain/live ownership and deferred daemon
 attempts record a bounded wait in `data/ama-closure-waits/` (see the
 [wait data model](data-model/ama-closure-waits.md)); the default limit
 is 30 minutes, adjustable through `AMA_CLOSURE_WAIT_BOUND_MS`. Exhaustion

@@ -48,7 +48,10 @@ their revision matches the live head, without changing any retry budget.
 Before the external action, `attempts` increments and `outcomes` appends an
 `outcome-unknown` record with action and timestamp. Settlement records the
 bounded reason, optional underlying `holdReason`, launch identity, dispatched
-flag and review-request result. Proven recovery waits refund the reservation
+flag and review-request result. `holdReason` uses an explicit result field when
+present, otherwise the suffix of `reason: 'harness-hold:<reason>'`; both forms
+populate the dedicated field in `outcomes` and the latest `evidence` summary.
+Proven recovery waits refund the reservation
 and remove its outcome from the spent-attempt history, retaining its summary in
 `evidence`. These include coexistence/background waits, rate limits,
 `stacked-base-read-failed`, and quota status read failures

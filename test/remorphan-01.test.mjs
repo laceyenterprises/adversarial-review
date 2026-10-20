@@ -109,6 +109,8 @@ for (const hold of [
   assert.equal(state.attempts, 0);
   assert.deepEqual(JSON.parse(state.outcomes), []);
   assert.equal(JSON.parse(state.evidence).reason, hold.reason);
+  assert.equal(JSON.parse(state.evidence).holdReason,
+    hold.holdReason || (hold.reason.startsWith('harness-hold:') ? hold.reason.slice('harness-hold:'.length) : undefined));
   assert.equal(calls.pages.length, 0);
   // A route-level observation also holds without spending or probing ownership.
   await tick(18, { result: { amaEnabled: true, ...hold },
@@ -129,9 +131,27 @@ for (const hold of [
   assert.equal(isOrphanRecoveryWait(hold), false);
   const overrides = { dispatchHammer: async () => ({ dispatched: false, ...hold }) };
   await tick(0); await tick(15, overrides); await tick(16, overrides);
-  assert.equal(recoveryState(args.rootDir).attempts, 2);
+  const state = recoveryState(args.rootDir);
+  assert.equal(state.attempts, 2);
+  const holdReason = hold.holdReason || (hold.reason.startsWith('harness-hold:') ? hold.reason.slice('harness-hold:'.length) : undefined);
+  for (const outcome of JSON.parse(state.outcomes)) {
+    assert.equal(outcome.reason, hold.reason);
+    assert.equal(outcome.holdReason, holdReason);
+  }
+  assert.equal(JSON.parse(state.evidence).holdReason, holdReason);
   assert.equal((await tick(17)).outcome, 'recovery-exhausted');
   assert.equal(calls.pages.length, 1);
+});
+
+test('ORPHANACTION-01: explicit hold reason takes precedence over the harness reason suffix', async t => {
+  const { args, tick } = setup(t);
+  await tick(0);
+  await tick(15, { dispatchHammer: async () => ({
+    reason: 'harness-hold:all-fallbacks-grounded', holdReason: 'quota-exhausted',
+  }) });
+  const state = recoveryState(args.rootDir);
+  assert.equal(JSON.parse(state.outcomes)[0].holdReason, 'quota-exhausted');
+  assert.equal(JSON.parse(state.evidence).holdReason, 'quota-exhausted');
 });
 
 test('ORPHANACTION-01: exhausted page text names both outcome reasons and underlying hold', async t => {

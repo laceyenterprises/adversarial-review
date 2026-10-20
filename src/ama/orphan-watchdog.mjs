@@ -148,7 +148,7 @@ async function rereviewClosed({ rootDir, repo, prNumber, headSha, reviewStateRow
     || (dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') return true;
   // Final-round ownership survives later head movement. Read the same terminal
   // job ledger as closure orchestration, rather than inferring it from a verdict.
-  if (summarizePRRemediationLedger(rootDir, { repo, prNumber }).commentOnlyFinalRoundRevisionRefs?.length) return true;
+  if (summarizePRRemediationLedger(rootDir, { repo, prNumber })?.commentOnlyFinalRoundRevisionRefs?.length) return true;
   const { hasSettledCommentOnlyVerdict } = await import('../review-state.mjs');
   return hasSettledCommentOnlyVerdict(rootDir, { repo, prNumber, headSha }, logger);
 }
@@ -166,8 +166,10 @@ export function isOrphanRecoveryWait(result) {
 }
 
 function attemptSummary(retry) {
-  return { dispatched: retry?.dispatched === true, reason: text(retry?.reason),
-    ...(retry?.holdReason ? { holdReason: text(retry.holdReason) } : {}),
+  const reason = text(retry?.reason);
+  const holdReason = retry?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
+  return { dispatched: retry?.dispatched === true, reason,
+    ...(holdReason ? { holdReason: text(holdReason) } : {}),
     launchRequestId: text(retry?.launchRequestId || retry?.dispatchId) };
 }
 

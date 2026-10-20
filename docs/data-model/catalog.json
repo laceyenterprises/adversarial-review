@@ -861,6 +861,7 @@
       "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
       "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged"],
       "attemptOutcomeFields": ["action", "reason", "holdReason", "at", "dispatched", "launchRequestId", "triggered"],
+      "attemptHoldReasonNormalization": "Explicit result holdReason takes precedence; otherwise extract the harness-hold: suffix from reason for outcomes and evidence summaries.",
       "recoveryAttemptLimit": 2,
       "pagedTerminalReceiptStatuses": ["delivered", "dead-letter"]
     },

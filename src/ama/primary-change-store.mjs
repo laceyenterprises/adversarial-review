@@ -10,7 +10,8 @@ const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
 // HAMREVERSAL-02: recompute stale original-reversal refusals and proofs once
 // with context-tolerant, structure-preserving identity and bounded diagnostics.
 // REVERSALPROV-01: re-evaluate cached foreign-committer provenance refusals.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalprov-v1'];
+// REVERSALPROV-02: recompute proofs and refusals using content multisets.
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalprov-v2'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace

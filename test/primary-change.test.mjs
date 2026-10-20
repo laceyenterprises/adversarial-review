@@ -296,7 +296,7 @@ test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and i
     assert.equal(records.length, 1);
     const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
     assert.equal(record.history.renameProofReadFailed, undefined);
-    assert.equal(record.key[7], 'reversalprov-v1');
+    assert.equal(record.key[7], 'reversalprov-v2');
     assert.deepEqual(await fetchPrimaryChange(args), evidence);
     assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
   }
@@ -516,14 +516,14 @@ test('in-place bug, identifier and whitespace repairs preserve the author region
   }
 });
 
-test('an author addition may be repaired but cannot disappear while another region survives', () => {
+test('REVERSALPROV-02: an insertion-only region needs no reversal authorization', () => {
   const file = { filename: 'src/worker.mjs', status: 'modified', additions: 1, deletions: 0,
     patch: '@@ -9,1 +9,2 @@\n context\n+return foo(a);' };
   const evidence = { ...primaryChangeFixture(head), primaryFiles: [file],
     finalFiles: [{ ...file, patch: '@@ -9,1 +9,2 @@\n context\n+return foo(a ?? b);' }] };
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   evidence.finalFiles[0].patch = '@@ -29,1 +29,2 @@\n other context\n+return foo(a);';
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
 test('restoring one removed occurrence fails even if another identical removal survives', () => {

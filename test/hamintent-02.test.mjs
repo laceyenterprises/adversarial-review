@@ -33,8 +33,11 @@ function evidence() {
   return { ciCost: { headSha: head, ok: true, failedCheck: false }, headSha: head, hasHammerCommits: true, primaryHead: author, mergeBase: base,
     primaryFiles: [file], finalFiles: [], reversalAuthorizations: [{ commit, review, reviewedFiles: [file], parentFiles: [file] }] };
 }
-test('blocking finding authorizes the overlapping HAM reversion; #1207 and invalid citations still refuse', () => {
+test('blocking finding authorizes matching HAM removed content; invalid citations still refuse', () => {
   assert.equal(checkPrimaryChange(evidence(), head).ok, true);
+  const shifted = structuredClone(evidence());
+  shifted.reversalAuthorizations[0].commit.files[0].patch = '@@ -9 +9 @@\n-enforcement: true\n+enforcement: false';
+  assert.equal(checkPrimaryChange(shifted, head).ok, true);
   for (const mutate of [
     (e) => { e.reversalAuthorizations = []; },
     (e) => { e.reversalAuthorizations[0].commit.commit.message = 'HAM\n\nWorker-Class: hammer'; },
@@ -43,7 +46,7 @@ test('blocking finding authorizes the overlapping HAM reversion; #1207 and inval
     (e) => { e.reversalAuthorizations[0].review.body = body.replace(path, 'other.json'); },
     (e) => { e.reversalAuthorizations[0].review.user.login = 'author'; },
     (e) => { e.reversalAuthorizations[0].review.commit_id = head; },
-    (e) => { e.reversalAuthorizations[0].commit.files[0].patch = '@@ -9 +9 @@\n-enforcement: true\n+enforcement: false'; },
+    (e) => { e.reversalAuthorizations[0].commit.files[0].patch = '@@ -10 +10 @@\n-unrelated: true\n+enforcement: false'; },
     (e) => { e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace('Worker-Ticket: HAM', 'Worker-Ticket: AUTHOR'); },
   ]) {
     const e = structuredClone(evidence()); mutate(e);
@@ -218,7 +221,7 @@ test('a one-line finding cannot waive a contiguous multi-line author rewrite', (
   assert.equal(checkPrimaryChange(e, head).ok, true);
 });
 
-test('ambiguous replacement and pure insertion spans require full finding coverage', () => {
+test('expanded replacements require full finding coverage; insertion-only regions need no authorization', () => {
   for (const primary of [
     { ...file, additions: 3, deletions: 1, patch: '@@ -10 +10,3 @@\n-old\n+one\n+two\n+three' },
     { ...file, additions: 3, deletions: 0, patch: '@@ -9,0 +10,3 @@\n+one\n+two\n+three' },
@@ -228,7 +231,8 @@ test('ambiguous replacement and pure insertion spans require full finding covera
     Object.assign(e.reversalAuthorizations[0], { reviewedFiles: [primary], parentFiles: [primary] });
     e.reversalAuthorizations[0].commit.files = [{ ...file, additions: 0, deletions: 3,
       patch: '@@ -10,3 +9,0 @@\n-one\n-two\n-three' }];
-    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+    if (primary.deletions === 0) assert.equal(checkPrimaryChange(e, head).ok, true);
+    else assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
     e.reversalAuthorizations[0].review.body = body.replace('`10`', '`10-12`');
     assert.equal(checkPrimaryChange(e, head).ok, true);
   }

@@ -40,7 +40,7 @@ function reversalCommitIdentityMatches(authorization, cache) {
 
 function reversalTrailerIdentity(commit) {
   return JSON.stringify(Object.entries(parseCommitTrailerValues(commit?.commit?.message || ''))
-    .map(([key, values]) => [key, [...values].sort()]).sort(([a], [b]) => a.localeCompare(b)));
+    .map(([key, values]) => [key, [...values].sort()]).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
 }
 const isHammerCommit = (commit, loginProvenance = false) => {
   const trailers = parseCommitTrailers(commit?.commit?.message || '');
@@ -274,34 +274,60 @@ function projectRegion(files, path, region, cache) {
   return { start: project(region.start, false), end: project(Math.max(region.start, region.end - 1), true), filename: file.filename };
 }
 
-// REVERSALREBASE-01: a rebase moves the reviewed head onto an older base, so
-// base coordinates differ. Find the protected hunk in the reviewed diff by its
-// exact patch lines, never by SHA, and project the unit from that hunk. A
-// changed or ambiguous hunk is a different change and authorizes nothing.
+// REVERSALPROV-02: context, hunk boundaries and offsets are not authority.
+// Match the protected removed content, retaining multiplicity and uniqueness.
+function lineMultiset(lines) {
+  const counts = new Map();
+  for (const line of lines) counts.set(line, (counts.get(line) || 0) + 1);
+  return counts;
+}
+
+function contentIdentity(lines) {
+  return JSON.stringify([...lineMultiset(lines)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+}
+
+function protectedSegment(files, path, region, cache) {
+  return patchSegments(files, path, cache).segments.find(entry =>
+    entry.old <= region.start && region.end <= entry.oldEnd && entry.old < entry.oldEnd);
+}
+
 function rebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
   const primarySegments = patchSegments(primaryFiles, path, cache).segments;
-  const segment = primarySegments.find((entry) => region.start === region.end
-    ? entry.old === entry.oldEnd && entry.old === region.start
-    : entry.old <= region.start && region.end <= entry.oldEnd);
+  const segment = protectedSegment(primaryFiles, path, region, cache);
   if (!segment) throw new Error('protected region outside the primary patch');
-  const samePatch = (entry) => entry.lines.length === segment.lines.length
-    && entry.lines.every((line, index) => line === segment.lines[index]);
-  const matches = patchSegments(reviewedFiles, path, cache).segments.filter(samePatch);
-  if (matches.length !== 1 || primarySegments.filter(samePatch).length !== 1) {
+  const removed = entry => entry.removals ??= entry.lines.filter(line => line.startsWith('-'));
+  const identity = entry => entry.removedIdentity ??= contentIdentity(removed(entry));
+  const sameContent = entry => identity(entry) === identity(segment);
+  const matches = patchSegments(reviewedFiles, path, cache).segments.filter(sameContent);
+  if (matches.length !== 1 || primarySegments.filter(sameContent).length !== 1) {
     throw new Error('rebased protected region patch differs or is ambiguous');
   }
-  const shift = matches[0].old - segment.old;
-  return { start: region.start + shift, end: region.end + shift };
+  // Map each removed occurrence, even when equal-content lines were reordered.
+  segment.rebasedPositions ??= new Map();
+  if (!segment.rebasedPositions.has(matches[0])) {
+    const targets = new Map();
+    removed(matches[0]).forEach((line, index) => {
+      if (!targets.has(line)) targets.set(line, []);
+      targets.get(line).push(matches[0].old + index);
+    });
+    const occurrences = new Map();
+    segment.rebasedPositions.set(matches[0], removed(segment).map(line => {
+      const occurrence = occurrences.get(line) || 0;
+      occurrences.set(line, occurrence + 1);
+      return targets.get(line)[occurrence];
+    }));
+  }
+  const positions = segment.rebasedPositions.get(matches[0])
+    .slice(region.start - segment.old, region.end - segment.old);
+  return { start: Math.min(...positions), end: Math.max(...positions) + 1 };
 }
 
 function projectRebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
   return projectRegion(reviewedFiles, path, rebasedRegion(primaryFiles, reviewedFiles, path, region, cache), cache);
 }
 
-const overlaps = (a, b) => a.start <= b.end && b.start <= a.end;
-
 function regionUnits(region) {
-  return region.start === region.end ? [region]
+  return region.removedLines.length === 0 ? []
     : Array.from({ length: region.end - region.start }, (_, index) => ({
       start: region.start + index, end: region.start + index + 1,
     }));
@@ -369,7 +395,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         if (!lines) return reject('finding-lines-unreadable');
         const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
         if (cited.start < 1 || cited.end < cited.start) return reject('finding-lines-invalid');
-        if (rebased && rebasePatchIdentity(reviewedFiles) !== rebasePatchIdentity(parentFiles)) return reject('rebased protected region patch differs or is ambiguous');
+        if (rebased && reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('rebased protected region patch differs or is ambiguous');
         const reviewed = rebased === true
           ? projectRebasedRegion(evidence.primaryFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
@@ -388,10 +414,39 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           }
         }
         const parent = projectRegion(parentFiles, path, region, cache);
-        if (!cache.has(commit.files)) cache.set(commit.files, { changes: changes(commit.files), paths: new Map() });
-        const touched = cache.get(commit.files).changes.get(parent.filename);
-        if (!touched?.regions.some((other) => overlaps({ start: other.start, end: Math.max(other.start, other.end - 1) }, parent))) {
+        const segment = protectedSegment(evidence.primaryFiles, path, region, cache);
+        const added = segment.addedLines ??= segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
+        // A primary deletion is restored by additions, so preserve that
+        // existing authorization path using its content as well.
+        const restoringDeletion = added.length === 0;
+        const content = restoringDeletion
+          ? segment.lines.filter(line => line.startsWith('-')).map(line => line.slice(1)) : added;
+        // Equal-length replacements can authorize a single base unit. An
+        // expansion maps each unit to the complete introduced span, as above.
+        const key = content.length === segment.oldEnd - segment.old ? `${region.start}:${region.end}` : segment;
+        segment.protectedContent ??= new Map();
+        if (!segment.protectedContent.has(key)) segment.protectedContent.set(key, lineMultiset(
+          key === segment ? content : content.slice(region.start - segment.old, region.end - segment.old)));
+        const protectedLines = segment.protectedContent.get(key);
+        const { segments } = patchSegments(commit.files, parent.filename, cache);
+        const prefix = restoringDeletion ? '+' : '-';
+        segments.authorizingContent ??= new Map();
+        if (!segments.authorizingContent.has(prefix)) segments.authorizingContent.set(prefix, lineMultiset(segments.flatMap(entry => entry.lines)
+          .filter(line => line.startsWith(prefix)).map(line => line.slice(1))));
+        const removed = segments.authorizingContent.get(prefix);
+        if (!cache.has('reversalContentCoverage')) cache.set('reversalContentCoverage', new Map());
+        const coverageByCommit = cache.get('reversalContentCoverage');
+        const coverageKey = `${commit.sha}:${parent.filename}:${prefix}`;
+        if (!coverageByCommit.has(coverageKey)) coverageByCommit.set(coverageKey, { units: new Set(), used: new Map() });
+        const coverage = coverageByCommit.get(coverageKey);
+        const alreadyCovered = coverage.units.has(protectedLines);
+        if (!protectedLines.size || [...protectedLines].some(([line, count]) =>
+          (removed.get(line) || 0) < (coverage.used.get(line) || 0) + (alreadyCovered ? 0 : count))) {
           return reject('hammer-patch-does-not-touch-region');
+        }
+        if (!alreadyCovered) {
+          coverage.units.add(protectedLines);
+          for (const [line, count] of protectedLines) coverage.used.set(line, (coverage.used.get(line) || 0) + count);
         }
         if (!cache.has('verifiedReversals')) cache.set('verifiedReversals', new Set());
         cache.get('verifiedReversals').add(`${commit.sha}:${cite[1]}:${cite[2]}:${kind}`);
@@ -413,7 +468,7 @@ function hasRebasedReversalProof(evidence, path) {
         || commit.parents?.length !== 1
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
         || parseCommitTrailers(commit.commit.message)['reviewed-head'] !== review.commit_id
-        || rebasePatchIdentity(reviewedFiles) !== rebasePatchIdentity(parentFiles)) return false;
+        || reversalPatchIdentity(reviewedFiles) !== reversalPatchIdentity(parentFiles)) return false;
       return reversalCitations(commit.commit.message).some(cite => {
         if (![review.node_id, review.html_url].includes(cite[1])) return false;
         const findings = cite[3] === 'non-blocking' ? parseNonBlockingFindingsSection(review.body) : parseBlockingFindingsSection(review.body);
@@ -547,8 +602,10 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       }
       const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
       if (identicalHammerRename(evidence, file)) continue;
-      if ((change.renamed && actual?.filename === path) || (!actual
+      if ((change.renamed && actual?.filename === path)
+        || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
+          && (change.status !== 'added' || change.removed.size > 0)
           && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
         return reverted(path, change.renamed ? 'rename-preservation' : change.opaque ? 'opaque-file-preservation' : 'reversal-authorization');
       }
@@ -600,23 +657,19 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
   }
 }
 
-// Bind ordered change lines, hunk/context-run boundaries and newline markers.
-// Only context text/counts and hunk coordinates may drift across a rebase.
-// The immutable review head still pins the original reversal.
-function reversalPatchIdentity(files) {
-  changes(files);
-  return JSON.stringify(files.map((file) => {
+// Bind changed content with multiplicity per path. Rebase context, positions,
+// ordering and hunk partitioning do not change the removal authorization.
+function reversalPatchIdentity(files, cache) {
+  if (cache?.get(files)?.reversalIdentity) return cache.get(files).reversalIdentity;
+  const parsed = cache?.get(files) || { changes: changes(files), paths: new Map() };
+  const identity = JSON.stringify(files.map(file => {
     if (typeof file.patch !== 'string') throw new Error('opaque original reversal');
-    const lines = [];
-    for (const line of file.patch.split('\n')) {
-      if (line.startsWith('@@ ')) lines.push('@@');
-      else if (line.startsWith(' ')) {
-        if (lines.at(-1) !== ' ') lines.push(' ');
-      } else if (line.startsWith('-') || line.startsWith('+') || line.startsWith('\\')) lines.push(line);
-    }
     return [file.filename, file.previous_filename || '', file.status,
-      lines];
+      contentIdentity(file.patch.split('\n').filter(line => /^[+\\-]/.test(line)))];
   }).sort((a, b) => a[0].localeCompare(b[0])));
+  parsed.reversalIdentity = identity;
+  cache?.set(files, parsed);
+  return identity;
 }
 
 function boundedReversalText(text, limit = 1200) {
@@ -762,7 +815,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     }
     try {
       changes(parent.files);
-      if (rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
+      if (rebased && reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
         reject('parent-is-not-reviewed-head-rebase'); continue;
       }
     } catch {
@@ -999,7 +1052,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             originalAuthorization = proof.authorization;
             if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested
               ? 'rebased-commit-unproven' : 'original-reversal-not-proven-before-supersession', proof.detail); continue; }
-            if (originalAuthorization.rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
+            if (originalAuthorization.rebased && reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
               reject('parent-is-not-reviewed-head-rebase'); continue;
             }
           }

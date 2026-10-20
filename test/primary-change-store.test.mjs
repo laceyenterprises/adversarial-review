@@ -96,7 +96,7 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
   const dir = join(args.rootDir, 'data', 'primary-change-history');
   mkdirSync(dir, { recursive: true });
-  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'hamreversal-v2'];
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalprov-v1'];
   const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
   writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args),
     rejectedReversalAuthorizations: [{ reason: 'commit-provenance' }] } }));
@@ -106,9 +106,9 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   assert.equal(calls, 1);
   assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
-  assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalprov-v1');
+  assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalprov-v2');
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
-  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalprov-v1');
+  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalprov-v2');
 });
 
 test('timed out caller leaves a single read running, completion persists and next attempt reuses it', async t => {

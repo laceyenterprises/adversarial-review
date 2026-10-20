@@ -121,6 +121,8 @@ for (const hold of [
   { reason: 'all-fallbacks-grounded', holdReason: 'fleet-quota-status-unreadable' },
   { reason: 'harness-hold:fleet-quota-status-unavailable' },
   { reason: 'harness-hold:fleet-quota-status-unreadable' },
+  { reason: 'harness-hold:all-fallbacks-grounded', holdReason: 'fleet-quota-status-unavailable' },
+  { reason: 'harness-hold:all-fallbacks-grounded', holdReason: 'fleet-quota-status-unreadable' },
   { reason: 'stacked-base-read-failed' },
 ]) test(`ORPHANACTION-01: transient hold refunds recovery: ${JSON.stringify(hold)}`, async t => {
   const { args, tick, calls } = setup(t);
@@ -149,6 +151,8 @@ for (const hold of [
   { reason: 'all-fallbacks-grounded', holdReason: 'all-fallbacks-grounded' },
   { reason: 'harness-hold:all-fallbacks-grounded' },
   { reason: 'all-fallbacks-grounded', holdReason: 'unknown-hold' },
+  { reason: 'harness-hold:fleet-quota-status-unavailable', holdReason: 'quota-exhausted' },
+  { reason: 'harness-hold:fleet-quota-status-unreadable', holdReason: 'quota-exhausted' },
 ]) test(`ORPHANACTION-01: grounded or unknown hold spends recovery: ${JSON.stringify(hold)}`, async t => {
   const { args, tick, calls } = setup(t);
   assert.equal(isOrphanRecoveryWait(hold), false);

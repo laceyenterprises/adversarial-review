@@ -154,7 +154,7 @@ async function rereviewClosed({ rootDir, repo, prNumber, headSha, reviewStateRow
 }
 export function isOrphanRecoveryWait(result) {
   const reason = String(result?.reason || result?.code || result?.message || '');
-  const holdReason = reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : result?.holdReason;
+  const holdReason = result?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
   const transientHarnessHold = (reason === 'all-fallbacks-grounded' || reason.startsWith('harness-hold:'))
     && ['fleet-quota-status-unavailable', 'fleet-quota-status-unreadable'].includes(holdReason);
   return result?.recoveryWait === true || [

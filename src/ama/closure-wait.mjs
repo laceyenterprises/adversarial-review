@@ -39,10 +39,11 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)').run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason);
       db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
       // Retained launches carry durable progress timestamps. Apply them to an
-      // existing final-round wait too, without making each poll fresh progress.
-      if (reasonClass === 'final-round' && Number.isFinite(startedAt)) {
+      // existing final-round wait too. Ignore future timestamps here so clock
+      // skew cannot turn each poll into fresh progress.
+      if (reasonClass === 'final-round' && Number.isFinite(startedAt) && startedAt <= now) {
         db.prepare('UPDATE waits_by_class SET started=MAX(started, ?) WHERE head=? AND class=?')
-          .run(Math.min(now, startedAt), headSha, reasonClass);
+          .run(startedAt, headSha, reasonClass);
       }
       const row = db.prepare('SELECT * FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass);
       if (progress) db.prepare('UPDATE waits_by_class SET started=? WHERE head=? AND class=?').run(now, headSha, reasonClass);

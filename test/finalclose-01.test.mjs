@@ -106,6 +106,7 @@ const minute = 60_000;
 for (const [reason, age, expectedPages] of [
   ['existing-dispatch-running', 20, 0],
   ['existing-dispatch-running', 35, 1],
+  ['existing-dispatch-stalled', null, 1],
   ['dispatch-held', null, 1],
   ['all-fallbacks-grounded', null, 1],
   ['daemon-closure-failed', null, 1],
@@ -140,11 +141,50 @@ for (const [reason, age, expectedPages] of [
   assert.equal(pages.length, expectedPages);
 });
 
-test('HAMCLOSEWAIT-01 retained running dispatch reports its launch, not its observation time', async t => {
-  const f = fixture(t, { ledgerStatus: 'running', reportedStatus: 'running' });
+for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown']) {
+  test(`HAMCLOSEWAIT-01 retained ${status} dispatch only reports active-running progress`, async t => {
+    const f = fixture(t, { ledgerStatus: 'running', reportedStatus: status });
+    if (status === 'unknown') {
+      const exec = f.args.execFileImpl;
+      f.args.execFileImpl = async (cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') throw new Error('status probe unavailable');
+        return exec(cmd, argv);
+      };
+    }
+    const result = await maybeDispatchAmaCloser(f.args);
+    assert.equal(result.reason, status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
+    if (status === 'running' || status === 'starting') assert.equal(result.closerProgressAt, started);
+    else assert.equal(Object.hasOwn(result, 'closerProgressAt'), false);
+    assert.equal(f.launches.length, 0, 'retained ownership never launches a duplicate');
+  });
+}
+
+test('HAMCLOSEWAIT-01 real exhausted-fallback dispatch does not report closer progress', async t => {
+  const f = fixture(t);
+  let resolverCalls = 0;
+  f.args.resolveCloserDispatchHarnessImpl = async () => {
+    resolverCalls++;
+    return { hold: true };
+  };
   const result = await maybeDispatchAmaCloser(f.args);
-  assert.equal(result.reason, 'existing-dispatch-running');
-  assert.equal(result.closerProgressAt, started);
+  assert.equal(result.reason, 'all-fallbacks-grounded');
+  assert.equal(Object.hasOwn(result, 'closerProgressAt'), false);
+  assert.equal(resolverCalls, 1);
+  assert.equal(f.launches.length, 0);
+});
+
+test('HAMCLOSEWAIT-01 future timestamps cannot refresh the deadline on every poll', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const args = { rootDir, repo, prNumber, headSha, waitClass: 'final-round', env: {},
+    startedAt: 24 * 60 * minute, reason: 'future-dated-progress',
+    pageImpl: async text => pages.push(text) };
+  // A new row clamps to its first observation; subsequent polls keep that clock.
+  for (const now of [0, 10, 20, 30, 31]) {
+    const wait = await observeClosureWait({ ...args, now: now * minute });
+    assert.equal(wait.startedAt, 0);
+    assert.equal(wait.exhausted, now >= 30);
+  }
+  assert.equal(pages.length, 1);
 });
 
 for (const [status, uncertain, expectedPages] of [

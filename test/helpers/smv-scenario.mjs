@@ -476,6 +476,13 @@ if (scenario === 'clean') {
   assert.equal(pages, 1, 'a closer launched twenty minutes ago must not page');
   assert.equal((await observeClosureWait({ ...finalWait, now: 55 * 60_000, startedAt: 20 * 60_000 })).exhausted, true);
   assert.equal(pages, 2, 'unchanged launch progress must still expire');
+  const skewedWait = { ...finalWait, prNumber: prNumber + 100, startedAt: 24 * 60 * 60_000 };
+  for (const now of [0, 10, 20, 30, 31]) {
+    const wait = await observeClosureWait({ ...skewedWait, now: now * 60_000 });
+    assert.equal(wait.startedAt, 0, 'future timestamps cannot turn polling into progress');
+    assert.equal(wait.exhausted, now >= 30);
+  }
+  assert.equal(pages, 3, 'future-dated progress still pages once at the original deadline');
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);

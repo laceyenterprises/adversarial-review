@@ -3902,18 +3902,22 @@ Immediate primary-change alerts use their own receipt and cannot consume this
 final-round stall receipt. A successful launch resets the wait before checking
 the stall deadline, including when dispatch succeeds on the deadline tick.
 HAMCLOSEWAIT-01 also advances an existing final-round wait to a retained
-closer's recorded launch or confirmed dispatched lease progress (`updatedAt`,
-falling back to `acquiredAt`). Polling alone does not refresh this timestamp:
-a closer with no progress for thirty minutes still pages. Pending/uncertain
-ownership, held dispatches, exhausted fallbacks, daemon failures and review
-handoffs retain their existing waits; immediate pages remain immediate.
+running/starting closer's recorded launch or confirmed dispatched lease progress
+(`updatedAt`, falling back to `acquiredAt`). Polling alone does not refresh this timestamp:
+a closer with no progress for thirty minutes still pages. A future timestamp
+seeds a new row at its first observation, but cannot advance an existing wait
+until the timestamp is reached. Retained stalled, blocked and unknown dispatch
+statuses do not supply launch progress. Pending/uncertain ownership, held
+dispatches, exhausted fallbacks, daemon failures and review handoffs retain their
+existing waits; immediate pages remain immediate.
 
 After deploy, SRE owns these checks:
 
 1. Confirm the watcher restarted after deployment.
 2. Verify the next final-round PR closes through a hammer, or pages once naming
    its head and blocker, within about thirty minutes under normal load and load
-   above eighty.
+   above eighty. Confirm future-dated progress does not refresh an existing wait
+   and retained stalled/blocked/unknown dispatches preserve its original clock.
 3. Over the following day, confirm no operator hand merge was needed because
    final-round closure stalled.
 

@@ -10,6 +10,7 @@ import path from 'node:path';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
   amaHammerBackgroundProgress,
+  isAmaCloserLaunching,
   DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS,
   amaHammerBackgroundQueue,
   amaHammerBackgroundKey,
@@ -82,18 +83,23 @@ test('HAMCLOSEWAIT-02 queue credits actual start, not submission or repeated obs
   const queued = queue.submit({ key: 'example/repo#2@b', timeoutMs: 240_000, run: () => second.promise });
   assert.deepEqual(amaHammerBackgroundProgress(queued, clock), {});
   assert.deepEqual(amaHammerBackgroundProgress(queue.get(queued.key), clock), {});
+  assert.equal(isAmaCloserLaunching({ reason: AMA_HAMMER_BACKGROUND_REASON,
+    ...amaHammerBackgroundProgress(queued, clock), backgroundDispatch: queued }), false);
   clock = 10_000;
   first.resolve({ dispatched: false });
   await new Promise(resolve => setImmediate(resolve));
   const progress = amaHammerBackgroundProgress(queue.get(queued.key), clock);
   assert.equal(progress.closerProgressAt, new Date(clock).toISOString());
   assert.equal(progress.closerLaunchBoundMs, 240_000);
+  assert.equal(isAmaCloserLaunching({ reason: AMA_HAMMER_BACKGROUND_REASON, ...progress }), true);
   clock += 200_000;
   assert.deepEqual(amaHammerBackgroundProgress(queue.get(queued.key), clock), progress);
   second.resolve({ dispatched: true });
   await queue.drain();
   assert.equal(queue.get(queued.key).state, 'settled');
-  assert.equal(queue.takeSettled(queued.key).result.closerProgressAt, progress.closerProgressAt);
+  const settled = queue.takeSettled(queued.key).result;
+  assert.equal(settled.closerProgressAt, progress.closerProgressAt);
+  assert.ok(!isAmaCloserLaunching(settled), 'successful settlement is no longer launching');
   assert.equal(queue.get(queued.key), null);
 });
 

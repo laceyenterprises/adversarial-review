@@ -161,12 +161,26 @@ for (const dispatchOnly of [false, true]) {
     f.advance(200_000);
     f.finish({ dispatched: true, reason: 'dispatched' });
     await f.queue.drain();
+    const beforeSettlement = f.waits.length;
     const settled = await maybeDispatchAmaClosureFor(f.args);
     assert.equal(settled.dispatched, true);
     assert.equal(settled.closerProgressAt, first.closerProgressAt);
+    assert.equal(f.waits.length, beforeSettlement + 1, 'settlement records a new wait observation');
     assert.equal(f.waits.at(-1).startedAt, f.launchAt, 'settlement keeps the fixed launch clock');
     assert.equal(f.calls(), 1);
     assert.deepEqual(f.pages, []);
+    // Reopen the SQLite store without launch evidence to prove settlement
+    // persisted progress rather than merely returning provisional launch credit.
+    const observePersistedWait = now => observeClosureWait({ ...f.identity,
+      waitClass: 'final-round', reason: 'no-further-progress', now, env: {},
+      pageImpl: async text => f.pages.push(text) });
+    const persisted = await observePersistedWait(f.launchAt + 20 * 60_000);
+    assert.equal(persisted.startedAt, f.launchAt);
+    assert.equal(persisted.exhausted, false);
+    assert.deepEqual(f.pages, []);
+    assert.equal((await observePersistedWait(f.launchAt + 30 * 60_000)).exhausted, true);
+    assert.equal((await observePersistedWait(f.launchAt + 31 * 60_000)).exhausted, true);
+    assert.equal(f.pages.length, 1, 'settlement preserves the fixed deadline and one-page receipt');
   });
 
   test(`HAMCLOSEWAIT-02 undispatched settlement restores original wait and reasons, dispatch-only=${dispatchOnly}`, async t => {
@@ -178,7 +192,9 @@ for (const dispatchOnly of [false, true]) {
     f.advance(200_000);
     f.finish({ dispatched: false, reason: 'not-eligible', reasons: ['ci-not-green'] });
     await f.queue.drain();
+    const beforeSettlement = f.waits.length;
     const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.ok(f.waits.length > beforeSettlement, 'refusal records a new wait observation');
     assert.equal(result.reason, 'not-eligible');
     assert.equal(result.closerProgressAt, undefined);
     assert.equal(f.waits.at(-1).startedAt, Date.parse(started));

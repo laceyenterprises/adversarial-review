@@ -85,7 +85,9 @@ for (const outcome of ['ama-pending', 'await-operator']) {
     'ama-closer-dispatch-overrun: elapsed_ms=900001 bound_ms=900000']) {
     test(`HAMCLOSEWAIT-02 ${outcome} ${reason} logs that the closer is launching`, async () => {
       const { args, logs } = baseArgs({ repoPath: 'example/repo',
-        resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome, amaClosureResult: { reason } }),
+        resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome, amaClosureResult: {
+          reason, closerProgressAt: new Date().toISOString(),
+        } }),
       });
       await handlePostedReviewRow(args);
       assert.match(logs.at(-1), /closer is launching/);
@@ -93,6 +95,17 @@ for (const outcome of ['ama-pending', 'await-operator']) {
     });
   }
 }
+
+test('HAMCLOSEWAIT-02 queued background work does not log that the closer is launching', async () => {
+  const { args, logs } = baseArgs({ repoPath: 'example/repo',
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome: 'ama-pending',
+      amaClosureResult: { reason: 'ama-closer-dispatch-backgrounded', backgroundDispatch: { state: 'queued' } },
+    }),
+  });
+  await handlePostedReviewRow(args);
+  assert.match(logs.at(-1), /AMA hammer route retained ownership/);
+  assert.doesNotMatch(logs.join('\n'), /closer is launching|safety hold requires operator action/);
+});
 
 test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', () => {
   const env = {

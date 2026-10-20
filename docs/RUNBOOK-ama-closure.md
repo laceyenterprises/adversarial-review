@@ -4044,7 +4044,9 @@ timeout (15 minutes when absent). It preserves the original final-round clock:
 an undispatched settlement resumes that clock and pages with the settled
 reasons. An in-progress overrun pages once with `ama-closer-dispatch-overrun`,
 `elapsed_ms` and `bound_ms`. Successful settlement credits the fixed launch
-time. Launching states log “closer is launching”. Restart intent alone supplies
+time. Background work logs “closer is launching” only when it carries actual
+execution-start evidence; queued submissions do not emit that launch hint.
+Restart intent alone supplies
 no progress. Other pending/uncertain ownership, held dispatches, exhausted
 fallbacks, daemon failures and review handoffs retain their existing waits;
 immediate pages remain immediate.

@@ -72,7 +72,9 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
       if (command !== 'gh') {
         if (args[0] === 'write') return { stdout: JSON.stringify({ ok: true }) };
         throw Object.assign(new Error('synthetic unsupported read'), { code: 78,
-          stdout: JSON.stringify({ failureClass: 'unsupported', code: 'unsupported_command', requested: 'read' }) });
+          // Mirror the adapter contract: requested names the invoked subcommand,
+          // exercising the client's per-tick capability cache.
+          stdout: JSON.stringify({ failureClass: 'unsupported', code: 'unsupported_command', requested: args[0] }) });
       }
       let value;
       if (args[0] === 'pr') {

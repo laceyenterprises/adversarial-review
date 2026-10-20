@@ -539,7 +539,8 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(gate.subprocesses.adapter.count, 4, 'one read capability probe plus three status writes');
   assert.equal(gate.database.count, 3);
   assert.equal(candidate.runs, 3);
-  assert.equal(candidate.subprocesses.gh.count, 7, 'one snapshot and guard per PR, shared branch protection');
+  assert.equal(candidate.subprocesses.gh.count, 5, 'three snapshots, one initial guard read and shared branch protection');
+  assert.equal(candidate.github['rest:pr-state'].count, 1, 'later candidates reuse the cached default with their live base');
   assert.equal(candidate.github['graphql:label-timeline'], undefined, 'all controls share the gate timeline');
   assert.equal(candidate.database.count, 0);
   assert.equal(closure.runs, 3);

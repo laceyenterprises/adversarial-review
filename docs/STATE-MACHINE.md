@@ -684,6 +684,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+HAMMERQUOTAREAD-01: closer quota read failures may reuse a last-good snapshot
+less than ten minutes old after bounded retries. Without usable evidence,
+automatic routing holds before any launch, recording an existing `deferred`
+AMA audit outcome with the actual resolver reason and quota provenance. No
+launch state or retry budget is consumed. Genuine exhausted fallback sets keep
+`all-fallbacks-grounded`; other holds return `harness-hold:<resolver reason>`.
+
 BRANCHPROBE-01: before hammer launch, null head-repository metadata requires
 Git confirmation of the exact head ref, using the base repository URL only
 when the PR is not identified as cross-repository. Only `ls-remote` exit 2 permits branch-missing

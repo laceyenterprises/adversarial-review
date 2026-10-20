@@ -53,7 +53,13 @@ import { codexWorkerLaneFromSnapshot } from '../codex-account-routing.mjs';
 import { resolveRemediationModel } from '../adapters/agent-runtime/local/remediation.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { writeFileAtomic } from '../atomic-write.mjs';
+import {
+  AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
+  readFleetQuotaStatusStdoutWithRetry,
+} from '../afh-reviewer-fallback.mjs';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -71,6 +77,7 @@ const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
+const LAST_GOOD_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 
 // Closer/hammer worker_class → HHR provider whose OAuth quota gates whether that
 // harness can spawn at all. `hammer` runs on the codex harness (OpenAI OAuth),
@@ -99,15 +106,32 @@ function normalizeFallbackList(fallbackWorkerClasses) {
   return fallbackWorkerClasses.map((value) => String(value || '').trim()).filter(Boolean);
 }
 
-async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
-  const result = await execFileImpl(hqPath, ['fleet', 'quota', 'status', '--json'], {
-    env,
-    cwd: String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT,
-    encoding: 'utf8',
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
-  });
-  return typeof result === 'string' ? result : (result?.stdout || '');
+// The dispatch owner supplies its state root. Callers without a durable state
+// directory can omit rootDir and retain live-only resolution.
+export function closerQuotaSnapshotPath(rootDir) {
+  return join(rootDir, 'data', 'ama-closer-quota-snapshot.json');
+}
+
+function parseCloserQuotaSnapshot(stdout) {
+  const snapshot = parseHqFleetQuotaSnapshot(stdout);
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new Error('fleet quota status must be a JSON object');
+  }
+  return snapshot;
+}
+
+function recentQuotaSnapshot(rootDir, nowMs) {
+  if (!rootDir) return null;
+  try {
+    const cached = JSON.parse(readFileSync(closerQuotaSnapshotPath(rootDir), 'utf8'));
+    const ageMs = nowMs - cached.readAt;
+    if (typeof cached.readAt !== 'number' || !Number.isFinite(ageMs)
+      || ageMs < 0 || ageMs >= LAST_GOOD_SNAPSHOT_MAX_AGE_MS) return null;
+    const snapshot = parseCloserQuotaSnapshot(JSON.stringify(cached.payload));
+    return { snapshot, ageMs, readAt: cached.readAt };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -119,6 +143,9 @@ async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
  * @param {string=} args.hqPath — path to the `hq` binary.
  * @param {Function=} args.execFileImpl — DI for `hq fleet quota status`.
  * @param {Object=} args.env
+ * @param {string=} args.rootDir — dispatch owner's state root; enables disk snapshots.
+ * @param {Function=} args.nowMs — injected clock, evaluated after the live read.
+ * @param {Function=} args.sleepImpl — injected retry delay.
  * @param {'personal-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @returns {Promise<{
  *   workerClass: string,      // the harness to actually pass to `hq dispatch`
@@ -131,6 +158,10 @@ async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
  *   softGrounding?: Object|null, // the raw afhGrounding verdict, for the audit
  *   fallbackProvider?: string,
  *   reason?: string,          // why NO fallback was taken (when !fellBack)
+ *   evidenceSource?: 'live'|'last-good-snapshot',
+ *   evidenceAgeMs?: number,
+ *   evidenceReadAt?: number, // original read completion, epoch milliseconds
+ *   liveReadReason?: string,
  *   error?: string,
  * }>}
  */
@@ -140,6 +171,9 @@ export async function resolveCloserDispatchHarness({
   hqPath = 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
+  rootDir = null,
+  nowMs = Date.now,
+  sleepImpl,
   codexAccountPolicy = 'personal-first',
   modelForWorkerClass = (className) => resolveRemediationModel(className, { env, fallbackModel: null }).resolvedModel,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
@@ -153,7 +187,7 @@ export async function resolveCloserDispatchHarness({
 } = {}) {
   const primary = String(workerClass || '').trim();
   const fallbacks = normalizeFallbackList(fallbackWorkerClasses);
-  const base = { workerClass: primary, fellBack: false };
+  let base = { workerClass: primary, fellBack: false };
   const autoCodex = codexAccountPolicy === 'personal-first' && primary === 'hammer';
 
   if (!primary || (fallbacks.length === 0 && !probeWithoutFallbacks && !autoCodex)) {
@@ -167,32 +201,50 @@ export async function resolveCloserDispatchHarness({
     return { ...base, reason: 'primary-provider-untracked' };
   }
 
-  // Authoritative HHR read, ONCE per launch. Automatic Codex routing holds on
-  // unknown evidence; pinned/non-Codex routing retains its previous fail-open.
-  let stdout;
-  try {
-    stdout = await readFleetQuotaStatusStdout({ hqPath, execFileImpl, env });
-  } catch (err) {
-    return { ...base, hold: autoCodex || primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
-  }
-
-  // Both limbs are read from the SAME single status payload, so the hard state
-  // and the soft verdict can never describe different moments. Parse it ONCE
-  // here: the primary's two limbs and every fallback candidate below all query
-  // the same parsed rows. Malformed evidence follows the same unknown-evidence
-  // behavior as a failed read, rather than relying on the caller's catch.
-  let providerStatuses;
+  // All account/provider decisions use the same payload. Retry transient live
+  // failures before consulting a bounded last-good snapshot; never renew the
+  // snapshot timestamp on a failed read or cached use.
   let snapshot;
-  let primaryAvailability;
-  let primarySoft;
+  let failureReason = 'fleet-quota-status-unavailable';
+  let evidence;
   try {
-    snapshot = parseHqFleetQuotaSnapshot(stdout);
-    providerStatuses = quotaStatusesFromSnapshot(snapshot);
-    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
-    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
+    const stdout = await readFleetQuotaStatusStdoutWithRetry({
+      resolvedHqPath: hqPath,
+      hqCwd: String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT,
+      execFileImpl, env, timeoutMs: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+      retryDelaysMs: AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS, sleepImpl,
+    });
+    failureReason = 'fleet-quota-status-unreadable';
+    snapshot = parseCloserQuotaSnapshot(stdout);
+    const readAt = nowMs();
+    evidence = { evidenceSource: 'live', evidenceAgeMs: 0, evidenceReadAt: readAt };
+    if (rootDir) {
+      try {
+        writeFileAtomic(closerQuotaSnapshotPath(rootDir),
+          `${JSON.stringify({ readAt, payload: snapshot })}\n`, { mode: 0o600 });
+      } catch (err) {
+        // A cache write fault must not discard successful live evidence.
+        evidence.snapshotWriteError = String(err?.message || err);
+      }
+    }
   } catch (err) {
-    return { ...base, hold: autoCodex || primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
+    const cached = recentQuotaSnapshot(rootDir, nowMs());
+    if (!cached) {
+      return { ...base, hold: autoCodex || primary === 'hammer-claude-corp',
+        reason: failureReason, error: String(err?.message || err) };
+    }
+    snapshot = cached.snapshot;
+    evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: cached.ageMs,
+      evidenceReadAt: cached.readAt, liveReadReason: failureReason };
   }
+  base = { ...base, ...evidence };
+  const providerStatuses = quotaStatusesFromSnapshot(snapshot);
+  const primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, {
+    provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null,
+  });
+  const primarySoft = providerSoftGroundingFromStatuses(providerStatuses, {
+    provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null,
+  });
 
   const codexAccount = autoCodex ? codexWorkerLaneFromSnapshot(snapshot, {
     workerClass: primary, policy: codexAccountPolicy, statuses: providerStatuses,
@@ -276,6 +328,7 @@ export async function resolveCloserDispatchHarness({
       }
     }
     return {
+      ...evidence,
       workerClass: candidate,
       fellBack: true,
       from: primary,

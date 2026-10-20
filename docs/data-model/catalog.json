@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-closer-quota-snapshot",
+      "title": "AMA Closer Quota Snapshot",
+      "path": "docs/data-model/ama-closer-quota-snapshot.md",
+      "store": "<dispatch rootDir>/data/ama-closer-quota-snapshot.json",
+      "schemaSurface": "src/ama/harness-fallback.mjs",
+      "timestampSource": "readAt is local epoch milliseconds after a successful live read and parse",
+      "owner": "AMA closer harness resolver"
+    },
+    {
       "id": "ama-dispatch-configuration",
       "title": "AMA Dispatch Configuration Receipts",
       "path": "docs/data-model/ama-dispatch-configuration.md",

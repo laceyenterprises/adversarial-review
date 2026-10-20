@@ -17,7 +17,7 @@ import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
-import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
+import { readAmaAuditEntry, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -2152,3 +2152,47 @@ for (const ageMs of [0, 59_999, 60_000]) {
     }
   });
 }
+
+for (const holdReason of ['fleet-quota-status-unavailable', 'codex-account-evidence-unknown', 'all-fallbacks-grounded']) {
+  test(`HAMMERQUOTAREAD-01: dispatch preserves ${holdReason} in result and audit`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-hold-reason-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = findingsRemediationArgs(rootDir);
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      resolveCloserDispatchHarnessImpl: async options => {
+        assert.equal(options.rootDir, rootDir);
+        return { workerClass: 'hammer', hold: true, reason: holdReason };
+      } });
+    const expected = holdReason === 'all-fallbacks-grounded' ? holdReason : `harness-hold:${holdReason}`;
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, expected);
+    assert.equal(result.namedReason, expected);
+    assert.equal(result.holdReason, holdReason);
+    assert.equal(deps.calls.length, 0);
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, args.dispatchContext.repo, 404, HEAD);
+    assert.equal(audit.attempts.at(-1).reason, expected);
+    assert.equal(audit.attempts.at(-1).harnessResolution.reason, holdReason);
+    assert.equal(audit.status, 'deferred');
+  });
+}
+
+test('HAMMERQUOTAREAD-01: snapshot provenance survives personal dispatch and audit', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-snapshot-audit-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const args = findingsRemediationArgs(rootDir);
+  const evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: 180_000,
+    evidenceReadAt: Date.parse('2026-10-01T12:00:00Z'), liveReadReason: 'fleet-quota-status-unavailable' };
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    resolveCloserDispatchHarnessImpl: async () => ({ workerClass: 'hammer', fellBack: false,
+      reason: 'personal-ready', ...evidence }) });
+  assert.equal(result.dispatched, true);
+  for (const [key, value] of Object.entries(evidence)) {
+    assert.equal(result.harnessResolution[key], value);
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, args.dispatchContext.repo, 404, HEAD);
+    assert.equal(audit.harnessResolution[key], value);
+    assert.equal(audit.attempts.at(-1).harnessResolution[key], value);
+  }
+});

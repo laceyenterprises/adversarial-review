@@ -41,6 +41,16 @@ at mode `0640`.
 | `closureAuthority`, `reviewer`, `riskClass`, `flagState`, `ciMode` | optional provenance | Watcher-owned metadata, or caller-provided metadata when an append creates a missing record. `ciMode` is `github-checks` or `no-ci-bootstrap`. |
 | `ciConfigurationAdmission`, `attempts[].ciConfiguration` | optional `{ reason, repo, base, head, baseHead, checkedAt }` | Only the operator-authorized no-CI daemon route. Top-level admission metadata holds the pre-lease proof; the successful `daemon-merged` attempt holds its latest in-lease proof. All identity fields are strings; `checkedAt` is an ISO timestamp and `reason` is `no CI configured`. |
 
+`harnessResolution` and `attempts[].harnessResolution` record the closer's
+physical `workerClass`, resolver `reason`, `hold` boolean, and quota provenance:
+`evidenceSource`, `evidenceAgeMs`, `evidenceReadAt` (epoch milliseconds), and
+`liveReadReason`. Evidence fields are null when unavailable. Snapshot use is
+recorded even when the class stays unchanged. Resolver holds write a `deferred`
+attempt with `reason: harness-hold:<resolver reason>`; genuine exhausted fallback
+sets preserve `all-fallbacks-grounded`. The same reason is returned to dispatch
+callers, along with `holdReason`. See the
+[quota snapshot contract](ama-closer-quota-snapshot.md).
+
 ```mermaid
 erDiagram
   AMA_AUDIT ||--|{ AMA_ATTEMPT : records

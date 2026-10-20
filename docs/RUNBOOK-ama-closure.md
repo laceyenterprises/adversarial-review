@@ -3906,8 +3906,8 @@ running/starting closer's recorded launch or confirmed dispatched lease progress
 (`updatedAt`, falling back to `acquiredAt`). Polling alone does not refresh this timestamp:
 a closer with no progress for thirty minutes still pages. A future timestamp
 seeds a new row at its first observation, but cannot advance an existing wait
-until the timestamp is reached. Retained stalled, blocked and unknown dispatch
-statuses do not supply launch progress. Pending/uncertain ownership, held
+until the timestamp is reached. Only running/starting retained dispatches supply launch progress;
+stalled, blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Pending/uncertain ownership, held
 dispatches, exhausted fallbacks, daemon failures and review handoffs retain their
 existing waits; immediate pages remain immediate.
 
@@ -3917,7 +3917,7 @@ After deploy, SRE owns these checks:
 2. Verify the next final-round PR closes through a hammer, or pages once naming
    its head and blocker, within about thirty minutes under normal load and load
    above eighty. Confirm future-dated progress does not refresh an existing wait
-   and retained stalled/blocked/unknown dispatches preserve its original clock.
+   and retained stalled/blocked/unknown/succeeded-awaiting-signal dispatches preserve its original clock.
 3. Over the following day, confirm no operator hand merge was needed because
    final-round closure stalled.
 

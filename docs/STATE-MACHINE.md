@@ -967,7 +967,7 @@ HAMCLOSEWAIT-01 measures a retained running/starting closer from its recorded la
 confirmed dispatched lease progress, advancing existing final-round waits too.
 An unchanged timestamp cannot extend the bound. Future timestamps seed new rows
 at observation time but cannot advance existing waits until reached; retained
-stalled/blocked/unknown dispatches supply no launch progress. Other blockers and
+stalled/blocked/unknown/succeeded-awaiting-audit-or-merged-signal dispatches supply no launch progress. Other blockers and
 immediate pages keep their existing behavior. Merge authority and lifecycle edges stay unchanged.
 There are no new lifecycle states or review rounds. STOPHOLDREVIEW-01 posting
 receipts and REVERSALPROV-01 reversal provenance remain independent requirements.

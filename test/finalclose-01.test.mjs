@@ -9,6 +9,7 @@ import { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } fro
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
@@ -141,9 +142,12 @@ for (const [reason, age, expectedPages] of [
   assert.equal(pages.length, expectedPages);
 });
 
-for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown']) {
+for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 'succeeded']) {
   test(`HAMCLOSEWAIT-01 retained ${status} dispatch only reports active-running progress`, async t => {
     const f = fixture(t, { ledgerStatus: 'running', reportedStatus: status });
+    if (status === 'succeeded') {
+      f.args.readBuildCompletionSignalForPrImpl = () => ({ ok: false, reason: 'ledger-read-failed' });
+    }
     if (status === 'unknown') {
       const exec = f.args.execFileImpl;
       f.args.execFileImpl = async (cmd, argv) => {
@@ -153,6 +157,7 @@ for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown']) {
     }
     const result = await maybeDispatchAmaCloser(f.args);
     assert.equal(result.reason, status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
+    assert.equal(result.namedReason, result.reason, 'retained returns share the named no-dispatch reason');
     if (status === 'running' || status === 'starting') assert.equal(result.closerProgressAt, started);
     else assert.equal(Object.hasOwn(result, 'closerProgressAt'), false);
     assert.equal(f.launches.length, 0, 'retained ownership never launches a duplicate');
@@ -223,6 +228,35 @@ for (const [status, uncertain, expectedPages] of [
   assert.equal(pages.length, expectedPages);
   assert.equal(waits.length, 2, 'both inner and outer observations must honor the launch clock');
   assert.equal(waits[0].exhausted, expectedPages === 1);
+});
+
+test('HAMCLOSEWAIT-01 real ownership of an old dispatched lease cannot extend its stall clock', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const clock = Date.parse(started) + 40 * minute;
+  const closerProgressAt = new Date(clock - 35 * minute).toISOString();
+  const identity = { rootDir, repo, prNumber, headSha };
+  acquireAmaCloserLease({ ...identity, watcherPid: process.pid, now: started });
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'synthetic-closer', now: closerProgressAt });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ repo, prNumber, headSha,
+    state: 'dispatched', launchRequestId: 'synthetic-closer', dispatchedAt: closerProgressAt }));
+  let probes = 0;
+  const ownership = await probeOrphanOwnership({ ...identity,
+    readStatusImpl: async ({ launchRequestId }) => {
+      assert.equal(launchRequestId, 'synthetic-closer');
+      probes++;
+      return { ok: true, row: { status: 'running' } };
+    } });
+  assert.equal(probes, 1);
+  assert.equal(ownership.owned, true);
+  assert.equal(ownership.uncertain, false);
+  // Ownership is independent of lease age. Even if a caller retains the
+  // launch, its fixed progress timestamp must not suppress the stall page.
+  const wait = await observeClosureWait({ ...identity, waitClass: 'final-round',
+    startedAt: Date.parse(closerProgressAt), now: clock, env: {}, reason: 'in-flight:synthetic-closer',
+    pageImpl: async text => pages.push(text) });
+  assert.equal(wait.exhausted, true);
+  assert.equal(wait.startedAt, Date.parse(closerProgressAt));
+  assert.equal(pages.length, 1);
 });
 
 test('HAMCLOSEWAIT-01 a fixed progress timestamp eventually pages and immediate pages still win', async t => {

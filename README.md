@@ -952,8 +952,8 @@ suites pin retention, eventual backlog reclamation and admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. A retained
 running/starting closer advances the deadline from its recorded launch or confirmed
-dispatched lease progress, including on existing wait rows. Retained stalled,
-blocked or unknown dispatch status does not supply launch progress. Future-dated
+dispatched lease progress, including on existing wait rows. Only running/starting retained dispatches supply launch progress; stalled,
+blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Future-dated
 timestamps seed new rows at the first observation but cannot advance existing
 waits until reached. Repeated polls do not reset that clock; thirty minutes
 without progress still pages. Other blockers and immediate pages retain their

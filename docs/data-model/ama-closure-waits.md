@@ -36,8 +36,8 @@ its recorded launch; confirmed dispatched lease ownership supplies `updatedAt`,
 falling back to `acquiredAt`. The later of this timestamp and final-round
 completion advances an existing final-round `started` as well as seeding a new
 row. A future timestamp seeds a new row at observation time, but is ignored
-when advancing an existing row until the timestamp is reached. Retained stalled,
-blocked or unknown dispatch status supplies no launch progress. Repeated
+when advancing an existing row until the timestamp is reached. Only running/starting retained dispatches supply launch progress; stalled,
+blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Repeated
 observations of the same timestamp do not extend the deadline;
 thirty minutes without further progress still pages. Pending or uncertain
 ownership and other blockers retain their existing clocks and page receipts.

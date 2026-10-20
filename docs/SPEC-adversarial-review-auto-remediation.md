@@ -537,9 +537,13 @@ If none of those paths resolves, the adapter is treated as absent. When the
 adapter is present it is invoked with the caller's GitHub/OAuth environment
 (`GH_TOKEN`, `GITHUB_TOKEN`, host, proxy, certificate, and basic process env
 needed by the binary); `GITHUB_TOKEN` is copied to `GH_TOKEN` only when
-`GH_TOKEN` is unset. The adapter currently covers pull-request rollups, review
-contexts, head/state reads, review bodies for a head SHA, label events, issue
-comments, open PR discovery, single-PR snapshots, and PR diffs. Each read call site
+`GH_TOKEN` is unset. Read kinds map to documented per-kind subcommands through
+the exported `ADAPTER_READ_COMMANDS` constant, using `--number` for PR references.
+Head and reviewer filters remain local. Review contexts combine `pr-state` and
+`issue-comments`; reviews use `pr-reviews` and label timelines use `label-events`.
+The current adapter omits mergeability from `pr-state`, so full rollups retain
+their existing fallback. Open PR discovery and diffs probe their own command
+names and fall back when unsupported. Each read call site
 must preserve the fallback behavior independently, because the adapter is an
 optional preferred read source rather than the authoritative availability gate.
 Adapter-absent reads must not emit synthetic adapter telemetry or consume a

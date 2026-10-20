@@ -326,13 +326,11 @@ test('service-owned read binds merge-agent env-token auth under the watcher brok
     GITHUB_TOKEN: 'ghs_broker_merge_agent',
     GH_TOKEN: 'ghs_broker_merge_agent',
   }), [
-    'read',
-    '--kind',
-    'pull-request-head-state',
+    'pr-state',
     '--json',
     '--repo',
     FIXTURE_REPO,
-    '--pr-number',
+    '--number',
     String(FIXTURE_PR),
     '--auth',
     'merge-agent',
@@ -1061,13 +1059,11 @@ test('adapter-present rollup path returns the normalized PR rollup shape without
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
       assert.deepEqual(args, [
-        'read',
-        '--kind',
-        'pull-request-rollup',
+        'pr-state',
         '--json',
         '--repo',
         FIXTURE_REPO,
-        '--pr-number',
+        '--number',
         String(FIXTURE_PR),
       ]);
       return { stdout: JSON.stringify({ rollup: expected }) };
@@ -1094,13 +1090,11 @@ test('adapter-present mergeability read uses optional adapter payload without gh
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
       assert.deepEqual(args, [
-        'read',
-        '--kind',
-        'pull-request-rollup',
+        'pr-state',
         '--json',
         '--repo',
         FIXTURE_REPO,
-        '--pr-number',
+        '--number',
         String(FIXTURE_PR),
       ]);
       return {
@@ -1485,7 +1479,7 @@ test('adapter-present head/state path preserves existing normalized payload shap
     recordApiCallImpl: () => {},
     execFileImpl: async (command, args) => {
       assert.equal(command, '/fixture/github-adapter');
-      assert.equal(args.includes('pull-request-head-state'), true);
+      assert.equal(args.includes('pr-state'), true);
       return {
         stdout: JSON.stringify({
           headState: {
@@ -1517,9 +1511,9 @@ test('adapter-present review bodies path preserves fail-closed authoritative bod
   const bodies = await mod.fetchReviewBodiesForHead(
     async (command, args) => {
       assert.equal(command, '/fixture/github-adapter');
-      assert.equal(args.includes('pull-request-review-bodies-for-head'), true);
-      assert.deepEqual(args.filter((arg) => arg === '--reviewer-login'), ['--reviewer-login']);
-      assert.equal(args.includes('codex-reviewer-lacey'), true);
+      assert.equal(args.includes('pr-reviews'), true);
+      assert.equal(args.includes('--reviewer-login'), false);
+      assert.equal(args.includes('--head-sha'), false);
       return {
         stdout: JSON.stringify({
           bodies: [
@@ -1553,7 +1547,7 @@ test('adapter-present review bodies path drops spoofed authors with local allowl
   const bodies = await mod.fetchReviewBodiesForHead(
     async (command, args) => {
       assert.equal(command, '/fixture/github-adapter');
-      assert.equal(args.includes('pull-request-review-bodies-for-head'), true);
+      assert.equal(args.includes('pr-reviews'), true);
       return {
         stdout: JSON.stringify({
           bodies: [
@@ -2868,7 +2862,7 @@ test('adapter-present review context does not require or surface mergeability fi
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
-      assert.equal(args.includes('pull-request-review-context'), true);
+      assert.equal(args.includes('pr-state'), true);
       const { mergeable, mergeStateStatus, labels, reviews, checks, ...reviewContext } = expected;
       return { stdout: JSON.stringify({ rollup: reviewContext }) };
     },

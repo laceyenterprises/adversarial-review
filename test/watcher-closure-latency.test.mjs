@@ -213,13 +213,13 @@ test('same-tick primary-change readers share immutable evidence while mutable PR
   assert.equal(reads.get(`${moved}?per_page=100&page=1`), 1);
 });
 
-test('unsupported read transport falls back once per tick, retries next tick and leaves transient failures retryable', async () => {
+test('unsupported subcommand falls back once per tick, retries next tick and leaves transient failures retryable', async () => {
   let calls = 0;
   const warnings = [];
   const options = { env: { GHA_ADAPTER_BIN: '/fixture/adapter' }, execFileImpl: async () => {
     calls++;
     throw Object.assign(new Error(''), { code: 78,
-      stdout: JSON.stringify({ ok: false, failureClass: 'unsupported', code: 'unsupported_command', requested: 'read' }) });
+      stdout: JSON.stringify({ ok: false, failureClass: 'unsupported', code: 'unsupported_command', requested: 'pr-state' }) });
   } };
   const tick = () => withGitHubAdapterReadTick(async () => {
     await assert.rejects(readAdapterPrRollup(repo, 1, options));
@@ -243,7 +243,7 @@ test('nested adapter scopes share capability refusals until the outer tick exits
   const options = { env: { GHA_ADAPTER_BIN: '/fixture/nested-adapter' }, execFileImpl: async () => {
     calls++;
     throw Object.assign(new Error(''), { code: 78,
-      stdout: JSON.stringify({ ok: false, failureClass: 'unsupported', code: 'unsupported_command', requested: 'read' }) });
+      stdout: JSON.stringify({ ok: false, failureClass: 'unsupported', code: 'unsupported_command', requested: 'pr-state' }) });
   } };
   const logger = { warn: message => warnings.push(message) };
   await withGitHubAdapterReadTick(async () => {
@@ -417,7 +417,7 @@ test('unsupported-command evidence selects the real GitHub helper fallback witho
     transports.push(command);
     if (command === '/fixture/unsupported-adapter') throw Object.assign(new Error(''), {
       code: 78, stdout: JSON.stringify({ ok: false, failureClass: 'unsupported',
-        code: 'unsupported_command', requested: 'read' }),
+        code: 'unsupported_command', requested: 'pr-state' }),
     });
     assert.equal(command, 'gh');
     return { stdout: JSON.stringify({ data: { repository: { pullRequest: {

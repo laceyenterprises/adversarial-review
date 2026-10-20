@@ -190,6 +190,28 @@ measurements; verify the existing posted-review step logs after deployment to
 establish whether normal production PRs meet the ten-second target. No config
 change or new check is required.
 
+## Stacked-base reads (STACKEDBASE-01)
+
+The stacked-base guard skips GitHub when the caller supplies a base from live
+PR evidence matching the repository default branch. Successful PR reads cache
+the repository default for 60 seconds per transport, so later watcher candidates
+can pass that value through closer dispatch and daemon merge admission. Unknown
+defaults retain the live read; non-default bases retain the merged-parent search and retarget receipt.
+Remediation reuses only the live base/default pair returned by its existing
+branch hydration. Persisted job bases can be configured defaults from recovery
+and never authorize the shortcut; without hydration the guard reads the live PR,
+even when the repository default is cached. Both inline merge paths always
+re-read the live base immediately before the merge command.
+
+A failed read still holds closure for 60 seconds. Its result and local hold
+receipt carry `readError` (`timeout`, `auth`, `5xx`, `parse`, or `unknown`), and
+a new hold or changed error class emits one timestamped warning. Auth means a
+typed auth outage or HTTP 401; HTTP 403/429 remain `unknown`, and HTTP 5xx
+(including 504 Gateway Timeout) takes precedence over free-text timeout matching.
+Raw errors and response bodies are excluded. After deployment, verify ordinary default-base candidates
+reuse known metadata and failed reads expose a class. No configuration changes
+are required. See [stacked-base holds](data-model/stacked-base-holds.md).
+
 ## Live head branch confirmation (BRANCHPROBE-01)
 
 The closer's pre-launch PR read treats `headRepository: null` as unknown and

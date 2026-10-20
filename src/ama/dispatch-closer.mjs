@@ -4727,7 +4727,8 @@ async function maybeDispatchAmaCloserAttempt({
 
   if (dispatchContext?.baseBranch) {
     const baseHold = await guardStackedBaseImpl({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-      repo: dispatchContext.repo, prNumber, execFileImpl, signal });
+      repo: dispatchContext.repo, prNumber, baseBranch: dispatchContext.baseBranch,
+      defaultBranch: dispatchContext.defaultBranch, execFileImpl, signal, logger });
     if (baseHold) return noAmaDispatch(baseHold);
   }
 
@@ -6162,7 +6163,9 @@ async function maybeDispatchAmaCloserAttempt({
               });
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
-              const baseHold = await guardStackedBaseImpl({ rootDir, repo: mergeRepo, prNumber: mergePr, execFileImpl, signal });
+              // Re-read the base at the click boundary, after any admission wait.
+              const baseHold = await guardStackedBaseImpl({ rootDir, repo: mergeRepo, prNumber: mergePr,
+                execFileImpl, signal, logger });
               if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
               const methodFlag = method === 'merge' ? '--merge' : '--squash';
               const args = [

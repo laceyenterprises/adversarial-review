@@ -11,7 +11,45 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 const execFileAsync = promisify(execFile);
 const COMMENT_MARKER = '<!-- ama:stacked-base-merged -->';
 
-export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFileAsync, signal }) {
+// Keep defaults briefly, scoped to the transport as well as the repository.
+// Injected transports never share evidence with the production client.
+const DEFAULT_BRANCH_CACHE_TTL_MS = 60_000;
+const defaultBranchCaches = new WeakMap();
+
+export function cachedStackedBaseDefaultBranch(repo, execFileImpl = execFileAsync) {
+  if (typeof repo !== 'string' || !repo) return undefined;
+  const entry = defaultBranchCaches.get(execFileImpl)?.get(repo.toLowerCase());
+  return entry && Date.now() - entry.observedAt < DEFAULT_BRANCH_CACHE_TTL_MS ? entry.branch : undefined;
+}
+
+function classifyReadError(error) {
+  if (error instanceof SyntaxError || error?.readError === 'parse') return 'parse';
+  if (error?.authOutage) return 'auth';
+  const detail = String(error?.stderr || error?.message || '');
+  const status = Number(error?.status || error?.response?.status);
+  if (status === 401 || /\bHTTP\s+401\b/i.test(detail)) return 'auth';
+  if ((status >= 500 && status < 600) || /\bHTTP\s+5\d\d\b/i.test(detail)) return '5xx';
+  // A valid token can receive permission or quota refusals; neither proves an
+  // authentication outage. Keep these in the existing unknown class.
+  if ([403, 429].includes(status) || /\bHTTP\s+(403|429)\b/i.test(detail)) return 'unknown';
+  if (error?.code === 'ETIMEDOUT' || error?.code === 'ESOCKETTIMEDOUT'
+    || (error?.killed && ['SIGTERM', 'SIGKILL'].includes(error.signal))
+    || /timed?\s*out|timeout/i.test(detail)) return 'timeout';
+  return 'unknown';
+}
+
+function invalidRead(message) {
+  return Object.assign(new Error(message), { readError: 'parse' });
+}
+
+export async function inspectStackedBase({ repo, prNumber, baseBranch, defaultBranch,
+  execFileImpl = execFileAsync, signal }) {
+  signal?.throwIfAborted();
+  defaultBranch ||= cachedStackedBaseDefaultBranch(repo, execFileImpl);
+  if (typeof baseBranch === 'string' && baseBranch
+    && typeof defaultBranch === 'string' && baseBranch === defaultBranch) {
+    return { ok: true, baseBranch, defaultBranch };
+  }
   const get = async path => {
     const { stdout } = await execGhWithRetry({ execFileImpl,
       args: ['api', path], timeoutMs: loadAwareTimeoutMs(15_000), retries: 2, backoffMs: 500, signal });
@@ -19,15 +57,19 @@ export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFi
   };
   try {
     const pr = await get(`repos/${repo}/pulls/${prNumber}`);
-    const baseBranch = pr.base?.ref;
-    const defaultBranch = pr.base?.repo?.default_branch;
-    if (!baseBranch || !defaultBranch) throw new Error('base/default branch unavailable');
+    baseBranch = pr?.base?.ref;
+    defaultBranch = pr?.base?.repo?.default_branch;
+    if (typeof baseBranch !== 'string' || !baseBranch
+      || typeof defaultBranch !== 'string' || !defaultBranch) throw invalidRead('base/default branch unavailable');
+    let cache = defaultBranchCaches.get(execFileImpl);
+    if (!cache) { cache = new Map(); defaultBranchCaches.set(execFileImpl, cache); }
+    cache.set(repo.toLowerCase(), { branch: defaultBranch, observedAt: Date.now() });
     if (baseBranch === defaultBranch) return { ok: true, baseBranch, defaultBranch };
     // Paginate explicitly: a branch may have several closed, unmerged PRs.
     const query = new URLSearchParams({ state: 'closed', head: `${repo.split('/')[0]}:${baseBranch}`, per_page: '100' });
     for (let page = 1; page <= 10; page++) {
       const pulls = await get(`repos/${repo}/pulls?${query}&page=${page}`);
-      if (!Array.isArray(pulls)) throw new Error('merged-base history unavailable');
+      if (!Array.isArray(pulls)) throw invalidRead('merged-base history unavailable');
       if (pulls.some(parent => parent.merged_at && parent.head?.ref === baseBranch
         && parent.head?.repo?.full_name?.toLowerCase() === repo.toLowerCase())) {
         return { ok: false, reason: 'stacked-base-merged', baseBranch, defaultBranch };
@@ -37,7 +79,7 @@ export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFi
     throw new Error('merged-base history exceeded bounded read budget');
   } catch (error) {
     if (signal?.aborted) throw error;
-    return { ok: false, reason: 'stacked-base-read-failed' };
+    return { ok: false, reason: 'stacked-base-read-failed', readError: classifyReadError(error) };
   }
 }
 
@@ -46,7 +88,9 @@ export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFi
 export async function holdStackedBase({ state, rootDir = process.cwd(), repo, prNumber, execFileImpl = execFileAsync, signal, logger = console }) {
   if (state?.ok) return null;
   const reason = state?.reason || 'stacked-base-read-failed';
-  const result = { dispatched: false, skipMergeAgent: true, recoveryWait: true, reason,
+  const readError = reason === 'stacked-base-read-failed'
+    ? (['timeout', 'auth', '5xx', 'parse', 'unknown'].includes(state?.readError) ? state.readError : 'unknown') : null;
+  const result = { ...(readError ? { readError } : {}), dispatched: false, skipMergeAgent: true, recoveryWait: true, reason,
     needsOperator: reason === 'stacked-base-merged', retryAfterMs: 60_000 };
   const dir = join(rootDir, 'data', 'stacked-base-holds');
   const path = join(dir, `${createHash('sha256').update(`${repo.toLowerCase()}#${prNumber}`).digest('hex')}.json`);
@@ -56,7 +100,10 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
     // Retain the delivered receipt if an intervening API read fails.
     if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
-      if (prior?.reason !== reason) writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason }));
+      if (prior?.reason !== reason || (prior?.readError ?? null) !== readError) {
+        writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason, readError }));
+        if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
+      }
       return result;
     }
   } catch (error) {
@@ -111,7 +158,7 @@ export async function guardStackedBase(options) {
     `${createHash('sha256').update(`${options.repo.toLowerCase()}#${options.prNumber}`).digest('hex')}.json`);
   try {
     const prior = JSON.parse(readFileSync(path, 'utf8'));
-    if (prior.reason) writeFileAtomic(path, JSON.stringify({ ...prior, reason: null,
+    if (prior.reason) writeFileAtomic(path, JSON.stringify({ ...prior, reason: null, readError: null,
       clearedAt: new Date().toISOString() }));
   } catch { /* No hold to clear; a delivered comment receipt remains reusable. */ }
   return null;

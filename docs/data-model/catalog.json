@@ -26,6 +26,10 @@
       "store": "data/stacked-base-holds/",
       "schemaSurface": "src/ama/stacked-base.mjs",
       "persistence": "best-effort receipt; filesystem failure preserves the hold result",
+      "readErrorValues": ["timeout", "auth", "5xx", "parse", "unknown", null],
+      "readErrorClassification": "typed auth outage or 401 is auth; 403/429 are unknown; HTTP 5xx precedes timeout text",
+      "readFailureWarning": "once per hold reason/error-class change after successful receipt persistence; successful clearance re-arms",
+      "readErrorAbsence": "omitted and null are equivalent for unchanged comment receipts; no rewrite required",
       "owner": "AMA closure and remediation"
     },
     {

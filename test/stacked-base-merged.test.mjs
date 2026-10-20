@@ -25,7 +25,7 @@ function fixture(t, { base = 'feature/parent', merged = true, fork = false, defa
     const endpoint = args[1];
     let data;
     if (args[0] === 'pr' && args[1] === 'view') data = { baseRefName: base, state: 'OPEN', labels: [], statusCheckRollup: [] };
-    else if (endpoint === `repos/${repo}/pulls/41`) data = { base: { ref: base, repo: { default_branch: defaultBranch } } };
+    else if (endpoint === `repos/${repo}/pulls/41`) data = { base: { ref: base, repo: { default_branch: defaultBranch } }, head: { ref: 'feature/child' } };
     else if (endpoint.startsWith(`repos/${repo}/pulls?`)) data = [{ merged_at: merged ? '2026-10-16T08:00:00Z' : null,
       head: { ref: base, repo: { full_name: fork ? 'contributor/widget' : repo } } }];
     else if (endpoint.endsWith('/comments')) {
@@ -187,7 +187,8 @@ test('hold persistence failures return the hold without posting or throwing', as
     assert.equal(result.recoveryWait, true);
     assert.equal(f.comments.length, 0);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /hold persistence failed/);
+    assert.doesNotMatch(warnings[0], /readError=/, 'an unpersisted hold must not emit a state-change warning');
+    assert.match(warnings.at(-1), /hold persistence failed/);
   }
 });
 
@@ -274,16 +275,23 @@ test('unreadable base evidence requeues remediation without spending its round',
 });
 
 
-test('an otherwise mergeable PR cannot click daemon merge into a merged parent branch', async t => {
-  for (const base of ['feature/parent', 'trunk']) {
-    const f = fixture(t, { base });
+for (const { name, candidateBase, liveBase, held } of [
+  { name: 'non-default candidate base holds a merged parent',
+    candidateBase: 'feature/parent', liveBase: 'feature/parent', held: true },
+  { name: 'default candidate base re-reads a live merged parent before clicking',
+    candidateBase: 'trunk', liveBase: 'feature/parent', held: true },
+  { name: 'default candidate base merges after a safe live retarget',
+    candidateBase: 'trunk', liveBase: 'trunk', held: false },
+]) {
+  test(`daemon clean merge: ${name}`, async t => {
+    const f = fixture(t, { base: liveBase });
     const head = 'a'.repeat(40);
     let clicks = 0, released = 0;
     const checks = [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }];
     const result = await runDaemonCleanMergeAttempt({
       rootDir: f.rootDir, repoPath: repo, prNumber: 41,
       cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
-      candidate: { title: 'Synthetic change', baseBranch: base, headSha: head,
+      candidate: { title: 'Synthetic change', baseBranch: candidateBase, defaultBranch: 'trunk', headSha: head,
         statusCheckRollup: checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
         prState: 'open', labels: [], branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] } },
       gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
@@ -294,7 +302,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
       fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
       fetchRollupImpl: async () => ({ title: 'Synthetic change', state: 'OPEN', headRefOid: head,
         checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [] }),
-      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo, base, leaseId: 'synthetic-lease',
+      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo, base: candidateBase, leaseId: 'synthetic-lease',
         holderPr: 41, holderHead: head, acquiredAt: '2026-10-16T10:00:00Z' } }),
       releaseMergeLeaseImpl: () => { released++; },
       readBuildCompletionSignalForPrImpl: () => ({ ok: true,
@@ -307,7 +315,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
       },
       env: { HQ_ROOT: f.rootDir }, logger: { log() {}, warn() {} },
     });
-    if (base === 'feature/parent') {
+    if (held) {
       assert.equal(result.reason, 'stacked-base-merged');
       assert.equal(result.merged, false);
       assert.equal(clicks, 0);
@@ -316,6 +324,49 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
       assert.equal(result.merged, true, 'the same otherwise eligible PR merges after a safe retarget');
       assert.equal(clicks, 1);
     }
+    assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 1,
+      'the click boundary reads the callback repository and PR regardless of the candidate base');
     assert.equal(released, 1);
-  }
-});
+  });
+}
+
+for (const { mode, branch } of [
+  { mode: 'os' }, { mode: 'local' },
+  { mode: 'os', branch: 'feature/child' }, { mode: 'local', branch: 'feature/child' },
+]) {
+  test(`recovered job default cannot hide a merged parent before ${mode} remediation (${branch ? 'known' : 'missing'} head branch)`, async t => {
+    const f = fixture(t, { defaultBranch: 'main' });
+    // Seed the same transport's default cache as a previous poll would.
+    const execFileImpl = async (cmd, args) => args[1] === `repos/${repo}/pulls/42`
+      ? { stdout: JSON.stringify({ base: { ref: 'main', repo: { default_branch: 'main' } } }) }
+      : f.execFileImpl(cmd, args);
+    assert.equal((await inspectStackedBase({ repo, prNumber: 42, execFileImpl })).ok, true);
+    createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
+      baseBranch: 'main', branch, reviewerModel: 'claude',
+      createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
+      changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
+    let guardCalls = 0;
+    const hydrated = mode === 'os' && !branch;
+    const result = await consumeNextFollowUpJob({ ...f, execFileImpl,
+      healthRouter: { getMode: () => mode }, promptTemplate: 'synthetic prompt',
+      resolvePRLifecycleImpl: async () => ({ state: 'OPEN', source: 'live' }),
+      guardStackedBaseImpl: async options => {
+        guardCalls++;
+        assert.equal(options.baseBranch, hydrated ? 'feature/parent' : undefined,
+          'only the hydration read can supply base evidence, never the persisted main');
+        assert.equal(options.defaultBranch, hydrated ? 'main' : undefined);
+        return guardStackedBase(options);
+      },
+      spawnImpl: () => assert.fail('recovered stacked job cannot spawn remediation'),
+      log: { log() {}, warn() {} } });
+    assert.equal(result.reason, 'stacked-base-merged');
+    assert.equal(result.job.status, 'stopped');
+    assert.equal(result.job.remediationPlan.stop.code, 'stacked-base-merged');
+    assert.equal(result.job.remediationWorker.state, 'never-spawned');
+    assert.equal(result.job.baseBranch, 'main', 'the persisted base is not rewritten to implement the guard');
+    assert.equal(guardCalls, 1);
+    assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, hydrated ? 2 : 1,
+      'unhydrated jobs still read the live PR despite a populated default cache');
+    assert.equal(f.comments.length, 1);
+  });
+}

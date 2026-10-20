@@ -1,6 +1,6 @@
 import { observePostedReviewHead, withPostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
-import { guardStackedBase } from './ama/stacked-base.mjs';
+import { cachedStackedBaseDefaultBranch, guardStackedBase } from './ama/stacked-base.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -67,7 +67,8 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   const results = await Promise.allSettled([
     String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
       ? guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
-        repo, prNumber, execFileImpl, signal }) : null,
+        repo, prNumber, baseBranch: parsed.baseRefName, defaultBranch: parsed.defaultBranch,
+        execFileImpl, signal, logger }) : null,
     hasOperatorApproved && operatorApprovalEvent === undefined
       ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl, env })
       : operatorApprovalEvent ?? null,
@@ -127,6 +128,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
     branch: parsed.headRefName,
     ...(stackedBaseHold ? { stackedBaseHold } : {}),
     baseBranch: parsed.baseRefName,
+    defaultBranch: parsed.defaultBranch || cachedStackedBaseDefaultBranch(repo, execFileImpl) || null,
     // NOOWNER-01: a moved base is one of the inputs that releases a hammer stop hold.
     baseSha: parsed.baseRefOid || null,
     headSha: parsed.headRefOid || null,

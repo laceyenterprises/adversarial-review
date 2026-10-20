@@ -186,7 +186,8 @@ test('hold persistence failures return the hold without posting or throwing', as
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.recoveryWait, true);
     assert.equal(f.comments.length, 0);
-    assert.equal(warnings.length, failure === 'write' ? 2 : 1);
+    assert.equal(warnings.length, 1);
+    assert.doesNotMatch(warnings[0], /readError=/, 'an unpersisted hold must not emit a state-change warning');
     assert.match(warnings.at(-1), /hold persistence failed/);
   }
 });

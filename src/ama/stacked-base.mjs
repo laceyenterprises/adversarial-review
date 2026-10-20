@@ -17,6 +17,7 @@ const DEFAULT_BRANCH_CACHE_TTL_MS = 60_000;
 const defaultBranchCaches = new WeakMap();
 
 export function cachedStackedBaseDefaultBranch(repo, execFileImpl = execFileAsync) {
+  if (typeof repo !== 'string' || !repo) return undefined;
   const entry = defaultBranchCaches.get(execFileImpl)?.get(repo.toLowerCase());
   return entry && Date.now() - entry.observedAt < DEFAULT_BRANCH_CACHE_TTL_MS ? entry.branch : undefined;
 }
@@ -99,9 +100,9 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
     // Retain the delivered receipt if an intervening API read fails.
     if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
-      if (prior?.reason !== reason || prior?.readError !== readError) {
-        if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
+      if (prior?.reason !== reason || (prior?.readError ?? null) !== readError) {
         writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason, readError }));
+        if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
       }
       return result;
     }

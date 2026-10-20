@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { guardStackedBase, inspectStackedBase } from '../src/ama/stacked-base.mjs';
+import { cachedStackedBaseDefaultBranch, guardStackedBase, holdStackedBase, inspectStackedBase } from '../src/ama/stacked-base.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
 import { fetchPRBranchMetadata, ensureJobBranchMetadata } from '../src/remediation-git-pr-io.mjs';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
@@ -17,6 +18,59 @@ function workspace(t) {
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   return rootDir;
 }
+
+test('cache lookup tolerates invalid repository inputs even with a populated transport cache', async () => {
+  const execFileImpl = async () => ({ stdout: JSON.stringify(pr) });
+  await inspectStackedBase({ repo, prNumber, execFileImpl });
+  assert.equal(cachedStackedBaseDefaultBranch(repo.toUpperCase(), execFileImpl), defaultBranch);
+  for (const invalidRepo of [undefined, null, '', 42, {}, []]) {
+    assert.equal(cachedStackedBaseDefaultBranch(invalidRepo, execFileImpl), undefined);
+  }
+});
+
+test('read-failure warnings follow durable persistence and skip failed writes', async t => {
+  const rootDir = workspace(t), warnings = [];
+  const path = join(rootDir, 'data', 'stacked-base-holds',
+    `${createHash('sha256').update(`${repo}#${prNumber}`).digest('hex')}.json`);
+  mkdirSync(path, { recursive: true }); // A directory cannot be replaced by a receipt file.
+  const options = { rootDir, repo, prNumber,
+    state: { reason: 'stacked-base-read-failed', readError: 'timeout' },
+    logger: { warn: message => {
+      if (message.includes('readError=')) {
+        assert.equal(JSON.parse(readFileSync(path, 'utf8')).readError, 'timeout');
+      }
+      warnings.push(message);
+    } } };
+  assert.equal((await holdStackedBase(options)).reason, 'stacked-base-read-failed');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /hold persistence failed/);
+  assert.doesNotMatch(warnings[0], /readError=/);
+  rmSync(path, { recursive: true });
+  await holdStackedBase(options);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[1], /readError=timeout$/);
+  await holdStackedBase(options);
+  assert.equal(warnings.length, 2, 'a persisted unchanged hold does not warn again');
+});
+
+test('a delivered comment receipt without readError is not rewritten on recheck', async t => {
+  const rootDir = workspace(t);
+  let reads = 0;
+  const options = { rootDir, repo, prNumber,
+    state: { reason: 'stacked-base-merged', baseBranch: 'feature/parent', defaultBranch },
+    execFileImpl: async () => { reads++; return { stdout: '[]' }; } };
+  await holdStackedBase(options);
+  const dir = join(rootDir, 'data', 'stacked-base-holds');
+  const path = join(dir, readdirSync(dir).find(name => name.endsWith('.json')));
+  const before = readFileSync(path, 'utf8'), inode = statSync(path).ino;
+  assert.ok(JSON.parse(before).commentedAt);
+  assert.equal(JSON.parse(before).readError, undefined);
+  assert.equal(reads, 2);
+  await holdStackedBase(options);
+  assert.equal(reads, 2, 'the existing comment receipt prevents further GitHub reads');
+  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(statSync(path).ino, inode, 'no atomic receipt replacement occurred');
+});
 
 for (const branch of ['main', 'trunk']) {
   test(`supplied matching ${branch} branches skip every API read`, async t => {

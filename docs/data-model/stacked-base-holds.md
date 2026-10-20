@@ -8,10 +8,12 @@ Each filename is the SHA-256 of `lowercase-repository#PR`, plus `.json`.
 `stacked-base-read-failed`; a successful recheck clears it to null and
 records `clearedAt` as an ISO timestamp. Read failures also store `readError` as
 `timeout`, `auth`, `5xx`, `parse`, or `unknown`; success clears that field to null.
-A new read-failure hold or changed error class logs one timestamped warning,
-never raw errors, credentials or response bodies. Unchanged persisted holds do
-not repeat the warning; clearing the hold re-arms it. `auth` means a typed auth
-outage or HTTP 401; HTTP 403/429 use `unknown`. HTTP 5xx, including 504, takes
+A new read-failure hold or changed error class logs one timestamped warning
+after successful receipt persistence, never raw errors, credentials or response
+bodies. Unchanged persisted holds do
+not repeat the warning; clearing the hold re-arms it. An omitted `readError` in
+a comment receipt is equivalent to null and does not trigger a rewrite. `auth`
+means a typed auth outage or HTTP 401; HTTP 403/429 use `unknown`. HTTP 5xx, including 504, takes
 precedence over free-text timeout matching. `commentedAt` records successful
 retarget-comment delivery. That receipt survives head and base changes.
 

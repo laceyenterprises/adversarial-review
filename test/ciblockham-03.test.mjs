@@ -180,7 +180,9 @@ test('CEILINGPUSH-01: repeated ceiling observations restore the review once and 
 test('CEILINGPUSH-01: an unavailable closure records its reason and pages once within the existing wait bound', async t => {
   const { args } = ceilingFixture(t);
   const pages = [], observations = [];
-  let clock = 0;
+  // Keep the review timestamp in the same time domain as the injected clock.
+  const startedAt = Date.parse(args.reviewStateRow.posted_at);
+  let clock = startedAt;
   args.now = () => clock;
   args.env = { AMA_CLOSURE_WAIT_BOUND_MS: '100' };
   args.observeClosureWaitImpl = input => {
@@ -189,7 +191,11 @@ test('CEILINGPUSH-01: an unavailable closure records its reason and pages once w
   };
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false,
     reason: 'not-eligible', reasons: ['branch-protection-missing-gate'] });
-  for (clock of [0, 101, 102]) await maybeDispatchAmaClosureFor(args);
+  for (const elapsed of [0, 101, 102]) {
+    clock = startedAt + elapsed;
+    await maybeDispatchAmaClosureFor(args);
+    assert.equal(pages.length, elapsed > 100 ? 1 : 0);
+  }
   assert.equal(pages.length, 1);
   assert.match(pages[0], /branch-protection-missing-gate/);
   assert.ok(observations.every(reason => reason.includes('branch-protection-missing-gate')));

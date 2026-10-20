@@ -169,7 +169,7 @@ test('HAMCLOSEWAIT-01 real exhausted-fallback dispatch does not report closer pr
   let resolverCalls = 0;
   f.args.resolveCloserDispatchHarnessImpl = async () => {
     resolverCalls++;
-    return { hold: true };
+    return { hold: true, reason: 'all-fallbacks-grounded' };
   };
   const result = await maybeDispatchAmaCloser(f.args);
   assert.equal(result.reason, 'all-fallbacks-grounded');

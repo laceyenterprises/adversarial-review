@@ -2,8 +2,13 @@
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 
 import {
+  closerQuotaSnapshotPath,
   providerForCloserWorkerClass,
   resolveCloserDispatchHarness,
 } from '../src/ama/harness-fallback.mjs';
@@ -544,3 +549,127 @@ test('CCX-04: a soft-grounded fallback is skipped for closer and merge-agent', a
   assert.equal(clear.fellBack, true);
   assert.equal(clear.workerClass, 'hammer-claude');
 });
+
+const SNAPSHOT_NOW = Date.parse('2026-10-01T12:00:00Z');
+function snapshotArgs(t, ageMs) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-quota-snapshot-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const file = closerQuotaSnapshotPath(rootDir);
+  mkdirSync(dirname(file), { recursive: true });
+  if (ageMs !== undefined) writeFileSync(file, JSON.stringify({
+    readAt: SNAPSHOT_NOW - ageMs, payload: codexAccountFixture(),
+  }));
+  return { rootDir, workerClass: 'hammer', env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+    nowMs: () => SNAPSHOT_NOW, sleepImpl: async () => {},
+    execFileImpl: async () => { throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }); } };
+}
+
+test('HAMMERQUOTAREAD-01: timeout uses a three-minute-old snapshot without renewing it', async t => {
+  const args = snapshotArgs(t, 3 * 60_000);
+  const before = readFileSync(closerQuotaSnapshotPath(args.rootDir), 'utf8');
+  const timeouts = [];
+  const result = await resolveCloserDispatchHarness({ ...args,
+    execFileImpl: async (...call) => { timeouts.push(call[2].timeout); return args.execFileImpl(); } });
+  assert.equal(result.hold, false);
+  assert.equal(result.reason, 'personal-ready');
+  assert.equal(result.evidenceSource, 'last-good-snapshot');
+  assert.equal(result.evidenceAgeMs, 3 * 60_000);
+  assert.equal(result.evidenceReadAt, SNAPSHOT_NOW - 3 * 60_000);
+  assert.equal(result.liveReadReason, 'fleet-quota-status-unavailable');
+  assert.deepEqual(timeouts, [20_000, 5_000, 5_000]);
+  assert.equal(readFileSync(closerQuotaSnapshotPath(args.rootDir), 'utf8'), before);
+});
+
+for (const [label, ageMs] of [['expired', 30 * 60_000], ['boundary', 10 * 60_000],
+  ['future', -60_000], ['missing', undefined]]) {
+  test(`HAMMERQUOTAREAD-01: ${label} snapshot cannot admit after a timeout`, async t => {
+    const result = await resolveCloserDispatchHarness(snapshotArgs(t, ageMs));
+    assert.equal(result.hold, true);
+    assert.equal(result.reason, 'fleet-quota-status-unavailable');
+  });
+}
+
+test('HAMMERQUOTAREAD-01: successful live read refreshes expired snapshot after a transient retry', async t => {
+  const args = snapshotArgs(t, 30 * 60_000);
+  const payload = codexAccountFixture({ primary: 'exhausted' });
+  let calls = 0;
+  const result = await resolveCloserDispatchHarness({ ...args, execFileImpl: async () => {
+    if (++calls === 1) return args.execFileImpl();
+    return { stdout: JSON.stringify(payload) };
+  } });
+  assert.equal(calls, 2);
+  assert.equal(result.workerClass, 'hammer-corp');
+  assert.equal(result.evidenceSource, 'live');
+  assert.equal(result.evidenceAgeMs, 0);
+  assert.deepEqual(JSON.parse(readFileSync(closerQuotaSnapshotPath(args.rootDir), 'utf8')),
+    { readAt: SNAPSHOT_NOW, payload });
+  assert.deepEqual(readdirSync(join(args.rootDir, 'data')), ['ama-closer-quota-snapshot.json']);
+});
+
+test('HAMMERQUOTAREAD-01: fresh state root persists a snapshot for a subsequent quota outage', async t => {
+  const args = snapshotArgs(t);
+  rmSync(join(args.rootDir, 'data'), { recursive: true });
+  const payload = codexAccountFixture();
+  const live = await resolveCloserDispatchHarness({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify(payload) }) });
+  assert.equal(live.hold, false);
+  assert.equal(live.evidenceSource, 'live');
+  assert.equal(live.snapshotWriteError, undefined);
+  const file = closerQuotaSnapshotPath(args.rootDir);
+  const before = readFileSync(file, 'utf8');
+  assert.deepEqual(JSON.parse(before), { readAt: SNAPSHOT_NOW, payload });
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+
+  const cached = await resolveCloserDispatchHarness({ ...args,
+    nowMs: () => SNAPSHOT_NOW + 3 * 60_000 });
+  assert.equal(cached.hold, false);
+  assert.equal(cached.reason, 'personal-ready');
+  assert.equal(cached.evidenceSource, 'last-good-snapshot');
+  assert.equal(cached.evidenceAgeMs, 3 * 60_000);
+  assert.equal(cached.evidenceReadAt, SNAPSHOT_NOW);
+  assert.equal(readFileSync(file, 'utf8'), before);
+});
+
+test('HAMMERQUOTAREAD-01: corrupt cache and malformed live output hold without replacing cache', async t => {
+  const args = snapshotArgs(t);
+  const path = closerQuotaSnapshotPath(args.rootDir);
+  writeFileSync(path, 'synthetic corrupt cache');
+  const result = await resolveCloserDispatchHarness({ ...args, execFileImpl: async () => ({ stdout: 'invalid JSON' }) });
+  assert.equal(result.hold, true);
+  assert.equal(result.reason, 'fleet-quota-status-unreadable');
+  assert.equal(readFileSync(path, 'utf8'), 'synthetic corrupt cache');
+});
+
+test('HAMMERQUOTAREAD-01: malformed live output can reuse recent snapshot', async t => {
+  const args = snapshotArgs(t, 3 * 60_000);
+  const result = await resolveCloserDispatchHarness({ ...args, execFileImpl: async () => ({ stdout: 'invalid JSON' }) });
+  assert.equal(result.hold, false);
+  assert.equal(result.evidenceSource, 'last-good-snapshot');
+  assert.equal(result.liveReadReason, 'fleet-quota-status-unreadable');
+});
+
+test('HAMMERQUOTAREAD-01: cache write failure preserves live evidence', async t => {
+  const args = snapshotArgs(t);
+  mkdirSync(closerQuotaSnapshotPath(args.rootDir));
+  const result = await resolveCloserDispatchHarness({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify(codexAccountFixture()) }) });
+  assert.equal(result.hold, false);
+  assert.equal(result.evidenceSource, 'live');
+  assert.ok(result.snapshotWriteError);
+});
+
+for (const payload of [null, [], true, 'synthetic']) {
+  test(`HAMMERQUOTAREAD-01: non-object quota payload ${JSON.stringify(payload)} is not cached or reused`, async t => {
+    const args = snapshotArgs(t);
+    const path = closerQuotaSnapshotPath(args.rootDir);
+    writeFileSync(path, JSON.stringify({ readAt: SNAPSHOT_NOW, payload }));
+    const result = await resolveCloserDispatchHarness(args);
+    assert.equal(result.hold, true);
+    assert.equal(result.reason, 'fleet-quota-status-unavailable');
+    const live = await resolveCloserDispatchHarness({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify(payload) }) });
+    assert.equal(live.hold, true);
+    assert.equal(live.reason, 'fleet-quota-status-unreadable');
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { readAt: SNAPSHOT_NOW, payload });
+  });
+}

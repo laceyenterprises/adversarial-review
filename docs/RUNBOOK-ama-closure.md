@@ -499,11 +499,23 @@ provenance still key off the configured logical class). It emits a loud
 `ama_closer.harness_fallback` audit log + operator alert with `provider`,
 `from`, and `to`.
 
-- **Auto-revert:** the resolution is stateless and re-runs every tick. The
-  moment codex recovers to `ok`, the next close returns to the configured
-  primary — no manual flip. This **replaces** the manual
-  `roles.adversarial.merge_authority.worker_class: claude-code` config.local.yaml
-  hot-patch (which was static and never reverted).
+- **Bounded quota evidence (HAMMERQUOTAREAD-01):** each launch tries the live
+  read with the shared retry reader: 20 seconds initially, then up to two
+  5-second retries for transient errors, with 250 ms and 1-second delays.
+  Awaited retry delays keep standalone callers alive until the read settles.
+  Successful parsed reads atomically refresh
+  `data/ama-closer-quota-snapshot.json` under the dispatch state root. A failed
+  or unreadable live read may reuse that payload only while its original read
+  time is less than ten minutes old. Cached use never renews its timestamp.
+  The resolver result and AMA audit's `harnessResolution` record
+  `evidenceSource` (`live` or `last-good-snapshot`), `evidenceAgeMs`, and
+  `evidenceReadAt` (epoch milliseconds); cached use also records `liveReadReason`.
+  Cache write failures preserve successful live routing. Missing, corrupt,
+  future-dated or expired caches cannot admit a launch.
+- **Auto-revert:** live resolution re-runs every launch. When codex recovers to
+  `ok`, the next successful live read returns to the configured primary without
+  a manual flip. During a status outage, cached routing can persist for the
+  bounded snapshot window.
 - **Default:** `[hammer-claude]`, applied by the code-level schema default — the
   protection is **on automatically with no config edit**. The order is honored
   left-to-right; a fallback whose provider is also grounded is skipped.
@@ -524,9 +536,12 @@ provenance still key off the configured logical class). It emits a loud
   asserts every domain fallback is a hammer class. Explicit operator overrides
   still take precedence. This is a role declaration, not a temporary
   provider-outage pin.
-- **Fail-open:** if `hq fleet quota status` is unreadable, or the alert
-  transport is down, the closer dispatches on the configured primary exactly as
-  before — a resolver/alert fault never blocks the merge.
+- **Unknown evidence:** automatic Codex routing and the corporate Claude pin
+  hold when no usable live or cached status exists. Other pinned/non-Codex
+  paths retain their existing fail-open behavior. Holds return
+  `harness-hold:<resolver reason>` plus `holdReason`, and the AMA audit records
+  a `deferred` attempt with the same reason. A genuine exhausted fallback set
+  retains `all-fallbacks-grounded`. Alert transport failures remain best effort.
 - **Alert debounce ownership:** fallback operator alerts are debounced by
   fleet-wide condition under `data/ama-harness-fallback-alerts/`. Native writes
   are allowed only when the caller UID matches the canonical owner of the

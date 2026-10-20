@@ -6674,6 +6674,7 @@ async function maybeDispatchAmaCloserAttempt({
           // would land on another harness than the one that died.
           nextDispatchDiffersImpl: async () => {
             const next = await resolveCloserDispatchHarnessImpl({
+              rootDir,
               workerClass,
               codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass, { env }),
               fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
@@ -6986,37 +6987,6 @@ async function maybeDispatchAmaCloserAttempt({
       });
     }
   }
-  writeAmaAuditEntry({
-    hqRoot,
-    repo,
-    prNumber,
-    headSha: reviewedSha,
-    now: dispatchContext.dispatchedAt,
-    attempt: {
-      outcome: 'in_progress',
-      reviewedBy: dispatchContext.reviewedBy || null,
-      requiredGateContext: dispatchContext.requiredGateContext || null,
-      eligibilityTrace: verdict.trace,
-      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
-    },
-    metadata: {
-      reviewedBy: dispatchContext.reviewedBy || null,
-      reviewSha: reviewedSha,
-      riskClass: dispatchContext.riskClass || null,
-      requiredGateContexts: dispatchContext.requiredGateContext
-        ? [dispatchContext.requiredGateContext]
-        : [],
-      eligibilityReasons: bootstrapEligibilityReasons,
-      mergeMethod,
-      reconciliation: {
-        needsRepair: false,
-        lastVerifiedAt: dispatchContext.dispatchedAt || null,
-      },
-      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
-    },
-  });
 
   // Persist the prompt under watcher-owned repo state and pass that path
   // to `hq dispatch --prompt`. This avoids cross-user writes into HQ_ROOT.
@@ -7043,6 +7013,7 @@ async function maybeDispatchAmaCloserAttempt({
   try {
     throwIfAborted(signal);
     harnessFallback = await resolveCloserDispatchHarnessImpl({
+      rootDir,
       workerClass,
       codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass, { env }),
       fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
@@ -7058,8 +7029,57 @@ async function maybeDispatchAmaCloserAttempt({
     // configured primary exactly as the pre-HHR path did.
     harnessFallback = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
   }
+  const harnessHoldReason = harnessFallback?.reason === 'all-fallbacks-grounded'
+    ? 'all-fallbacks-grounded' : `harness-hold:${harnessFallback?.reason || 'unknown'}`;
+  const harnessResolution = {
+    workerClass: harnessFallback?.workerClass || workerClass,
+    reason: harnessFallback?.reason || null,
+    hold: Boolean(harnessFallback?.hold),
+    evidenceSource: harnessFallback?.evidenceSource || null,
+    evidenceAgeMs: harnessFallback?.evidenceAgeMs ?? null,
+    evidenceReadAt: harnessFallback?.evidenceReadAt ?? null,
+    liveReadReason: harnessFallback?.liveReadReason || null,
+  };
+  writeAmaAuditEntry({
+    hqRoot,
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    now: dispatchContext.dispatchedAt,
+    attempt: {
+      outcome: harnessFallback?.hold ? 'deferred' : 'in_progress',
+      reason: harnessFallback?.hold ? harnessHoldReason : null,
+      harnessResolution,
+      reviewedBy: dispatchContext.reviewedBy || null,
+      requiredGateContext: dispatchContext.requiredGateContext || null,
+      eligibilityTrace: verdict.trace,
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
+    },
+    metadata: {
+      harnessResolution,
+      reviewedBy: dispatchContext.reviewedBy || null,
+      reviewSha: reviewedSha,
+      riskClass: dispatchContext.riskClass || null,
+      requiredGateContexts: dispatchContext.requiredGateContext
+        ? [dispatchContext.requiredGateContext]
+        : [],
+      eligibilityReasons: bootstrapEligibilityReasons,
+      mergeMethod,
+      reconciliation: {
+        needsRepair: false,
+        lastVerifiedAt: dispatchContext.dispatchedAt || null,
+      },
+      operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
+      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
+    },
+  });
+  logAmaCloserDispatchEvent(logger, 'ama_closer.harness_resolution', {
+    repo, prNumber, ...harnessResolution,
+  });
   if (harnessFallback?.hold) {
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'all-fallbacks-grounded' });
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: harnessHoldReason, holdReason: harnessFallback.reason || 'unknown', harnessResolution });
   }
   if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
     dispatchWorkerClass = harnessFallback.workerClass;
@@ -8001,6 +8021,7 @@ async function maybeDispatchAmaCloserAttempt({
     dispatchId: parsed.dispatchId || parsed.launchRequestId || null,
     launchRequestId: parsed.launchRequestId || null,
     promptPath,
+    harnessResolution,
     eligibilityReasons: verdict.trace,
     leasePath: leaseResult.leasePath,
     ...(leaseUpdateError ? { leaseUpdateError } : {}),

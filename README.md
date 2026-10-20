@@ -849,6 +849,11 @@ A new head still re-arms review through the existing REVIEWSTALL-01 policy.
 
 ## State machines and smoke verification (SMV v1)
 
+HAMMERQUOTAREAD-01: quota status retries may use a snapshot under ten minutes old.
+Missing usable evidence defers before launch with the resolver's hold reason in
+AMA audits; no new launch state is introduced. After deployment, inspect
+`harnessResolution` for evidence source and age when investigating quota holds.
+
 BRANCHPROBE-01: null head-repository metadata requires Git confirmation before
 branch-missing abandonment. Failed confirmation reuses the transient dispatch
 state, releases the unlaunched pending lease and preserves retry budget for the

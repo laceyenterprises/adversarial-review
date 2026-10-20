@@ -6023,100 +6023,57 @@ test('dispatchMergeAgentForPR retries consumed-label cleanup even when agent-os 
   assert.equal(ghCalls[0].args.at(-1), 'merge-agent-requested');
 });
 
-test('fetchMergeAgentCandidate fetches operator label events in parallel', { timeout: 5000 }, async () => {
-  const eventResolvers = [];
-  let eventFetchesStarted = 0;
-  let resolveEventStart;
-  const eventsStarted = new Promise(resolve => { resolveEventStart = resolve; });
-  const candidatePromise = fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
-    guardStackedBaseImpl: async () => null,
-    env: { GITHUB_TOKEN: 'test-token' },
-    execFileImpl: async (_cmd, args) => {
-      if (args[0] === 'pr') {
-        return {
-          stdout: JSON.stringify({
-            mergeable: 'MERGEABLE',
-            headRefName: 'feature/pr-401',
-            baseRefName: 'main',
-            headRefOid: 'abc123',
-            body: '',
-            labels: [{ name: 'operator-approved' }, { name: 'merge-agent-requested' }],
-            statusCheckRollup: [],
-            state: 'OPEN',
-            updatedAt: '2026-05-07T12:00:00.000Z',
-            author: { login: 'builder-bot' },
-          }),
-        };
-      }
-      if (args[0] === 'api' && String(args[1]).includes('/branches/')) {
-        return {
-          stdout: JSON.stringify({
-            required_status_checks: {
-              contexts: ['agent-os/adversarial-gate'],
-            },
-          }),
-        };
-      }
-      eventFetchesStarted += 1;
-      return new Promise((resolve) => {
-        eventResolvers.push(resolve);
-        if (eventFetchesStarted === 2) resolveEventStart();
-      });
+test('fetchMergeAgentCandidate shares one timeline while independent reads overlap', { timeout: 5000 }, async () => {
+  const head = 'a'.repeat(40);
+  const started = new Set();
+  const calls = [];
+  let releaseReads, resolveStarted;
+  const readsReleased = new Promise(resolve => { releaseReads = resolve; });
+  const readsStarted = new Promise(resolve => { resolveStarted = resolve; });
+  const candidatePromise = fetchMergeAgentCandidate('fixture/project', 1, {
+    env: { GITHUB_TOKEN: 'synthetic-token' },
+    execFileImpl: async (command, args) => {
+      if (command !== 'gh') throw new Error('synthetic adapter unavailable');
+      calls.push(args);
+      if (args[0] === 'pr') return { stdout: JSON.stringify({
+        mergeable: 'MERGEABLE', headRefName: 'fixture-branch', baseRefName: 'main',
+        headRefOid: head, state: 'OPEN', statusCheckRollup: [],
+        labels: [{ name: 'operator-approved' }, { name: 'merge-agent-requested' }],
+      }) };
+      const kind = args[1] === 'graphql' ? 'timeline'
+        : args[1].includes('/branches/') ? 'protection' : 'guard';
+      started.add(kind);
+      if (started.size === 3) resolveStarted();
+      await readsReleased;
+      if (kind === 'guard') return { stdout: JSON.stringify({ base: { ref: 'main', repo: { default_branch: 'main' } } }) };
+      if (kind === 'protection') return { stdout: JSON.stringify({
+        required_status_checks: { contexts: ['agent-os/adversarial-gate'] },
+      }) };
+      return { stdout: JSON.stringify({ data: { repository: { pullRequest: {
+        headRefOid: head, timelineItems: { nodes: [
+          { __typename: 'PullRequestCommit', id: 'fixture-anchor',
+            commit: { oid: head, committedDate: '2026-01-01T00:00:00Z' } },
+          ...['operator-approved', 'merge-agent-requested'].map(label => ({
+            __typename: 'LabeledEvent', id: `fixture-${label}`, label: { name: label },
+            actor: { login: 'fixture-operator' }, createdAt: '2026-01-01T00:01:00Z',
+          })),
+        ] },
+      } } } }) };
     },
   });
-
-  await eventsStarted;
-  assert.equal(eventFetchesStarted, 2);
-  for (const resolve of eventResolvers) {
-    resolve({
-      stdout: JSON.stringify({
-        data: {
-          repository: {
-            pullRequest: {
-              headRefOid: 'abc123',
-              timelineItems: {
-                nodes: [
-                  {
-                    __typename: 'PullRequestCommit',
-                    id: 'commit-event',
-                    commit: {
-                      oid: 'abc123',
-                      committedDate: '2026-05-07T12:00:30.000Z',
-                    },
-                  },
-                  {
-                    __typename: 'LabeledEvent',
-                    id: 'LE_operator_approved',
-                    label: { name: 'operator-approved' },
-                    actor: { login: 'VirtualPaul' },
-                    createdAt: '2026-05-07T12:01:00.000Z',
-                  },
-                  {
-                    __typename: 'LabeledEvent',
-                    id: 'LE_merge_agent_requested',
-                    label: { name: 'merge-agent-requested' },
-                    actor: { login: 'VirtualPaul' },
-                    createdAt: '2026-05-07T12:02:00.000Z',
-                  },
-                ],
-              },
-            },
-          },
-        },
-      }),
-    });
-  }
-
+  try {
+    await readsStarted;
+    assert.equal(calls.length, 4, 'snapshot plus one guard, timeline and protection read');
+    assert.equal(calls.filter(args => args[1] === 'graphql').length, 1,
+      'both operator controls consume the same timeline');
+  } finally { releaseReads(); }
   const candidate = await candidatePromise;
-  // LAC-1559: an empty statusCheckRollup now classifies fail-closed as `null`
-  // (was 'SUCCESS'). This test's focus is parallel operator-event fetching; the
-  // conclusion value is incidental and just reflects the new fail-closed default.
-  assert.equal(candidate.checksConclusion, null);
-  assert.equal(candidate.mergeStateStatus, null);
-  assert.deepEqual(candidate.statusCheckRollup, []);
-  assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate']);
+  assert.equal(candidate.checksConclusion, null, 'an empty rollup still fails closed');
   assert.equal(candidate.operatorApprovalEvent.label, 'operator-approved');
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
+  assert.equal(candidate.operatorApprovalEvent.headSha, head);
+  assert.equal(candidate.mergeAgentRequestEvent.headSha, head);
+  assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate']);
 });
 
 test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/base', { timeout: 5000 }, async () => {

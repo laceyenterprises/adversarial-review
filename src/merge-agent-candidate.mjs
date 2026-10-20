@@ -1,3 +1,4 @@
+import { observePostedReviewHead, withPostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +37,12 @@ export function extractOperatorNotes(prBody) {
   ].join('\n');
 }
 
-export async function fetchMergeAgentCandidate(repo, prNumber, {
+export function fetchMergeAgentCandidate(repo, prNumber, options = {}) {
+  return withPostedReviewReadCache({ repo, prNumber },
+    () => fetchMergeAgentCandidateWithinReadCache(repo, prNumber, options));
+}
+
+async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
   rootDir = null,
   preparedSnapshot = null,
@@ -47,43 +53,57 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
+  fetchCachedAdversarialGateBranchProtectionImpl = fetchCachedAdversarialGateBranchProtection,
   guardStackedBaseImpl = guardStackedBase,
 } = {}) {
   const parsed = preparedSnapshot || await fetchMergeAgentCandidateSnapshot(repo, prNumber, { execFileImpl, signal });
-  const stackedBaseHold = String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
-    ? await guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
-      repo, prNumber, execFileImpl, signal }) : null;
+  observePostedReviewHead(repo, prNumber, parsed.headRefOid);
   const labels = parsed.labels || [];
   const normalizedLabels = normalizeLabelNames(labels);
   const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
   const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
-  const [resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent] = await Promise.all([
+  // Four independent tasks, bounded per PR. The stacked-base guard (including
+  // its hold receipt) still finishes before a candidate can authorize routing.
+  const results = await Promise.allSettled([
+    String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
+      ? guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
+        repo, prNumber, execFileImpl, signal }) : null,
     hasOperatorApproved && operatorApprovalEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl, env })
       : operatorApprovalEvent ?? null,
     hasMergeAgentRequested && mergeAgentRequestEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl, env })
       : mergeAgentRequestEvent ?? null,
+    (async () => {
+      let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
+      if (parsed.baseRefName) {
+        try {
+          const protection = await fetchCachedAdversarialGateBranchProtectionImpl({
+            cache: branchProtectionCache,
+            repoPath: repo,
+            baseBranch: parsed.baseRefName,
+            execFileImpl, env,
+          });
+          branchProtection = {
+            requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],
+            ok: protection?.ok === true,
+            reason: protection?.reason || 'branch-protection-check-failed',
+            requiredContext: protection?.context || null,
+          };
+        } catch {
+          branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
+        }
+      }
+      return branchProtection;
+    })(),
   ]);
-  let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
-  if (parsed.baseRefName) {
-    try {
-      const protection = await fetchCachedAdversarialGateBranchProtection({
-        cache: branchProtectionCache,
-        repoPath: repo,
-        baseBranch: parsed.baseRefName,
-        execFileImpl, env,
-      });
-      branchProtection = {
-        requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],
-        ok: protection?.ok === true,
-        reason: protection?.reason || 'branch-protection-check-failed',
-        requiredContext: protection?.context || null,
-      };
-    } catch {
-      branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
-    }
-  }
+  // Settle the guard and other readers even on failure; no orphaned task may
+  // write a hold receipt after the caller has abandoned this candidate.
+  const failed = results.find(result => result.status === 'rejected');
+  if (failed) throw failed.reason;
+  signal?.throwIfAborted();
+  const [stackedBaseHold, resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent, branchProtection] =
+    results.map(result => result.value);
   const checksCfg = loadConfigCached({ env });
   const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup, { env, cfg: checksCfg });
   let recovering = false;

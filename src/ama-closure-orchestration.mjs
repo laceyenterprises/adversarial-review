@@ -931,6 +931,7 @@ async function dispatchAmaClosureFor({
   priorDaemonCleanMerge = null,
   rootDir = ROOT,
   reviewStateRow,
+  reviewStateDb = null,
   dispatchJob,
   candidate,
   labelNames,
@@ -1114,7 +1115,7 @@ async function dispatchAmaClosureFor({
       completedRereviewRoundsForPR = 0;
       try {
         completedRereviewRoundsForPR = normalizeCompletedRoundCount(
-          countCompletedReviewerRereviewRounds({ rootDir, repoPath, prNumber }),
+          countCompletedReviewerRereviewRounds({ db: reviewStateDb, rootDir, repoPath, prNumber }),
         );
       } catch (rereviewErr) {
         console.warn(
@@ -1849,6 +1850,7 @@ async function dispatchAmaClosureFor({
     }
     const wake = requestEligibleHammerWakeImpl({
       rootDir,
+      reviewStateDb,
       repo: repoPath,
       prNumber,
       headSha: currentPrHeadSha || candidate?.headSha || '',
@@ -2834,6 +2836,7 @@ export function resolveMergeAgentCoexistenceForWatcher(options) {
 async function resolveMergeAgentCoexistenceWithinEvaluation({
   rootDir = ROOT,
   reviewStateRow,
+  reviewStateDb = null,
   dispatchJob,
   candidate,
   labelNames,
@@ -2882,6 +2885,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     amaClosureResult = await maybeDispatchAmaClosureForImpl({
       rootDir,
       reviewStateRow,
+      reviewStateDb,
       dispatchJob,
       candidate,
       labelNames,
@@ -3015,7 +3019,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
       candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
       dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
-        rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+        rootDir, reviewStateRow, reviewStateDb, dispatchJob, candidate, labelNames,
         operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
         repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
         operationTimeoutMs, operationTracker, orphanRecovery,
@@ -3042,7 +3046,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       result: amaClosureResult, reviewStateRow, logger, signal,
       maxAttempts: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
       dispatchHammer: () => maybeDispatchAmaClosureForImpl({
-        rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+        rootDir, reviewStateRow, reviewStateDb, dispatchJob, candidate, labelNames,
         operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
         repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
         operationTimeoutMs, operationTracker, automatedRecovery: true,

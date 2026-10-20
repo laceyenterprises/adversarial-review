@@ -1,6 +1,8 @@
+import './helpers/rate-limit-state-isolation.mjs';
+import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -366,3 +368,23 @@ for (const terminalOutcome of ['failed-without-merge', 'succeeded']) {
     } finally { db.close(); }
   });
 }
+
+
+test('wake telemetry borrows the initialized watcher connection without closing it or losing its receipt', t => {
+  const rootDir = root();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewStateDb = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(reviewStateDb);
+  t.after(() => reviewStateDb.close());
+  const args = { rootDir, reviewStateDb, repo: 'fixture/project', prNumber: 1,
+    headSha: 'a'.repeat(40), eligibilityReason: 'fixture-eligible', eligibility: { eligible: true, reasons: [] },
+    requestWatcherWakeImpl: wakeImpl([]), log: { log() {} } };
+  const result = requestEligibleHammerWake(args);
+  assert.equal(result.outcome, 'requested');
+  assert.equal(result.latencyEvent.recorded, true);
+  assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate');
+  assert.equal(reviewStateDb.prepare(
+    "SELECT COUNT(*) AS count FROM review_latency_events WHERE event_type = 'hammer_wake'"
+  ).get().count, 1);
+  assert.equal(JSON.parse(readFileSync(hammerWakeAuditPath(rootDir, args), 'utf8')).outcome, 'requested');
+});

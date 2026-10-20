@@ -1,8 +1,16 @@
+import './helpers/rate-limit-state-isolation.mjs';
+import { withPostedReviewReadCache, closePostedReviewReadCache, readPostedReviewResource } from '../src/posted-review-read-cache.mjs';
+import { fetchLatestLabelEvent } from '../src/github-label-events.mjs';
+import { profilePostedReviews } from './helpers/posted-review-profile.mjs';
+import * as closureModules from '../src/ama-closure-orchestration.mjs';
+import * as gateModules from '../src/adversarial-gate-status.mjs';
+import * as controlModules from '../src/adapters/operator/github-pr-label-controls/index.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setImmediate as turn } from 'node:timers/promises';
 import { POSTED_REVIEW_CONCURRENCY, createPostedReviewFairnessState,
   runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
@@ -11,6 +19,7 @@ import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHan
 import { readNoProgressLane, recordNoProgressLaneRun, recordNoProgressLaneSkip } from '../src/watcher-no-progress-lane.mjs';
 import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
+import { db } from '../src/review-state-db.mjs';
 import { fetchMergeAgentCandidateSnapshot } from '../src/merge-agent-candidate-snapshot.mjs';
 import { fetchPullRequestHeadAndState } from '../src/github-api.mjs';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -26,6 +35,39 @@ const otherHead = 'b'.repeat(40);
 const quiet = { log() {}, warn() {}, error() {} };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const handler = (prNumber, run) => ({ repoPath: repo, prNumber, headSha: head, run });
+
+test('handler production defaults and database overrides reach dispatch and closure', async t => {
+  const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const customRoot = mkdtempSync(join(tmpdir(), 'handler-db-'));
+  t.after(() => rmSync(customRoot, { recursive: true, force: true }));
+  const injectedDb = {};
+  const row = { review_status: 'posted', reviewer_head_sha: head };
+  for (const [options, expectedDb] of [
+    [{}, db], [{ rootDir }, db], [{ rootDir: customRoot }, null],
+    [{ rootDir: customRoot, reviewStateDb: injectedDb }, injectedDb],
+    [{ rootDir, reviewStateDb: null }, null],
+  ]) {
+    let dispatchDb, closureDb;
+    const result = await handlePostedReviewRow({
+      ...options, repoPath: repo, prNumber: 1, currentRevisionRef: head,
+      currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
+      latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+      fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),
+      buildMergeAgentDispatchJobImpl: (_root, _candidate, { reviewStateDb }) => {
+        dispatchDb = reviewStateDb;
+        return {};
+      },
+      resolveMergeAgentCoexistenceForWatcherImpl: async ({ reviewStateDb }) => {
+        closureDb = reviewStateDb;
+        return { outcome: 'ama-pending', amaClosureResult: { reason: 'synthetic-wait' } };
+      },
+      logger: quiet,
+    });
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(dispatchDb, expectedDb);
+    assert.equal(closureDb, expectedDb);
+  }
+});
 
 test('adoption readiness probes use the injected executor through the real snapshot reader', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closure-executor-'));
@@ -323,7 +365,7 @@ test('handler reuses only a recent prepared candidate for its exact head', async
   }
 });
 
-test('immutable cache retries failed JSON and isolates credentials, executors and abortable reads', async () => {
+test('immutable cache retries failed JSON and isolates credentials and executors', async () => {
   let calls = 0;
   let malformed = true;
   const exec = async () => { calls++; return { stdout: malformed ? 'invalid JSON' : JSON.stringify({ files: [], parents: [] }) }; };
@@ -339,9 +381,9 @@ test('immutable cache retries failed JSON and isolates credentials, executors an
     const signal = new AbortController().signal;
     await createHistoryReader({ execGhWithRetryImpl: exec, signal })(path);
     await createHistoryReader({ execGhWithRetryImpl: exec, signal })(path);
-    assert.equal(calls, 5);
+    assert.equal(calls, 3, 'completed immutable evidence is shared across operation signals');
     await createHistoryReader({ execGhWithRetryImpl: async () => { calls++; return { stdout: '{"files":[],"parents":[]}' }; } })(path);
-    assert.equal(calls, 6);
+    assert.equal(calls, 4);
   });
 });
 
@@ -476,4 +518,239 @@ test('read-only snapshot reuse saves the PR read and still runs the normal stack
   assert.equal(reads, 1, 'candidate evaluation reuses the tick snapshot');
   assert.equal(guards, 1, 'reuse cannot bypass the existing guard');
   assert.equal(candidate.stackedBaseHold, hold);
+});
+
+
+test('synthetic posted-review pass pins GitHub and database read counts per step', async t => {
+  const overrides = { GITHUB_TOKEN: 'synthetic-token', GHA_ADAPTER_BIN: '/fixture/adapter',
+    AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false', AGENT_OS_CONFIG_PATH: '/fixture/config.yaml' };
+  for (const [key, value] of Object.entries(overrides)) {
+    const prior = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; });
+  }
+  const profile = await profilePostedReviews({ handlePostedReviewRow, fetchMergeAgentCandidate,
+    fetchLatestLabelEvent, ...closureModules, ...gateModules, ...controlModules }, { prCount: 3, delayMs: 0 });
+  const { projectGateStatusSafe: gate, fetchMergeAgentCandidate: candidate,
+    resolveMergeAgentCoexistence: closure } = profile.steps;
+  assert.equal(gate.runs, 3);
+  assert.equal(gate.github['graphql:label-timeline'].count, 3);
+  assert.equal(gate.subprocesses.adapter.count, 4, 'one read capability probe plus three status writes');
+  assert.equal(gate.database.count, 3);
+  assert.equal(candidate.runs, 3);
+  assert.equal(candidate.subprocesses.gh.count, 7, 'one snapshot and guard per PR, shared branch protection');
+  assert.equal(candidate.github['graphql:label-timeline'], undefined, 'all controls share the gate timeline');
+  assert.equal(candidate.database.count, 0);
+  assert.equal(closure.runs, 3);
+  assert.equal(closure.github['rest:reviews-page'].count, 6, 'two live pages per PR still read');
+  assert.equal(closure.database.count, 111, 'round counter and wake telemetry reuse the initialized connection');
+  assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
+  assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));
+});
+
+test('label timeline is shared only for the handler head and invalidated by a candidate head change', async () => {
+  let liveHead = head, calls = 0;
+  const env = { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false' };
+  const execFileImpl = async () => {
+    calls++;
+    return { stdout: JSON.stringify({ data: { repository: { pullRequest: {
+      headRefOid: liveHead, timelineItems: { nodes: [
+        { __typename: 'PullRequestCommit', commit: { oid: liveHead, committedDate: '2026-01-01T00:00:00Z' } },
+        ...['operator-approved', 'merge-agent-requested'].map(label => ({ __typename: 'LabeledEvent',
+          id: label, label: { name: label }, actor: { login: 'fixture-operator' }, createdAt: '2026-01-01T00:01:00Z' })),
+      ] },
+    } } } }) };
+  };
+  const read = label => fetchLatestLabelEvent(repo, 1, label, { execFileImpl, env });
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    assert.equal((await read('operator-approved')).headSha, head);
+    await Promise.all([read('operator-approved'), read('merge-agent-requested')]);
+    assert.equal(calls, 1);
+    liveHead = otherHead;
+    await withPostedReviewReadCache({ repo, prNumber: 1, headSha: otherHead }, async () => {
+      assert.equal((await read('operator-approved')).headSha, otherHead);
+    });
+    await fetchMergeAgentCandidate(repo, 1, { execFileImpl, env,
+      preparedSnapshot: { headRefOid: otherHead, state: 'CLOSED' } });
+    assert.equal((await read('operator-approved')).headSha, otherHead);
+    assert.equal(calls, 2);
+    closePostedReviewReadCache();
+    await read('operator-approved');
+    assert.equal(calls, 3, 'closure freshness reads bypass advisory reuse');
+  });
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: otherHead }, () => read('operator-approved'));
+  assert.equal(calls, 4, 'a new tick never inherits mutable evidence');
+});
+
+test('posted-review cache expires, retries errors and isolates credentials and executors', async () => {
+  let clock = 0, calls = 0;
+  const execFileImpl = () => {};
+  const options = { execFileImpl, env: {} };
+  const read = (opts = options, fail = false) => readPostedReviewResource('fixture', repo, 1, opts,
+    async () => { calls++; if (fail) throw new Error('synthetic read failure'); return calls; }, { now: () => clock });
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    await assert.rejects(read(options, true));
+    assert.equal(await read(), 2);
+    assert.equal(await read(), 2);
+    await read({ ...options, env: { GH_TOKEN: 'synthetic-other-token' } });
+    await read({ ...options, execFileImpl: () => {} });
+    assert.equal(calls, 4);
+    clock = 10_000;
+    assert.equal(await read(), 5);
+    assert.equal(await read(), 6, 'an expired scope cannot renew its freshness window');
+  });
+});
+
+test('posted-review resource accepts undefined options inside and outside a cache scope', async () => {
+  let calls = 0;
+  const read = () => readPostedReviewResource('fixture', repo, 1, undefined, async () => ++calls);
+  assert.equal(await read(), 1);
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    assert.equal(await read(), 2);
+    assert.equal(await read(), 2);
+  });
+  assert.equal(await read(), 3);
+});
+
+test('candidate label reads reuse caller environment provenance and isolate environment changes', async () => {
+  let calls = 0;
+  const tokens = [];
+  const labels = ['operator-approved', 'merge-agent-requested'];
+  const execFileImpl = async (_command, _args, options) => {
+    calls++;
+    tokens.push(options.env.GH_TOKEN);
+    return { stdout: JSON.stringify({ data: { repository: { pullRequest: {
+      headRefOid: head, timelineItems: { nodes: [
+        { __typename: 'PullRequestCommit', commit: { oid: head, committedDate: '2026-01-01T00:00:00Z' } },
+        ...labels.map(label => ({ __typename: 'LabeledEvent', id: label, label: { name: label },
+          actor: { login: 'fixture-operator' }, createdAt: '2026-01-01T00:01:00Z' })),
+      ] },
+    } } } }) };
+  };
+  const env = { GH_TOKEN: 'synthetic-caller-token', GH_HOST: 'fixture.example',
+    GH_CONFIG_DIR: '/fixture/config', AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false' };
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    const expected = await Promise.all(labels.map(label => fetchLatestLabelEvent(repo, 1, label, { execFileImpl, env })));
+    const readCandidate = overrides => fetchMergeAgentCandidate(repo, 1, {
+      execFileImpl, env: { ...env, ...overrides },
+      preparedSnapshot: { headRefOid: head, state: 'CLOSED', labels },
+    });
+    const candidate = await readCandidate({});
+    assert.deepEqual([candidate.operatorApprovalEvent, candidate.mergeAgentRequestEvent], expected);
+    assert.equal(calls, 1, 'both labels reuse evidence fetched with the caller environment');
+    await readCandidate({ GH_TOKEN: 'synthetic-other-token' });
+    assert.equal(calls, 2, 'changed credentials must fetch fresh label evidence');
+    assert.deepEqual(tokens, ['synthetic-caller-token', 'synthetic-other-token'],
+      'the timeline subprocess must use the same environment as its cache identity');
+  });
+});
+
+test('immutable reads preserve independent cancellation while sharing completed evidence', async () => {
+  const first = new AbortController(), second = new AbortController();
+  const gates = [deferred(), deferred()];
+  let calls = 0;
+  const exec = async () => {
+    const index = calls++;
+    await gates[index].promise;
+    return { stdout: JSON.stringify({ sha: head, files: [], parents: [] }) };
+  };
+  const path = `repos/${repo}/commits/${head}`;
+  await withClosureEvaluationReadCache(async () => {
+    const a = createHistoryReader({ execGhWithRetryImpl: exec, signal: first.signal })(path);
+    const failed = assert.rejects(a, /synthetic abort/);
+    await turn();
+    const b = createHistoryReader({ execGhWithRetryImpl: exec, signal: second.signal })(path);
+    await turn();
+    assert.equal(calls, 2, 'one operation must not inherit another operation cancellation');
+    first.abort(new Error('synthetic abort'));
+    gates[0].resolve(); gates[1].resolve();
+    await failed;
+    await b;
+    await createHistoryReader({ execGhWithRetryImpl: exec, signal: new AbortController().signal })(path);
+    assert.equal(calls, 2, 'successful immutable evidence survives an unrelated abort');
+    await assert.rejects(createHistoryReader({ execGhWithRetryImpl: exec, signal: first.signal })(path), /synthetic abort/);
+  });
+});
+
+
+test('candidate reads run concurrently and a failed label read still waits for the guard', async () => {
+  const guard = deferred(), labelRead = deferred();
+  let finished = false, guarded = false;
+  const execFileImpl = async (_command, args) => {
+    if (args.includes('graphql')) { labelRead.resolve(); throw new Error('synthetic label failure'); }
+    return { stdout: JSON.stringify({ required_status_checks: { contexts: [] } }) };
+  };
+  const candidate = fetchMergeAgentCandidate(repo, 1, { execFileImpl,
+    env: { GITHUB_TOKEN: 'synthetic-token' },
+    preparedSnapshot: { headRefOid: head, state: 'OPEN', baseRefName: 'main', labels: ['operator-approved'] },
+    guardStackedBaseImpl: async () => { await guard.promise; guarded = true; return null; },
+  }).finally(() => { finished = true; });
+  const rejected = assert.rejects(candidate, /synthetic label failure/);
+  await labelRead.promise;
+  assert.equal(finished, false, 'label read starts while the guard is still active');
+  guard.resolve();
+  await rejected;
+  assert.equal(guarded, true, 'all guard actions settle before candidate rejection');
+});
+
+
+test('candidate label provenance follows the live timeline head when the snapshot head moves', async () => {
+  const execFileImpl = async () => ({ stdout: JSON.stringify({ data: { repository: { pullRequest: {
+    headRefOid: otherHead, timelineItems: { nodes: [
+      ...[head, otherHead].map(oid => ({ __typename: 'PullRequestCommit',
+        commit: { oid, committedDate: '2026-01-01T00:00:00Z' } })),
+      { __typename: 'LabeledEvent', id: 'fixture-event', label: { name: 'operator-approved' },
+        actor: { login: 'fixture-operator' }, createdAt: '2026-01-01T00:01:00Z' },
+    ] },
+  } } } }) });
+  const candidate = await fetchMergeAgentCandidate(repo, 1, { execFileImpl,
+    preparedSnapshot: { headRefOid: head, state: 'OPEN', labels: ['operator-approved'] },
+    guardStackedBaseImpl: async () => null,
+  });
+  assert.equal(candidate.headSha, head);
+  assert.equal(candidate.operatorApprovalEvent.headSha, otherHead,
+    'a newer label must never be rebound to the candidate snapshot head');
+});
+
+
+test('nested event and timeline caches cannot extend the handler freshness window', async () => {
+  let clock = 0, calls = 0;
+  const options = { execFileImpl: () => {}, env: {} };
+  const raw = () => readPostedReviewResource('timeline', repo, 1, options,
+    async () => ++calls, { now: () => clock });
+  const event = () => readPostedReviewResource('derived-event', repo, 1, options,
+    raw, { now: () => clock });
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    assert.equal(await raw(), 1);
+    clock = 9_000;
+    assert.equal(await event(), 1);
+    clock = 11_000;
+    assert.equal(await event(), 2, 'a recently derived event cannot prolong an older timeline');
+  });
+});
+
+
+test('slow successful reads retain a reuse window after the response completes', async () => {
+  let clock = 0, calls = 0;
+  const response = deferred();
+  const options = { execFileImpl: () => {}, env: {} };
+  const read = () => readPostedReviewResource('timeline', repo, 1, options, async () => {
+    calls++;
+    if (calls === 1) await response.promise;
+    return calls;
+  }, { now: () => clock });
+  await withPostedReviewReadCache({ repo, prNumber: 1, headSha: head }, async () => {
+    const first = read();
+    await turn();
+    clock = 20_000;
+    const duplicate = read();
+    await turn();
+    assert.equal(calls, 1, 'a slow pending read is still coalesced');
+    response.resolve();
+    assert.deepEqual(await Promise.all([first, duplicate]), [1, 1]);
+    clock = 25_000;
+    assert.equal(await read(), 1, 'fresh response is reusable despite slow startup');
+    clock = 30_000;
+    assert.equal(await read(), 2, 'the response window remains bounded');
+  });
 });

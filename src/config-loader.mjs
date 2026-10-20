@@ -5168,6 +5168,12 @@ function validateModuleDoc(
       const mv = rawFlat[moduleKey];
       const cv = rawFlat[canonicalKey];
       if (!sameValue(mv, cv)) {
+        if (TOKEN_POOL_DECLARATION_PATHS.has(canonicalKey)) {
+          throw new AgentOSConfigError(
+            `${source}: ${canonicalKey}: conflicting declarations; set one only`,
+            { key: canonicalKey, expected: 'single declaration', source },
+          );
+        }
         throw new AgentOSConfigError(
           `${source}: same-file alias conflict — ${moduleKey}=${JSON.stringify(mv)} but ${canonicalKey}=${JSON.stringify(cv)}; set one only`,
           {

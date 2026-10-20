@@ -74,3 +74,23 @@ test('ITP-01 module aliases preserve atomic declarations', () => {
     assert.deepEqual(cfg.get('oauth.identity_token_pools'), oauth.identity_token_pools);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('ITP-01 alias conflicts never echo unvalidated account values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'itp-redaction-'));
+  try {
+    const module = join(dir, 'module.yaml');
+    const sentinel = 'synthetic-redaction-sentinel';
+    writeFileSync(module, JSON.stringify({
+      __aliases: { accounts: 'oauth.token_accounts' },
+      accounts: { sample: sentinel }, oauth: { token_accounts: {} },
+    }));
+    assert.throws(() => loadConfig({ topPath: join(dir, 'config.yaml'), modulePaths: [module], env: {} }), error => {
+      assert.ok(error instanceof AgentOSConfigError);
+      assert.match(error.message, /conflicting declarations/);
+      assert.ok(!JSON.stringify(error).includes(sentinel));
+      assert.ok(!error.message.includes(sentinel));
+      return true;
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

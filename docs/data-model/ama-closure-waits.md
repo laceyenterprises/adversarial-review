@@ -31,6 +31,13 @@ immediately without starting or consuming the bounded-wait or final-round clock 
 Final-round observations can seed the deadline from completion of the final
 remediation push. Launch progress resets the deadline before exhaustion is
 evaluated, so a successful launch at the deadline does not emit a stall page.
+HAMCLOSEWAIT-01: a retained running dispatch supplies `closerProgressAt` from
+its recorded launch; confirmed dispatched lease ownership supplies `updatedAt`,
+falling back to `acquiredAt`. The later of this timestamp and final-round
+completion advances an existing final-round `started` as well as seeding a new
+row. Repeated observations of the same timestamp do not extend the deadline;
+thirty minutes without further progress still pages. Pending or uncertain
+ownership and other blockers retain their existing clocks and page receipts.
 Explicit immediate observations still page regardless of launch progress.
 For `final-round`, head movement replaces prior class rows and restarts the
 deadline while carrying the maximum `paged` value forward. Final-round stalls

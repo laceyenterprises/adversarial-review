@@ -469,6 +469,13 @@ if (scenario === 'clean') {
   let pages = 0;
   for (const now of [0, 1800001, 1800002]) await observeClosureWait({ ...identity(), now, reason: 'synthetic-stale-lease', pageImpl: async () => { pages++; } });
   assert.equal(pages, 1);
+  const finalWait = { ...identity(), waitClass: 'final-round', env: {},
+    reason: 'in-flight:synthetic-closer', pageImpl: async () => { pages++; } };
+  await observeClosureWait({ ...finalWait, now: 0, startedAt: 0 });
+  assert.equal((await observeClosureWait({ ...finalWait, now: 40 * 60_000, startedAt: 20 * 60_000 })).exhausted, false);
+  assert.equal(pages, 1, 'a closer launched twenty minutes ago must not page');
+  assert.equal((await observeClosureWait({ ...finalWait, now: 55 * 60_000, startedAt: 20 * 60_000 })).exhausted, true);
+  assert.equal(pages, 2, 'unchanged launch progress must still expire');
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);

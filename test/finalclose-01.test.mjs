@@ -101,6 +101,105 @@ function finalRound(t) {
     remediationPlan: { currentRound: 1, maxRounds: 2 }, remediationWorker: { state: 'completed' } }));
   return rootDir;
 }
+
+const minute = 60_000;
+for (const [reason, age, expectedPages] of [
+  ['existing-dispatch-running', 20, 0],
+  ['existing-dispatch-running', 35, 1],
+  ['dispatch-held', null, 1],
+  ['all-fallbacks-grounded', null, 1],
+  ['daemon-closure-failed', null, 1],
+  ['handed-to-review', null, 1],
+]) test(`HAMCLOSEWAIT-01 ${reason} with closer age ${age} minutes`, async t => {
+  const rootDir = finalRound(t), pages = [];
+  const clock = Date.parse(started) + 40 * minute;
+  const closerProgressAt = age === null ? undefined : new Date(clock - age * minute).toISOString();
+  // Seed a previous poll before launch: updating only INSERT cannot repair it.
+  const observe = args => observeClosureWait({ ...args, env: {}, now: clock,
+    pageImpl: async text => pages.push(text) });
+  await observeClosureWait({ rootDir, repo, prNumber, headSha, waitClass: 'final-round',
+    startedAt: Date.parse(started), now: Date.parse(started), env: {},
+    reason: 'dispatch-pending', pageImpl: async text => pages.push(text) });
+  for (let tick = 0; tick < 2; tick++) {
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [], now: () => clock, env: {}, operationTimeoutMs: 10,
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: 'UNKNOWN', statusCheckRollup: [] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchPullRequestMergeabilityImpl: () => new Promise(() => {}),
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('wait never grants merge authority'),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt }),
+      observeClosureWaitImpl: observe,
+      logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.reason, reason);
+  }
+  assert.equal(pages.length, expectedPages);
+});
+
+test('HAMCLOSEWAIT-01 retained running dispatch reports its launch, not its observation time', async t => {
+  const f = fixture(t, { ledgerStatus: 'running', reportedStatus: 'running' });
+  const result = await maybeDispatchAmaCloser(f.args);
+  assert.equal(result.reason, 'existing-dispatch-running');
+  assert.equal(result.closerProgressAt, started);
+});
+
+for (const [status, uncertain, expectedPages] of [
+  ['dispatched', false, 0], ['pending', false, 1], ['dispatched', true, 1],
+]) test(`HAMCLOSEWAIT-01 in-flight ${status}, uncertain=${uncertain}`, async t => {
+  const rootDir = finalRound(t), pages = [], waits = [];
+  const clock = Date.parse(started) + 40 * minute;
+  t.mock.timers.enable({ apis: ['Date'], now: clock });
+  const identity = { rootDir, repo, prNumber, headSha };
+  acquireAmaCloserLease({ ...identity, watcherPid: process.pid,
+    now: new Date(clock - 25 * minute).toISOString() });
+  const closerProgressAt = new Date(clock - 20 * minute).toISOString();
+  updateAmaCloserLease({ ...identity, status, lrqId: 'synthetic-closer', now: closerProgressAt });
+  const observe = args => observeClosureWait({ ...args, now: clock, env: {},
+    pageImpl: async text => pages.push(text) }).then(wait => { waits.push(wait); return wait; });
+  await observeClosureWait({ ...identity, waitClass: 'final-round', startedAt: Date.parse(started),
+    now: Date.parse(started), env: {}, reason: 'dispatch-pending', pageImpl: async text => pages.push(text) });
+  const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+    currentRevisionRef: headSha, labelNames: [], now: () => clock, env: {},
+    reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+      reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+    candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+      mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    fetchLatestHeadReviewBodiesImpl: async () => [body],
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+    probeClosureOwnershipImpl: async () => ({ owned: !uncertain, uncertain }),
+    runDaemonCleanMergeAttemptImpl: async () => assert.fail('in-flight wait never merges'),
+    maybeDispatchAmaCloserImpl: async () => assert.fail('in-flight wait never dispatches'),
+    observeClosureWaitImpl: observe,
+    logger: { log() {}, warn() {} },
+  });
+  assert.equal(result.reason, `in-flight:${status === 'pending' ? process.pid : 'synthetic-closer'}`);
+  assert.equal(result.closerProgressAt, status === 'dispatched' && !uncertain ? closerProgressAt : undefined);
+  assert.equal(pages.length, expectedPages);
+  assert.equal(waits.length, 2, 'both inner and outer observations must honor the launch clock');
+  assert.equal(waits[0].exhausted, expectedPages === 1);
+});
+
+test('HAMCLOSEWAIT-01 a fixed progress timestamp eventually pages and immediate pages still win', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const args = { rootDir, repo, prNumber, headSha, waitClass: 'final-round', env: {},
+    reason: 'in-flight:synthetic-closer', pageImpl: async text => pages.push(text) };
+  await observeClosureWait({ ...args, startedAt: 0, now: 0 });
+  for (const now of [40, 45, 49, 50, 51]) {
+    const wait = await observeClosureWait({ ...args, startedAt: 20 * minute, now: now * minute });
+    assert.equal(wait.startedAt, 20 * minute);
+    assert.equal(wait.exhausted, now >= 50);
+  }
+  assert.equal(pages.length, 1);
+  await observeClosureWait({ ...args, prNumber: prNumber + 1,
+    startedAt: 40 * minute, now: 40 * minute, progress: true, immediate: true });
+  assert.equal(pages.length, 2);
+});
 for (const operation of ['mergeability', 'live-review', 'stale-proof']) {
   test(`FINALCLOSE-01 final-round ${operation} timeout reaches dispatch on the same tick without merging`, async t => {
     const rootDir = finalRound(t);

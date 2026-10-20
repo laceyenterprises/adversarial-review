@@ -3901,6 +3901,12 @@ not grant merge authority or suppress remaining retry budget.
 Immediate primary-change alerts use their own receipt and cannot consume this
 final-round stall receipt. A successful launch resets the wait before checking
 the stall deadline, including when dispatch succeeds on the deadline tick.
+HAMCLOSEWAIT-01 also advances an existing final-round wait to a retained
+closer's recorded launch or confirmed dispatched lease progress (`updatedAt`,
+falling back to `acquiredAt`). Polling alone does not refresh this timestamp:
+a closer with no progress for thirty minutes still pages. Pending/uncertain
+ownership, held dispatches, exhausted fallbacks, daemon failures and review
+handoffs retain their existing waits; immediate pages remain immediate.
 
 After deploy, SRE owns these checks:
 

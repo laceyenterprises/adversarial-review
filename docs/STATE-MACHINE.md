@@ -963,6 +963,10 @@ verdict allowlist stays unchanged. An already routed row retains ownership
 without another write or `review-ceiling-closure-transition` event. The posted
 lane settles `remediation-closeout` wakes as `skipped: review-ceiling-hammer-owned`.
 The existing final-round wait records refusals and pages once after 30 minutes.
+HAMCLOSEWAIT-01 measures a retained running closer from its recorded launch or
+confirmed dispatched lease progress, advancing existing final-round waits too.
+An unchanged timestamp cannot extend the bound; other blockers and immediate
+pages keep their existing behavior. Merge authority and lifecycle edges stay unchanged.
 There are no new lifecycle states or review rounds. STOPHOLDREVIEW-01 posting
 receipts and REVERSALPROV-01 reversal provenance remain independent requirements.
 

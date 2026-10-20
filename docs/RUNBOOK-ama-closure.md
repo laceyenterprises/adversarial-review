@@ -2135,6 +2135,17 @@ reasons:
 
 ### Primary-change evidence, authorization and disputes (HAMINTENT-02 / LAC-1833)
 
+REVERSALBLANK-01: preservation comparisons ignore blank and whitespace-only
+edits and replacements that differ only in trailing whitespace. Removed-text
+counts exclude blank lines. Mixed regions retain their content-bearing units;
+a blank removal cannot waive content added by the same replacement. Original
+patches still bind reversal authorization and rebase proofs. When author units
+are skipped, the evaluator evidence (including the audit's `trace.primaryChange`)
+includes `whitespaceOnlyUnitsIgnored`, counting skipped base-line units or
+insertion anchors. Renames, opaque files, test-path rules and required-guard
+proofs retain their existing rules. No configuration or operator override is
+needed for whitespace normalization.
+
 HAMENOBUFS-01: every production history reader projects compare metadata and
 commit identity into pages of 100 without compare patches. Because GitHub caps
 compare files at 300 with no file pagination, complete file evidence comes from

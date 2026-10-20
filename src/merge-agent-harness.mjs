@@ -1,8 +1,4 @@
 // The worker class a merge-agent dispatch runs on.
-// LANEFAILOVER-01: unpinned Codex hammers use personal-first account selection
-// before the legacy cross-model fallback described below. Unknown account
-// evidence uses the existing durable deferral. Explicit pins preserve the
-// existing HHR behavior; Codex reviewer ordering remains corporate-first.
 //
 // `roles.merge_agent_worker_class` names the class. CLOSERREUSE-01 (SEV2
 // 2026-09-29): this host pins it to `hammer`, a codex harness, and the
@@ -32,7 +28,7 @@ import { join } from 'node:path';
 import { resolveCloserDispatchHarness } from './ama/harness-fallback.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadConfigCached } from './config-loader.mjs';
-import { MODULE_CONFIG_PATH, resolveDefaultMergeAgentWorkerClass, codexWorkerAccountPolicy } from './role-config.mjs';
+import { MODULE_CONFIG_PATH, resolveDefaultMergeAgentWorkerClass } from './role-config.mjs';
 
 // Worker class used for merge-orchestration dispatch. Default is the
 // `merge-agent` stub adapter; operators pin to a real model class
@@ -217,10 +213,9 @@ export async function resolveMergeAgentDispatchHarness({
   fallbackWorkerClasses = mergeAgentFallbackWorkerClasses(env, { logger }),
   resolveHarnessImpl = resolveCloserDispatchHarness,
   deferral = null,
-  codexAccountPolicy = codexWorkerAccountPolicy('roles.merge_agent_worker_class', workerClass, { env }),
 } = {}) {
   const result = await resolveHarness({
-    workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy,
+    workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl,
   });
   if (!deferral) return result;
   const deferralRecord = trackMergeAgentHarnessDeferral({ ...deferral, harness: result, logger });
@@ -228,7 +223,7 @@ export async function resolveMergeAgentDispatchHarness({
 }
 
 async function resolveHarness({
-  workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy,
+  workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl,
 }) {
   let harness;
   try {
@@ -238,7 +233,6 @@ async function resolveHarness({
       hqPath,
       execFileImpl,
       env,
-      codexAccountPolicy,
       probeWithoutFallbacks: true,
       screenSoftGroundedFallbacks: true,
     });
@@ -247,15 +241,14 @@ async function resolveHarness({
     harness = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
   }
   if (harness?.fellBack === true && harness.workerClass) {
-    if (!harness.authPath) logger?.warn?.(
+    logger?.warn?.(
       `[merge-agent] harness fallback: ${harness.from} -> ${harness.to} `
         + `(${harness.provider} ${harness.groundedBy || 'hard'}-grounded, state=${harness.primaryState}); `
         + `returns to ${harness.from} when ${harness.provider} recovers`,
     );
     return { ...harness, deferred: false };
   }
-  if ((harness?.hold && codexAccountPolicy === 'personal-first'
-    && ['hammer', 'codex'].includes(workerClass)) || harness?.groundedBy) {
+  if (harness?.groundedBy) {
     return {
       ...harness,
       workerClass,

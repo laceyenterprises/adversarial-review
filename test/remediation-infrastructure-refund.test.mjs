@@ -158,15 +158,15 @@ test('harness-specific refund selects the configured fallback and preserves revi
     code: 'infrastructure-refund', harnessSpecific: true, workerClass: 'codex',
   } }] } };
   const args = { primary: 'codex', fallbackWorkerClasses: ['claude-code'], job, execFileImpl: null, env: {} };
-  const routing = await resolveRemediationWorkerClassWithFallback({ ...args, codexAccountPolicy: 'pinned' });
+  const routing = await resolveRemediationWorkerClassWithFallback(args);
   assert.equal(routing.workerClass, 'claude-code');
   assert.equal(routing.fellBack, true);
-  const refused = await resolveRemediationWorkerClassWithFallback({ ...args, codexAccountPolicy: 'pinned', reviewerModels: ['claude'] });
+  const refused = await resolveRemediationWorkerClassWithFallback({ ...args, reviewerModels: ['claude'] });
   assert.equal(refused.workerClass, 'codex');
   assert.equal(refused.hold, false);
   assert.equal(refused.fellBack, false);
   assert.equal(refused.skipped[0].reason, 'reviews-next-round:claude');
-  const empty = await resolveRemediationWorkerClassWithFallback({ ...args, codexAccountPolicy: 'pinned', fallbackWorkerClasses: [] });
+  const empty = await resolveRemediationWorkerClassWithFallback({ ...args, fallbackWorkerClasses: [] });
   assert.equal(empty.workerClass, 'codex');
   assert.equal(empty.hold, false);
   assert.equal(empty.fellBack, false);

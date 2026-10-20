@@ -1,8 +1,4 @@
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
-import { codexWorkerLaneFromSnapshot } from './codex-account-routing.mjs';
-// LANEFAILOVER-01: automatic Codex claims use personal-first account evidence
-// and hold on unknown evidence. Pins/non-Codex retain the cross-model fallback
-// contract below, including its job-local evidence and infrastructure repair.
 // Cap-aware remediation worker-class fallback (the remediation-dispatch analogue
 // of the AMA closer HHR harness-fallback in ./ama/harness-fallback.mjs).
 //
@@ -48,7 +44,7 @@ import {
   quotaStatusesFromSnapshot,
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
-import { resolveRemediatorFallback, codexWorkerAccountPolicy } from './role-config.mjs';
+import { resolveRemediatorFallback } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, remediatorQuotaEvidence } from './remediation-quota-evidence.mjs';
 import {
   resolveClaudeRemediationModel,
@@ -172,7 +168,6 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @param {string[]=} args.reviewerModels — models that may review the PR's next round
  *   (nextRoundReviewerModels); a fallback of one of their families is skipped.
  * @param {Object=} args.env
- * @param {'personal-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @param {string=} args.hqPath
  * @param {Function|null=} args.execFileImpl — DI for `hq fleet quota status --json`;
  *   null skips the fleet read so only job-local evidence applies.
@@ -191,7 +186,6 @@ export async function resolveRemediationWorkerClassWithFallback({
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
-  codexAccountPolicy = 'personal-first',
 } = {}) {
   let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
@@ -216,28 +210,6 @@ export async function resolveRemediationWorkerClassWithFallback({
     statuses,
     model: statuses ? modelOf(modelForClass, workerClass) : null,
   });
-
-  const automaticCodex = codexAccountPolicy === 'personal-first' && primaryClass === 'codex';
-  const personalCap = automaticCodex ? capOf('codex') : null;
-  const corporateCap = automaticCodex ? capOf('remediator-codex-corp') : null;
-  const codexAccount = automaticCodex
-    ? codexWorkerLaneFromSnapshot(snapshot, {
-      workerClass: primaryClass, policy: codexAccountPolicy,
-      ...(statuses ? { statuses } : {}), model: modelOf(modelForClass, primaryClass),
-      // Only job-local exhaustion supplements the shared selector. Re-projecting
-      // fleet caps here would turn stale quota into fresh exhaustion evidence.
-      personalExhausted: personalCap.capSource === 'provider-reset-past-hold-window'
-        || personalCap.resetsWithinHoldWindow === true,
-      corporateExhausted: corporateCap.capSource === 'provider-reset-past-hold-window'
-        || corporateCap.resetsWithinHoldWindow === true,
-    }) : null;
-  if (codexAccount?.hold || (codexAccount && codexAccount.workerClass !== primaryClass)) {
-    return { ...base, ...codexAccount,
-      fellBack: codexAccount.workerClass !== primaryClass, from: primaryClass, to: codexAccount.workerClass,
-      ...(codexAccount.hold ? { holdUntil: holdUntilFor(null, nowMs) } : {}),
-    };
-  }
-  if (codexAccount) Object.assign(base, codexAccount);
 
   const accountLane = (name) => snapshot ? selectClaudeAccountLaneFromSnapshot(snapshot, {
     statuses,
@@ -284,7 +256,7 @@ export async function resolveRemediationWorkerClassWithFallback({
       : primaryCap.available ? 'primary-available' : 'primary-not-grounded';
     return {
       ...base,
-      reason: base.reason || reason,
+      reason,
       primaryState: primaryCap.state,
       ...(statuses === null && error ? { error } : {}),
     };
@@ -419,15 +391,8 @@ export async function resolveClaimedRemediatorRouting({
 } = {}) {
   const resolver = resolveImpl
     || ((args) => resolveRemediationWorkerClassWithFallback({ ...args, execFileImpl: null }));
-  let accountPolicy = resolveImpl
-    ? codexWorkerAccountPolicy('roles.remediator', primary, { env, topPath, loaderImpl }) : 'pinned';
-  if (accountPolicy === 'personal-first'
-    && !['codex', 'claude-code', 'clio-agent'].includes(String(job?.builderTag || '').trim().toLowerCase())) {
-    accountPolicy = codexWorkerAccountPolicy('roles.registry.remediator.workerClass', primary, { env, topPath, loaderImpl });
-  }
   const routing = await resolver({
     primary,
-    codexAccountPolicy: accountPolicy,
     fallbackWorkerClasses: remediationWorkerClassFallback(env, { topPath, loaderImpl }),
     job,
     nowMs: Number.isFinite(nowMs) ? nowMs : Date.now(),
@@ -435,7 +400,7 @@ export async function resolveClaimedRemediatorRouting({
     modelForClass: (workerClass) => remediatorModelForClass(workerClass, { job, env }),
     reviewerModels: nextRoundReviewerModels(job, { env, topPath, loaderImpl }),
   });
-  if (routing?.fellBack && !routing.authPath) {
+  if (routing?.fellBack) {
     log.warn?.(
       `[follow-up-remediation] remediation-worker-class cap-fallback: ` +
         `routed=${routing.from} -> ${routing.workerClass} ` +

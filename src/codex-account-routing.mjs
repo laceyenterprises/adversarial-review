@@ -4,25 +4,12 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { harnessCapFromStatuses, quotaStatusesFromSnapshot } from './fleet-quota-status.mjs';
 
-// Accounts share a model family, but never quota or broker evidence. Keep the
-// two policies explicit: reviewers are corporate-first, workers personal-first.
-const REVIEWER_ORDER = [['codex-corp', 'oauth-corp'], ['codex', 'oauth']];
-const WORKER_ORDER = [['codex', 'oauth'], ['codex-corp', 'oauth-corp']];
-
-export function selectCodexReviewerAccount(payload, options = {}) {
-  return selectCodexAccount(payload, REVIEWER_ORDER, options);
-}
-
-export function selectCodexWorkerAccount(payload, options = {}) {
-  return selectCodexAccount(payload, WORKER_ORDER, options);
-}
-
-function selectCodexAccount(payload, order, { model = null,
-  statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false, personalExhausted = false } = {}) {
-  const rows = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
-  for (const [provider, authPath] of order) {
+// Reviewer accounts share a model family, but never quota or broker evidence.
+export function selectCodexReviewerAccount(payload, { model = null,
+  statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false } = {}) {
+  for (const [provider, authPath] of [['codex-corp', 'oauth-corp'], ['codex', 'oauth']]) {
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
-    const row = rows.find(entry => entry?.provider === 'openai'
+    const row = payload?.providerStatuses?.find(entry => entry.provider === 'openai'
       && (entry.authPath || entry.auth_path) === authPath);
     const weekly = payload?.reserveFloors?.[`openai-${authPath}`]?.weeklyMeasurement;
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
@@ -32,7 +19,6 @@ function selectCodexAccount(payload, order, { model = null,
     // exhaustion and an explicitly unavailable broker are independent evidence.
     const fresh = row?.cachedEvidenceStale !== true;
     const exhausted = (provider === 'codex-corp' && corporateExhausted)
-      || (provider === 'codex' && personalExhausted)
       || (fresh && (cap.capped || (measured && weekly.percentRemaining === 0)));
     if (!exhausted && fresh && measured && cap.available
       && ready?.ready === true && ready?.can_serve === true) {
@@ -43,25 +29,6 @@ function selectCodexAccount(payload, order, { model = null,
     }
   }
   return { hold: true, reason: 'no-ready-codex-account' };
-}
-
-// Only unpinned Codex lanes opt into account substitution. Corporate classes
-// already name an account and retain their existing dispatch/cap behavior.
-export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'personal-first', ...options } = {}) {
-  if (policy !== 'personal-first' || !['hammer', 'codex'].includes(workerClass)) return null;
-  const account = selectCodexWorkerAccount(payload, options);
-  if (account.hold) return { ...account, workerClass };
-  return { ...account,
-    workerClass: account.provider === 'codex' ? workerClass
-      : workerClass === 'hammer' ? 'hammer-corp' : 'remediator-codex-corp',
-    reason: account.provider === 'codex' ? 'personal-ready' : 'personal-unavailable-corporate-ready',
-  };
-}
-
-export function logCodexWorkerDispatch(log, workerClass, routing = {}, prefix = 'review-worker') {
-  if (!['hammer', 'hammer-corp', 'codex', 'remediator-codex-corp'].includes(workerClass)) return;
-  const account = workerClass.endsWith('-corp') ? 'corporate' : 'personal';
-  (log?.info || log?.log)?.call(log, `[${prefix}] codex_account=${account} worker_class=${workerClass} reason=${routing?.reason || 'explicit-worker-class-pin'}`);
 }
 
 export function codexReviewerAccountForGrounding(grounding, options = {}) {

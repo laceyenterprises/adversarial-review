@@ -15,8 +15,6 @@ import {
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
-import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
-import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import {
@@ -173,41 +171,6 @@ function flagValue(args, flag) {
   const idx = args.indexOf(flag);
   return idx === -1 ? undefined : args[idx + 1];
 }
-
-for (const account of ['personal', 'corporate', 'pinned-personal']) test(`LANEFAILOVER-01: AMA dispatch uses and logs ${account}`, async t => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'codex-ama-dispatch-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
-  if (account === 'pinned-personal') {
-    env.AGENT_OS_CONFIG_PATH = join(rootDir, 'config.yaml');
-    writeFileSync(env.AGENT_OS_CONFIG_PATH, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class: hammer\n');
-  }
-  const deps = testDeps(); const logs = []; const resolutions = [];
-  const snapshot = codexAccountFixture({ primary: account === 'corporate' ? 'exhausted' : 'ok' });
-  const result = await maybeDispatchAmaCloser({
-    ...findingsRemediationArgs(rootDir, { dispatchContext: {
-      repo: 'sample/project', prUrl: 'https://github.com/sample/project/pull/404', reviewedBy: 'synthetic-reviewer',
-    } }),
-    ...deps,
-    env,
-    resolveCloserDispatchHarnessImpl: args => {
-      resolutions.push(args);
-      return resolveCloserDispatchHarness(args);
-    },
-    execFileImpl: async (command, args, options) => args[0] === 'fleet'
-      ? { stdout: JSON.stringify(snapshot) } : deps.execFileImpl(command, args, options),
-    logger: { ...deps.logger, info: line => logs.push(line) },
-  });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(resolutions.length, 1);
-  assert.equal(resolutions[0].env, env);
-  assert.equal(resolutions[0].codexAccountPolicy, account === 'pinned-personal' ? 'pinned' : 'personal-first');
-  const dispatch = deps.calls.find(call => call.args[0] === 'dispatch');
-  assert.equal(flagValue(dispatch.args, '--worker-class'), account === 'corporate' ? 'hammer-corp' : 'hammer');
-  const choices = logs.filter(line => line.includes('codex_account='));
-  assert.equal(choices.length, 1);
-  assert.match(choices[0], new RegExp(`codex_account=${account === 'pinned-personal' ? 'personal' : account} .*reason=`));
-});
 
 test('LCR: findings-remediation hammer dispatches with --priority normal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-remediation-'));

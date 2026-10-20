@@ -182,18 +182,6 @@ exhausted account. Quota holds can be bypassed only when changing accounts;
 repeated failures on the selected account retain bounded model fallback.
 Review-cycle resets clear attribution.
 
-LANEFAILOVER-01 keeps the reviewer ordering separate from worker ordering.
-Unpinned Codex hammer and remediation dispatches reuse the account evidence
-classifier in personal-first order. Ready personal capacity keeps `hammer` or
-`codex`; confirmed personal exhaustion or broker unavailability permits
-`hammer-corp` or `remediator-codex-corp` only with independently ready corporate
-capacity. Unknown evidence or two unavailable accounts uses the existing
-hold/defer path without spending a worker attempt. Operator class pins retain
-their existing behavior, and fresh dispatches return to personal after recovery.
-This adds no lifecycle state, transition, merge gate or durable store field.
-See the [closure runbook](RUNBOOK-ama-closure.md) for dispatch logs and deployment
-acceptance; the reviewer ledger above remains corporate-first.
-
 The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
 also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
 watcher can adopt or settle the subprocess without relying only on SQLite spawn

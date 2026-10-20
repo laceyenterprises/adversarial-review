@@ -1,5 +1,3 @@
-// Historical cross-harness scenarios retain explicit personal-class pin behavior.
-// Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { afhGroundingSnapshotFromStdout, reviewerModelGrounding, applyAfhReviewerFallback, createAfhReviewerGroundingCache } from '../src/afh-reviewer-fallback.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,7 +67,7 @@ for (const [label, options, suffix] of [
 ]) {
   const execFileImpl = async () => ({ stdout: JSON.stringify(claudeAccountFixture(options)) });
   test(`hammer fallback ${label} uses a hammer twin or holds`, async () => {
-    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned', workerClass: 'hammer', fallbackWorkerClasses: ['hammer-claude'], execFileImpl,
+    const result = await resolveCloserDispatchHarness({ workerClass: 'hammer', fallbackWorkerClasses: ['hammer-claude'], execFileImpl,
       env: {}, modelForWorkerClass: () => null });
     if (suffix === null) assert.equal(result.hold, true);
     else {
@@ -78,7 +76,7 @@ for (const [label, options, suffix] of [
     }
   });
   test(`remediator fallback ${label} uses a remediator twin or holds`, async () => {
-    const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned', primary: 'codex', fallbackWorkerClasses: ['remediator-claude'],
+    const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', fallbackWorkerClasses: ['remediator-claude'],
       reviewerModels: ['codex'], execFileImpl, env: {} });
     if (suffix === null) assert.equal(result.hold, true);
     else assert.equal(result.workerClass, 'remediator-claude' + suffix);
@@ -87,7 +85,7 @@ for (const [label, options, suffix] of [
 
 test('preferred Claude lanes return to corporate on recovery without changing declarations', async () => {
   for (const workerClass of ['hammer-claude', 'hammer-claude-corp']) {
-    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned', workerClass, execFileImpl: async () => ({ stdout: JSON.stringify(claudeAccountFixture()) }),
+    const result = await resolveCloserDispatchHarness({ workerClass, execFileImpl: async () => ({ stdout: JSON.stringify(claudeAccountFixture()) }),
       env: {}, modelForWorkerClass: () => null });
     assert.equal(result.workerClass, 'hammer-claude-corp');
   }

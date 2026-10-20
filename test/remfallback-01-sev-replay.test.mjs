@@ -70,9 +70,6 @@ beforeEach((context) => {
   Object.assign(process.env, {
     // Hermetic role config: the checked-in module config.yaml only.
     AGENT_OS_CONFIG_PATH: '/dev/null',
-    // Keep the historical cross-harness replay under an explicit personal pin.
-    // Unpinned account failover is covered by codex-worker-account-routing.test.
-    AGENT_OS_ROLES_REMEDIATOR: 'codex',
     ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'keychain',
     CLAUDE_CODE_CLI_PATH: '/usr/bin/true',
     CODEX_AUTH_PATH: path.join(codexHome, 'auth.json'),

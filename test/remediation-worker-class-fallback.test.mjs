@@ -1,5 +1,3 @@
-// Historical cross-harness scenarios retain explicit personal-class pin behavior.
-// Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -27,7 +25,7 @@ const CODEX_OK = [
 ];
 
 test('falls back codex -> claude-code when the routed codex harness provider is exhausted', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: fleetStatusStub(CODEX_EXHAUSTED_CLAUDE_OK),
@@ -39,7 +37,7 @@ test('falls back codex -> claude-code when the routed codex harness provider is 
 });
 
 test('keeps the routed codex harness when codex has quota (auto-revert on recovery)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: fleetStatusStub(CODEX_OK),
@@ -50,7 +48,7 @@ test('keeps the routed codex harness when codex has quota (auto-revert on recove
 });
 
 test('never grounds on a soft/unknown signal (does not fall back when codex is only degraded)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: fleetStatusStub([
@@ -63,7 +61,7 @@ test('never grounds on a soft/unknown signal (does not fall back when codex is o
 });
 
 test('no fallback configured -> keeps the primary', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: [],
     execFileImpl: fleetStatusStub(CODEX_EXHAUSTED_CLAUDE_OK),
@@ -74,7 +72,7 @@ test('no fallback configured -> keeps the primary', async () => {
 });
 
 test('fail-open: an unreadable fleet-quota status keeps the primary (never guesses a cap)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: async () => {
@@ -91,7 +89,7 @@ test('fail-open: an unreadable fleet-quota status keeps the primary (never guess
 const HERMETIC_CONFIG = { topPath: '/dev/null' };
 
 test('falls back claude-code -> codex when Claude is grounded and Codex is available', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'claude-code',
     fallbackWorkerClasses: remediationWorkerClassFallback({}, HERMETIC_CONFIG),
     execFileImpl: fleetStatusStub([
@@ -177,7 +175,7 @@ function jobHeldOnCodex({ providerResetAt, requeuedAt = '2026-09-29T01:45:15.389
 }
 
 test('model_only_exhaustion of the routed codex model counts as capped (provider reads unknown)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code', 'codex'],
     nowMs: NOW,
@@ -194,7 +192,7 @@ test('model_only_exhaustion of the routed codex model counts as capped (provider
 for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
   test(`${model} quota fallback matches only the routed model`, async () => {
     for (const state of ['ok', 'exhausted']) {
-      const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+      const result = await resolveRemediationWorkerClassWithFallback({
         primary: 'codex', fallbackWorkerClasses: ['claude-code'], nowMs: NOW,
         modelForClass: (workerClass) => workerClass === 'codex' ? model : null,
         execFileImpl: fleetStatusStub([
@@ -214,7 +212,7 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
 test('the model_only_exhaustion signature caps codex even when the payload carries no models[] rows', async () => {
   const signatureOnly = { ...OPENAI_MODEL_ONLY_EXHAUSTION };
   delete signatureOnly.models;
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -225,7 +223,7 @@ test('the model_only_exhaustion signature caps codex even when the payload carri
 });
 
 test('a provider projected ok still caps codex when its routed model row is exhausted', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -248,7 +246,7 @@ test('a provider projected ok still caps codex when its routed model row is exha
 });
 
 test('another model being exhausted does not cap a routed model whose own row is ok', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -272,7 +270,7 @@ test('another model being exhausted does not cap a routed model whose own row is
 });
 
 test('AFH soft grounding re-routes the remediator (the lane now sees AFH-02)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -292,7 +290,7 @@ test('AFH soft grounding re-routes the remediator (the lane now sees AFH-02)', a
 });
 
 test('a soft-grounded candidate is never the fallback: capped primary with no other class holds', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -309,7 +307,7 @@ test('a soft-grounded candidate is never the fallback: capped primary with no ot
 });
 
 test('job-local evidence: a provider reset 5 days out caps codex even when fleet status is unreadable', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code', 'codex'],
     job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
@@ -326,7 +324,7 @@ test('job-local evidence: a provider reset 5 days out caps codex even when fleet
 });
 
 test('job-local evidence: a good probe after the hold clears it (cap lifted early, codex returns)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
@@ -349,7 +347,7 @@ test('job-local evidence: a good probe after the hold clears it (cap lifted earl
 });
 
 test('job-local evidence: an ok probe from BEFORE the hold does not clear it', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
@@ -364,7 +362,7 @@ test('job-local evidence: an ok probe from BEFORE the hold does not clear it', a
 });
 
 test('job-local evidence: a reset that has passed is no evidence (codex is routed again)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     job: jobHeldOnCodex({ providerResetAt: '2026-09-29T02:30:00.000Z' }),
@@ -384,7 +382,7 @@ test('a candidate with its own job-local cap is skipped', async () => {
     retryMetadata: { code: 'quota-exhausted', harness: 'claude', providerResetAt: '2026-10-01T00:00:00.000Z' },
     worker: { model: 'claude-code' },
   });
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     job,
@@ -397,7 +395,7 @@ test('a candidate with its own job-local cap is skipped', async () => {
 });
 
 test('remediatorFallbackAudit records fallbackFrom and the reason, and nothing when the routed class ran', async () => {
-  const fellBack = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const fellBack = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['claude-code'],
     nowMs: NOW,
@@ -447,7 +445,7 @@ test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses
 const GOOGLE_OK = { provider: 'google', authPath: 'agy', state: 'ok' };
 
 test('a fallback whose model family reviews the next round is skipped (reviewer-selection rule)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['gemini', 'claude-code'],
     reviewerModels: ['gemini', 'codex'],
@@ -464,7 +462,7 @@ test('a fallback whose model family reviews the next round is skipped (reviewer-
 });
 
 test('claude-code is refused as a fallback when claude reviews the PR (codex-built PR)', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'gemini',
     fallbackWorkerClasses: ['claude-code', 'codex'],
     reviewerModels: ['claude'],
@@ -480,7 +478,7 @@ test('claude-code is refused as a fallback when claude reviews the PR (codex-bui
 });
 
 test('with only same-model-as-reviewer fallbacks left, the capped remediator holds instead', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
+  const result = await resolveRemediationWorkerClassWithFallback({
     primary: 'codex',
     fallbackWorkerClasses: ['gemini'],
     reviewerModels: ['gemini'],

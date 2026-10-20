@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -141,7 +142,7 @@ test('createQuotaHoldRevalidator caches hq quota status failures for the TTL win
   });
 
   assert.equal(calls, 2);
-  assert.deepEqual(execOptions.map((options) => options.timeout), [10_000, 10_000]);
+  assert.deepEqual(execOptions.map((options) => options.timeout), [45_000, 45_000]);
   assert.equal(first.available, false);
   assert.equal(first.state, 'error');
   assert.equal(first.error, 'hq quota status unavailable');

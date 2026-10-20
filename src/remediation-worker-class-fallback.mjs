@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 import { codexWorkerLaneFromSnapshot } from './codex-account-routing.mjs';
 // LANEFAILOVER-01: automatic Codex claims use personal-first account evidence
@@ -86,7 +88,6 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
 }
 
 const execFileAsync = promisify(execFileCb);
-const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
 // The fallback chain is declared config (REMFALLBACK-01):
 // `roles.remediator_fallback`, schema-registered in the Node, Python and shell
@@ -151,7 +152,7 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
       env,
       encoding: 'utf8',
       maxBuffer: 5 * 1024 * 1024,
-      timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
     });
     const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
     const snapshot = parseHqFleetQuotaSnapshot(stdout);

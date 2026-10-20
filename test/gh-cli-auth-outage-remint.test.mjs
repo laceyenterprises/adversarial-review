@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // gh-cli-auth-outage-remint.test.mjs — RTOK-01.
 //
 // The watcher authenticates to GitHub with a broker-minted GitHub App

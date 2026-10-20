@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Fleet-wide false-deferral detector, extracted from watcher.mjs (ARC-18).
 //
 // Defense-in-depth alerting for the 2026-05-18 session-ledger DB-path bug class:
@@ -73,7 +74,7 @@ function isFleetWideFalseDeferralLockStale(lockPath, nowMs, staleLockMs) {
 
 async function acquireFleetWideFalseDeferralLock(lockPath, {
   retryMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS,
-  timeoutMs = FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS),
   staleLockMs = FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS,
   nowFn = Date.now,
 } = {}) {

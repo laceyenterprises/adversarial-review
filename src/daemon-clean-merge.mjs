@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -1019,7 +1020,7 @@ export async function runDaemonCleanMergeAttempt({
             'state',
           ],
           env,
-          timeoutMs: 30_000,
+          timeoutMs: loadAwareTimeoutMs(30_000),
           log: logger,
         });
         const protector = JSON.parse(String(stdout || '{}'));
@@ -1060,7 +1061,7 @@ export async function runDaemonCleanMergeAttempt({
       get: async (path, { paginate = false } = {}) => {
         const { stdout } = await execGhWithRetryImpl({ execFileImpl,
           args: ['api', path, ...(paginate ? ['--paginate', '--slurp'] : [])],
-          timeoutMs: 15000, retries: 0, env, signal });
+          timeoutMs: loadAwareTimeoutMs(15000), retries: 0, env, signal });
         return JSON.parse(stdout);
       },
     }),
@@ -1127,7 +1128,7 @@ export async function runDaemonCleanMergeAttempt({
             return execFileImpl(...args);
           },
           args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', filterGitHubBody(body, { repo, reviewerHeadSha: head })],
-          timeoutMs: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+          timeoutMs: loadAwareTimeoutMs(DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS),
         });
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
       } catch (err) {

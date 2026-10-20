@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { updateAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';

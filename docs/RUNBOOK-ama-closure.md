@@ -24,6 +24,21 @@ dispatcher debugging), see
 
 ---
 
+## Load-aware per-call budgets
+
+The service scales GitHub lookups, quota-status reads, lock waits and
+posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
+readers share a 45-second nominal budget. The existing graded CPU
+corroboration curve supplies up to 6x patience under contention; CPU samples
+(including failures) and timeout policy are cached for five seconds.
+
+Set `timeouts.load_aware.enabled: false` in `config.local.yaml` to restore
+nominal budgets, or set `timeouts.load_aware.max_multiplier` (at least 1,
+default 6) to cap the extension. Policy changes are observed within five
+seconds. Posted-review phase budgets, polling/backoff, cache freshness,
+leases, rate-limit windows and reviewer/worker run limits keep their existing
+meaning and duration.
+
 ## Table of contents
 
 1. [Prerequisites](#1-prerequisites)

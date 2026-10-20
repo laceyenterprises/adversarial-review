@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 // ARGUSDRAIN-01 item 3 — which model reviews an Argus job, while codex is out.
 //
 // The `argus-reviewer` worker class allows only OpenAI models, and codex is
@@ -34,7 +36,6 @@ import {
 import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
 
 const execFileAsync = promisify(execFile);
-const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
 export const ARGUS_REVIEWER_MODELS_ENV = 'ADVERSARIAL_ARGUS_REVIEWER_MODELS';
 export const DEFAULT_ARGUS_REVIEWER_MODELS = Object.freeze(['claude', 'gemini', 'codex']);
@@ -110,7 +111,7 @@ export async function readFleetQuotaStatuses({
     env,
     encoding: 'utf8',
     maxBuffer: 5 * 1024 * 1024,
-    timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
   });
   return parseHqFleetQuotaStatus(typeof result === 'string' ? result : result?.stdout);
 }

@@ -19,46 +19,75 @@
  *   multiplier  = clamp(1 + factor * 5, 1, 6)     // 1x idle, 6x at load>=3
  *
  * `loadAwareMultiplier` / `loadAwareTimeoutSeconds(base, {loadAvg1m, cpuCount})`
- * are PURE given their inputs (unit-testable, no clock, no randomness); the
- * argless call form reads `os.loadavg()` / `os.cpus()` at call time.
+ * support synthetic load inputs. CPU samples and config policy are cached for
+ * five seconds; the default call reads current os.loadavg().
  *
  * @module load-aware-timeout
  */
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
+import { loadRoleConfig } from './role-config.mjs';
+
 /** Multiplier floor — never shrink a nominal timeout. */
 export const MIN_MULTIPLIER = 1;
-/** Multiplier ceiling — matches agent-os fleet_pressure default cap (6x). */
 export const MAX_MULTIPLIER = 6;
-/** Absolute clamp so a wild loadavg can never produce an unbounded alarm. */
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
-/** Corroborating CPU-busy threshold required before loadavg can inflate a timeout. */
 export const CPU_BUSY_THRESHOLD_PERCENT = 85;
+const SAMPLE_INTERVAL_MS = 5_000;
+const HOST_CPU_COUNT = os.cpus()?.length || 1;
 
-export function hostCpuBusyPercent() {
-  try {
-    const out = execFileSync('/bin/ps', ['-A', '-o', '%cpu='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 1000,
-    });
-    let total = 0;
-    let seen = false;
-    for (const line of out.split(/\r?\n/)) {
-      const raw = line.trim().replace(',', '.');
-      if (!raw) continue;
-      const value = Number(raw);
-      if (!Number.isFinite(value)) return null;
-      total += value;
-      seen = true;
-    }
-    if (!seen) return null;
-    const cores = os.cpus()?.length || 1;
-    return Math.max(0, Math.min(100, total / cores));
-  } catch {
-    return null;
+// Cache failures too: an unreadable ps must not spawn again on every call.
+export function createCpuBusySampler({
+  execFileSyncImpl = (...args) => execFileSync(...args),
+  nowMs = () => performance.now(),
+  cpuCount = HOST_CPU_COUNT,
+} = {}) {
+  let sampledAt = -Infinity;
+  let cached = null;
+  return function sample() {
+    const now = nowMs();
+    if (now - sampledAt < SAMPLE_INTERVAL_MS) return cached;
+    sampledAt = now;
+    cached = null;
+    try {
+      const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000,
+      });
+      let total = 0;
+      let seen = false;
+      for (const line of out.split(/\r?\n/)) {
+        const raw = line.trim().replace(',', '.');
+        if (!raw) continue;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return null;
+        total += value;
+        seen = true;
+      }
+      if (seen) cached = Math.max(0, Math.min(100, total / cpuCount));
+    } catch { /* No corroboration until the next sample. */ }
+    return cached;
+  };
+}
+
+export const hostCpuBusyPercent = createCpuBusySampler();
+
+// Use the service's config cascade, including config.local.yaml. Refresh at
+// most once per sample interval so timeout sizing has a constant-time hot path.
+let policyCache = null;
+function timeoutPolicy() {
+  const path = process.env.AGENT_OS_CONFIG_PATH;
+  const now = performance.now();
+  if (policyCache && policyCache.path === path && now - policyCache.at < SAMPLE_INTERVAL_MS) {
+    return policyCache.value;
   }
+  const cfg = loadRoleConfig();
+  const value = {
+    enabled: cfg.get('timeouts.load_aware.enabled', true),
+    maxMultiplier: cfg.get('timeouts.load_aware.max_multiplier', MAX_MULTIPLIER),
+  };
+  policyCache = { path, at: now, value };
+  return value;
 }
 
 /**
@@ -66,11 +95,11 @@ export function hostCpuBusyPercent() {
  * @param {number} loadPerCore  1-minute loadavg divided by CPU count.
  * @returns {number}
  */
-export function loadAwareMultiplier(loadPerCore) {
+export function loadAwareMultiplier(loadPerCore, maxMultiplier = MAX_MULTIPLIER) {
   const lpc = Number.isFinite(loadPerCore) ? Math.max(0, loadPerCore) : 0;
   const factor = Math.max(0, (lpc - 1) / 2);
   const multiplier = 1 + factor * 5;
-  return Math.min(MAX_MULTIPLIER, Math.max(MIN_MULTIPLIER, multiplier));
+  return Math.min(Math.max(MIN_MULTIPLIER, maxMultiplier), Math.max(MIN_MULTIPLIER, multiplier));
 }
 
 /**
@@ -85,23 +114,26 @@ export function loadAwareMultiplier(loadPerCore) {
  * @returns {number} Effective timeout in whole seconds, never below the nominal.
  * @throws {Error} when baseSeconds is not a positive finite number.
  */
-export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
+function scaledTimeout(baseValue, opts, maxValue) {
   const {
     loadAvg1m,
     cpuCount,
     cpuBusyPercent,
-    maxSeconds = DEFAULT_MAX_TIMEOUT_SECONDS,
   } = opts;
-  const base = Number(baseSeconds);
+  const base = Number(baseValue);
   if (!Number.isFinite(base) || base <= 0) {
     throw new Error(
-      `load-aware-timeout: baseSeconds must be a positive number, got ${baseSeconds}`,
+      `load-aware-timeout: base timeout must be a positive number, got ${baseValue}`,
     );
   }
+  const policy = opts.enabled !== undefined && opts.maxMultiplier !== undefined
+    ? opts : { ...timeoutPolicy(), ...opts };
+  if (policy.enabled === false) return Math.ceil(base);
   const cores = Number.isFinite(cpuCount) && cpuCount > 0
     ? cpuCount
-    : (os.cpus()?.length || 1);
+    : HOST_CPU_COUNT;
   const load = Number.isFinite(loadAvg1m) ? loadAvg1m : (os.loadavg()?.[0] ?? 0);
+  if (load <= cores) return Math.ceil(base);
   const hasBusyOverride = Object.prototype.hasOwnProperty.call(opts, 'cpuBusyPercent');
   const busy = hasBusyOverride ? cpuBusyPercent : hostCpuBusyPercent();
   const loadPerCore = load / cores;
@@ -124,7 +156,7 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
   // threshold. Both endpoints are unchanged: at or above the threshold the
   // full multiplier still applies, and an unreadable CPU still yields no
   // extension at all.
-  const rawMultiplier = loadAwareMultiplier(loadPerCore);
+  const rawMultiplier = loadAwareMultiplier(loadPerCore, policy.maxMultiplier);
   const corroboration = Number.isFinite(busy)
     ? Math.min(1, Math.max(0, busy / CPU_BUSY_THRESHOLD_PERCENT))
     : 0;
@@ -133,6 +165,16 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
   // Never below the nominal. The max cap limits load inflation, not the
   // caller's explicit nominal timeout.
   const nominal = Math.ceil(base);
-  const cap = Math.max(nominal, maxSeconds);
+  const cap = Math.max(nominal, maxValue);
   return Math.min(cap, Math.max(nominal, effective));
+}
+
+/** Scale seconds, rounded up to whole seconds. Explicit opts support synthetic loads. */
+export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
+  return scaledTimeout(baseSeconds, opts, opts.maxSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS);
+}
+
+/** Scale milliseconds without rounding short per-call budgets to whole seconds. */
+export function loadAwareTimeoutMs(baseMs, opts = {}) {
+  return scaledTimeout(baseMs, opts, opts.maxMs ?? DEFAULT_MAX_TIMEOUT_SECONDS * 1000);
 }

@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
@@ -86,7 +88,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-export const AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 export const AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
 export const AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION = 0.25;
 export const DEFAULT_AFH_GROUNDING_TTL_MS = 60_000;
@@ -404,7 +405,7 @@ export async function readFleetQuotaStatusStdoutWithRetry({
   hqCwd,
   execFileImpl,
   env,
-  timeoutMs,
+  timeoutMs = loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
   retryDelaysMs,
   sleepImpl,
 }) {
@@ -444,7 +445,7 @@ export async function readAfhReviewerGrounding({
   hqPath = null,
   execFileImpl = execFileAsync,
   env = process.env,
-  timeoutMs = AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
   retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   claudeRuntimeProbeImpl = null,
@@ -1005,3 +1006,5 @@ export function describeAfhReviewerFallback(decision) {
       : '')
   );
 }
+
+export { FLEET_QUOTA_STATUS_TIMEOUT_MS as AFH_FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';

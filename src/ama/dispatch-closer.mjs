@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
@@ -699,7 +700,7 @@ async function defaultAmaLivePrProbe({
     'state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest',
   ], {
     env: process.env,
-    timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS),
     maxBuffer: 1024 * 1024,
     ...(signal ? { signal } : {}),
   }, {
@@ -729,7 +730,7 @@ async function defaultAmaLivePrProbe({
         `refs/heads/${headRefName}`,
       ], {
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-        timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS),
         maxBuffer: 1024 * 1024,
         ...(signal ? { signal } : {}),
       }, {
@@ -1122,7 +1123,7 @@ async function cleanupHammerCloserWorker({
         env: process.env,
         cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
-        timeout: 60_000,
+        timeout: loadAwareTimeoutMs(60_000),
         killSignal: 'SIGTERM',
       });
       logger.info?.(JSON.stringify({
@@ -1263,7 +1264,7 @@ async function runGhPrMergeWithTransientRetry({
     try {
       const { stdout, stderr } = await meteredExecFile(execFileImpl, 'gh', args, {
         maxBuffer: 5 * 1024 * 1024,
-        timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS),
       });
       return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
     } catch (err) {
@@ -1310,7 +1311,7 @@ async function fetchMergeCommitShaBestEffort({
         'mergeCommit',
       ], {
         maxBuffer: 1024 * 1024,
-        timeout: 15_000,
+        timeout: loadAwareTimeoutMs(15_000),
       });
       const parsed = JSON.parse(String(stdout || '{}'));
       const oid = parsed?.mergeCommit?.oid;
@@ -1403,7 +1404,7 @@ async function emitWorkerGitMergeSignalBestEffort({
     await execFileImpl(pythonBin, args, {
       env: { ...env, PYTHONPATH: pythonPath },
       maxBuffer: 1024 * 1024,
-      timeout: 15_000,
+      timeout: loadAwareTimeoutMs(15_000),
     });
     return true;
   } catch (err) {
@@ -1581,7 +1582,7 @@ async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal 
   try {
     const { stdout } = await meteredExecFile(execFileAsync, 'gh', [
       'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,autoMergeRequest',
-    ], { env, signal, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    ], { env, signal, encoding: 'utf8', timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS), maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   } catch { return null; }
 }
@@ -1590,7 +1591,7 @@ async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal 
 function readAmaCloserPullRequestState({ repo, prNumber, env }) {
   const result = meteredExecFileSync(spawnSync, 'gh', [
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,autoMergeRequest',
-  ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+  ], { env, encoding: 'utf8', timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS), maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) return null;
   const raw = result.stdout?.trim();
   if (!raw) return null;
@@ -2862,7 +2863,7 @@ const drainStatusWarnings = new Set();
 async function readDispatchDrainStatus({ hqPath, hqRoot, ledgerDbPath, execFileImpl, signal, env }) {
   const args = ['dispatch', 'drain-status', '--no-reap', '--root', hqRoot];
   if (ledgerDbPath) args.push('--db-path', ledgerDbPath);
-  const { stdout } = await execFileImpl(hqPath, args, { encoding: 'utf8', timeout: 10_000, signal, env, cwd: AGENT_OS_ROOT });
+  const { stdout } = await execFileImpl(hqPath, args, { encoding: 'utf8', timeout: loadAwareTimeoutMs(10_000), signal, env, cwd: AGENT_OS_ROOT });
   return JSON.parse(stdout);
 }
 
@@ -3061,13 +3062,13 @@ function isCorruptHolderGitError(error) {
 
 async function inspectHolderForTakeover({ worktreePath, execFileImpl, env, holderRun }) {
   const run = async (cmd, args) => execFileImpl(cmd, args, {
-    env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+    env, maxBuffer: 4 * 1024 * 1024, timeout: loadAwareTimeoutMs(15_000),
   });
   // lsof exits 1 when there are no matching cwd descriptors. Any other
   // failure is ambiguous and must keep the holder intact.
   try {
     const lsof = await (holderRun || run)('lsof', ['-nP', '-t', '-d', 'cwd', '+D', worktreePath], {
-      env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+      env, maxBuffer: 4 * 1024 * 1024, timeout: loadAwareTimeoutMs(15_000),
     });
     if (String(lsof.stdout || '').trim()) return { safe: false, reason: 'live-process-in-holder-cwd' };
   } catch (error) {
@@ -3076,7 +3077,7 @@ async function inspectHolderForTakeover({ worktreePath, execFileImpl, env, holde
     }
   }
   const git = async (...args) => (holderRun || run)('git', ['-C', worktreePath, ...args], {
-    env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000,
+    env, maxBuffer: 4 * 1024 * 1024, timeout: loadAwareTimeoutMs(15_000),
   });
   let branch;
   let status;
@@ -3108,7 +3109,7 @@ async function inspectHolderForTakeover({ worktreePath, execFileImpl, env, holde
 async function salvageHolder({ worktreePath, hqRoot, workerId, execFileImpl, env, holderRun, ownerUser }) {
   const rescueDir = join(hqRoot, 'rescues', 'holder-adopt', `${workerId}-${Date.now()}`);
   mkdirSync(rescueDir, { recursive: true });
-  const options = { env, maxBuffer: 4 * 1024 * 1024, timeout: 60_000 };
+  const options = { env, maxBuffer: 4 * 1024 * 1024, timeout: loadAwareTimeoutMs(60_000) };
   // Bundle preserves committed history; archive preserves the complete working
   // tree, including untracked files and staged changes, before force removal.
   if (ownerUser) await execFileImpl('sudo', ['-A', 'chown', ownerUser, rescueDir], options);
@@ -3276,7 +3277,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
         env: process.env,
         cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
-        timeout: 60_000,
+        timeout: loadAwareTimeoutMs(60_000),
         killSignal: 'SIGTERM',
       });
       lastErr = null;
@@ -3402,7 +3403,7 @@ async function teardownSamePrHammerHolder({
     if (holderMissing) {
       try {
         await execFileImpl('git', ['-C', owningRepo, 'worktree', 'prune'], {
-          env, maxBuffer: 1024 * 1024, timeout: 60_000, killSignal: 'SIGTERM',
+          env, maxBuffer: 1024 * 1024, timeout: loadAwareTimeoutMs(60_000), killSignal: 'SIGTERM',
         });
         attempts.push({ worktreePath, action: 'git-worktree-prune', ok: true,
           recoveredFrom: 'missing-directory' });
@@ -3455,7 +3456,7 @@ async function teardownSamePrHammerHolder({
       ], {
         env,
         maxBuffer: 1024 * 1024,
-        timeout: 60_000,
+        timeout: loadAwareTimeoutMs(60_000),
         killSignal: 'SIGTERM',
       });
       attempts.push({
@@ -3493,7 +3494,7 @@ async function teardownSamePrHammerHolder({
           env,
           cwd: AGENT_OS_ROOT,
           maxBuffer: 1024 * 1024,
-          timeout: 60_000,
+          timeout: loadAwareTimeoutMs(60_000),
           killSignal: 'SIGTERM',
         });
         attempts.push({
@@ -3770,7 +3771,7 @@ async function probeAmaCloserDispatchStatus({
         env: { ...env },
         cwd: AGENT_OS_ROOT,
         maxBuffer: 1024 * 1024,
-        timeout: 5_000,
+        timeout: loadAwareTimeoutMs(5_000),
         ...(signal ? { signal } : {}),
       });
       throwIfAborted(signal);
@@ -4503,7 +4504,7 @@ export async function resolveHamTerminalRemediationEvidence({
   const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath,
     reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env, comments: rollup?.comments,
     get: async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path],
-      timeoutMs: 15000, env, signal })).stdout) }) : null;
+      timeoutMs: loadAwareTimeoutMs(15000), env, signal })).stdout) }) : null;
 
   return {
     hamTerminalRemediation: buildHamTerminalRemediationEvidenceFromGroundTruth({

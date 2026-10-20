@@ -1,3 +1,5 @@
+// Historical cross-harness scenarios retain explicit personal-class pin behavior.
+// Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -100,7 +102,7 @@ test('gemini reviewer reads the google/agy quota provider row', () => {
 
 test('no fallback configured → probe and hold a capped primary', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: [],
     execFileImpl: exec.impl,
@@ -114,7 +116,7 @@ test('no fallback configured → probe and hold a capped primary', async () => {
 
 test('codex grounded (exhausted) + hammer primary → falls back to claude-code', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'ok' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: exec.impl,
@@ -132,7 +134,7 @@ test('codex grounded (exhausted) + hammer primary → falls back to claude-code'
 
 test('fleet quota status runs from the configured Agent OS root', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'ok' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -146,7 +148,7 @@ test('fleet quota status runs from the configured Agent OS root', async () => {
 
 test('codex healthy (ok) → keep primary hammer (auto-revert, no fallback)', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'ok', anthropic: 'ok' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: exec.impl,
@@ -160,7 +162,7 @@ test('codex healthy (ok) → keep primary hammer (auto-revert, no fallback)', as
 test('ambiguous codex state (degraded/unknown/missing) → keep primary (no guess)', async () => {
   for (const state of ['degraded', 'unknown']) {
     const exec = buildFleetExec(fleetQuotaStdout({ openai: state }));
-    const result = await resolveCloserDispatchHarness({
+    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['claude-code'],
       execFileImpl: exec.impl,
@@ -170,7 +172,7 @@ test('ambiguous codex state (degraded/unknown/missing) → keep primary (no gues
   }
   // Missing provider status entirely → also no guess.
   const execMissing = buildFleetExec(fleetQuotaStdout({ anthropic: 'ok' }));
-  const missing = await resolveCloserDispatchHarness({
+  const missing = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: execMissing.impl,
@@ -182,7 +184,7 @@ test('fleet quota status unavailable (exec throws) → fail-open to primary', as
   const impl = async () => {
     throw new Error('hq: command not found');
   };
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: impl,
@@ -194,7 +196,7 @@ test('fleet quota status unavailable (exec throws) → fail-open to primary', as
 
 test('every fallback also grounded → keep primary (doomed but auto-reverting)', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'exhausted' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: exec.impl,
@@ -207,7 +209,7 @@ test('every fallback also grounded → keep primary (doomed but auto-reverting)'
 test('skips a grounded fallback and picks the first healthy one in order', async () => {
   // openai (hammer) exhausted, google (gemini) exhausted, anthropic (claude-code) ok.
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', google: 'exhausted', anthropic: 'ok' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['gemini', 'claude-code'],
     execFileImpl: exec.impl,
@@ -232,7 +234,7 @@ test('AFH-05: soft-grounded codex (hard state unknown) → falls back to hammer-
     },
     anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: false }) },
   }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -259,7 +261,7 @@ test('AFH-05: provider recovered (soft verdict clears, hard not set) → auto-re
     openai: { state: 'ok', afhGrounding: afhGrounding({ grounded: false, signals: 1, kills: 1 }) },
     anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: false }) },
   }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -278,7 +280,7 @@ test('AFH-05: sub-threshold soft signal (a blip) does not ground the primary', a
     },
     anthropic: 'ok',
   }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -296,7 +298,7 @@ test('AFH-05: hard GROUNDED_PROVIDER_STATES path is unchanged (regression)', asy
       openai: { state, afhGrounding: afhGrounding({ grounded: false }) },
       anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: false }) },
     }));
-    const result = await resolveCloserDispatchHarness({
+    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['hammer-claude'],
       execFileImpl: exec.impl,
@@ -311,7 +313,7 @@ test('AFH-05: hard GROUNDED_PROVIDER_STATES path is unchanged (regression)', asy
   // And with NO afhGrounding key at all (a pre-AFH-02 `hq` on the box), the
   // hard path still behaves exactly as it did before this change.
   const legacy = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'ok' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: legacy.impl,
@@ -327,7 +329,7 @@ test('AFH-05: hard AND soft grounded → falls back, labeled hard+soft', async (
     openai: { state: 'exhausted', afhGrounding: afhGrounding({ grounded: true, signals: 5, kills: 5 }) },
     anthropic: 'ok',
   }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -351,7 +353,7 @@ test('AFH-05: unreadable/ambiguous soft verdict → keeps primary (fail-open pre
   ];
   for (const openai of unreadable) {
     const exec = buildFleetExec(fleetQuotaStdout({ openai, anthropic: 'ok' }));
-    const result = await resolveCloserDispatchHarness({
+    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['hammer-claude'],
       execFileImpl: exec.impl,
@@ -370,7 +372,7 @@ test('AFH-05: unreadable/ambiguous soft verdict → keeps primary (fail-open pre
 test('AFH-05: malformed fleet-quota JSON → fail-open to primary, never throws', async () => {
   for (const stdout of ['not json at all', '', '{"providerStatuses": [']) {
     const exec = buildFleetExec(stdout);
-    const result = await resolveCloserDispatchHarness({
+    const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['hammer-claude'],
       execFileImpl: exec.impl,
@@ -388,7 +390,7 @@ test('AFH-05: a soft-grounded primary still respects a hard-grounded fallback', 
     openai: { state: 'unknown', afhGrounding: afhGrounding({ grounded: true, signals: 4, kills: 4 }) },
     anthropic: 'exhausted',
   }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: exec.impl,
@@ -458,7 +460,7 @@ test('the fleet-quota payload is parsed exactly once per resolve, however many c
   };
   let result;
   try {
-    result = await resolveCloserDispatchHarness({
+    result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
       workerClass: 'hammer',
       fallbackWorkerClasses: ['claude-code', 'hammer-claude', 'gemini'],
       execFileImpl: exec.impl,
@@ -493,7 +495,7 @@ test('providerAvailabilityFromStatuses / providerSoftGroundingFromStatuses answe
 
 test('primary provider untracked → never fall back (cannot prove a cap)', async () => {
   const exec = buildFleetExec(fleetQuotaStdout({ openai: 'exhausted' }));
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'some-bespoke-worker',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: exec.impl,
@@ -510,7 +512,7 @@ test('CCX-04: a soft-grounded fallback is skipped for closer and merge-agent', a
     anthropic: { state: 'ok', afhGrounding: afhGrounding({ grounded: true, signals: 4, kills: 4 }) },
   });
   // The closer also holds rather than dispatching a soft-grounded candidate.
-  const closer = await resolveCloserDispatchHarness({
+  const closer = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: buildFleetExec(stdout).impl,
@@ -519,7 +521,7 @@ test('CCX-04: a soft-grounded fallback is skipped for closer and merge-agent', a
   assert.equal(closer.hold, true);
 
   // The merge-agent screens it out: no usable fallback.
-  const screened = await resolveCloserDispatchHarness({
+  const screened = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: buildFleetExec(stdout).impl,
@@ -530,7 +532,7 @@ test('CCX-04: a soft-grounded fallback is skipped for closer and merge-agent', a
   assert.equal(screened.groundedBy, 'hard');
 
   // A soft verdict that is not grounded does not screen the candidate.
-  const clear = await resolveCloserDispatchHarness({
+  const clear = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: buildFleetExec(fleetQuotaStdout({

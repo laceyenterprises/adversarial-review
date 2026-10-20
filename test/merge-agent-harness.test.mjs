@@ -149,6 +149,7 @@ test('a grounded class with no fallback configured is still probed, and defers',
   const harness = await resolveMergeAgentDispatchHarness({
     workerClass: 'hammer',
     fallbackWorkerClasses: [],
+    env: HAMMER_ENV,
     hqPath: '/bin/hq-test',
     execFileImpl: hq.impl,
     logger: { warn() {} },
@@ -161,6 +162,7 @@ test('a grounded class with no fallback configured is still probed, and defers',
   const healthy = await resolveMergeAgentDispatchHarness({
     workerClass: 'hammer',
     fallbackWorkerClasses: [],
+    env: HAMMER_ENV,
     hqPath: '/bin/hq-test',
     execFileImpl: hqStub(fleetQuotaStdout({ openai: 'ok' })).impl,
     logger: { warn() {} },
@@ -232,6 +234,7 @@ test('a grounded deferral is recorded durably, counted, and escalates once after
   const grounded = hqStub(fleetQuotaStdout({ openai: 'exhausted', anthropic: 'suspended' }));
   const resolveAt = (now, hq = grounded) => resolveMergeAgentDispatchHarness({
     workerClass: 'hammer',
+    env: HAMMER_ENV,
     fallbackWorkerClasses: ['hammer-claude'],
     hqPath: '/bin/hq-test',
     execFileImpl: hq.impl,

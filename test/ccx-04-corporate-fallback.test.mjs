@@ -1,3 +1,5 @@
+// Historical cross-harness scenarios retain explicit personal-class pin behavior.
+// Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -81,10 +83,10 @@ for (const [label, primary, extra] of [
 ]) {
   test(`CCX-04 ${label}: each lane selects its corporate account before Claude`, async () => {
     const statuses = rows(primary, 'ok', extra);
-    const hammer = await resolveCloserDispatchHarness({ workerClass: 'hammer',
+    const hammer = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned', workerClass: 'hammer',
       fallbackWorkerClasses: ['hammer-corp', 'hammer-claude'], execFileImpl: probe(statuses), env: {} });
     assert.equal(hammer.workerClass, 'hammer-corp');
-    const remediator = await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+    const remediator = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned', primary: 'codex',
       fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'], reviewerModels: ['codex'], execFileImpl: probe(statuses), env: {} });
     assert.equal(remediator.workerClass, 'remediator-codex-corp');
     const review = reviewer(statuses);
@@ -96,16 +98,16 @@ for (const [label, primary, extra] of [
 
 test('CCX-04 both accounts capped: declared Claude fallbacks, no capped spawn', async () => {
   const statuses = rows('exhausted', 'exhausted');
-  assert.equal((await resolveCloserDispatchHarness({ workerClass: 'hammer',
+  assert.equal((await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned', workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-corp', 'hammer-claude'], execFileImpl: probe(statuses) })).workerClass, 'hammer-claude');
-  assert.equal((await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+  assert.equal((await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned', primary: 'codex',
     fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'], execFileImpl: probe(statuses) })).workerClass, 'remediator-claude');
   assert.equal(reviewer(statuses).quotaBlocked, true, 'Claude cannot review this Claude build');
   statuses[2].state = 'exhausted';
   assert.equal(reviewer(statuses).quotaBlocked, true);
-  assert.equal((await resolveCloserDispatchHarness({ workerClass: 'hammer',
+  assert.equal((await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned', workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-corp', 'hammer-claude'], execFileImpl: probe(statuses) })).hold, true);
-  assert.equal((await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+  assert.equal((await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned', primary: 'codex',
     fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'], execFileImpl: probe(statuses) })).hold, true);
 });
 

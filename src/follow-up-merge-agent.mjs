@@ -1,4 +1,5 @@
 import { observeSynchronousChild } from './watcher-latency.mjs';
+import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
@@ -2655,6 +2656,7 @@ async function dispatchMergeAgentForPR({
   });
   if (harness.deferred) return { decision: 'dispatch-deferred', reason: harness.reason, workerClass: harness.workerClass, harness };
   const mergeAgentWorkerClass = harness.workerClass;
+  logCodexWorkerDispatch(logger, mergeAgentWorkerClass, harness, 'merge-agent');
   // AOM-04: the orchestration switch is a deliberate no-op for merge-class
   // dispatch. Native and agentos both stay on `hq dispatch` because no bare
   // merge orchestration exists to fall back to.

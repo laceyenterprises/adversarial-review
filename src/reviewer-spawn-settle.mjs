@@ -733,7 +733,8 @@ async function spawnReviewerOnceWithAccount({
     + (normalizeReviewerModel(reviewerModel) === 'claude'
       ? ` claude_account=${claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate' : 'primary'}`
       : normalizeReviewerModel(reviewerModel) === 'codex'
-        ? ` codex_account=${codexBrokerProvider === 'codex-corp' ? 'corporate' : 'primary'}` : ''));
+        ? ` codex_account=${codexBrokerProvider === 'codex-corp' ? 'corporate' : 'personal'}`
+          + ` reason=${codexBrokerProvider === 'codex-corp' ? 'corporate-first-account-ready' : 'corporate-unavailable-personal-ready'}` : ''));
 
   let quotaDecision;
   const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';

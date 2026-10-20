@@ -9,6 +9,8 @@ import path from 'node:path';
 
 import {
   AMA_HAMMER_BACKGROUND_REASON,
+  amaHammerBackgroundProgress,
+  DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS,
   amaHammerBackgroundQueue,
   amaHammerBackgroundKey,
   createAmaHammerBackgroundQueue,
@@ -71,6 +73,43 @@ function deferred() {
   });
   return { promise, resolve, reject };
 }
+
+test('HAMCLOSEWAIT-02 queue credits actual start, not submission or repeated observations', async () => {
+  let clock = 1000;
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1, nowMs: () => clock });
+  const first = deferred(), second = deferred();
+  queue.submit({ key: 'example/repo#1@a', run: () => first.promise });
+  const queued = queue.submit({ key: 'example/repo#2@b', timeoutMs: 240_000, run: () => second.promise });
+  assert.deepEqual(amaHammerBackgroundProgress(queued, clock), {});
+  assert.deepEqual(amaHammerBackgroundProgress(queue.get(queued.key), clock), {});
+  clock = 10_000;
+  first.resolve({ dispatched: false });
+  await new Promise(resolve => setImmediate(resolve));
+  const progress = amaHammerBackgroundProgress(queue.get(queued.key), clock);
+  assert.equal(progress.closerProgressAt, new Date(clock).toISOString());
+  assert.equal(progress.closerLaunchBoundMs, 240_000);
+  clock += 200_000;
+  assert.deepEqual(amaHammerBackgroundProgress(queue.get(queued.key), clock), progress);
+  second.resolve({ dispatched: true });
+  await queue.drain();
+  assert.equal(queue.get(queued.key).state, 'settled');
+  assert.equal(queue.takeSettled(queued.key).result.closerProgressAt, progress.closerProgressAt);
+  assert.equal(queue.get(queued.key), null);
+});
+
+test('HAMCLOSEWAIT-02 canceled and future-dated background entries cannot grant launch credit', async () => {
+  const queue = createAmaHammerBackgroundQueue({ nowMs: () => 1000 });
+  const gate = deferred(), key = 'example/repo#1@a';
+  const submitted = queue.submit({ key, run: () => gate.promise });
+  assert.equal(submitted.boundMs, DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS);
+  assert.deepEqual(amaHammerBackgroundProgress(submitted, 999), {});
+  queue.abort(key);
+  assert.equal(queue.get(key), null);
+  assert.deepEqual(amaHammerBackgroundProgress(queue.submit({ key, run: () => gate.promise }), 1000), {});
+  gate.resolve({ dispatched: true });
+  await queue.drain();
+  assert.equal(queue.takeSettled(key), null);
+});
 
 test('dispatch mode defaults to inline when the key is unset', () => {
   assert.equal(resolveAmaHammerDispatchMode({ cfg: cfgReturning(undefined) }), 'inline');

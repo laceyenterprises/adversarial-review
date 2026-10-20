@@ -80,6 +80,20 @@ function baseArgs(overrides = {}) {
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+for (const outcome of ['ama-pending', 'await-operator']) {
+  for (const reason of ['ama-closer-dispatch-backgrounded', 'in-flight:synthetic-closer',
+    'ama-closer-dispatch-overrun: elapsed_ms=900001 bound_ms=900000']) {
+    test(`HAMCLOSEWAIT-02 ${outcome} ${reason} logs that the closer is launching`, async () => {
+      const { args, logs } = baseArgs({ repoPath: 'example/repo',
+        resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome, amaClosureResult: { reason } }),
+      });
+      await handlePostedReviewRow(args);
+      assert.match(logs.at(-1), /closer is launching/);
+      assert.doesNotMatch(logs.join('\n'), /safety hold requires operator action/);
+    });
+  }
+}
+
 test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', () => {
   const env = {
     ADVERSARIAL_WATCHER_POSTED_REVIEW_PHASE_BUDGET_MS: '330000',
@@ -1203,6 +1217,7 @@ test('handlePostedReviewRow: await-operator returns the AMA closure result', asy
   assert.equal(result.outcome, 'await-operator');
   assert.equal(result.amaClosureResult, amaClosureResult);
   assert.match(logs.at(-1), /not-eligible:blocking-findings-present/);
+  assert.match(logs.at(-1), /safety hold requires operator action/);
 });
 
 test('handlePostedReviewRow: terminal PR result returns AMA closure details', async () => {

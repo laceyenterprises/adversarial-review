@@ -41,4 +41,13 @@ An unlink failure during queued cancellation does not retain the queue slot or
 prevent a newer head from being submitted. Its durable record remains available
 for guarded recovery until replacement or successful cleanup.
 
+HAMCLOSEWAIT-02 keeps actual execution start and the existing dispatch timeout
+(15-minute fallback) in the process queue. The read-only `get(key)` reports
+running/queued evidence or the presence of an unconsumed settled outcome.
+Only running, uncancelled work credits the final-round closure wait; queued
+submission time in this durable intent is not launch progress. Successful
+outcomes retain actual start as `closerProgressAt`; refusals supply no progress.
+A process restart loses running evidence and rebuilds work through normal
+admission. No durable fields or lifecycle states change.
+
 This store authorizes a prompt retry only. It cannot authorize a launch or merge.

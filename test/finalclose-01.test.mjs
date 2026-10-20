@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
@@ -9,6 +10,7 @@ import { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } fro
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { createAmaHammerBackgroundQueue, DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS } from '../src/ama-hammer-background-dispatch.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
@@ -102,6 +104,172 @@ function finalRound(t) {
     remediationPlan: { currentRound: 1, maxRounds: 2 }, remediationWorker: { state: 'completed' } }));
   return rootDir;
 }
+
+async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, timeoutMs } = {}) {
+  const rootDir = finalRound(t), pages = [], waits = [];
+  let clock = Date.parse(started) + 40 * 60_000;
+  t.mock.timers.enable({ apis: ['Date'], now: clock });
+  const launchAt = clock;
+  const queue = createAmaHammerBackgroundQueue({ nowMs: () => clock });
+  let finish, calls = 0;
+  const pending = new Promise(resolve => { finish = resolve; });
+  t.after(async () => { finish({ dispatched: false, reason: 'fixture-cleanup' }); await queue.drain(); });
+  const identity = { rootDir, repo, prNumber, headSha };
+  await observeClosureWait({ ...identity, waitClass: 'final-round', startedAt: Date.parse(started),
+    now: Date.parse(started), env: {}, reason: 'dispatch-pending', pageImpl: async text => pages.push(text) });
+  const args = { rootDir, repoPath: repo, prNumber, currentRevisionRef: headSha, labelNames: [],
+    now: () => clock, env: {}, operationTimeoutMs: dispatchOnly ? 10 : 1000,
+    reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+      reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+    candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+      mergeable: dispatchOnly ? 'UNKNOWN' : 'MERGEABLE',
+      statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, dispatchTimeoutMs: timeoutMs }) }),
+    resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+    fetchPullRequestMergeabilityImpl: () => new Promise(() => {}),
+    fetchLatestHeadReviewBodiesImpl: async () => [body],
+    fetchCurrentPrStateImpl: async () => ({ state: 'OPEN', headSha, isDraft: false, mergeable: 'MERGEABLE' }),
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+    probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: false }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible',
+      reasons: ['non-blocking-findings-present'] }),
+    maybeDispatchAmaCloserImpl: async () => {
+      calls++;
+      if (lease) acquireAmaCloserLease({ ...identity, watcherPid: process.pid, now: new Date(clock).toISOString() });
+      return pending;
+    },
+    observeClosureWaitImpl: async args => {
+      const wait = await observeClosureWait({ ...args, now: clock, env: {}, pageImpl: async text => pages.push(text) });
+      waits.push(wait);
+      return wait;
+    },
+    logger: { log() {}, warn() {} },
+  };
+  return { args, identity, queue, pages, waits, launchAt, finish, calls: () => calls,
+    advance: ms => { clock = launchAt + ms; t.mock.timers.setTime(clock); } };
+}
+
+for (const dispatchOnly of [false, true]) {
+  test(`HAMCLOSEWAIT-02 200-second background launch dispatches without paging, dispatch-only=${dispatchOnly}`, async t => {
+    const f = await backgroundFinalRound(t, { dispatchOnly });
+    const first = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(first.closerProgressAt, new Date(f.launchAt).toISOString());
+    f.advance(180_000);
+    const running = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(running.closerProgressAt, first.closerProgressAt);
+    assert.equal(running.boundedWait.exhausted, false);
+    f.advance(200_000);
+    f.finish({ dispatched: true, reason: 'dispatched' });
+    await f.queue.drain();
+    const settled = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(settled.dispatched, true);
+    assert.equal(settled.closerProgressAt, first.closerProgressAt);
+    assert.equal(f.waits.at(-1).startedAt, f.launchAt, 'settlement keeps the fixed launch clock');
+    assert.equal(f.calls(), 1);
+    assert.deepEqual(f.pages, []);
+  });
+
+  test(`HAMCLOSEWAIT-02 undispatched settlement restores original wait and reasons, dispatch-only=${dispatchOnly}`, async t => {
+    const f = await backgroundFinalRound(t, { dispatchOnly, lease: !dispatchOnly });
+    if (!dispatchOnly) f.args.runDaemonCleanMergeAttemptImpl = async () => ({
+      disposition: 'not-taken', reason: 'not-eligible', reasons: ['pending-required-checks'], ciMergePathPending: true,
+    });
+    await maybeDispatchAmaClosureFor(f.args);
+    f.advance(200_000);
+    f.finish({ dispatched: false, reason: 'not-eligible', reasons: ['ci-not-green'] });
+    await f.queue.drain();
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.closerProgressAt, undefined);
+    assert.equal(f.waits.at(-1).startedAt, Date.parse(started));
+    assert.equal(f.pages.length, 1);
+    assert.match(f.pages[0], /ci-not-green/);
+    assert.doesNotMatch(f.pages[0], /dispatch-backgrounded|in-flight/);
+    assert.equal(f.calls(), 1);
+  });
+}
+
+for (const timeoutMs of [240_000, undefined]) {
+  test(`HAMCLOSEWAIT-02 background dispatch pages at its own bound ${timeoutMs ?? 'fallback'}`, async t => {
+    const f = await backgroundFinalRound(t, { timeoutMs });
+    const bound = timeoutMs ?? DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS;
+    await maybeDispatchAmaClosureFor(f.args);
+    f.advance(bound - 1);
+    assert.equal((await maybeDispatchAmaClosureFor(f.args)).boundedWait.exhausted, false);
+    assert.deepEqual(f.pages, []);
+    f.advance(bound + 1);
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.boundedWait.exhausted, true);
+    assert.match(result.reason, /ama-closer-dispatch-overrun/);
+    assert.equal(f.pages.length, 1);
+    assert.match(f.pages[0], new RegExp(`elapsed_ms=${bound + 1} bound_ms=${bound}`));
+    f.advance(bound + 30_000);
+    await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(f.pages.length, 1, 'overruns retain the existing page receipt');
+  });
+}
+
+test('HAMCLOSEWAIT-02 pending lease held by the running background dispatch gets launch credit', async t => {
+  const f = await backgroundFinalRound(t, { lease: true });
+  await maybeDispatchAmaClosureFor(f.args);
+  f.advance(180_000);
+  const before = f.waits.length;
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.match(result.reason, /^in-flight:/);
+  assert.equal(result.closerProgressAt, new Date(f.launchAt).toISOString());
+  assert.equal(f.waits.length, before + 2, 'inner and outer lease observations both apply launch credit');
+  assert.equal(result.boundedWait.exhausted, false);
+  assert.deepEqual(f.pages, []);
+  f.advance(DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS + 1);
+  assert.match((await maybeDispatchAmaClosureFor(f.args)).reason, /ama-closer-dispatch-overrun/);
+  assert.equal(f.pages.length, 1);
+});
+
+test('HAMCLOSEWAIT-02 queued work that never starts keeps the original exhaustion page', async t => {
+  const f = await backgroundFinalRound(t);
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  for (let index = 0; index < 3; index++) f.queue.submit({ key: `example/repo#${index}@queued`, run: () => pending });
+  try {
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.backgroundDispatch.state, 'queued');
+    assert.equal(result.closerProgressAt, undefined);
+    assert.equal(f.calls(), 0);
+    assert.equal(f.pages.length, 1);
+    assert.match(f.pages[0], /ama-closer-dispatch-backgrounded/);
+    assert.equal(f.waits.at(-1).startedAt, Date.parse(started));
+  } finally {
+    release({ dispatched: false });
+    f.finish({ dispatched: false });
+    await f.queue.drain();
+  }
+});
+
+test('HAMCLOSEWAIT-02 a foreign-host pending lease with the same PID gets no background launch credit', async t => {
+  const f = await backgroundFinalRound(t, { lease: true });
+  await maybeDispatchAmaClosureFor(f.args);
+  deleteAmaCloserLease(f.identity.rootDir, { repo, prNumber, headSha });
+  acquireAmaCloserLease({ ...f.identity, watcherPid: process.pid, host: 'synthetic-remote',
+    now: new Date(f.launchAt).toISOString() });
+  f.advance(180_000);
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.match(result.reason, /^in-flight:/);
+  assert.equal(result.closerProgressAt, undefined);
+  assert.equal(f.pages.length, 1);
+  assert.match(f.pages[0], /in-flight:/);
+});
+
+test('HAMCLOSEWAIT-02 immediate background retries still page with the settled blocker', async t => {
+  const f = await backgroundFinalRound(t);
+  await maybeDispatchAmaClosureFor(f.args);
+  f.advance(200_000);
+  f.finish({ dispatched: false, reason: 'operator-label-classification-pending' });
+  await f.queue.drain();
+  await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(f.pages.length, 1);
+  assert.match(f.pages[0], /operator-label-classification-pending/);
+  assert.doesNotMatch(f.pages[0], /dispatch-backgrounded/);
+});
 
 const minute = 60_000;
 for (const [reason, age, expectedPages] of [

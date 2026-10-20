@@ -8,6 +8,7 @@ import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-r
 import { decideClosureOwner } from './ama/closure-owner.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
@@ -92,6 +93,7 @@ import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
+  amaHammerBackgroundProgress,
   amaHammerBackgroundKey,
   amaHammerBackgroundQueue,
   resolveAmaHammerDispatchMode,
@@ -888,14 +890,19 @@ export async function maybeDispatchAmaClosureFor({
   if (finalRoundSink.value && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
     && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
     try {
+      const observationTime = options.now ? options.now() : Date.now();
+      if (result?.closerLaunchBoundMs) result = { ...result, ...amaHammerBackgroundProgress({
+        state: 'running', startedAtMs: Date.parse(result.closerProgressAt), boundMs: result.closerLaunchBoundMs,
+      }, observationTime) };
       const launchAt = Date.parse(result?.closerProgressAt || '');
-      await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
-        ...(Number.isFinite(launchAt) ? { startedAt: Math.max(launchAt,
-          Number.isFinite(finalRoundSink.value.startedAt) ? finalRoundSink.value.startedAt : launchAt) } : {}),
+      const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
+        ...closureWaitProgress(result, finalRoundSink.value.startedAt),
         reason: result?.reasons?.join(', ') || result?.reason || 'closure-pending',
-        progress: result?.dispatched === true, now: options.now ? options.now() : Date.now(),
+        progress: result?.dispatched === true && !Number.isFinite(launchAt), now: observationTime,
         env: options.env || process.env, waitClass: 'final-round',
         ...(result?.hammerStop?.paged ? { immediate: true, pageImpl: async () => {} } : {}) });
+      if (result?.closerLaunchBoundMs) result = { ...result, boundedWait, recoveryWait: true,
+        ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
     } catch (error) { options.logger?.warn?.(`[watcher] final-round wait observation failed: ${error.message}`); }
   }
   if (result && closureOwnerSink.value) result = { ...result,
@@ -919,6 +926,13 @@ export async function maybeDispatchAmaClosureFor({
     && !result.closerAuthoredStale
     ? { ...result, closerAuthoredStale: closerAuthoredStaleSink.value }
     : result;
+}
+
+function closureWaitProgress(result, startedAt) {
+  const launchAt = Date.parse(result?.closerProgressAt || '');
+  if (!Number.isFinite(launchAt)) return {};
+  if (result.closerLaunchBoundMs) return { launchWait: { startedAt: launchAt, boundMs: result.closerLaunchBoundMs } };
+  return { startedAt: Math.max(launchAt, Number.isFinite(startedAt) ? startedAt : launchAt) };
 }
 
 async function dispatchAmaClosureFor({
@@ -1221,7 +1235,8 @@ async function dispatchAmaClosureFor({
         if (!settled.ok) throw settled.error;
         result = settled.result;
       } else {
-        queue.submit({ key, pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: finalHead },
+        const submission = queue.submit({ key, timeoutMs: cfg.dispatchTimeoutMs,
+          pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: finalHead },
           run: async signal => {
             let live;
             for (let attempt = 0; ; attempt++) {
@@ -1238,7 +1253,8 @@ async function dispatchAmaClosureFor({
             // Keep the observed label gates; the closer and hammer refresh them before execution.
             return run(signal, true);
           } });
-        result = { dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON };
+        result = { dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON,
+          ...amaHammerBackgroundProgress(submission, now()) };
       }
     } else result = await run(signal);
     return withAmaDispatchMetadata({ ...result, skipMergeAgent: true }, { amaEnabled: true });
@@ -1767,23 +1783,31 @@ async function dispatchAmaClosureFor({
   if (closureOwner.owner === 'wait' && handoffLease && ['pending', 'dispatched'].includes(handoffLease.status)
     && !(labelNames || []).some(label =>
     [...OPERATOR_HOLD_LABELS, 'duplicate-family-hold', 'adversarial-merge-blocked'].includes(label))) {
+    const ownLease = handoffLease.watcherPid === process.pid
+      && (!handoffLease.holderHost || handoffLease.holderHost === hostname());
     const flight = handoffLease && ['pending', 'dispatched'].includes(handoffLease.status);
     const ownership = flight ? await probeClosureOwnershipImpl({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: 5000, logger }) : null;
-    if (!flight || ownership?.owned !== false || ownership?.uncertain === true) {
-      // A confirmed running closer gets its own bounded window. Pending or
-      // uncertain ownership keeps the original stall clock; polling is no heartbeat.
-      const closerProgressAt = handoffLease.status === 'dispatched'
+    const background = resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background'
+      ? amaHammerBackgroundQueueImpl({ maxConcurrent: cfg.amaCloserMaxConcurrentLaunches }).get?.(
+        amaHammerBackgroundKey({ repo: repoPath, prNumber, headSha: currentPrHeadSha })) : null;
+    const launchProgress = ownLease ? amaHammerBackgroundProgress(background, now()) : {};
+    // Apply the actual outcome below instead of hiding a refusal behind the
+    // pending lease left by that completed dispatch.
+    if (!(ownLease && background?.state === 'settled')
+      && (launchProgress.closerProgressAt || !flight || ownership?.owned !== false || ownership?.uncertain === true)) {
+      // A confirmed closer or this process's running dispatch gets a fixed
+      // progress window. Other pending/uncertain ownership keeps its stall clock.
+      const closerProgressAt = launchProgress.closerProgressAt || (handoffLease.status === 'dispatched'
         && ownership?.owned === true && ownership?.uncertain !== true
-        ? handoffLease.updatedAt || handoffLease.acquiredAt || null : null;
-      const progressAt = Date.parse(closerProgressAt || '');
+        ? handoffLease.updatedAt || handoffLease.acquiredAt || null : null);
+      const reason = launchProgress.reason || closureOwner.reason;
       const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
-        headSha: currentPrHeadSha, reason: closureOwner.reason, env,
-        ...(finalRoundSink?.value && Number.isFinite(progressAt)
-          ? { startedAt: Math.max(progressAt, Number.isFinite(finalRoundSink.value.startedAt)
-            ? finalRoundSink.value.startedAt : progressAt) } : {}) });
+        headSha: currentPrHeadSha, reason, env,
+        ...(finalRoundSink?.value
+          ? closureWaitProgress({ ...launchProgress, closerProgressAt }, finalRoundSink.value.startedAt) : {}) });
       return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-        reason: closureOwner.reason, retryAfterMs: boundedWait.retryAfterMs,
+        ...launchProgress, reason, retryAfterMs: boundedWait.retryAfterMs,
         ...(closerProgressAt ? { closerProgressAt } : {}),
         ...(boundedWait.exhausted ? { needsOperator: true } : {}), boundedWait }, { amaEnabled: true });
     }
@@ -2598,6 +2622,11 @@ async function dispatchAmaClosureFor({
     // this pass instead of spending a whole pass consuming the wait.
     if (backgroundSettled?.ok && ['operator-label-classification-pending',
       'background-pr-state-unavailable', 'deferred-by-drain'].includes(backgroundSettled.result?.reason)) {
+      // Preserve the completed attempt's wait debt before starting its retry.
+      // A new background submission must not hide the settled blocker.
+      if (finalRoundSink?.value) await observeWait({ rootDir, repo: repoPath, prNumber,
+        headSha: dispatchContext.targetRemediationSha,
+        reason: backgroundSettled.result.reasons?.join(', ') || backgroundSettled.result.reason, env });
       backgroundSettled = null;
     }
     // A scoped request must observe the closer's gates before taking ownership.
@@ -2608,6 +2637,7 @@ async function dispatchAmaClosureFor({
       let mergeabilityElapsedMs = 0;
       const submission = backgroundQueue.submit({
         key: backgroundKey,
+        timeoutMs: cfg.dispatchTimeoutMs,
         pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: dispatchContext.targetRemediationSha },
         // Detached from this step's deadline on purpose: the whole point is that
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
@@ -2703,6 +2733,7 @@ async function dispatchAmaClosureFor({
           dispatched: false,
           skipMergeAgent: true,
           reason: AMA_HAMMER_BACKGROUND_REASON,
+          ...amaHammerBackgroundProgress(submission, now()),
           backgroundDispatch: { key: backgroundKey, state: submission.state },
           ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
         },
@@ -2821,7 +2852,9 @@ async function dispatchAmaClosureFor({
   if (!result?.dispatched && !result?.needsOperator && !result?.boundedWait
     && (isDaemonNotTakenTransientRead(daemonCleanMerge) || daemonCleanMerge?.ciMergePathPending === true)) {
     const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
-      headSha: currentPrHeadSha, reason: daemonCleanMerge.reasons?.join(',') || 'pending-required-checks', env });
+      headSha: currentPrHeadSha, reason: backgroundSettled
+        ? result?.reasons?.join(', ') || result?.reason || 'closure-pending'
+        : daemonCleanMerge.reasons?.join(',') || 'pending-required-checks', env });
     result = { ...result, recoveryWait: true, boundedWait, retryAfterMs: boundedWait.retryAfterMs,
       ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
   }

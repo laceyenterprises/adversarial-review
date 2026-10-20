@@ -677,7 +677,7 @@
       "waitPrimaryKey": ["head", "class"],
       "waitClasses": ["primary-change", "bounded-wait", "final-round"],
       "finalRoundReceiptScope": "per PR across heads; independent of primary-change",
-      "waitProgress": "launch/head progress restarts the deadline before stall evaluation; retained running/starting launch or confirmed dispatched lease timestamps advance existing final-round rows only when no later than observation time; retained succeeded-awaiting-audit-or-merged-signal holds supply no launch progress",
+      "waitProgress": "launch/head progress restarts the deadline before stall evaluation; retained running/starting launch or confirmed dispatched lease timestamps advance existing final-round rows only when no later than observation time; retained succeeded-awaiting-audit-or-merged-signal holds supply no launch progress; running background dispatch uses ephemeral launchWait from actual start for its dispatch timeout (15-minute fallback), preserving original debt on refusal and paging explicitly on overrun",
       "legacyWaitMigration": "none; one-time deadline and page-reservation reset"
     },
     {

@@ -20,6 +20,7 @@ import {
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
+import { isAmaCloserLaunching } from './ama-hammer-background-dispatch.mjs';
 import { normalizeLabelNames } from './review-cycle-cap-actions.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
 import {
@@ -154,6 +155,7 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       logger.log(
         `[watcher] reviewer-timeout exhaustion awaiting AMA hammer for ${repoPath}#${prNumber}: ` +
         `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+        (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
         `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
         `workerClass=${amaClosureResult.workerClass || 'unknown'}`
       );
@@ -170,8 +172,10 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         : amaClosureResult?.reason || 'unknown';
       logger.log(
         `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
-        `AMA enabled but not eligible (reasons: ${reasonsHint}); safety hold requires operator action ` +
-        '(inspect and resolve the named safety hold under its existing approval policy)'
+        `AMA enabled but not eligible (reasons: ${reasonsHint}); ` +
+        (isAmaCloserLaunching(amaClosureResult)
+          ? 'closer is launching; awaiting dispatch outcome'
+          : 'safety hold requires operator action (inspect and resolve the named safety hold under its existing approval policy)')
       );
       return { handled: true, dispatchJob, amaClosureResult };
     }

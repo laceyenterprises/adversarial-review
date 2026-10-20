@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "id_pattern": "[a-z][a-z0-9_-]{0,63}",
+  "model_pattern": "[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}",
+  "families": [
+    "codex",
+    "claude",
+    "gemini"
+  ],
+  "account_fields": [
+    "family",
+    "broker_provider",
+    "holder_user",
+    "allowed_models",
+    "concurrency"
+  ],
+  "required_fields": [
+    "family",
+    "allowed_models",
+    "concurrency"
+  ],
+  "max_concurrency": 64,
+  "max_models": 128,
+  "max_pool_accounts": 64,
+  "broker_families": {
+    "codex": "codex",
+    "codex-corp": "codex",
+    "claude-code": "claude",
+    "claude-code-corp": "claude"
+  },
+  "role_families": {
+    "codex": "codex",
+    "codex-reviewer": "codex",
+    "hammer": "codex",
+    "remediator-codex": "codex",
+    "claude-code": "claude",
+    "claude-reviewer": "claude",
+    "hammer-claude": "claude",
+    "remediator-claude": "claude",
+    "gemini-reviewer": "gemini"
+  }
+}

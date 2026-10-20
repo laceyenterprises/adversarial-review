@@ -1327,3 +1327,21 @@ stateDiagram-v2
 ```
 
 <!-- smv:diagrams:end -->
+
+The strict configuration loader accepts inert ITP-01 OAuth declarations under
+`oauth.token_accounts` and `oauth.identity_token_pools`, both empty by default.
+Descriptors contain family, allowed model IDs, positive bounded concurrency
+(1–64), and exactly one existing broker-provider or agy `holder_user` binding;
+agy holder concurrency stays 1. Duplicate bindings, unknown account references,
+unknown fields and cross-family pools refuse. Each role retains its declared
+account order; hammer/Codex remediators use personal-first declarations and
+other in-scope Codex/Claude roles corporate-first. No runtime routing changes.
+
+`src/identity-token-pools.v1.json` and
+`test/fixtures/identity-token-pools.v1.json` are published copies of the
+agent-os-config vocabulary and shared vectors. Keep them byte-identical to
+that owner on publication. Standalone Node config loading remains offline and
+needs no Python or superproject checkout. Both maps replace whole prior-layer
+maps; an empty map clears declarations. Final effective config validates
+references after all layers without changing role/vault or signing authority.
+No persistent store, lifecycle state or post-deploy smoke promise changes here.

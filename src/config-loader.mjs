@@ -30,6 +30,7 @@ import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
+import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 
 export const __testYamlHooks = {
   load: (...args) => yaml.load(...args),
@@ -826,6 +827,20 @@ function schemaV1() {
       // docker_bin, broker_internal_healthz_url,
       // portforward_wedge_restart_max_attempts) landed in #1958, both
       // Python-only — this section heals the drift.
+      oauth: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          // Atomic declaration maps: validate all fields after the cascade,
+          // including fields a tolerant generic loader would otherwise drop.
+          token_accounts: { __type: 'any', __default: {} },
+          identity_token_pools: { __type: 'any', __default: {} },
+          ...Object.fromEntries(['codex', 'claude', 'gemini', 'opencode', 'hermes', 'pi', 'oss_local', 'patch'].map(role => [`litellm_vk_${role}`, {
+            __type: TYPE_DICT, __strict: true,
+            __keys: { op_ref: { __type: TYPE_STRING, __default: null, __nullable: true } },
+          }])),
+        },
+      },
       oauth_broker: {
         __type: TYPE_DICT,
         __strict: true,
@@ -4573,6 +4588,7 @@ function jsTypeName(value) {
 
 function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
   const expected = schema.__type;
+  if (expected === 'any') return value; // validated atomically after the cascade
   if (value === null || value === undefined) {
     if (schema.__nullable) return null;
     // Explicit null/undefined (i.e. user wrote `key: ~` or `key:`) must
@@ -4979,14 +4995,16 @@ function filterForeignTopLevelSections(
 
 // -------- Module file validation -------------------------------------------
 
-function flatten(doc, prefix = '', preserveEmptyMap = () => false) {
+function flatten(doc, prefix = '', preserveEmptyMap = () => false, atomicPaths = new Set()) {
   const out = {};
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
     const full = prefix ? `${prefix}.${key}` : key;
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (atomicPaths.has(full)) {
+      out[full] = value;
+    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (Object.keys(value).length > 0) {
-        Object.assign(out, flatten(value, full, preserveEmptyMap));
+        Object.assign(out, flatten(value, full, preserveEmptyMap, atomicPaths));
       } else if (preserveEmptyMap(full)) {
         out[full] = value;
       }
@@ -5140,6 +5158,10 @@ function validateModuleDoc(
   // their historical drop behavior, and module normalization stays unchanged.
   const rawFlat = flatten(body, '', (key) =>
     preserveEmptyMaps && isValidSchemaPath(schema, aliases[key] || key),
+    new Set([
+      ...TOKEN_POOL_DECLARATION_PATHS,
+      ...Object.entries(aliases).filter(([, canonical]) => TOKEN_POOL_DECLARATION_PATHS.has(canonical)).map(([key]) => key),
+    ]),
   );
   for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
     if (moduleKey in rawFlat && canonicalKey in rawFlat) {
@@ -5801,6 +5823,8 @@ function loadConfigImpl({
   // flatten() intentionally omits empty dictionaries. These new override maps
   // have an observable empty-map default, so retain it in the resolved config.
   for (const dotted of [
+    'oauth.token_accounts',
+    'oauth.identity_token_pools',
     'worker_pool.dispatch.codex_exec_timeout_by_worker_class',
     'worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class',
   ]) {
@@ -5981,6 +6005,13 @@ function loadConfigImpl({
 
   enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
+  try {
+    validateTokenPoolDeclarations(merged.oauth);
+  } catch (error) {
+    throw new AgentOSConfigError(error.message, {
+      key: error.message.split(':', 1)[0], expected: 'valid token pool declaration',
+    });
+  }
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

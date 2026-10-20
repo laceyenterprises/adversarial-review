@@ -274,16 +274,23 @@ test('unreadable base evidence requeues remediation without spending its round',
 });
 
 
-test('an otherwise mergeable PR cannot click daemon merge into a merged parent branch', async t => {
-  for (const base of ['feature/parent', 'trunk']) {
-    const f = fixture(t, { base });
+for (const { name, candidateBase, liveBase, held } of [
+  { name: 'non-default candidate base holds a merged parent',
+    candidateBase: 'feature/parent', liveBase: 'feature/parent', held: true },
+  { name: 'default candidate base re-reads a live merged parent before clicking',
+    candidateBase: 'trunk', liveBase: 'feature/parent', held: true },
+  { name: 'default candidate base merges after a safe live retarget',
+    candidateBase: 'trunk', liveBase: 'trunk', held: false },
+]) {
+  test(`daemon clean merge: ${name}`, async t => {
+    const f = fixture(t, { base: liveBase });
     const head = 'a'.repeat(40);
     let clicks = 0, released = 0;
     const checks = [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }];
     const result = await runDaemonCleanMergeAttempt({
       rootDir: f.rootDir, repoPath: repo, prNumber: 41,
       cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
-      candidate: { title: 'Synthetic change', baseBranch: 'trunk', defaultBranch: 'trunk', headSha: head,
+      candidate: { title: 'Synthetic change', baseBranch: candidateBase, defaultBranch: 'trunk', headSha: head,
         statusCheckRollup: checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
         prState: 'open', labels: [], branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] } },
       gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
@@ -294,7 +301,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
       fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
       fetchRollupImpl: async () => ({ title: 'Synthetic change', state: 'OPEN', headRefOid: head,
         checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [] }),
-      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo, base, leaseId: 'synthetic-lease',
+      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo, base: candidateBase, leaseId: 'synthetic-lease',
         holderPr: 41, holderHead: head, acquiredAt: '2026-10-16T10:00:00Z' } }),
       releaseMergeLeaseImpl: () => { released++; },
       readBuildCompletionSignalForPrImpl: () => ({ ok: true,
@@ -307,7 +314,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
       },
       env: { HQ_ROOT: f.rootDir }, logger: { log() {}, warn() {} },
     });
-    if (base === 'feature/parent') {
+    if (held) {
       assert.equal(result.reason, 'stacked-base-merged');
       assert.equal(result.merged, false);
       assert.equal(clicks, 0);
@@ -315,12 +322,12 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
     } else {
       assert.equal(result.merged, true, 'the same otherwise eligible PR merges after a safe retarget');
       assert.equal(clicks, 1);
-      assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 1,
-        'even a matching default snapshot gets a live pre-click base read');
     }
+    assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 1,
+      'the click boundary reads the callback repository and PR regardless of the candidate base');
     assert.equal(released, 1);
-  }
-});
+  });
+}
 
 for (const mode of ['os', 'local']) {
   test(`recovered job default cannot hide a merged parent before ${mode} remediation`, async t => {

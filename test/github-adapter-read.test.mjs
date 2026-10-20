@@ -5,7 +5,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ADAPTER_READ_COMMANDS, __test__, readAdapterHeadAndState,
-  readAdapterIssueComments, readAdapterReviewContext, readAdapterReviewBodiesForHead,
+  readAdapterIssueComments, readAdapterPrRollup, readAdapterPullRequest,
+  readAdapterReviewContext, readAdapterReviewBodiesForHead,
   readAdapterLatestLabelEvent, withGitHubAdapterReadTick } from '../src/github-adapter-client.mjs';
 import { fetchPullRequestHeadAndState, fetchReviewBodiesForHead, fetchPullRequestRollup } from '../src/github-api.mjs';
 
@@ -16,12 +17,12 @@ const env = { GHA_ADAPTER_BIN: '/fixture/adapter' };
 const params = { repo, prNumber: 7, headSha: 'synthetic-head', reviewerLogins: ['fixture-reviewer'],
   currentHeadSha: 'synthetic-head', labelName: 'fixture-label', withLabels: false, limit: 10,
   head: 'synthetic-branch', ticket: 'ADAPTERREAD-01', graphql: false };
-function fixtureOptions({ unsupported = '', fallback = null } = {}) {
+function fixtureOptions({ unsupported = '', fallback = null, adapterBin = env.GHA_ADAPTER_BIN } = {}) {
   const calls = [];
-  return { calls, env, execFileImpl: async (bin, args, options) => {
+  return { calls, env: { ...env, GHA_ADAPTER_BIN: adapterBin }, execFileImpl: async (bin, args, options) => {
     calls.push({ bin, args });
     if (bin === 'gh' && fallback) return fallback(args);
-    assert.equal(bin, env.GHA_ADAPTER_BIN);
+    assert.equal(bin, adapterBin);
     return exec(process.execPath, [fixture, unsupported, ...args], options);
   } };
 }
@@ -111,6 +112,42 @@ test('unsupported unmapped kinds are isolated and incomplete reads are never cac
     }), /incomplete/);
   });
   assert.equal(attempts, 2);
+});
+
+test('absent and malformed PR entities return the fallback sentinel without reading comments', async () => {
+  for (const [read, key] of [
+    [readAdapterPrRollup, 'rollup'], [readAdapterPullRequest, 'pullRequest'],
+    [readAdapterReviewContext, 'rollup'],
+  ]) {
+    for (const field of [key, 'data']) {
+      for (const value of [null, false, 0, 'missing', []]) {
+        let calls = 0;
+        const result = await read(repo, 7, { env, execFileImpl: async (_bin, args) => {
+          calls++;
+          assert.equal(args[0], 'pr-state');
+          return { stdout: JSON.stringify({ ok: true, [field]: value }) };
+        } });
+        assert.equal(result, null, `${read.name}: ${field}=${JSON.stringify(value)}`);
+        assert.equal(calls, 1);
+      }
+    }
+  }
+});
+
+test('review context skips pr-state when comments are unsupported only for that binary and tick', async () => {
+  const options = fixtureOptions({ unsupported: 'issue-comments' });
+  const other = fixtureOptions({ adapterBin: '/fixture/other-adapter' });
+  for (let tick = 0; tick < 2; tick++) {
+    await withGitHubAdapterReadTick(async () => {
+      const before = options.calls.length;
+      await assert.rejects(readAdapterReviewContext(repo, 7, options));
+      assert.deepEqual(options.calls.slice(before).map(call => call.args[0]), ['pr-state', 'issue-comments']);
+      assert.equal(await readAdapterReviewContext(repo, 7, options), null);
+      assert.equal(options.calls.length, before + 2);
+      assert.equal((await readAdapterHeadAndState(repo, 7, options)).state, 'OPEN');
+      assert.equal((await readAdapterReviewContext(repo, 7, other)).number, 7);
+    }, { logger: { warn() {} } });
+  }
 });
 
 test('pr-state without mergeability keeps the established full rollup fallback', async () => {

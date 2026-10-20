@@ -601,10 +601,15 @@ async function readAdapterPrRollup(repo, prNumber, options) {
   if (!payload) return null;
   // pr-state currently omits mergeability. The caller's existing rollup
   // validator must refuse that partial shape and use its established fallback.
-  return normalizeAdapterPr(unwrapPayload(payload, 'rollup', 'pull-request-rollup'));
+  return normalizeAdapterPr(payload, 'rollup', 'pull-request-rollup');
 }
 
-function normalizeAdapterPr(pr) {
+function normalizeAdapterPr(payload, key, kind) {
+  const object = asPayloadObject(payload, kind);
+  // Preserve explicit absence instead of normalizing the envelope as a PR.
+  const pr = Object.hasOwn(object, key) ? object[key]
+    : Object.hasOwn(object, 'data') ? object.data : object;
+  if (!pr || typeof pr !== 'object' || Array.isArray(pr)) return null;
   return {
     ...pr,
     number: pr.number ?? pr.pr?.number,
@@ -614,9 +619,15 @@ function normalizeAdapterPr(pr) {
 }
 
 async function readAdapterReviewContext(repo, prNumber, options) {
+  const tick = adapterReadTick.getStore();
+  if (tick?.open) {
+    const adapterBin = resolveGitHubAdapterBin({ env: options?.env ?? process.env, rootDir: options?.rootDir });
+    if (tick.unsupported.get(adapterBin)?.has('issue-comments')) return null;
+  }
   const payload = await runGitHubAdapter('pull-request-review-context', { repo, prNumber }, options);
   if (!payload) return null;
-  const pr = normalizeAdapterPr(unwrapPayload(payload, 'rollup', 'pull-request-review-context'));
+  const pr = normalizeAdapterPr(payload, 'rollup', 'pull-request-review-context');
+  if (!pr) return null;
   const comments = pr.comments ?? await readAdapterIssueComments(repo, prNumber, options);
   if (!Array.isArray(comments)) return null;
   return { ...pr, comments: comments.map(comment => ({
@@ -697,7 +708,7 @@ async function readAdapterOpenPullRequests(repo, options) {
 async function readAdapterPullRequest(repo, prNumber, options) {
   const payload = await runGitHubAdapter('pull-request', { repo, prNumber }, options);
   if (!payload) return null;
-  return normalizeAdapterPr(unwrapPayload(payload, 'pullRequest', 'pull-request'));
+  return normalizeAdapterPr(payload, 'pullRequest', 'pull-request');
 }
 
 async function readAdapterPullRequestDiff(repo, prNumber, options) {

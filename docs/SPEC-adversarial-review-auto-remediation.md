@@ -541,6 +541,10 @@ needed by the binary); `GITHUB_TOKEN` is copied to `GH_TOKEN` only when
 the exported `ADAPTER_READ_COMMANDS` constant, using `--number` for PR references.
 Head and reviewer filters remain local. Review contexts combine `pr-state` and
 `issue-comments`; reviews use `pr-reviews` and label timelines use `label-events`.
+Explicitly absent or non-object PR entities return the no-adapter sentinel for
+caller fallback. If `issue-comments` is already unsupported for the selected
+binary in the active tick, review-context reads skip `pr-state` as well; other
+PR reads and other adapter binaries remain available, and the next tick probes again.
 The current adapter omits mergeability from `pr-state`, so full rollups retain
 their existing fallback. Open PR discovery and diffs probe their own command
 names and fall back when unsupported. Each read call site

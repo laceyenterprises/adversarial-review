@@ -30,6 +30,26 @@ import {
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MODULE_CONFIG_PATH = join(REPO_ROOT, 'config.yaml');
 
+test('local example keeps load-aware policy inside the shared adversarial reviewer extension', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'load-aware-example-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    writeFileSync(join(dir, 'config.local.yaml'), readFileSync(join(REPO_ROOT, 'config.local.yaml.example')));
+    for (const modulePaths of [[], [MODULE_CONFIG_PATH]]) {
+      const cfg = loadConfig({ topPath, modulePaths, env: {} });
+      assert.equal(cfg.get('adversarial.reviewer.load_aware.enabled'), true);
+      assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
+      assert.equal(cfg.get('timeouts'), null);
+    }
+    // Do not reintroduce a root that older Python/shell strict loaders reject.
+    writeFileSync(join(dir, 'config.local.yaml'), 'timeouts:\n  load_aware:\n    enabled: true\n');
+    assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key: 'timeouts' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('reviewer heartbeat timeout keys accept YAML and environment aliases', () => {
   const dir = mkdtempSync(join(tmpdir(), 'reviewer-timeout-config-'));
   try {

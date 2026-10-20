@@ -6,7 +6,7 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
-import { createCpuBusySampler, loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
+import { createCpuBusySampler, hostCpuBusyPercent, loadAwareTimeoutMs, loadAwareTimeoutSeconds, resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
 import { loadConfig, __testYamlHooks } from '../src/config-loader.mjs';
 import { execGhWithRetry, GH_LOOKUP_TIMEOUT_MS } from '../src/gh-cli.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../src/fleet-quota-status.mjs';
@@ -70,6 +70,17 @@ test('CPU sample, including failure, is reused for five seconds', () => {
   now++;
   assert.equal(failedSample(), null);
   assert.equal(failures, 2);
+});
+
+test('reset discards a cached default CPU sample without waiting for expiry', t => {
+  syntheticBusyHost(t);
+  t.mock.method(performance, 'now', () => 0);
+  assert.equal(hostCpuBusyPercent(), 100);
+  t.mock.method(childProcess, 'execFileSync', () => '0\n');
+  syncBuiltinESMExports();
+  assert.equal(hostCpuBusyPercent(), 100);
+  resetLoadAwareTimeoutCachesForTesting();
+  assert.equal(hostCpuBusyPercent(), 0);
 });
 
 test('local config disables scaling and sets the multiplier cap', t => {
@@ -212,6 +223,35 @@ test('invalid local config degrades timeout sizing and caches failure until reco
   now = 15000;
   assert.equal(loadAwareTimeoutMs(200, opts), 200);
   assert.equal(warnings.length, 3);
+});
+
+test('GitHub reads survive a running service config typo and recover its policy', async t => {
+  syntheticBusyHost(t);
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const localPath = join(dirname(process.env.AGENT_OS_CONFIG_PATH), 'config.local.yaml');
+  const readTimeout = async () => {
+    let timeout;
+    await execGhWithRetry({ env: {}, retries: 0, args: ['api', 'repos/example/project'],
+      execFileImpl: async (_cmd, _args, options) => { timeout = options.timeout; return { stdout: '{}' }; } });
+    return timeout;
+  };
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      enabled: false\n');
+  assert.equal(await readTimeout(), GH_LOOKUP_TIMEOUT_MS);
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: 25\n');
+  now = 4999;
+  assert.equal(await readTimeout(), GH_LOOKUP_TIMEOUT_MS);
+  now = 5000;
+  assert.equal(await readTimeout(), GH_LOOKUP_TIMEOUT_MS * 6);
+  assert.equal(warnings.length, 1);
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: 2\n');
+  now = 9999;
+  assert.equal(await readTimeout(), GH_LOOKUP_TIMEOUT_MS * 6);
+  now = 10000;
+  assert.equal(await readTimeout(), GH_LOOKUP_TIMEOUT_MS * 2);
+  assert.equal(warnings.length, 1);
 });
 
 for (const pressure of [false, true]) {

@@ -37,8 +37,10 @@ nominal budgets, or set `adversarial.reviewer.load_aware.max_multiplier` (1..20 
 default 6) to cap the extension. Policy changes are observed within five
 seconds. These keys use the shared `adversarial.reviewer` forward-compatible
 extension point accepted by the Python loader and its shell wrapper; do not add
-a top-level `timeouts` root. An invalid or unreadable config uses the default
-policy for five seconds and emits one warning per refresh interval, so timeout
+a top-level `timeouts` root. The Node watcher owns validation and consumption of
+these leaves; Python and shell tolerate them but do not expose the timeout policy
+in their resolved config or shell exports. An invalid or unreadable config uses
+the default policy for five seconds and emits one warning per refresh interval, so timeout
 computations do not interrupt GitHub reads or lock/quota bookkeeping.
 
 Posted-review admission uses the nominal step deadline regardless of host load.

@@ -83,7 +83,18 @@ for (const evidence of ['stale', 'unknown', 'missing', 'cached-stale']) {
     const fixture = codexAccountFixture();
     if (evidence === 'missing') delete fixture.brokerAuth.provider_states['codex-corp'];
     else if (evidence === 'cached-stale') fixture.providerStatuses[1].cachedEvidenceStale = true;
-    else fixture.reserveFloors['openai-oauth-corp'].weeklyMeasurement.status = evidence;
+    else {
+      const reading = { status: evidence, confidence: evidence, inferred: false, percentRemaining: 99 };
+      fixture.reserveFloors['openai-oauth-corp'] = {
+        weeklyMeasurement: { ...reading }, measurement: { ...reading },
+      };
+      const personal = { status: 'measured', confidence: 'measured', inferred: false, percentRemaining: 6 };
+      fixture.reserveFloors['openai-oauth'] = {
+        weeklyMeasurement: { ...personal }, measurement: { ...personal },
+      };
+    }
+    assert.deepEqual(groundingFor(fixture).codexAccountSelection,
+      { hold: true, reason: 'codex-account-evidence-unknown' });
     const status = reviewerModelGrounding(groundingFor(fixture), 'codex');
     assert.equal(status.accountHold, true);
     assert.equal(status.grounded, false, 'unknown evidence cannot trigger a model switch');

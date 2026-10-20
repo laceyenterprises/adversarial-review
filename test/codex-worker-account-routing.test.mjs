@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { codexWorkerAccountPolicy } from '../src/role-config.mjs';
-import { selectCodexWorkerAccount, selectCodexReviewerAccount } from '../src/codex-account-routing.mjs';
+import { selectCodexWorkerAccount, selectCodexReviewerAccount, codexWorkerLaneFromSnapshot } from '../src/codex-account-routing.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { resolveMergeAgentDispatchHarness } from '../src/merge-agent-harness.mjs';
 import { dispatchMergeAgentForPR } from '../src/follow-up-merge-agent.mjs';
@@ -33,9 +33,9 @@ for (const [label, mutate, corporate, hold] of [
   ['personal measured zero', f => { f.reserveFloors['openai-oauth'].weeklyMeasurement.percentRemaining = 0; }, true, false],
   ['personal model capped', f => { f.providerStatuses[0].models = [{ model: 'synthetic-model', state: 'exhausted' }]; }, true, false],
   ['both unknown', f => { f.reserveFloors = {}; f.brokerAuth = {}; }, false, true],
-  ['personal unknown, corporate ready', f => { delete f.reserveFloors['openai-oauth']; }, false, true],
-  ['personal stale, corporate ready', f => { f.providerStatuses[0].cachedEvidenceStale = true; }, false, true],
-  ['stale personal exhaustion, corporate ready', f => { f.providerStatuses[0].cachedEvidenceStale = true; f.providerStatuses[0].state = 'exhausted'; }, false, true],
+  ['personal unknown, corporate ready', f => { delete f.reserveFloors['openai-oauth']; }, true, false],
+  ['personal stale, corporate ready', f => { f.providerStatuses[0].cachedEvidenceStale = true; }, true, false],
+  ['stale personal exhaustion, corporate ready', f => { f.providerStatuses[0].cachedEvidenceStale = true; f.providerStatuses[0].state = 'exhausted'; }, true, false],
   ['personal exhausted, corporate unknown', f => { f.providerStatuses[0].state = 'exhausted'; delete f.brokerAuth.provider_states['codex-corp']; }, false, true],
   ['both exhausted', f => { f.providerStatuses[0].state = 'exhausted'; f.providerStatuses[1].state = 'exhausted'; }, false, true],
 ]) test(`LANEFAILOVER-01: ${label} uses the same evidence in both worker lanes`, async () => {
@@ -59,6 +59,49 @@ for (const [label, mutate, corporate, hold] of [
     assert.equal(remediation.workerClass, corporate ? 'remediator-codex-corp' : 'codex');
     assert.equal(remediation.reason, hammer.reason, 'worker lanes retain the same account decision reason');
   }
+});
+
+for (const [personalStatus, corporateStatus, expectedProvider, reason] of [
+  ['stale', 'measured', 'codex-corp', 'personal-evidence-unknown-corporate-ready'],
+  ['unknown', 'measured', 'codex-corp', 'personal-evidence-unknown-corporate-ready'],
+  ['stale', 'stale', null, 'codex-account-evidence-unknown'],
+  ['measured', 'measured', 'codex', 'personal-ready'],
+  ['measured', 'stale', 'codex', 'personal-ready'],
+]) test(`worker producer-shaped quota: personal ${personalStatus}, corporate ${corporateStatus}`, async () => {
+  const snapshot = codexAccountFixture();
+  for (const [authPath, status, percentRemaining] of [
+    ['oauth', personalStatus, 6], ['oauth-corp', corporateStatus, 99],
+  ]) {
+    const reading = { status, confidence: status, inferred: false, percentRemaining };
+    snapshot.reserveFloors[`openai-${authPath}`] = {
+      weeklyMeasurement: { ...reading }, measurement: { ...reading },
+    };
+  }
+  const selected = selectCodexWorkerAccount(snapshot);
+  assert.equal(selected.hold, expectedProvider === null);
+  assert.equal(selected.provider, expectedProvider ?? undefined);
+  for (const workerClass of ['hammer', 'codex']) {
+    const lane = codexWorkerLaneFromSnapshot(snapshot, { workerClass });
+    assert.equal(lane.reason, reason);
+    assert.equal(lane.hold, expectedProvider === null);
+    assert.equal(lane.workerClass, expectedProvider === 'codex-corp'
+      ? workerClass === 'hammer' ? 'hammer-corp' : 'remediator-codex-corp' : workerClass);
+  }
+  for (const decision of [await closer(snapshot), await remediator(snapshot)]) {
+    assert.equal(decision.hold, expectedProvider === null);
+    if (!decision.hold) assert.equal(decision.reason, reason);
+  }
+});
+
+for (const [label, mutate, reason] of [
+  ['unknown then exhausted', f => { delete f.reserveFloors['openai-oauth']; f.providerStatuses[1].state = 'exhausted'; }, 'codex-account-evidence-unknown'],
+  ['exhausted then unknown', f => { f.providerStatuses[0].state = 'exhausted'; delete f.reserveFloors['openai-oauth-corp']; }, 'codex-account-evidence-unknown'],
+  ['both exhausted', f => { f.providerStatuses[0].state = 'exhausted'; f.providerStatuses[1].state = 'exhausted'; }, 'no-ready-codex-account'],
+  ['both brokers unavailable', f => { f.brokerAuth.provider_states.codex.ready = false; f.brokerAuth.provider_states['codex-corp'].can_serve = false; }, 'no-ready-codex-account'],
+]) test(`worker hold reason: ${label}`, () => {
+  const snapshot = codexAccountFixture();
+  mutate(snapshot);
+  assert.deepEqual(selectCodexWorkerAccount(snapshot), { hold: true, reason });
 });
 
 for (const account of ['personal', 'corporate', 'unknown']) test(`real remediation claim: ${account}`, async t => {

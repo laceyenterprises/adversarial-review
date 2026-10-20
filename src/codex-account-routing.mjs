@@ -14,12 +14,14 @@ export function selectCodexReviewerAccount(payload, options = {}) {
 }
 
 export function selectCodexWorkerAccount(payload, options = {}) {
-  return selectCodexAccount(payload, WORKER_ORDER, options);
+  return selectCodexAccount(payload, WORKER_ORDER, { ...options, fallThroughUnknown: true });
 }
 
 function selectCodexAccount(payload, order, { model = null,
-  statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false, personalExhausted = false } = {}) {
+  statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false, personalExhausted = false,
+  fallThroughUnknown = false } = {}) {
   const rows = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
+  let unknownEvidence = false;
   for (const [provider, authPath] of order) {
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
     const row = rows.find(entry => entry?.provider === 'openai'
@@ -36,13 +38,17 @@ function selectCodexAccount(payload, order, { model = null,
       || (fresh && (cap.capped || (measured && weekly.percentRemaining === 0)));
     if (!exhausted && fresh && measured && cap.available
       && ready?.ready === true && ready?.can_serve === true) {
-      return { provider, authPath, hold: false, reason: 'codex-account-ready' };
+      return { provider, authPath, hold: false,
+        reason: unknownEvidence ? 'codex-account-evidence-unknown-fallback-ready' : 'codex-account-ready' };
     }
     if (!exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      return { hold: true, reason: 'codex-account-evidence-unknown' };
+      if (!fallThroughUnknown) return { hold: true, reason: 'codex-account-evidence-unknown' };
+      // Workers may use independently measured capacity on the next account;
+      // unknown evidence never admits this account or proves it exhausted.
+      unknownEvidence = true;
     }
   }
-  return { hold: true, reason: 'no-ready-codex-account' };
+  return { hold: true, reason: unknownEvidence ? 'codex-account-evidence-unknown' : 'no-ready-codex-account' };
 }
 
 // Only unpinned Codex lanes opt into account substitution. Corporate classes
@@ -54,7 +60,9 @@ export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'pe
   return { ...account,
     workerClass: account.provider === 'codex' ? workerClass
       : workerClass === 'hammer' ? 'hammer-corp' : 'remediator-codex-corp',
-    reason: account.provider === 'codex' ? 'personal-ready' : 'personal-unavailable-corporate-ready',
+    reason: account.provider === 'codex' ? 'personal-ready'
+      : account.reason === 'codex-account-evidence-unknown-fallback-ready'
+        ? 'personal-evidence-unknown-corporate-ready' : 'personal-unavailable-corporate-ready',
   };
 }
 

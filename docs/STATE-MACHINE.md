@@ -185,9 +185,11 @@ Review-cycle resets clear attribution.
 LANEFAILOVER-01 keeps the reviewer ordering separate from worker ordering.
 Unpinned Codex hammer and remediation dispatches reuse the account evidence
 classifier in personal-first order. Ready personal capacity keeps `hammer` or
-`codex`; confirmed personal exhaustion or broker unavailability permits
+`codex`; personal exhaustion, broker unavailability or unknown quota evidence permits
 `hammer-corp` or `remediator-codex-corp` only with independently ready corporate
-capacity. Unknown evidence or two unavailable accounts uses the existing
+capacity. When no account qualifies, any unknown evidence retains
+`codex-account-evidence-unknown`; otherwise two unavailable accounts use
+`no-ready-codex-account`. Both reasons use the existing
 hold/defer path without spending a worker attempt. Operator class pins retain
 their existing behavior, and fresh dispatches return to personal after recovery.
 This adds no lifecycle state, transition, merge gate or durable store field.

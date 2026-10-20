@@ -138,6 +138,8 @@ import {
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
+import { codexWorkerAccountPolicy } from '../role-config.mjs';
+import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
 import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
 export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
@@ -6673,6 +6675,7 @@ async function maybeDispatchAmaCloserAttempt({
           nextDispatchDiffersImpl: async () => {
             const next = await resolveCloserDispatchHarnessImpl({
               workerClass,
+              codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass),
               fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
               hqPath,
               execFileImpl,
@@ -7041,6 +7044,7 @@ async function maybeDispatchAmaCloserAttempt({
     throwIfAborted(signal);
     harnessFallback = await resolveCloserDispatchHarnessImpl({
       workerClass,
+      codexAccountPolicy: codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', workerClass),
       fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
       hqPath,
       execFileImpl,
@@ -7070,7 +7074,7 @@ async function maybeDispatchAmaCloserAttempt({
       softGrounding: harnessFallback.softGrounding || null,
       fallbackProvider: harnessFallback.fallbackProvider || null,
     });
-    await emitHarnessFallbackAlert({
+    if (!harnessFallback.authPath) await emitHarnessFallbackAlert({
       deliverAlertImpl,
       rootDir,
       repo,
@@ -7658,6 +7662,8 @@ async function maybeDispatchAmaCloserAttempt({
     }));
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
   };
+  logCodexWorkerDispatch({ info: message => logAmaCloserDispatchEvent(logger,
+    'ama_closer.codex_account', { repo, prNumber, message }) }, dispatchWorkerClass, harnessFallback, 'ama-closer');
   for (;;) {
     try {
       throwIfAborted(signal);

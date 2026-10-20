@@ -1,3 +1,5 @@
+// Historical cross-harness scenarios retain explicit personal-class pin behavior.
+// Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 // QUOTAPAUSE-01: the dispatch daemon mirrors a per-credential quota pause onto
 // that credential's operator suspension, the same status file `hq fleet quota
@@ -78,7 +80,7 @@ test('reviewer fallback moves off a paused primary and holds when every fallback
 });
 
 test('follow-up remediation holds while its remediator credential is paused', async () => {
-  const result = await resolveRemediationWorkerClassWithFallback({
+  const result = await resolveRemediationWorkerClassWithFallback({ codexAccountPolicy: 'pinned',
     primary: 'claude-code',
     fallbackWorkerClasses: ['codex'],
     execFileImpl: fleetStatusStub([pauseSuspension('anthropic'), pauseSuspension('openai')]),
@@ -90,7 +92,7 @@ test('follow-up remediation holds while its remediator credential is paused', as
 });
 
 test('AMA closer/hammer holds with all-fallbacks-grounded while both credentials are paused', async () => {
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: fleetStatusStub([pauseSuspension('openai'), pauseSuspension('anthropic')]),
@@ -102,7 +104,7 @@ test('AMA closer/hammer holds with all-fallbacks-grounded while both credentials
 });
 
 test('AMA closer dispatches again once the pause lifts', async () => {
-  const result = await resolveCloserDispatchHarness({
+  const result = await resolveCloserDispatchHarness({ codexAccountPolicy: 'pinned',
     workerClass: 'hammer',
     fallbackWorkerClasses: ['hammer-claude'],
     execFileImpl: fleetStatusStub([OK('openai'), OK('anthropic')]),

@@ -1,4 +1,5 @@
 import { guardStackedBase } from './ama/stacked-base.mjs';
+import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
 import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -133,7 +134,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting } from './remediation-worker-class-fallback.mjs';
+import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -3646,6 +3647,7 @@ async function consumeNextFollowUpJob({
       now,
     });
     const runtimeStartedMs = Date.now();
+    logCodexWorkerDispatch(log, workerClass, remediatorRouting, 'follow-up-remediation');
     const runHandle = await remediationRuntime.run({
       mode: remediationMode,
       role: { kind: 'remediator', workerClass },
@@ -4070,7 +4072,9 @@ async function main() {
       return;
     }
 
-    const drain = await consumeFollowUpJobsUntilCapacity();
+    const drain = await consumeFollowUpJobsUntilCapacity({
+      resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
+    });
     if (isDrainQueueIdle(drain)) {
       console.log('[follow-up-remediation] No pending follow-up jobs to consume.');
       console.log(buildDrainSummaryLogLine(drain));

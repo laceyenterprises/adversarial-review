@@ -1,4 +1,8 @@
 import { selectClaudeAccountLaneFromSnapshot } from '../claude-account-routing.mjs';
+import { codexWorkerLaneFromSnapshot } from '../codex-account-routing.mjs';
+// LANEFAILOVER-01: unpinned Codex hammers first resolve personal -> corporate
+// using the reviewer account evidence classifier. Unknown evidence holds.
+// Explicit pins and non-Codex classes retain the HHR behavior below.
 // HHR — harness-fallback protection for the AMA closer/hammer.
 //
 // The AMA closer worker_class defaults to `hammer`, a codex (OpenAI OAuth)
@@ -115,6 +119,7 @@ async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
  * @param {string=} args.hqPath — path to the `hq` binary.
  * @param {Function=} args.execFileImpl — DI for `hq fleet quota status`.
  * @param {Object=} args.env
+ * @param {'personal-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @returns {Promise<{
  *   workerClass: string,      // the harness to actually pass to `hq dispatch`
  *   fellBack: boolean,
@@ -135,6 +140,7 @@ export async function resolveCloserDispatchHarness({
   hqPath = 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
+  codexAccountPolicy = 'personal-first',
   modelForWorkerClass = (className) => resolveRemediationModel(className, { env, fallbackModel: null }).resolvedModel,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
   // fallback configured, because it defers rather than dispatch a grounded
@@ -148,8 +154,9 @@ export async function resolveCloserDispatchHarness({
   const primary = String(workerClass || '').trim();
   const fallbacks = normalizeFallbackList(fallbackWorkerClasses);
   const base = { workerClass: primary, fellBack: false };
+  const autoCodex = codexAccountPolicy === 'personal-first' && primary === 'hammer';
 
-  if (!primary || (fallbacks.length === 0 && !probeWithoutFallbacks)) {
+  if (!primary || (fallbacks.length === 0 && !probeWithoutFallbacks && !autoCodex)) {
     return { ...base, reason: 'no-fallback-configured' };
   }
 
@@ -160,23 +167,20 @@ export async function resolveCloserDispatchHarness({
     return { ...base, reason: 'primary-provider-untracked' };
   }
 
-  // Authoritative HHR read, ONCE per launch. Fail-open to the primary on any
-  // error: a doomed spawn is the pre-HHR behavior, and falling back on an
-  // unreadable signal would be exactly the "guess" HHR forbids.
+  // Authoritative HHR read, ONCE per launch. Automatic Codex routing holds on
+  // unknown evidence; pinned/non-Codex routing retains its previous fail-open.
   let stdout;
   try {
     stdout = await readFleetQuotaStatusStdout({ hqPath, execFileImpl, env });
   } catch (err) {
-    return { ...base, hold: primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
+    return { ...base, hold: autoCodex || primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
   }
 
   // Both limbs are read from the SAME single status payload, so the hard state
   // and the soft verdict can never describe different moments. Parse it ONCE
   // here: the primary's two limbs and every fallback candidate below all query
-  // the same parsed rows, instead of re-parsing the identical stdout per lookup
-  // on the closer's dispatch path. A malformed payload throws out of the parser
-  // — fail open to the primary here too, rather than leaning on the call site's
-  // catch, so this module's own contract holds.
+  // the same parsed rows. Malformed evidence follows the same unknown-evidence
+  // behavior as a failed read, rather than relying on the caller's catch.
   let providerStatuses;
   let snapshot;
   let primaryAvailability;
@@ -187,8 +191,16 @@ export async function resolveCloserDispatchHarness({
     primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
     primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
   } catch (err) {
-    return { ...base, hold: primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
+    return { ...base, hold: autoCodex || primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
   }
+
+  const codexAccount = autoCodex ? codexWorkerLaneFromSnapshot(snapshot, {
+    workerClass: primary, policy: codexAccountPolicy, statuses: providerStatuses,
+    model: modelForWorkerClass(primary),
+  }) : null;
+  if (codexAccount) return { ...base, ...codexAccount,
+    fellBack: codexAccount.workerClass !== primary, from: primary, to: codexAccount.workerClass,
+    provider: primaryProvider, fallbackProvider: primaryProvider };
 
   const accountLane = (name) => selectClaudeAccountLaneFromSnapshot(snapshot, {
     statuses: providerStatuses,

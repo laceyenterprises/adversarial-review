@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 
 import {
   amaCloserDispatchFilePath,
@@ -91,6 +92,7 @@ test('UNREGREPO-01: unregistered repository pages once and resumes after registr
     prMetadata: { ...inputs.prMetadata, prNumber },
     dispatchContext: { ...inputs.dispatchContext, dispatchedAt },
     execFileImpl: async (cmd, args) => {
+      if (args[0] === 'fleet') return { stdout: JSON.stringify(codexAccountFixture()) };
       if (args[0] !== 'dispatch') return { stdout: '{}' };
       attempts++;
       if (registered) return { stdout: JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) };
@@ -142,7 +144,8 @@ test('successful dispatch clears a persisted configuration blocker after registr
   assert.match(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).closureBlocker, /repo_unregistered/);
   const result = await maybeDispatchAmaCloser({ ...inputs,
     execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
-      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) : '{}' }),
+      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
+      : args[0] === 'fleet' ? JSON.stringify(codexAccountFixture()) : '{}' }),
     deliverAlertImpl: async () => {}, writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
   });
@@ -198,7 +201,8 @@ test('legacy transient refusal with an exhausted slow window is reclassified and
   let pages = 0;
   const result = await maybeDispatchAmaCloser({ ...inputs,
     execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
-      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) : '{}' }),
+      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
+      : args[0] === 'fleet' ? JSON.stringify(codexAccountFixture()) : '{}' }),
     deliverAlertImpl: async () => { pages++; }, writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
   });

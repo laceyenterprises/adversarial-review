@@ -3,6 +3,7 @@ import { evaluateNoProgressLane, readNoProgressLane, recordNoProgressLaneRun } f
 import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -691,7 +692,10 @@ test('ownerproof recovery requests HAM repair even for pending-CI-only misses', 
     dispatchContext: { ...inputs.dispatchContext, orphanRecovery: { ownerProof: true, headSha: inputs.headSha } },
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
     writeFileImpl: (_dir, _path, body) => { prompt = body; },
-    execFileImpl: async (_cmd, args) => { calls.push(args); throw new Error('test provisioning refusal'); },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'fleet') return { stdout: JSON.stringify(codexAccountFixture()) };
+      calls.push(args); throw new Error('test provisioning refusal');
+    },
   });
   assert.ok(calls.some(args => args.includes('dispatch')));
   const dispatchArgs = calls.find(args => args.includes('dispatch'));

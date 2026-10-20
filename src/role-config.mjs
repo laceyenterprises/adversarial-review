@@ -525,6 +525,17 @@ export function resolveDefaultMergeAgentWorkerClass({
   return cfg.get('roles.merge_agent_worker_class');
 }
 
+// Code defaults and builder routing select a lane; a concrete class in any
+// file/env/CLI layer pins its account, including an explicit personal pin.
+export function codexWorkerAccountPolicy(key, workerClass, options = {}) {
+  if (!['hammer', 'codex'].includes(workerClass)) return 'pinned';
+  const cfg = loadRoleConfig({ ...options, contextKey: key });
+  if (cfg.get(key) !== workerClass) return 'personal-first';
+  const trace = cfg.resolutionTrace(key);
+  const source = trace.at(-1)?.source || 'code-default';
+  return source === 'code-default' ? 'personal-first' : 'pinned';
+}
+
 // validateStartupRoleConfig — boot-time validator. Daemons (watcher,
 // follow-up-remediation, follow-up-merge-agent) call this on startup so a
 // schema error in config.yaml OR a bad env value fails loud at boot with

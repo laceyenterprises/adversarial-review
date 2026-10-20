@@ -25,7 +25,14 @@ the first PR-wide observation without a proven owner, across head changes. Poll 
 the bound. Held, draft and terminal PRs do not enter recovery.
 
 After the bound, current-head review evidence chooses the next action: request
-review if absent, otherwise request a hammer. Historical dispatch stops and
+review if absent and re-review remains open, otherwise request a hammer. Recovery
+shares review admission's settled Comment-only predicate (captured completed
+passes and follow-up jobs), and reads the terminal final-round ledger even when
+the reviewed head is older. If the readonly captured-pass query fails (including
+an unmigrated database), it logs a warning and falls back to filesystem review
+evidence without migrating the database. Closed final-round and exhausted-cycle facts also
+select the hammer; historical verdicts alone do not close review on a new head.
+Historical dispatch stops and
 retry counters are set aside for this bounded recovery. The hammer and merge
 agent retain their live merge predicates, quota admission and operator holds.
 Pending/failed review rows visit the watchdog before ordinary retry admission;
@@ -42,10 +49,22 @@ their revision matches the live head, without changing any retry budget.
 
 Before the external action, `attempts` increments and `outcomes` appends an
 `outcome-unknown` record with action and timestamp. Settlement records the
-bounded reason, launch identity, dispatched flag and review-request result.
-Exceptions consume an attempt; missing receipts or refusal strings cannot
-refund it. Attempts do not prove ownership or restart the idle timer. At two attempts, the next
-ownerless observation pages with repo, PR, head and both outcomes. `paged` is set
+bounded reason, optional underlying `holdReason`, launch identity, dispatched
+flag and review-request result. `holdReason` uses an explicit result field when
+present, otherwise the suffix of `reason: 'harness-hold:<reason>'`; both forms
+populate the dedicated field in `outcomes` and the latest `evidence` summary.
+Proven recovery waits refund the reservation
+and remove its outcome from the spent-attempt history, retaining its summary in
+`evidence`. These include coexistence/background waits, rate limits,
+`stacked-base-read-failed`, and quota status read failures
+(`fleet-quota-status-unavailable` or `fleet-quota-status-unreadable`) reported as
+`harness-hold:<reason>` or with an explicit `holdReason`, regardless of the outer
+reason (including a missing or generic reason).
+Genuine quota exhaustion and unknown holds still consume attempts. Other
+exceptions consume an attempt; missing receipts cannot refund it.
+Attempts do not prove ownership or restart the idle timer. At two attempts, the next
+ownerless observation pages with repo, PR, head and both outcomes' reasons in
+the message text as well as the structured payload. `paged` is set
 after successful enqueue or a deduplicated `delivered` or `dead-letter` receipt.
 Transient unqueued results (`failed`, `pending`, `inflight`) retry without
 another launch. A dead-letter receipt logs a distinct operator-action warning

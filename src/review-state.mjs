@@ -5,7 +5,7 @@ import { observeHoldRelease } from './operator-hold-release.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -1093,6 +1093,37 @@ async function resolvePRLifecycle(rootDir, {
   return { source: 'mirror', ...cached };
 }
 
+// Shared by review admission and ownerless recovery. Recovery reads the existing
+// store without creating or migrating it, before reserving a recovery attempt.
+export function hasSettledCommentOnlyVerdict(rootDir, {
+  repo, prNumber, headSha, db = null, automaticMalformedRecovery = false,
+}, logger = console) {
+  let ownedDb;
+  try {
+    const dbPath = join(rootDir, 'data', 'reviews.db');
+    if (!db && existsSync(dbPath)) {
+      ownedDb = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: DEFAULT_BUSY_TIMEOUT_MS });
+      db = ownedDb;
+    }
+    let settledBodies = [];
+    try {
+      settledBodies = db ? db.prepare(
+        `SELECT verdict, body_md FROM reviewer_passes
+          WHERE repo = ? AND pr_number = ? AND head_sha = ?
+            AND pass_kind IN ('first-pass', 'rereview')
+            AND status = 'completed'`
+      ).all(repo, prNumber, headSha) : [];
+    } catch (error) {
+      logger.warn?.(`[review-state] Cannot read settled review passes for ${repo}#${prNumber}@${headSha}: ${error.message}`);
+    }
+    return settledBodies.some((pass) =>
+      (pass.verdict === 'comment-only' ||
+      (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only'))
+      && !(automaticMalformedRecovery && parseReviewFindings(pass.body_md).findingsCount === null)
+    ) || (!automaticMalformedRecovery && hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }, logger));
+  } finally { ownedDb?.close(); }
+}
+
 function buildBlockedRereviewResult(reason, reviewRow = null, extra = {}) {
   return {
     triggered: false,
@@ -1155,17 +1186,9 @@ function requestReviewRereview({
       row: { revision_ref: targetHead, rereview_requested_at: requestedAt, rereview_reason: reason },
     });
     if (targetHead && !operatorRequestedRereview && !handoffReview) {
-      const settledBodies = db.prepare(
-        `SELECT verdict, body_md FROM reviewer_passes
-          WHERE repo = ? AND pr_number = ? AND head_sha = ?
-            AND pass_kind IN ('first-pass', 'rereview')
-            AND status = 'completed'`
-      ).all(repo, prNumber, targetHead);
-      if (settledBodies.some((pass) =>
-        (pass.verdict === 'comment-only' ||
-        (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only'))
-        && !(automaticMalformedRecovery && parseReviewFindings(pass.body_md).findingsCount === null)
-      ) || (!automaticMalformedRecovery && hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead }, logger))) {
+      if (hasSettledCommentOnlyVerdict(rootDir, {
+        repo, prNumber, headSha: targetHead, db, automaticMalformedRecovery,
+      }, logger)) {
         logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }

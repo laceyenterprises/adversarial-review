@@ -11,6 +11,8 @@ import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-a
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
+import { summarizePRRemediationLedger } from '../follow-up-jobs.mjs';
+import { hammerOwnerRouteOf } from './review-cycle-cap-route.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
 const terminalLaunches = new Map();
@@ -139,17 +141,34 @@ async function defaultRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
 }
+async function rereviewClosed({ rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger }) {
+  if (facts?.reviewCycleExhausted === true || facts?.commentOnlyFinalRoundCompleted === true
+    || hammerOwnerRouteOf(dispatchJob)
+    || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
+    || (dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') return true;
+  // Final-round ownership survives later head movement. Read the same terminal
+  // job ledger as closure orchestration, rather than inferring it from a verdict.
+  if (summarizePRRemediationLedger(rootDir, { repo, prNumber })?.commentOnlyFinalRoundRevisionRefs?.length) return true;
+  const { hasSettledCommentOnlyVerdict } = await import('../review-state.mjs');
+  return hasSettledCommentOnlyVerdict(rootDir, { repo, prNumber, headSha }, logger);
+}
 export function isOrphanRecoveryWait(result) {
   const reason = String(result?.reason || result?.code || result?.message || '');
+  const holdReason = result?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
+  const transientHarnessHold = ['fleet-quota-status-unavailable', 'fleet-quota-status-unreadable'].includes(holdReason);
   return result?.recoveryWait === true || [
     'ama-coexistence-operation-timeout', 'ama-closer-dispatch-backgrounded',
     'operator-label-classification-pending', 'AMA_COEXISTENCE_OPERATION_TIMEOUT',
-  ].includes(reason) || result?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || result?.status === 429 || result?.statusCode === 429
+    'stacked-base-read-failed',
+  ].includes(reason) || transientHarnessHold || result?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || result?.status === 429 || result?.statusCode === 429
     || /rate[-_ ]limit|secondary limit|HTTP 429/i.test(reason);
 }
 
 function attemptSummary(retry) {
-  return { dispatched: retry?.dispatched === true, reason: text(retry?.reason),
+  const reason = text(retry?.reason);
+  const holdReason = retry?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
+  return { dispatched: retry?.dispatched === true, reason,
+    ...(holdReason ? { holdReason: text(holdReason) } : {}),
     launchRequestId: text(retry?.launchRequestId || retry?.dispatchId) };
 }
 
@@ -249,7 +268,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (state.attempts >= 2) {
       if (!state.paged) {
         try {
-          const pageResult = await pageImpl(`Ownerless PR recovery exhausted: ${repo} PR ${prNumber} head ${headSha}`, {
+          const reasons = outcomes.slice(0, 2).map((outcome, index) =>
+            `attempt ${index + 1}: ${text(outcome?.reason) || 'outcome-unknown'}${outcome?.holdReason ? ` (${text(outcome.holdReason)})` : ''}`).join('; ');
+          const pageResult = await pageImpl(`Ownerless PR recovery exhausted: ${repo} PR ${prNumber} head ${headSha}; ${reasons}`, {
             event: 'ama.orphan_recovery.exhausted', payload: { repo, prNumber, headSha, attempts: state.attempts, outcomes,
               lastAttempt: previous } });
           if (pageResult?.status === 'dead-letter') {
@@ -280,7 +301,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       || reviewStateRow?.review_status === REREVIEW_CI_BLOCKED_STATUS
       || (external && (external.conclusion !== 'SUCCESS'
         || external.failedChecks.length > 0 || external.pendingChecks.length > 0));
-    const action = hasReview || reviewerRefused ? 'hammer' : 'review';
+    const action = hasReview || reviewerRefused || await rereviewClosed({
+      rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger,
+    }) ? 'hammer' : 'review';
     const attempt = { action, reason: 'outcome-unknown', at: now };
     outcomes.push(attempt);
     db.prepare('UPDATE heads SET attempts=attempts+1, outcomes=?, evidence=? WHERE head=?')

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -1358,7 +1358,7 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });
 
-for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
+for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending-local-dead', 'pending-foreign']) {
   test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1368,14 +1368,21 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
       prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
     });
     const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
-    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt, host: 'synthetic', watcherPid: 123 });
-    if (status !== 'pending') updateAmaCloserLease({ ...identity, status: 'dispatched',
+    const pending = status.startsWith('pending-');
+    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt,
+      host: status === 'pending-local-dead' ? hostname() : `${hostname()}.foreign`, watcherPid: 123 });
+    if (!pending) updateAmaCloserLease({ ...identity, status: 'dispatched',
       lrqId: 'lrq_synthetic', now: args.dispatchContext.dispatchedAt });
     updateAmaCloserDispatchRecord(rootDir, identity, () => ({ repo: identity.repo, prNumber: 404,
       headSha: HEAD, workerClass: 'hammer', state: 'dispatched', launchRequestId: 'lrq_synthetic',
       lastObservedStatus: 'running', dispatchedAt: args.dispatchContext.dispatchedAt }));
     let reads = 0;
+    let pidProbes = 0;
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      processKillImpl: () => {
+        pidProbes++;
+        throw Object.assign(new Error('synthetic dead local watcher'), { code: 'ESRCH' });
+      },
       readPullRequestStateImpl: () => status === 'succeeded-open' ? { state: 'OPEN' } : null,
       readLaunchRequestStatusImpl: () => {
         reads++;
@@ -1387,12 +1394,13 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
         } };
       },
     });
-    assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.reason, status === 'pending-foreign' ? 'closer-lease-held-by-other-process' : 'not-eligible');
     assert.notEqual(result.reason, 'active-remediation-job');
-    assert.equal(reads, status === 'pending' ? 0 : 1);
+    assert.equal(reads, pending ? 0 : 1);
+    assert.equal(pidProbes, status === 'pending-local-dead' ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     const terminal = status === 'failed' || status === 'succeeded-open';
-    assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
+    assert.equal(lease.status, terminal ? 'terminal' : pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     assert.equal(deps.calls.length, 0);
   });

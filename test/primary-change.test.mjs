@@ -14,6 +14,94 @@ import { primaryChangeFixture, primaryRenameRepository } from './helpers/primary
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 const head = 'c'.repeat(40);
 
+test('REVERSALBLANK-01: removing author-added blank and whitespace-only lines passes with an audit count', () => {
+  for (const text of ['', ' ', '\t', ' \t ']) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0,
+      patch: `@@ -1,2 +1,3 @@\n First entry\n+${text}\n Second entry` }];
+    evidence.finalFiles = [];
+    const result = checkPrimaryChange(evidence, head);
+    assert.equal(result.ok, true, JSON.stringify(text));
+    assert.equal(result.whitespaceOnlyUnitsIgnored, 1);
+    const verdict = predicate(evidence);
+    assert.equal(verdict.eligible, true);
+    assert.equal(verdict.trace.primaryChange.whitespaceOnlyUnitsIgnored, 1);
+  }
+});
+
+test('REVERSALBLANK-01: removing author-added content, alone or mixed with blanks, still refuses', () => {
+  for (const added of ['+Content', '+\n+Content', '+Content\n+ \t']) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: added.split('\n').length, deletions: 0,
+      patch: `@@ -1,2 +1,${2 + added.split('\n').length} @@\n First entry\n${added}\n Second entry` }];
+    evidence.finalFiles = [];
+    const result = checkPrimaryChange(evidence, head);
+    assert.equal(result.reason, 'primary-change-reverted', added);
+    assert.equal(result.whitespaceOnlyUnitsIgnored, undefined);
+    assert.equal(predicate(evidence).eligible, false);
+  }
+});
+
+test('REVERSALBLANK-01: restoring blank removals ignores their multiset and base-coordinate units', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 0, deletions: 2,
+    patch: '@@ -1,3 +1 @@\n First entry\n- \t\n-Obsolete entry' }];
+  evidence.finalFiles = [{ filename: 'README.md', status: 'modified', additions: 0, deletions: 1,
+    patch: '@@ -1,3 +1,2 @@\n First entry\n  \t\n-Obsolete entry' }];
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.ok, true);
+  assert.equal(result.whitespaceOnlyUnitsIgnored, 1);
+  evidence.finalFiles = [];
+  const refused = checkPrimaryChange(evidence, head);
+  assert.equal(refused.reason, 'primary-change-reverted');
+  assert.equal(refused.whitespaceOnlyUnitsIgnored, 1);
+  assert.deepEqual(refused.missingEvidence.regions, [{ start: 3, end: 4 }]);
+});
+
+test('REVERSALBLANK-01: trailing-whitespace-only author changes pass when restored', () => {
+  for (const [before, after] of [['Content', 'Content \t'], ['Content \t', 'Content'], ['\tContent ', '\tContent\t']]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -1 +1 @@\n-${before}\n+${after}` }];
+    evidence.finalFiles = [];
+    const result = checkPrimaryChange(evidence, head);
+    assert.equal(result.ok, true);
+    assert.equal(result.whitespaceOnlyUnitsIgnored, 1);
+  }
+});
+
+test('REVERSALBLANK-01: trailing whitespace within a mixed replacement cannot waive content', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 2, deletions: 2,
+    patch: '@@ -1,2 +1,2 @@\n-Heading\n-Old content\n+Heading \t\n+New content' }];
+  evidence.finalFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1,2 +1,2 @@\n Heading\n-Old content\n+New content' }];
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  evidence.finalFiles = [];
+  const refused = checkPrimaryChange(evidence, head);
+  assert.equal(refused.reason, 'primary-change-reverted');
+  assert.equal(refused.whitespaceOnlyUnitsIgnored, 1);
+});
+
+test('REVERSALBLANK-01: replacing a blank with content or content with a blank remains protected', () => {
+  for (const patch of ['-\n+Content', '-Content\n+ \t']) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 1,
+      patch: `@@ -1 +1 @@\n${patch}` }];
+    evidence.finalFiles = [];
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted', patch);
+  }
+});
+
+test('REVERSALBLANK-01: a whitespace-only final edit cannot cover reverted author content', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.primaryFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -1,0 +2 @@\n+Content' }];
+  evidence.finalFiles = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -1,0 +2 @@\n+ \t' }];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
 test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-to-head diff', async t => {
   const fixture = primaryRenameRepository(t);
   const evidence = await fetchPrimaryChange(fixture.args);

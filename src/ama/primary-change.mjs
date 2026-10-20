@@ -193,12 +193,12 @@ function changes(files, paths = null, aliases = new Map()) {
       }
       if (line.startsWith('+') || line.startsWith('-')) {
         if (oldLine === null) throw new Error('missing hunk header');
-        if (!region) { region = { start: oldLine, end: oldLine, removed: new Map(), removedLines: [] }; regions.push(region); }
-        if (line.startsWith('+')) additions += 1;
+        if (!region) { region = { start: oldLine, end: oldLine, removed: new Map(), removedLines: [], addedLines: [] }; regions.push(region); }
+        if (line.startsWith('+')) { additions += 1; region.addedLines.push(line.slice(1)); }
         else {
           const normalized = line.slice(1).trim().replace(/\s+/g, ' ');
           removed.set(normalized, (removed.get(normalized) || 0) + 1);
-          region.removedLines.push({ text: normalized, position: oldLine });
+          region.removedLines.push({ text: normalized, content: line.slice(1), position: oldLine });
           region.removed.set(normalized, (region.removed.get(normalized) || 0) + 1);
           deletions += 1;
           oldLine += 1;
@@ -209,6 +209,40 @@ function changes(files, paths = null, aliases = new Map()) {
     if (additions !== file.additions || deletions !== file.deletions) throw new Error('truncated patch');
     result.set(path, { filename: file.filename, sha: file.sha, status: file.status,
       renamed: file.status === 'renamed', regions, removed });
+  }
+  return result;
+}
+
+// Normalize preservation comparisons only. Authorization and rebase proofs
+// continue to use the original patch, including whitespace and multiplicity.
+function preservationChanges(files, paths = null, aliases = new Map()) {
+  const result = changes(files, paths, aliases);
+  for (const change of result.values()) {
+    if (change.opaque) continue;
+    change.removed = new Map();
+    change.whitespaceOnlyUnitsIgnored = 0;
+    for (const region of change.regions) {
+      const units = regionUnits(region);
+      const whitespaceOnly = [...region.addedLines, ...region.removedLines.map(line => line.content)]
+        .every(line => line.trim() === '');
+      const trailingOnly = region.removedLines.length === region.addedLines.length
+        && region.removedLines.every((line, index) => line.content.trimEnd() === region.addedLines[index].trimEnd());
+      const trailingPositions = new Set(region.removedLines.filter((line, index) =>
+        region.removedLines.length === region.addedLines.length
+        && line.content !== region.addedLines[index]
+        && line.content.trimEnd() === region.addedLines[index].trimEnd()).map(line => line.position));
+      // In a mixed replacement, added content may belong to any removed line.
+      // Keep those units protected rather than assigning content to a blank.
+      const blankRemovalsOnly = region.addedLines.every(line => line.trim() === '');
+      const blankPositions = new Set(region.removedLines.filter(line => !line.text).map(line => line.position));
+      region.preservationUnits = whitespaceOnly || trailingOnly ? []
+        : units.filter(unit => !trailingPositions.has(unit.start)
+          && (!blankRemovalsOnly || !blankPositions.has(unit.start)));
+      change.whitespaceOnlyUnitsIgnored += units.length - region.preservationUnits.length;
+      region.removedLines = whitespaceOnly || trailingOnly ? []
+        : region.removedLines.filter(line => line.text && !trailingPositions.has(line.position));
+      for (const { text } of region.removedLines) change.removed.set(text, (change.removed.get(text) || 0) + 1);
+    }
   }
   return result;
 }
@@ -329,6 +363,7 @@ function projectRebasedRegion(primaryFiles, reviewedFiles, path, region, cache) 
 }
 
 function regionUnits(region) {
+  if (region.preservationUnits) return region.preservationUnits;
   return region.start === region.end ? [{ start: region.start, end: region.end }]
     : Array.from({ length: region.end - region.start }, (_, index) => ({
       start: region.start + index, end: region.start + index + 1,
@@ -521,9 +556,10 @@ function unchangedReplacementPositions(primaryFiles, finalFiles, path) {
 // describes missing regions without granting any additional authorization.
 function refusedRegions(primary, final, authorized) {
   const result = [];
+  const finalUnits = final?.regions.flatMap(regionUnits);
   for (const region of primary.regions) {
     for (const unit of regionUnits(region)) {
-      const overlaps = final?.regions.some(other => unit.start === unit.end
+      const overlaps = finalUnits?.some(other => unit.start === unit.end
         ? other.start <= unit.start && other.end >= unit.start
         : other.start < unit.end && other.end > unit.start);
       const lostRemoval = region.removedLines.some(line => line.position === unit.start
@@ -588,16 +624,18 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       .some(files => files?.length >= 300)) throw new Error('missing or capped file list');
     const authorizationCache = new Map();
     const guardReversals = verifiedGuardReversals(evidence, headSha);
-    const primary = changes(evidence.primaryFiles);
+    const primary = preservationChanges(evidence.primaryFiles);
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
-    const final = changes(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
+    const final = preservationChanges(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
+    const ignored = [...primary.values()].reduce((count, change) => count + (change.whitespaceOnlyUnitsIgnored || 0), 0);
+    const whitespaceEvidence = ignored ? { whitespaceOnlyUnitsIgnored: ignored } : {};
     if (![...primary.values()].some(({ regions, renamed, opaque }) => regions.length > 0 || renamed || opaque)) {
       throw new Error('empty primary change');
     }
     const testChanges = testRegionsChanged(primary, final);
     const reverted = (path, missing = 'reversal-authorization') => {
       const diagnosticCache = new Map();
-      return { ok: false, reason: 'primary-change-reverted', path,
+      return { ok: false, reason: 'primary-change-reverted', path, ...whitespaceEvidence,
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
             reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation, restoringDeletion))) };
@@ -622,12 +660,13 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       if (!actual) continue;
       if (change.opaque) {
         if (actual.sha !== change.sha || actual.status !== change.status) {
-          return { ok: false, reason: 'primary-change-unknown', detail: 'opaque file changed without readable patch', path, testRegionsChanged: testChanges };
+          return { ok: false, reason: 'primary-change-unknown', detail: 'opaque file changed without readable patch', path, testRegionsChanged: testChanges, ...whitespaceEvidence };
         }
         continue;
       }
       const unchanged = hasRebasedReversalProof(evidence, path)
         ? unchangedReplacementPositions(evidence.primaryFiles, evidence.finalFiles, path) : new Set();
+      const actualUnits = actual.regions.flatMap(regionUnits);
       const actualPositionsByText = new Map();
       for (const entry of actual.regions.flatMap((region) => region.removedLines)) {
         if (!actualPositionsByText.has(entry.text)) actualPositionsByText.set(entry.text, new Set());
@@ -651,7 +690,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       for (const region of change.regions) {
         for (const unit of regionUnits(region)) {
           if (!unchanged.has(unit.start) && !authorizedRestorations.has(unit.start)
-            && !actual.regions.some((other) => unit.start === unit.end
+            && !actualUnits.some((other) => unit.start === unit.end
             ? other.start <= unit.start && other.end >= unit.start
             : other.start < unit.end && other.end > unit.start)
             && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
@@ -660,7 +699,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
         }
       }
     }
-    return { ok: true, applicable: true, testRegionsChanged: testChanges,
+    return { ok: true, applicable: true, testRegionsChanged: testChanges, ...whitespaceEvidence,
       ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
         authorization, paths: [path], failedCheckRun: failedRun.id, passingCheckRun: passingRun.id,
         failedHead: failedRun.head_sha, passingHead: passingRun.head_sha,

@@ -782,15 +782,15 @@ test('REVERSALPROV-02: a cited region leaves the uncited removed remainder prote
   assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
 });
 
-test('REVERSALPROV-02: empty removed sets are not reversals, even without a final file diff', async () => {
+test('REVERSALPROV-02: uncited insertion reversals refuse with or without a final file diff', async () => {
   const { evidence } = await collect({ cites: [] });
   for (const finalFiles of [[], [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 0,
     patch: '@@ -45,0 +46 @@\n+unrelated()' }]]) {
     const result = checkPrimaryChange({ ...evidence, finalFiles,
       primaryFiles: [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
         patch: '@@ -15,0 +16,2 @@\n+synthetic_entry_one()\n+synthetic_entry_two()' }] }, head);
-    assert.equal(result.ok, true);
-    assert.equal(result.missingEvidence, undefined);
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.deepEqual(result.missingEvidence.regions, [{ start: 16, end: 16 }]);
   }
 });
 
@@ -833,5 +833,98 @@ test('REVERSALPROV-02: cited restoration of a primary deletion retains its exist
     patch: '@@ -14,0 +15 @@\n+start()' }];
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   authorization.commit.files[0].patch = '@@ -14,0 +15 @@\n+other()';
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+function insertionReversal(evidence, { rebased = true, line = 15, reviewedLine = 10 } = {}) {
+  const insertion = old => [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
+    patch: `@@ -${old},0 +${old + 1},2 @@\n+introduced_one()\n+introduced_two()` }];
+  evidence.primaryFiles = insertion(line);
+  evidence.finalFiles = [];
+  const authorization = evidence.reversalAuthorizations[0];
+  Object.assign(authorization, { rebased, parentFiles: evidence.primaryFiles,
+    reviewedFiles: insertion(rebased ? reviewedLine : line) });
+  const first = (rebased ? reviewedLine : line) + 1;
+  authorization.review.body = review().body.replace('`10-11`', `\`${first}-${first + 1}\``);
+  authorization.commit.files = [{ filename: 'src/a.mjs', status: 'modified', additions: 0, deletions: 2,
+    patch: '@@ -86,2 +85,0 @@\n-introduced_one()\n-introduced_two()' }];
+  return authorization;
+}
+
+test('REVERSALPROV-02: insertion reversal requires a full citation and removal multiset across rebases', async () => {
+  for (const options of [{}, { rebased: false }, { line: 0, reviewedLine: 0 }]) {
+    const { evidence } = await collect();
+    const authorization = insertionReversal(evidence, options);
+    assert.equal(checkPrimaryChange(evidence, head).ok, true, JSON.stringify(options));
+    assert.equal(checkPrimaryChange({ ...evidence, reversalAuthorizations: [] }, head).reason, 'primary-change-reverted');
+    const body = authorization.review.body;
+    authorization.review.body = body.replace(/(\*\*Lines:\*\* `\d+)-\d+`/, '$1`');
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+    authorization.review.body = body;
+    for (const patch of ['@@ -86 +85,0 @@\n-introduced_one()',
+      '@@ -86,2 +85,0 @@\n-introduced_one()\n-unrelated()']) {
+      authorization.commit.files[0].patch = patch;
+      authorization.commit.files[0].deletions = patch.split('\n').filter(line => line.startsWith('-')).length;
+      const result = checkPrimaryChange(evidence, head);
+      assert.equal(result.reason, 'primary-change-reverted');
+      assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['hammer-patch-does-not-touch-region']);
+    }
+  }
+});
+
+test('REVERSALPROV-02: insertion removal matching retains duplicate-line multiplicity', async () => {
+  const { evidence } = await collect();
+  insertionReversal(evidence);
+  const duplicated = JSON.parse(JSON.stringify(evidence).replaceAll('introduced_two()', 'introduced_one()'));
+  assert.equal(checkPrimaryChange(duplicated, head).ok, true);
+  const file = duplicated.reversalAuthorizations[0].commit.files[0];
+  file.patch = '@@ -86 +85,0 @@\n-introduced_one()';
+  file.deletions = 1;
+  assert.equal(checkPrimaryChange(duplicated, head).reason, 'primary-change-reverted');
+});
+
+test('REVERSALPROV-02: a cited insertion cannot waive a distinct uncited insertion', async () => {
+  const { evidence } = await collect();
+  const authorization = insertionReversal(evidence);
+  const extra = (files, line) => files.map(file => ({ ...file, additions: file.additions + 1,
+    patch: `${file.patch}\n@@ -${line},0 +${line + 3} @@\n+uncited()` }));
+  evidence.primaryFiles = extra(evidence.primaryFiles, 35);
+  authorization.parentFiles = evidence.primaryFiles;
+  authorization.reviewedFiles = extra(authorization.reviewedFiles, 30);
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.equal(result.missingEvidence.accepted, 1);
+  assert.deepEqual(result.missingEvidence.regions, [{ start: 36, end: 36 }]);
+});
+
+test('REVERSALPROV-02: mixed replacements allow cited restoration of deleted base lines', async () => {
+  const { evidence } = await collect();
+  const authorization = evidence.reversalAuthorizations[0];
+  // Retain both introduced lines, but restore the author's deleted baseline.
+  evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
+    patch: '@@ -15,0 +16,2 @@\n+start_unsafe()\n+log_startup()' }];
+  authorization.commit.files = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -85,0 +86 @@\n+start()' }];
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  authorization.commit.files[0].patch = '@@ -85,0 +86 @@\n+unrelated()';
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['hammer-patch-does-not-touch-region']);
+});
+
+test('REVERSALPROV-02: rebase segments distinguish identical deletions with distinct additions', async () => {
+  const { evidence } = await collect();
+  const authorization = evidence.reversalAuthorizations[0];
+  const extra = (files, line) => files.map(file => ({ ...file, additions: file.additions + 1, deletions: file.deletions + 1,
+    patch: `${file.patch}\n@@ -${line} +${line + 1} @@\n-start()\n+distinct()` }));
+  evidence.primaryFiles = extra(evidence.primaryFiles, 35);
+  authorization.parentFiles = evidence.primaryFiles;
+  authorization.reviewedFiles = extra(authorization.reviewedFiles, 30);
+  evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -35 +35 @@\n-start()\n+distinct()' }];
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  // Truly identical segments are still ambiguous and fail closed.
+  evidence.primaryFiles = evidence.primaryFiles.map(file => ({ ...file, additions: file.additions + 1,
+    patch: file.patch.replace('+distinct()', '+start_unsafe()\n+log_startup()') }));
   assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
 });

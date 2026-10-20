@@ -187,7 +187,7 @@ function changes(files, paths = null, aliases = new Map()) {
       if (hunk) {
         oldLine = Number(hunk[1]);
         // A zero-context insertion names the preceding base line.
-        if (hunk[2] === '0' && oldLine > 0) oldLine += 1;
+        if (hunk[2] === '0') oldLine += 1;
         region = null;
         continue;
       }
@@ -275,7 +275,7 @@ function projectRegion(files, path, region, cache) {
 }
 
 // REVERSALPROV-02: context, hunk boundaries and offsets are not authority.
-// Match the protected removed content, retaining multiplicity and uniqueness.
+// Match the protected changed content, retaining multiplicity and uniqueness.
 function lineMultiset(lines) {
   const counts = new Map();
   for (const line of lines) counts.set(line, (counts.get(line) || 0) + 1);
@@ -288,7 +288,8 @@ function contentIdentity(lines) {
 
 function protectedSegment(files, path, region, cache) {
   return patchSegments(files, path, cache).segments.find(entry =>
-    entry.old <= region.start && region.end <= entry.oldEnd && entry.old < entry.oldEnd);
+    region.start === region.end ? entry.old === region.start && entry.oldEnd === region.end
+      : entry.old <= region.start && region.end <= entry.oldEnd && entry.old < entry.oldEnd);
 }
 
 function rebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
@@ -296,12 +297,13 @@ function rebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
   const segment = protectedSegment(primaryFiles, path, region, cache);
   if (!segment) throw new Error('protected region outside the primary patch');
   const removed = entry => entry.removals ??= entry.lines.filter(line => line.startsWith('-'));
-  const identity = entry => entry.removedIdentity ??= contentIdentity(removed(entry));
+  const identity = entry => entry.changedIdentity ??= contentIdentity(entry.lines);
   const sameContent = entry => identity(entry) === identity(segment);
   const matches = patchSegments(reviewedFiles, path, cache).segments.filter(sameContent);
   if (matches.length !== 1 || primarySegments.filter(sameContent).length !== 1) {
     throw new Error('rebased protected region patch differs or is ambiguous');
   }
+  if (region.start === region.end) return { start: matches[0].old, end: matches[0].old };
   // Map each removed occurrence, even when equal-content lines were reordered.
   segment.rebasedPositions ??= new Map();
   if (!segment.rebasedPositions.has(matches[0])) {
@@ -327,7 +329,7 @@ function projectRebasedRegion(primaryFiles, reviewedFiles, path, region, cache) 
 }
 
 function regionUnits(region) {
-  return region.removedLines.length === 0 ? []
+  return region.start === region.end ? [{ start: region.start, end: region.end }]
     : Array.from({ length: region.end - region.start }, (_, index) => ({
       start: region.start + index, end: region.start + index + 1,
     }));
@@ -351,7 +353,7 @@ function firstSupersedingReview(review, reviews) {
   });
 }
 
-function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation) {
+function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     let citation;
     const reject = (reason) => {
@@ -409,27 +411,27 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
             ? authorization.originalAuthorization.parentFiles : reviewedFiles;
           const originalRegion = rebasedRegion(evidence.primaryFiles, originalFiles, path, region, cache);
           if (!reversalAuthorized({ primaryFiles: originalFiles, reversalAuthorizations: [authorization.originalAuthorization] },
-            path, originalRegion, new Map(), strictNonBlockingRemediation)) {
+            path, originalRegion, new Map(), strictNonBlockingRemediation, restoringDeletion)) {
             return reject('original-authorization-does-not-cover-region');
           }
         }
         const parent = projectRegion(parentFiles, path, region, cache);
         const segment = protectedSegment(evidence.primaryFiles, path, region, cache);
         const added = segment.addedLines ??= segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
-        // A primary deletion is restored by additions, so preserve that
-        // existing authorization path using its content as well.
-        const restoringDeletion = added.length === 0;
-        const content = restoringDeletion
+        // Restored base lines need addition coverage, including in mixed
+        // replacements. Disappearing insertion regions need removal coverage.
+        const prefix = restoringDeletion || added.length === 0 ? '+' : '-';
+        const content = prefix === '+'
           ? segment.lines.filter(line => line.startsWith('-')).map(line => line.slice(1)) : added;
         // Equal-length replacements can authorize a single base unit. An
         // expansion maps each unit to the complete introduced span, as above.
-        const key = content.length === segment.oldEnd - segment.old ? `${region.start}:${region.end}` : segment;
+        const positional = content.length === segment.oldEnd - segment.old;
+        const key = `${prefix}:${positional ? `${region.start}:${region.end}` : 'all'}`;
         segment.protectedContent ??= new Map();
         if (!segment.protectedContent.has(key)) segment.protectedContent.set(key, lineMultiset(
-          key === segment ? content : content.slice(region.start - segment.old, region.end - segment.old)));
+          positional ? content.slice(region.start - segment.old, region.end - segment.old) : content));
         const protectedLines = segment.protectedContent.get(key);
         const { segments } = patchSegments(commit.files, parent.filename, cache);
-        const prefix = restoringDeletion ? '+' : '-';
         segments.authorizingContent ??= new Map();
         if (!segments.authorizingContent.has(prefix)) segments.authorizingContent.set(prefix, lineMultiset(segments.flatMap(entry => entry.lines)
           .filter(line => line.startsWith(prefix)).map(line => line.slice(1))));
@@ -519,7 +521,7 @@ function refusedRegions(primary, final, authorized) {
       const lostRemoval = region.removedLines.some(line => line.position === unit.start
         && (final?.removed.get(line.text) || 0) < primary.removed.get(line.text));
       if (overlaps && !lostRemoval) continue;
-      try { if (!authorized(unit)) result.push(unit); }
+      try { if (!authorized(unit, lostRemoval)) result.push(unit); }
       catch { result.push(unit); } // Diagnostic uncertainty cannot change the verdict.
     }
   }
@@ -589,8 +591,8 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       const diagnosticCache = new Map();
       return { ok: false, reason: 'primary-change-reverted', path,
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
-          refusedRegions(primary.get(path), final.get(path), (unit) =>
-            reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation))) };
+          refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
+            reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation, restoringDeletion))) };
     };
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
@@ -624,10 +626,12 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
         actualPositionsByText.get(entry.text).add(entry.position);
       }
       const authorizedByText = new Map();
+      const authorizedRestorations = new Set();
       for (const entry of change.regions.flatMap((region) => region.removedLines)) {
         if (unchanged.has(entry.position) || (!actualPositionsByText.get(entry.text)?.has(entry.position)
-          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache, strictNonBlockingRemediation))) {
+          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache, strictNonBlockingRemediation, true))) {
           authorizedByText.set(entry.text, (authorizedByText.get(entry.text) || 0) + 1);
+          authorizedRestorations.add(entry.position);
         }
       }
       for (const [line, count] of change.removed) {
@@ -638,7 +642,8 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       }
       for (const region of change.regions) {
         for (const unit of regionUnits(region)) {
-          if (!unchanged.has(unit.start) && !actual.regions.some((other) => unit.start === unit.end
+          if (!unchanged.has(unit.start) && !authorizedRestorations.has(unit.start)
+            && !actual.regions.some((other) => unit.start === unit.end
             ? other.start <= unit.start && other.end >= unit.start
             : other.start < unit.end && other.end > unit.start)
             && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {

@@ -296,7 +296,7 @@ test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and i
     assert.equal(records.length, 1);
     const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
     assert.equal(record.history.renameProofReadFailed, undefined);
-    assert.equal(record.key[7], 'reversalprov-v2');
+    assert.equal(record.key[7], 'reversalprov-v3');
     assert.deepEqual(await fetchPrimaryChange(args), evidence);
     assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
   }
@@ -516,14 +516,16 @@ test('in-place bug, identifier and whitespace repairs preserve the author region
   }
 });
 
-test('REVERSALPROV-02: an insertion-only region needs no reversal authorization', () => {
+test('insertion-only regions allow in-place repairs but reject uncited removal or relocation', () => {
   const file = { filename: 'src/worker.mjs', status: 'modified', additions: 1, deletions: 0,
     patch: '@@ -9,1 +9,2 @@\n context\n+return foo(a);' };
   const evidence = { ...primaryChangeFixture(head), primaryFiles: [file],
     finalFiles: [{ ...file, patch: '@@ -9,1 +9,2 @@\n context\n+return foo(a ?? b);' }] };
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   evidence.finalFiles[0].patch = '@@ -29,1 +29,2 @@\n other context\n+return foo(a);';
-  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  evidence.finalFiles = [];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
 });
 
 test('restoring one removed occurrence fails even if another identical removal survives', () => {
@@ -737,7 +739,7 @@ test('HAMINTENT-01R: collector reports restored and newly added test regions', a
     } });
   assert.deepEqual(result.testRegionsChanged, [
     { path: restored.filename, primaryRegions: [{ start: 1, end: 2 }], finalRegions: [] },
-    { path: added.filename, primaryRegions: [], finalRegions: [{ start: 0, end: 0 }] },
+    { path: added.filename, primaryRegions: [], finalRegions: [{ start: 1, end: 1 }] },
   ]);
   const checked = checkPrimaryChange(result, head);
   assert.equal(checked.ok, true);

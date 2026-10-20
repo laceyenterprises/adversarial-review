@@ -221,7 +221,7 @@ test('a one-line finding cannot waive a contiguous multi-line author rewrite', (
   assert.equal(checkPrimaryChange(e, head).ok, true);
 });
 
-test('expanded replacements require full finding coverage; insertion-only regions need no authorization', () => {
+test('expanded replacements and insertions require full finding coverage', () => {
   for (const primary of [
     { ...file, additions: 3, deletions: 1, patch: '@@ -10 +10,3 @@\n-old\n+one\n+two\n+three' },
     { ...file, additions: 3, deletions: 0, patch: '@@ -9,0 +10,3 @@\n+one\n+two\n+three' },
@@ -231,8 +231,7 @@ test('expanded replacements require full finding coverage; insertion-only region
     Object.assign(e.reversalAuthorizations[0], { reviewedFiles: [primary], parentFiles: [primary] });
     e.reversalAuthorizations[0].commit.files = [{ ...file, additions: 0, deletions: 3,
       patch: '@@ -10,3 +9,0 @@\n-one\n-two\n-three' }];
-    if (primary.deletions === 0) assert.equal(checkPrimaryChange(e, head).ok, true);
-    else assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
     e.reversalAuthorizations[0].review.body = body.replace('`10`', '`10-12`');
     assert.equal(checkPrimaryChange(e, head).ok, true);
   }

@@ -1023,17 +1023,21 @@ Key control points:
   reviewed head when reviews differ; each commit binds one `Reviewed-Head` to its
   citations. Missing and unrelated citations remain refused. After a rebase
   (cited review head `diverged` from the HAM parent), REVERSALPROV-02 matches
-  the protected region's removed-line multiset against the reviewed change,
-  preserving occurrence counts and rejecting ambiguous matches. Surrounding
-  context, line offsets and removed-line order do not determine authorization.
+  the protected region's removed/added-line multisets against the reviewed change,
+  preserving occurrence counts and rejecting ambiguous matches. Distinct added
+  content disambiguates identical deletions. Surrounding context, line offsets
+  and changed-line order do not determine authorization.
   The authorizing HAM commit must remove the protected introduced content with
   sufficient multiplicity; touching the same coordinates alone supplies no
   authority. Each removed occurrence can cover only one protected occurrence.
   A cited restoration of a primary deletion similarly binds the deleted
-  content to the authorizing commit's additions, retaining its existing path.
-  File/Lines coverage still uses the cited review's coordinates. A region with
-  no removed lines is not a reversal and needs no citation; whole-file absence,
-  opaque-file and rename preservation remain independent protections.
+  content to the authorizing commit's additions, including in mixed replacements
+  whose introduced lines remain present. File/Lines coverage still uses the cited
+  review's coordinates. Insertion-only regions remain protected: their removal
+  needs a citation covering the full introduced span and matching HAM removals
+  with multiplicity. In-place repairs may preserve the region while changing
+  introduced text. Whole-file absence, opaque-file and rename preservation remain
+  independent protections.
   A superseded citation additionally requires the original HAM reversal, with
   the same message, file paths, previous paths, statuses and removed/added
   content multisets and valid original authorization, in the first superseding

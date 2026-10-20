@@ -23,28 +23,29 @@ PR 1383 (REVERSALPROV-01) preserved proven hammer identity across pipeline
 rebases. Authorization still depended on exact protected patch segments and
 a reviewed-parent comparison that retained context and hunk layout. A rebase
 could therefore preserve the removed content and its citation yet invalidate
-the patch-shaped proof. Insertion-only regions also entered reversal checks,
-although they contained no removed lines to authorize.
+the patch-shaped proof. Insertion-only regions require reversal checks against their introduced content,
+even though their base-coordinate removed sets are empty.
 
 ## Repair
 
-The guard matches protected removed content as a multiset, preserving duplicate
-counts. It binds original and rebased commit content without surrounding
+The guard matches protected removed and added content as multisets, preserving
+duplicate counts and distinguishing replacements with identical base deletions. It binds original and rebased commit content without surrounding
 context, line offsets, ordering or hunk boundaries. Finding coverage still uses
 the cited review's coordinates. The authorizing commit must actually remove
 the protected introduced content; coordinate overlap alone cannot waive it,
 and one removed occurrence cannot cover multiple protected occurrences.
-Cited restoration of a primary deletion retains its existing authorization,
-using the content added back by the authorizing commit.
-Regions with empty removed sets do not request authorization or appear in
-reversal diagnostics. Whole-file absence, opaque assets and rename preservation
+Cited restoration of a primary deletion uses the content added back by the
+authorizing commit, including in mixed replacement hunks. Insertion-only regions
+remain protected: their reversal requires full finding coverage of the introduced
+span and matching HAM removals with multiplicity. Uncited insertion removals
+appear in reversal diagnostics; in-place region repairs remain allowed. Whole-file absence, opaque assets and rename preservation
 retain their existing protections.
 
 Hammer provenance, authoritative reviews, effective non-blocking policy,
 citation freshness, closure ancestry and superseded-review proofs remain
 required. Unauthorized or partially covered removals retain the existing
 `primary-change-reverted` refusal and diagnostic messages. The history cache
-identity advances to `reversalprov-v2` so unchanged heads recompute old proofs
+identity advances to `reversalprov-v3` so unchanged heads recompute old proofs
 and refusals once. No manual cache mutation is required.
 
 ## Validation and deployment acceptance
@@ -52,12 +53,16 @@ and refusals once. No manual cache mutation is required.
 Offline synthetic regressions cover context and coordinate shifts, reordered
 removed lines, changed hunk boundaries, a cited non-blocking cleanup, missing
 citations, unrelated or partially covered removed content, duplicate-line
-multiplicity, an uncited remainder and empty removed sets. Existing provenance,
+multiplicity, an uncited remainder and insertion-only reversal authorization. Existing provenance,
 review freshness, rename and opaque-file regressions remain in the focused suite.
-The 191-test focused run passed, including the shared hammer/daemon policy
+The initial 191-test focused run passed, including the shared hammer/daemon policy
 fixtures. Lint completed with zero errors; contract typechecking and the offline
 byte-equivalence demo passed. The full offline suite passed with 11,207
 passing tests, six skips and zero failures.
+
+Remediation regressions additionally cover insertion reversals with and without
+a final file diff, rebased and first-line insertions, full citation spans, duplicate
+inserted content, mixed replacement restorations and distinct replacement hunks.
 
 After deployment, observe the next naturally occurring hammer cleanup of cited
 primary-change content after a context-only rebase. Its citation should remain

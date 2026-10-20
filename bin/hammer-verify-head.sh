@@ -49,7 +49,7 @@ ham_wait_for_published_head() {
       probe_exit=$?
       cat "$probe_dir/stderr" >&2
       # Keep the last valid read; transport failures consume the visibility budget.
-      if [ "$probe_exit" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$probe_dir/stderr"; then
+      if [ "$probe_exit" -eq 142 ] || grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$probe_dir/stderr"; then
         rm -rf "$probe_dir"
         continue
       fi
@@ -144,7 +144,7 @@ ham_lease_pr_view() {
       rc=$?
     fi
     cat "$err" >&2
-    if [ "$rc" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$err"; then
+    if [ "$rc" -eq 142 ] || grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$err"; then
       HAM_LEASE_PROBE_TRANSIENT=1
     else
       HAM_LEASE_PROBE_TRANSIENT=0
@@ -293,7 +293,7 @@ NODE
     HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_MARKER
 HAM closing status — no merge. The gate-attempt cap stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
     ham_gate_cap_gh_transient() {
-      grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+      grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
     }
     # All comment operations share the same bounded retry and transient test.
     ham_gate_cap_gh() {
@@ -397,7 +397,7 @@ ham_update_branch_conflict() {
 }
 
 ham_update_branch_transient() {
-  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+  grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
 }
 
 ham_is_full_sha() {

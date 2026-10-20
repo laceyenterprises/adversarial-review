@@ -546,8 +546,8 @@ test('hammer audit deduplicates exact edges and preserves earlier App attestatio
   assert.match(lookup, /POST_REMEDIATION_SHA/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_HEAD=/);
   // An existing audit is refreshed IN PLACE (PATCH edit), not skipped or duplicated:
-  assert.match(HAMMER_PROMPT, /ham_gh api --method PATCH/);
-  assert.match(HAMMER_PROMPT, /issues\/comments\/\$HAM_EXISTING_AUDIT_COMMENT_ID/);
+  assert.match(HAMMER_PROMPT, /ham_entitled_gh api --method PATCH/);
+  assert.match(HAMMER_PROMPT, /issues\/comments\/\$existing/);
   assert.match(HAMMER_PROMPT, /hammer audit comment refreshed in place/);
 });
 
@@ -688,6 +688,12 @@ test('HAMIDENT-02: bounded unlinked identity repair requires own HAM trailers an
     'hammer-context.mjs', 'hammer-publish', 'predicate command above **once**',
     'Never re-author a', 'Never attempt a second re-author',
   ]) assert.ok(step.includes(required), `missing repair guard: ${required}`);
+});
+
+test('HAMATTESTRETRY-01 prompt preserves the audit delivery recovery cause', () => {
+  assert.match(HAMMER_PROMPT, /Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures/);
+  assert.match(HAMMER_PROMPT, /do not request source re-review for delivery failure/);
+  assert.match(HAMMER_PROMPT, /Something went wrong while executing your query/);
 });
 
 test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent', () => {

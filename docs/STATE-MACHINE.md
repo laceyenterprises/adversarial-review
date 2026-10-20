@@ -684,6 +684,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+HAMATTESTRETRY-01 uses the existing deferred AMA outcome for audit comment
+delivery failure. The validated edge stays in the same per-head audit document;
+a later hammer publishes it under its own lease only for the matching live
+head, reviewed base and authenticated App identity, before the unchanged
+provenance predicate. Lease loss stops retries. Existing dispatch states, retry
+caps and merge authority remain unchanged; mismatches retain exact-head review.
+
 HAMMERQUOTAREAD-01: closer quota read failures may reuse a last-good snapshot
 less than ten minutes old after bounded retries. Without usable evidence,
 automatic routing holds before any launch, recording an existing `deferred`

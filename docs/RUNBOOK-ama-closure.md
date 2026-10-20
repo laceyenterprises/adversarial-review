@@ -3702,6 +3702,26 @@ unproven starting base or unreadable proof requests exact-head review. The
 stale-head prover and daemon also require this App chain; old prose audits
 and forgeable commit identity fields cannot authorize a moved head.
 
+HAMATTESTRETRY-01: audit delivery retries transient GraphQL server errors
+(including generic execution failures, INTERNAL error types and HTTP 5xx) up to
+five times with fixed 2/4/8/16-second backoff. Each attempt rereads the merge
+lease and stops on loss, expiry or unreadable ownership. Failed delivery after
+a successful range proof appends a deferred AMA audit attempt containing
+`pendingAttestation`: reviewed base, validated head, authenticated App login and
+numeric identity, and fixed validation counts. No token, error text or finding
+body is stored. This survives scratch cleanup.
+
+Before the next publish provenance check, the hammer reads the audit for the
+live head. Only a matching current head, last reviewed base and authenticated
+App identity permit recovery under its new lease. It rechecks the head before
+posting and reuses an existing recovered edge if delivery already succeeded.
+Recovery posts only the original edge; the current run still needs its own
+range proof, audit, predicate and green exact-head checks. Mismatches supply no
+proof and retain ordinary exact-head review fallback. An exhausted-delivery
+closing status preserves `HAM_NO_MERGE_NOTE`: audit delivery failed transiently
+and the next hammer will recover the edge when those inputs match. It does not
+request a source re-review for a delivery failure.
+
 The prompt runs `bin/hammer-review-handoff.mjs` as `HAM_HQ_OWNER`, using
 `sudo -A -H -u` when the worker differs, so lease and review state retain
 canonical daemon ownership. The helper requests the existing bounded exact-head

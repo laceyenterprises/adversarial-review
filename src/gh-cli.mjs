@@ -68,6 +68,8 @@ function isTransientGhError(err) {
   const code = String(err.code || '');
   if (code === 'EIO' || code === 'ETIMEDOUT' || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND') return true;
   const stderr = String(err.stderr || err.message || '');
+  const graphqlDetail = [err.stderr, err.stdout, err.message].filter(Boolean).join('\n');
+  if (/Something went wrong while executing your query|"type"\s*:\s*"INTERNAL"|HTTP[^\s]*\s+5\d\d|"status"\s*:\s*5\d\d/i.test(graphqlDetail)) return true;
   if (/timeout/i.test(stderr)) return true;
   if (/TLS handshake/i.test(stderr)) return true;
   if (/connection reset|socket hang up|unexpected EOF|network is unreachable/i.test(stderr)) return true;

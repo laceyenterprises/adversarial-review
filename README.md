@@ -558,6 +558,14 @@ stops the flow; a rebase-conflict outcome returns control for local resolution.
 6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
 7. **Append the terminal audit and release the lease.**
 
+HAMATTESTRETRY-01 keeps audit delivery failures on the existing deferred retry
+path. Publication retries transient GitHub errors five times under the lease,
+then retains a validated base/head edge in AMA audit state. A later hammer can
+post that edge before its provenance check only when the current head, last
+reviewed base and authenticated App identity match. Different inputs retain the
+exact-head review fallback. Existing lifecycle states and smoke promises remain
+unchanged; offline recovery fixtures live in `test/hammer-attestation-retry.test.mjs`.
+
 The hammer does **not** run a local test battery or a pre-push CI mirror as a
 merge gate — GitHub required checks are the sole CI authority. This removes the
 original merge-agent state machine's fatal flaw of running heavy local suites

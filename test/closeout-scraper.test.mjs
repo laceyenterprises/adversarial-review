@@ -79,7 +79,7 @@ test('closeout PR created-at reader prefers optional adapter metadata', async ()
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
-      assert.equal(args.includes('pull-request'), true);
+      assert.equal(args.includes('pr-state'), true);
       return {
         stdout: JSON.stringify({
           pullRequest: {

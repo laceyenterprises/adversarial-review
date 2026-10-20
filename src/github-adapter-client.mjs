@@ -13,6 +13,26 @@ import {
 
 const adapterReadTick = new AsyncLocalStorage();
 
+// Logical client kinds and the adapter's documented CLI subcommands. Kinds
+// without an entry are probed by name and may be refused by older adapters.
+export const ADAPTER_READ_COMMANDS = Object.freeze({
+  'pull-request': 'pr-state',
+  'pull-request-head-state': 'pr-state',
+  'pull-request-rollup': 'pr-state',
+  'pull-request-review-context': 'pr-state',
+  'pull-request-review-bodies-for-head': 'pr-reviews',
+  'latest-label-event': 'label-events',
+  'pr-state': 'pr-state',
+  'pr-reviews': 'pr-reviews',
+  'issue-comments': 'issue-comments',
+  labels: 'labels',
+  'check-rollup': 'check-rollup',
+  'label-events': 'label-events',
+  'prs-by-head': 'prs-by-head',
+  'search-merged-prs': 'search-merged-prs',
+  'rate-limit': 'rate-limit',
+});
+
 // Capability skew is stable within a tick. Authentication/network failures are
 // request-specific and must never disable an otherwise supported transport.
 export async function withGitHubAdapterReadTick(run, { logger = console } = {}) {
@@ -27,8 +47,9 @@ function unsupportedReadCapability(error, kind) {
     let payload;
     try { payload = JSON.parse(String(output)); } catch { continue; }
     if (payload?.failureClass !== 'unsupported') continue;
-    if (payload.code === 'unsupported_command' && payload.requested === 'read') return 'read';
-    if (payload.code === 'unsupported_kind' && payload.requested === kind) return `read:${kind}`;
+    const command = ADAPTER_READ_COMMANDS[kind] ?? kind;
+    if (payload.code === 'unsupported_command' && payload.requested === command) return command;
+    if (payload.code === 'unsupported_kind' && payload.requested === kind) return command;
   }
   return null;
 }
@@ -308,8 +329,22 @@ function appendCommonAdapterArgs(args, params = {}) {
 }
 
 function makeAdapterArgs(kind, params = {}, env = {}) {
-  const args = ['read', '--kind', kind, '--json'];
-  appendCommonAdapterArgs(args, params);
+  const command = ADAPTER_READ_COMMANDS[kind] ?? kind;
+  const args = [command, '--json'];
+  if (command !== 'rate-limit') {
+    if (params.repo) args.push('--repo', String(params.repo));
+    if (!['prs-by-head', 'search-merged-prs'].includes(command) && params.prNumber !== undefined) {
+      args.push('--number', String(normalizePrNumber(params.prNumber)));
+    }
+  }
+  if (command === 'label-events' && params.labelName) args.push('--label', String(params.labelName));
+  if (command === 'prs-by-head' && params.head) args.push('--head', String(params.head));
+  if (command === 'search-merged-prs') {
+    if (params.ticket) args.push('--ticket', String(params.ticket));
+    if (params.graphql === false) args.push('--no-graphql');
+  }
+  // Head/reviewer filters, label inclusion and limits are caller-side options;
+  // these subcommands do not accept the unified write seam's flags.
   appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
   return args;
 }
@@ -453,7 +488,7 @@ async function runGitHubAdapter(kind, params = {}, {
   if (!adapterBin) return null;
   const tick = adapterReadTick.getStore();
   const unsupported = tick?.open ? tick.unsupported.get(adapterBin) : null;
-  if (unsupported?.has('read') || unsupported?.has(`read:${kind}`)) return null;
+  if (unsupported?.has(ADAPTER_READ_COMMANDS[kind] ?? kind)) return null;
   try {
     const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
       maxBuffer: ADAPTER_MAX_BUFFER,
@@ -462,6 +497,7 @@ async function runGitHubAdapter(kind, params = {}, {
     });
     const payload = parseAdapterJson(stdout, kind);
     if (payload?.ok === false) throw Object.assign(new Error(payload.message || 'GitHub adapter read failed'), { stdout });
+    if (payload?.complete === false) throw new Error('GitHub adapter read is incomplete');
     return payload;
   } catch (error) {
     const capability = unsupportedReadCapability(error, kind);
@@ -563,13 +599,44 @@ function unwrapPayload(payload, key, kind) {
 async function readAdapterPrRollup(repo, prNumber, options) {
   const payload = await runGitHubAdapter('pull-request-rollup', { repo, prNumber }, options);
   if (!payload) return null;
-  return unwrapPayload(payload, 'rollup', 'pull-request-rollup');
+  // pr-state currently omits mergeability. The caller's existing rollup
+  // validator must refuse that partial shape and use its established fallback.
+  return normalizeAdapterPr(payload, 'rollup', 'pull-request-rollup');
+}
+
+function normalizeAdapterPr(payload, key, kind) {
+  const object = asPayloadObject(payload, kind);
+  // Preserve explicit absence instead of normalizing the envelope as a PR.
+  const pr = Object.hasOwn(object, key) ? object[key]
+    : Object.hasOwn(object, 'data') ? object.data : object;
+  if (!pr || typeof pr !== 'object' || Array.isArray(pr)) return null;
+  return {
+    ...pr,
+    number: pr.number ?? pr.pr?.number,
+    mergedAt: pr.mergedAt ?? pr.merged_at,
+    closedAt: pr.closedAt ?? pr.closed_at,
+  };
 }
 
 async function readAdapterReviewContext(repo, prNumber, options) {
+  const tick = adapterReadTick.getStore();
+  if (tick?.open) {
+    const adapterBin = resolveGitHubAdapterBin({ env: options?.env ?? process.env, rootDir: options?.rootDir });
+    if (tick.unsupported.get(adapterBin)?.has('issue-comments')) return null;
+  }
   const payload = await runGitHubAdapter('pull-request-review-context', { repo, prNumber }, options);
   if (!payload) return null;
-  return unwrapPayload(payload, 'rollup', 'pull-request-review-context');
+  const pr = normalizeAdapterPr(payload, 'rollup', 'pull-request-review-context');
+  if (!pr) return null;
+  const comments = pr.comments ?? await readAdapterIssueComments(repo, prNumber, options);
+  if (!Array.isArray(comments)) return null;
+  return { ...pr, comments: comments.map(comment => ({
+    ...comment,
+    author: comment.author ?? comment.user,
+    createdAt: comment.createdAt ?? comment.created_at,
+    authorAssociation: comment.authorAssociation ?? comment.author_association,
+    authorType: comment.authorType ?? comment.user?.type,
+  })) };
 }
 
 async function readAdapterHeadAndState(repo, prNumber, { withLabels = true, ...options } = {}) {
@@ -586,7 +653,7 @@ async function readAdapterReviewBodiesForHead(repo, prNumber, headSha, { reviewe
     reviewerLogins,
   }, options);
   if (!payload) return null;
-  const bodies = unwrapPayload(payload, 'bodies', 'pull-request-review-bodies-for-head');
+  const bodies = payload.reviews ?? unwrapPayload(payload, 'bodies', 'pull-request-review-bodies-for-head');
   if (!Array.isArray(bodies)) {
     throw new Error('GitHub adapter review bodies payload must be an array');
   }
@@ -597,7 +664,7 @@ async function readAdapterReviewBodiesForHead(repo, prNumber, headSha, { reviewe
         body: String(body.body || ''),
         state: body.state ?? null,
         submittedAt: body.submittedAt ?? body.submitted_at ?? null,
-        commitId: body.commitId ?? body.commit_id ?? null,
+        commitId: body.commitId ?? body.commit_id ?? body.commit?.oid ?? null,
       };
     }
     return String(body || '');
@@ -607,7 +674,15 @@ async function readAdapterReviewBodiesForHead(repo, prNumber, headSha, { reviewe
 async function readAdapterLatestLabelEvent(repo, prNumber, labelName, { currentHeadSha = null, ...options } = {}) {
   const payload = await runGitHubAdapter('latest-label-event', { repo, prNumber, labelName, currentHeadSha }, options);
   if (!payload) return null;
-  return unwrapPayload(payload, 'event', 'latest-label-event');
+  const events = payload.events ?? [unwrapPayload(payload, 'event', 'latest-label-event')];
+  if (!Array.isArray(events)) throw new Error('GitHub adapter label events must be an array');
+  const event = events.filter(event => (
+    String(event?.label?.name ?? event?.label ?? '').toLowerCase() === String(labelName).toLowerCase()
+    && String(event?.event ?? 'labeled').toLowerCase() === 'labeled'
+  )).sort((a, b) => String(a.createdAt ?? a.created_at ?? '').localeCompare(String(b.createdAt ?? b.created_at ?? ''))).at(-1);
+  // A label timeline without a code anchor cannot authorize the current head.
+  if (!event || (currentHeadSha && (event.headSha !== currentHeadSha || !event.codeScopedAt))) return null;
+  return { ...event, actor: typeof event.actor === 'string' ? { login: event.actor } : event.actor };
 }
 
 async function readAdapterIssueComments(repo, prNumber, options) {
@@ -633,7 +708,7 @@ async function readAdapterOpenPullRequests(repo, options) {
 async function readAdapterPullRequest(repo, prNumber, options) {
   const payload = await runGitHubAdapter('pull-request', { repo, prNumber }, options);
   if (!payload) return null;
-  return unwrapPayload(payload, 'pullRequest', 'pull-request');
+  return normalizeAdapterPr(payload, 'pullRequest', 'pull-request');
 }
 
 async function readAdapterPullRequestDiff(repo, prNumber, options) {
@@ -751,6 +826,7 @@ const __test__ = {
   makeAdapterArgs,
   makeAdapterWriteArgs,
   parseAdapterJson,
+  runGitHubAdapter,
   resolveGitHubAdapterBin,
   trustedAutoDiscoveryRoots,
 };

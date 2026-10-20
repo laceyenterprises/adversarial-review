@@ -625,16 +625,20 @@ This observation requires host traffic and is not established by offline tests.
 Offline tests clear the window with
 `resetFinalReviewHammerLatenciesForTesting()` during setup and teardown.
 
-The optional adapter's Node read seam invokes `read --kind ...`. Adapter CLI
-versions that lack `read` return structured `unsupported_command` evidence;
+The optional adapter's Node read seam uses the per-kind CLI subcommands in
+`ADAPTER_READ_COMMANDS` (`src/github-adapter-client.mjs`), with `--number` for
+PR references. Review head/author filtering stays local; review context combines
+`pr-state` with `issue-comments`. Current `pr-state` lacks mergeability, so full
+rollup/mergeability reads retain their existing fallback. Label events without
+head-scope evidence also retain the authoritative timeline fallback.
+Adapter CLI versions that lack a subcommand return structured `unsupported_command` evidence;
 subprocess failures are classified as `exec_error`, and API telemetry does not
 store the error message. After that specific capability refusal, the watcher
 logs that it is skipping the unsupported read transport for the rest of the
-tick and uses its existing fallback. Unsupported individual kinds are skipped
-only for that kind. Every new tick probes again. Transient, authentication,
+tick and uses its existing fallback. Only that subcommand (including logical
+kinds sharing it) is skipped; other reads remain available. Every new tick probes again. Transient, authentication,
 timeout and unstructured failures do not disable the transport, and writes
-retain their existing path. This explains a repeatable failed-first-read
-pattern; it does not measure a host's failure percentage.
+retain their existing path. Incomplete envelopes cannot become successful reads.
 Nested `withGitHubAdapterReadTick` calls share the enclosing tick's capability
 cache; only the outermost call clears it on exit.
 

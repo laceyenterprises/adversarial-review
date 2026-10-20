@@ -444,7 +444,7 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args: [...args], options });
       if (command === '/fixture/github-adapter') {
-        const kind = args[args.indexOf('--kind') + 1];
+        const kind = args[0];
         if (kind === 'pull-request-diff') {
           return { stdout: JSON.stringify({ diff: { not: 'a string' } }) };
         }
@@ -462,7 +462,7 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
   assert.equal(content.representation, fixture.diff);
   assert.deepEqual(calls.map((call) => (
     call.command === '/fixture/github-adapter'
-      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      ? [call.command, call.args[0]]
       : [call.command, ...call.args]
   )), [
     ['/fixture/github-adapter', 'open-pull-requests'],
@@ -479,7 +479,7 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args: [...args], options });
       if (command === '/fixture/github-adapter') {
-        const kind = args[args.indexOf('--kind') + 1];
+        const kind = args[0];
         if (kind === 'open-pull-requests') {
           return { stdout: JSON.stringify({ pullRequests: fixture.pulls }) };
         }
@@ -500,7 +500,7 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
   assert.equal(content.representation, fixture.diff);
   assert.deepEqual(calls.map((call) => (
     call.command === '/fixture/github-adapter'
-      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      ? [call.command, call.args[0]]
       : [call.command, ...call.args]
   )), [
     ['/fixture/github-adapter', 'open-pull-requests'],
@@ -530,7 +530,7 @@ test('github-pr subject adapter falls back to Octokit when adapter discovery ret
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
-      const kind = args[args.indexOf('--kind') + 1];
+      const kind = args[0];
       assert.equal(kind, 'open-pull-requests');
       return { stdout: JSON.stringify({ pullRequests: [] }) };
     },
@@ -540,7 +540,7 @@ test('github-pr subject adapter falls back to Octokit when adapter discovery ret
 
   assert.deepEqual(refs.map((ref) => ref.subjectExternalId), [`${fixture.repo}#484`]);
   assert.equal(octokitListCalls, 1);
-  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+  assert.deepEqual(calls.map((call) => call.args[0]), [
     'open-pull-requests',
   ]);
 });
@@ -592,7 +592,7 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
-      const kind = args[args.indexOf('--kind') + 1];
+      const kind = args[0];
       assert.equal(kind, 'open-pull-requests');
       return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
     },
@@ -613,7 +613,7 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
     },
   ]);
   assert.equal(octokitListCalls, 1);
-  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+  assert.deepEqual(calls.map((call) => call.args[0]), [
     'open-pull-requests',
   ]);
 
@@ -660,7 +660,7 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       if (command === '/fixture/github-adapter') {
-        const kind = args[args.indexOf('--kind') + 1];
+        const kind = args[0];
         assert.equal(kind, 'open-pull-requests');
         return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
       }
@@ -698,7 +698,7 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
   assert.equal(octokitListCalls, 1);
   assert.deepEqual(calls.map((call) => (
     call.command === '/fixture/github-adapter'
-      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      ? [call.command, call.args[0]]
       : [call.command, ...call.args.slice(0, 3)]
   )), [
     ['/fixture/github-adapter', 'open-pull-requests'],
@@ -729,7 +729,7 @@ test('github-pr subject adapter fails loud when adapter discovery may be partial
     env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
     execFileImpl: async (command, args) => {
       if (command === '/fixture/github-adapter') {
-        const kind = args[args.indexOf('--kind') + 1];
+        const kind = args[0];
         assert.equal(kind, 'open-pull-requests');
         return { stdout: JSON.stringify({ pullRequests: [adapterPull] }) };
       }
@@ -782,7 +782,7 @@ test('github-pr subject adapter uses optional GitHub adapter when present withou
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
-      const kind = args[args.indexOf('--kind') + 1];
+      const kind = args[0];
       if (kind === 'open-pull-requests') {
         return {
           stdout: JSON.stringify({
@@ -821,7 +821,7 @@ test('github-pr subject adapter uses optional GitHub adapter when present withou
 
   const content = await adapter.fetchContent(ref);
   assert.equal(content.representation, 'diff --git adapter\n');
-  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+  assert.deepEqual(calls.map((call) => call.args[0]), [
     'open-pull-requests',
     'pull-request-diff',
   ]);

@@ -105,7 +105,7 @@ test('fetchLatestLabelEvent scopes timeline labels with caller-provided current 
     {
       currentHeadSha: 'reviewed-head',
       execFileImpl: async (command, args) => {
-        if (args?.[0] === 'read' && args.includes('latest-label-event')) {
+        if (args?.[0] === 'label-events') {
           const err = new Error('adapter does not own this fixture');
           err.code = 78;
           throw err;
@@ -159,7 +159,7 @@ test('fetchLatestLabelEvent prefers optional adapter event payloads', async () =
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
       execFileImpl: async (command, args) => {
         assert.equal(command, '/fixture/github-adapter');
-        assert.equal(args.includes('latest-label-event'), true);
+        assert.equal(args.includes('label-events'), true);
         return {
           stdout: JSON.stringify({
             event: {

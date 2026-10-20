@@ -5,6 +5,16 @@ model caps and AFH soft grounding. Corporate fallback requires confirmed
 admission; missing, degraded, unknown or capped corporate evidence is skipped.
 An exhausted account never lends its cap or availability to the other account.
 
+Account routing shares `reserveFloorWeeklyMeasurement` to read Anthropic's
+`weeklyMeasurement` and OpenAI's `measurement`, accepting both provider
+`confidence` readings and legacy `status` readings. Finite numeric strings are
+normalized in either shape; null, absent, blank, boolean and invalid percentages
+remain unknown rather than becoming zero. A measured weekly reading with a
+finite percentage takes precedence, including zero; otherwise the reader tries
+`measurement`. Routing still requires fresh measured evidence in the 0–100 range
+and independent broker readiness; provider readings marked inferred cannot admit
+an account.
+
 The hammer follows the role-declared order. The loader accepts
 `[hammer-corp, hammer-claude]`; its default remains `[hammer-claude]`.
 CCX-05 owns changing the host value. If every declared candidate is capped,

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
-import { harnessCapFromStatuses, quotaStatusesFromSnapshot } from './fleet-quota-status.mjs';
+import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMeasurement } from './fleet-quota-status.mjs';
 
 // Accounts share a model family, but never quota or broker evidence. Keep the
 // two policies explicit: reviewers are corporate-first, workers personal-first.
@@ -24,7 +24,7 @@ function selectCodexAccount(payload, order, { model = null,
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
     const row = rows.find(entry => entry?.provider === 'openai'
       && (entry.authPath || entry.auth_path) === authPath);
-    const weekly = payload?.reserveFloors?.[`openai-${authPath}`]?.weeklyMeasurement;
+    const weekly = reserveFloorWeeklyMeasurement(payload?.reserveFloors?.[`openai-${authPath}`]);
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
       && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
     const ready = payload?.brokerAuth?.provider_states?.[provider];

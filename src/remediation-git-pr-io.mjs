@@ -306,7 +306,10 @@ async function ensureJobBranchMetadata({
   if (jobPath) {
     writeFollowUpJob(jobPath, nextJob);
   }
-  return { job: nextJob, baseBranch, branch, defaultBranch: metadata.defaultBranch, hydrated: true };
+  // Persisted bases may be configured defaults from recovered jobs. Only this
+  // read's base is evidence for the stacked-base guard's no-read shortcut.
+  return { job: nextJob, baseBranch, branch, liveBaseBranch: metadata.baseBranch,
+    defaultBranch: metadata.defaultBranch, hydrated: true };
 }
 
 async function ensureJobBaseBranch({

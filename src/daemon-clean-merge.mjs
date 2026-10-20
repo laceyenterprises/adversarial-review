@@ -1113,8 +1113,9 @@ export async function runDaemonCleanMergeAttempt({
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.
     runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body, subject }) => {
-      const baseHold = await guardStackedBaseImpl({ rootDir, repo, prNumber: pr, baseBranch: base,
-        defaultBranch: candidate?.defaultBranch, execFileImpl, signal, logger });
+      // Re-read the base at the click boundary; the poll snapshot may be stale.
+      const baseHold = await guardStackedBaseImpl({ rootDir, repo, prNumber: pr,
+        execFileImpl, signal, logger });
       if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
       const hold = stopHold();
       if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };

@@ -25,7 +25,7 @@ function fixture(t, { base = 'feature/parent', merged = true, fork = false, defa
     const endpoint = args[1];
     let data;
     if (args[0] === 'pr' && args[1] === 'view') data = { baseRefName: base, state: 'OPEN', labels: [], statusCheckRollup: [] };
-    else if (endpoint === `repos/${repo}/pulls/41`) data = { base: { ref: base, repo: { default_branch: defaultBranch } } };
+    else if (endpoint === `repos/${repo}/pulls/41`) data = { base: { ref: base, repo: { default_branch: defaultBranch } }, head: { ref: 'feature/child' } };
     else if (endpoint.startsWith(`repos/${repo}/pulls?`)) data = [{ merged_at: merged ? '2026-10-16T08:00:00Z' : null,
       head: { ref: base, repo: { full_name: fork ? 'contributor/widget' : repo } } }];
     else if (endpoint.endsWith('/comments')) {
@@ -283,7 +283,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
     const result = await runDaemonCleanMergeAttempt({
       rootDir: f.rootDir, repoPath: repo, prNumber: 41,
       cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
-      candidate: { title: 'Synthetic change', baseBranch: base, defaultBranch: 'trunk', headSha: head,
+      candidate: { title: 'Synthetic change', baseBranch: 'trunk', defaultBranch: 'trunk', headSha: head,
         statusCheckRollup: checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
         prState: 'open', labels: [], branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] } },
       gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
@@ -315,8 +315,34 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
     } else {
       assert.equal(result.merged, true, 'the same otherwise eligible PR merges after a safe retarget');
       assert.equal(clicks, 1);
-      assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 0);
+      assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 1,
+        'even a matching default snapshot gets a live pre-click base read');
     }
     assert.equal(released, 1);
   }
 });
+
+for (const mode of ['os', 'local']) {
+  test(`recovered job default cannot hide a merged parent before ${mode} remediation`, async t => {
+    const f = fixture(t, { defaultBranch: 'main' });
+    // Seed the same transport's default cache as a previous poll would.
+    const execFileImpl = async (cmd, args) => args[1] === `repos/${repo}/pulls/42`
+      ? { stdout: JSON.stringify({ base: { ref: 'main', repo: { default_branch: 'main' } } }) }
+      : f.execFileImpl(cmd, args);
+    assert.equal((await inspectStackedBase({ repo, prNumber: 42, execFileImpl })).ok, true);
+    createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
+      baseBranch: 'main', reviewerModel: 'claude',
+      createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
+      changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
+    const result = await consumeNextFollowUpJob({ ...f, execFileImpl,
+      healthRouter: { getMode: () => mode }, promptTemplate: 'synthetic prompt',
+      resolvePRLifecycleImpl: async () => ({ state: 'OPEN', source: 'live' }),
+      spawnImpl: () => assert.fail('recovered stacked job cannot spawn remediation'),
+      log: { log() {}, warn() {} } });
+    assert.equal(result.reason, 'stacked-base-merged');
+    assert.equal(result.job.status, 'stopped');
+    assert.equal(result.job.remediationPlan.stop.code, 'stacked-base-merged');
+    assert.equal(result.job.remediationWorker.state, 'never-spawned');
+    assert.equal(f.comments.length, 1);
+  });
+}

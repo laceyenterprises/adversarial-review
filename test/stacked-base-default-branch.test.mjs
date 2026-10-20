@@ -62,7 +62,13 @@ for (const [name, error, readError] of [
   ['timeout code', { code: 'ETIMEDOUT' }, 'timeout'],
   ['timeout text', { message: 'request timed out' }, 'timeout'],
   ['auth wrapper', { authOutage: true }, 'auth'],
-  ['forbidden', { stderr: 'HTTP 403 Forbidden' }, 'auth'],
+  ['unauthorized', { stderr: 'HTTP 401 Unauthorized' }, 'auth'],
+  ['forbidden', { stderr: 'HTTP 403 Forbidden' }, 'unknown'],
+  ['rate limited', { stderr: 'HTTP 403: API rate limit exceeded' }, 'unknown'],
+  ['too many requests', { status: 429,
+    stderr: 'HTTP 429: Too Many Requests' }, 'unknown'],
+  ['gateway timeout', { stderr: 'HTTP 504: Gateway Timeout' }, '5xx'],
+  ['gateway timeout status', { status: 504, message: 'Gateway Timeout' }, '5xx'],
   ['server stderr', { stderr: 'HTTP 503 Service Unavailable' }, '5xx'],
   ['server status', { status: 502 }, '5xx'],
   ['unknown', { message: 'unavailable' }, 'unknown'],
@@ -71,7 +77,13 @@ for (const [name, error, readError] of [
     const rootDir = workspace(t), warnings = [];
     const failure = Object.assign(new Error('synthetic-private-detail'), error);
     const held = await guardStackedBase({ rootDir, repo, prNumber,
-      execFileImpl: async () => { throw failure; },
+      execFileImpl: async () => {
+        // Quota failures need a bounded reset hint for the metered transport.
+        if (name === 'rate limited' || name === 'too many requests') {
+          failure.stderr = `< HTTP/2 ${name === 'rate limited' ? 403 : 429}\n< x-ratelimit-remaining: 0\n< x-ratelimit-reset: ${Math.ceil(Date.now() / 1000) + 1}\n${error.stderr}`;
+        }
+        throw failure;
+      },
       logger: { warn: message => warnings.push(message) } });
     assert.equal(held.reason, 'stacked-base-read-failed');
     assert.equal(held.readError, readError);
@@ -147,6 +159,7 @@ test('remediation hydration returns the default from its existing metadata read'
   assert.equal((await fetchPRBranchMetadata({ repo, prNumber, execFileImpl })).defaultBranch, defaultBranch);
   const hydrated = await ensureJobBranchMetadata({ job: { repo, prNumber }, execFileImpl });
   assert.equal(hydrated.defaultBranch, defaultBranch);
+  assert.equal(hydrated.liveBaseBranch, defaultBranch);
   assert.equal(hydrated.job.baseBranch, defaultBranch);
   assert.equal(calls, 2, 'each existing hydration performs just its own read');
 });
@@ -155,7 +168,7 @@ test('changed read-failure classes update the receipt and a no-read success clea
   const rootDir = workspace(t);
   const warnings = [];
   const options = { rootDir, repo, prNumber, logger: { warn: message => warnings.push(message) } };
-  for (const [status, readError] of [[503, '5xx'], [403, 'auth']]) {
+  for (const [status, readError] of [[503, '5xx'], [401, 'auth']]) {
     const held = await guardStackedBase({ ...options,
       execFileImpl: async () => { throw Object.assign(new Error('synthetic'), { status }); } });
     assert.equal(held.readError, readError);
@@ -171,4 +184,38 @@ test('changed read-failure classes update the receipt and a no-read success clea
   assert.equal(receipt.reason, null);
   assert.equal(receipt.readError, null);
   assert.ok(receipt.clearedAt);
+});
+
+test('hydration separates live base evidence from a recovered job default', async () => {
+  const job = { repo, prNumber, baseBranch: 'main' };
+  const execFileImpl = async () => ({ stdout: JSON.stringify({
+    base: { ref: 'feature/parent', repo: { default_branch: 'main' } },
+    head: { ref: 'feature/child' },
+  }) });
+  const hydrated = await ensureJobBranchMetadata({ job, requireBranch: true, execFileImpl });
+  assert.equal(hydrated.job.baseBranch, 'main', 'preserve the existing job contract');
+  assert.equal(hydrated.liveBaseBranch, 'feature/parent');
+  assert.equal(hydrated.defaultBranch, 'main');
+  const unchanged = await ensureJobBranchMetadata({ job,
+    execFileImpl: () => assert.fail('no hydration needed') });
+  assert.equal(unchanged.hydrated, false);
+  assert.equal(unchanged.liveBaseBranch, undefined, 'persisted bases are never live evidence');
+});
+
+test('unchanged read failures warn once until the class changes or the hold clears', async t => {
+  const warnings = [];
+  let status = 401;
+  const options = { rootDir: workspace(t), repo, prNumber,
+    execFileImpl: async () => { throw Object.assign(new Error('synthetic'), { status }); },
+    logger: { warn: message => warnings.push(message) } };
+  await guardStackedBase(options);
+  await guardStackedBase(options);
+  assert.equal(warnings.length, 1);
+  status = 403;
+  await guardStackedBase(options);
+  await guardStackedBase(options);
+  assert.equal(warnings.length, 2);
+  await guardStackedBase({ ...options, baseBranch: defaultBranch, defaultBranch });
+  await guardStackedBase(options);
+  assert.equal(warnings.length, 3, 'a new hold episode warns again');
 });

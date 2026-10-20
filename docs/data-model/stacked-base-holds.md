@@ -8,8 +8,11 @@ Each filename is the SHA-256 of `lowercase-repository#PR`, plus `.json`.
 `stacked-base-read-failed`; a successful recheck clears it to null and
 records `clearedAt` as an ISO timestamp. Read failures also store `readError` as
 `timeout`, `auth`, `5xx`, `parse`, or `unknown`; success clears that field to null.
-Each read-failure hold logs one timestamped warning with this class, never raw
-errors, credentials or response bodies. `commentedAt` records successful
+A new read-failure hold or changed error class logs one timestamped warning,
+never raw errors, credentials or response bodies. Unchanged persisted holds do
+not repeat the warning; clearing the hold re-arms it. `auth` means a typed auth
+outage or HTTP 401; HTTP 403/429 use `unknown`. HTTP 5xx, including 504, takes
+precedence over free-text timeout matching. `commentedAt` records successful
 retarget-comment delivery. That receipt survives head and base changes.
 
 An exclusive `.lock` claim serializes comment delivery, with a 300-second stale
@@ -28,12 +31,15 @@ initial persistence failures log a warning and defer comment delivery until a
 later observation can persist safely.
 
 `inspectStackedBase` and `guardStackedBase` accept optional `baseBranch` and
-`defaultBranch`. Matching nonempty strings authorize an immediate success
-without a GitHub read; successful guard calls still clear the local hold.
+`defaultBranch`. Matching nonempty strings, with the base supplied from live PR
+evidence, authorize an immediate success without a GitHub read; successful guard calls still clear the local hold.
 Successful PR reads cache the repository default for 60 seconds, scoped to the
 injected transport and repository. A caller supplying only the base can use
 that cached default; an absent or expired default falls back to the existing
 live read. A caller without a base always reads. Non-default bases retain the
 live PR read, bounded parent-history search and existing comment/receipt flow.
 Watcher candidates carry the learned default through closer dispatch and daemon
-merge; remediation forwards branch metadata already read during hydration.
+merge admission; remediation forwards only the live base/default pair read
+during hydration, never a persisted job base. Unhydrated jobs retain the live
+read even with a cached default. The daemon and closer inline merge callbacks
+omit both fields to force a live base read immediately before merging.

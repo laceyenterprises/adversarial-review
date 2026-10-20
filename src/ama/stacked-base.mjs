@@ -26,11 +26,14 @@ function classifyReadError(error) {
   if (error?.authOutage) return 'auth';
   const detail = String(error?.stderr || error?.message || '');
   const status = Number(error?.status || error?.response?.status);
-  if (status === 401 || status === 403 || /\bHTTP\s+40[13]\b/i.test(detail)) return 'auth';
+  if (status === 401 || /\bHTTP\s+401\b/i.test(detail)) return 'auth';
+  if ((status >= 500 && status < 600) || /\bHTTP\s+5\d\d\b/i.test(detail)) return '5xx';
+  // A valid token can receive permission or quota refusals; neither proves an
+  // authentication outage. Keep these in the existing unknown class.
+  if ([403, 429].includes(status) || /\bHTTP\s+(403|429)\b/i.test(detail)) return 'unknown';
   if (error?.code === 'ETIMEDOUT' || error?.code === 'ESOCKETTIMEDOUT'
     || (error?.killed && ['SIGTERM', 'SIGKILL'].includes(error.signal))
     || /timed?\s*out|timeout/i.test(detail)) return 'timeout';
-  if ((status >= 500 && status < 600) || /\bHTTP\s+5\d\d\b/i.test(detail)) return '5xx';
   return 'unknown';
 }
 
@@ -86,7 +89,6 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
   const reason = state?.reason || 'stacked-base-read-failed';
   const readError = reason === 'stacked-base-read-failed'
     ? (['timeout', 'auth', '5xx', 'parse', 'unknown'].includes(state?.readError) ? state.readError : 'unknown') : null;
-  if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
   const result = { ...(readError ? { readError } : {}), dispatched: false, skipMergeAgent: true, recoveryWait: true, reason,
     needsOperator: reason === 'stacked-base-merged', retryAfterMs: 60_000 };
   const dir = join(rootDir, 'data', 'stacked-base-holds');
@@ -98,6 +100,7 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     // Retain the delivered receipt if an intervening API read fails.
     if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
       if (prior?.reason !== reason || prior?.readError !== readError) {
+        if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
         writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason, readError }));
       }
       return result;

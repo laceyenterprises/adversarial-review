@@ -3784,3 +3784,45 @@ test('REBASEPROV-01 key/value HAM receipt preserves the launched lease during le
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_hammer');
 });
+
+test('same-head terminal HAM pre-click guard reads the base after default-base admission', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-live-base-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  assert.equal((await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps(),
+  })).dispatched, true);
+  let guardCalls = 0;
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ] },
+      dispatchContext: { baseBranch: 'main', defaultBranch: 'main', dispatchedAt: '2026-07-06T12:02:00Z' },
+    }),
+    ...hammerDispatchDeps(),
+    options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: REVIEWED_HEAD }),
+    guardStackedBaseImpl: async options => {
+      guardCalls++;
+      if (guardCalls === 1) {
+        assert.equal(options.baseBranch, 'main');
+        assert.equal(options.defaultBranch, 'main');
+        return null;
+      }
+      assert.equal(options.baseBranch, undefined, 'click must not reuse admission base');
+      assert.equal(options.defaultBranch, undefined);
+      return { reason: 'stacked-base-merged', skipMergeAgent: true };
+    },
+    attemptDaemonCleanMergeImpl: async options => {
+      const click = await options.runMergeImpl({ repo: REPO, prNumber: PR_NUMBER, head: REVIEWED_HEAD });
+      assert.equal(click.closureHold.reason, 'stacked-base-merged');
+      return { disposition: 'deferred', reason: click.closureHold.reason, closureHold: click.closureHold };
+    },
+    execFileImpl: async (_cmd, args) => {
+      assert.notEqual(args[1], 'merge', 'held click cannot merge');
+      return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+    },
+  });
+  assert.equal(guardCalls, 2);
+  assert.equal(result.reason, 'current-head-hammer-already-ran-needs-operator');
+});

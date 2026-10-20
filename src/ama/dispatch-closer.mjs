@@ -6163,8 +6163,9 @@ async function maybeDispatchAmaCloserAttempt({
               });
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
+              // Re-read the base at the click boundary, after any admission wait.
               const baseHold = await guardStackedBaseImpl({ rootDir, repo: mergeRepo, prNumber: mergePr,
-                baseBranch, defaultBranch: dispatchContext.defaultBranch, execFileImpl, signal, logger });
+                execFileImpl, signal, logger });
               if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
               const methodFlag = method === 'merge' ? '--merge' : '--squash';
               const args = [

@@ -3353,7 +3353,7 @@ async function consumeNextFollowUpJob({
     });
     claimed.job = branchReadyJob.job;
     const baseHold = await guardStackedBaseImpl({ rootDir, repo: claimed.job.repo,
-      prNumber: claimed.job.prNumber, baseBranch: claimed.job.baseBranch,
+      prNumber: claimed.job.prNumber, baseBranch: branchReadyJob.liveBaseBranch,
       defaultBranch: branchReadyJob.defaultBranch, execFileImpl, logger: log });
     if (baseHold?.reason === 'stacked-base-read-failed') {
       const requeued = requeueClaimedFollowUpJobBeforeSpawn({ rootDir, jobPath: claimed.jobPath,

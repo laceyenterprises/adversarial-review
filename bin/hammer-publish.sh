@@ -101,6 +101,7 @@ if ! ham_audit_retry "<<RUN_DIR>>/audit-head" "$HAM_AUDIT_PR_VIEW_STDERR" \
 fi
 POST_REMEDIATION_SHA=$(cat "<<RUN_DIR>>/audit-head")
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
 fi
 if ! ham_audit_retry "<<RUN_DIR>>/audit-identity.json" "$HAM_AUDIT_PR_VIEW_STDERR" \
@@ -114,6 +115,8 @@ if ! HAM_RECOVERED_BODY=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pending-attest
   ham_publish_abort 20; return 20
 fi
 if [ -n "$HAM_RECOVERED_BODY" ]; then
+  HAM_RECOVERED_BODY=$(printf '%s' "$HAM_RECOVERED_BODY" |
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || { ham_publish_abort 1; return 1; }
   HAM_RECOVERY_HEAD_CHANGED=0
   ham_recover_edge() {
     local current comments existing
@@ -139,6 +142,9 @@ if [ -n "$HAM_RECOVERED_BODY" ]; then
     HAM_PHASE_OUTCOME=audit-comment-unavailable
     HAM_NO_MERGE_NOTE="HAM closing status — no merge. Audit comment delivery failed; the pending validated edge remains durable for the next hammer to recover under its lease."
     echo "$HAM_NO_MERGE_NOTE" >&2
+    if declare -F ham_mark_merge_lease_retryable_abort >/dev/null; then
+      ham_mark_merge_lease_retryable_abort audit-comment-unavailable
+    fi
     ham_publish_abort 1; return 1
   fi
 fi

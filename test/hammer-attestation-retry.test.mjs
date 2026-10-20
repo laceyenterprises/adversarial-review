@@ -100,13 +100,15 @@ console.log(JSON.stringify(range));
 HAM_MERGE_LEASE_HELD=1
 HAM_MERGE_LEASE_ID=test-lease
 BASE_BRANCH=main
-ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+ham_mark_merge_lease_retryable_abort() { HAM_RETRYABLE_ABORT_REASON="$1"; }
+ham_release_merge_lease() { HAM_RELEASE_RETRYABLE_ABORT_REASON="\${HAM_RETRYABLE_ABORT_REASON:-}"; HAM_MERGE_LEASE_HELD=0; }
 ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
 sleep() { echo "$1" >> "$FIXTURE_DIR/backoffs"; if [ "\${LOSE_LEASE:-0}" = 1 ]; then touch "$FIXTURE_DIR/lease-lost"; fi; }
 source "$FIXTURE_DIR/publish.sh"
 status=$?
 echo "status=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD published=$HAM_PUBLISHED_AUDIT_HEAD"
 echo "note=\${HAM_NO_MERGE_NOTE:-}"
+echo "release-retryable=\${HAM_RELEASE_RETRYABLE_ABORT_REASON:-}"
 exit "$status"
 `], { env: runEnv, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.signal, null, result.stderr);
@@ -137,6 +139,7 @@ test('five transient failures retain only a validated edge and allow next leased
   assert.equal(f.posts(), 5);
   assert.match(failed.stdout, /held=0 published=\n/);
   assert.match(failed.stdout, /failed transiently.*next hammer will recover/);
+  assert.match(failed.stdout, /release-retryable=audit-comment-unavailable/);
   assert.doesNotMatch(failed.stdout, /exact-head-review-required/);
   assert.equal(readFileSync(join(f.dir, 'backoffs'), 'utf8'), '2\n4\n8\n16\n');
   const audit = f.audit();
@@ -168,6 +171,43 @@ test('permanent audit error stops after one attempt and retains the validated ed
   assert.ok(f.audit().attempts.at(-1).pendingAttestation);
   assert.equal(isTransientGhError({ stderr: 'HTTP 403' }), false);
 });
+
+for (const [kind, error, attempts] of [
+  ['transient', 'Something went wrong while executing your query', 5],
+  ['permanent', 'Resource not accessible by integration (HTTP 403)', 1],
+]) {
+  test(`${kind} recovery delivery failure marks the lease retryable before release`, t => {
+    const f = fixture(t);
+    assert.equal(f.run({ FAIL_COUNT: '5' }).status, 1);
+    const pendingAudit = f.audit();
+    rmSync(join(f.dir, 'backoffs'));
+    const result = f.run({ HAM_BASE_HEAD: validated, FAIL_COUNT: '10', POST_ERROR: error });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /outcome=audit-comment-unavailable held=0 published=\n/);
+    assert.match(result.stdout, /release-retryable=audit-comment-unavailable/);
+    assert.equal(f.posts(), 5 + attempts);
+    if (attempts === 5) {
+      assert.equal(readFileSync(join(f.dir, 'backoffs'), 'utf8'), '2\n4\n8\n16\n');
+    } else {
+      assert.equal(existsSync(join(f.dir, 'backoffs')), false);
+    }
+    assert.deepEqual(f.audit(), pendingAudit);
+    assert.deepEqual(f.comments(), []);
+  });
+}
+
+for (const head of ['', validated.slice(0, 39), 'malformed-head']) {
+  test(`unresolved post-remediation head emits a diagnostic: ${head || 'empty'}`, t => {
+    const f = fixture(t);
+    const result = f.run({ CURRENT_HEAD: head });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /HAM hard-blocker: unable to resolve post-remediation head before audit comment/);
+    assert.match(result.stdout, /held=0 published=\n/);
+    assert.equal(existsSync(join(f.dir, 'post-count')), false);
+    assert.equal(f.audit(), null);
+    assert.deepEqual(f.comments(), []);
+  });
+}
 
 for (const [kind, overrides] of [
   ['head', { CURRENT_HEAD: other, HAM_BASE_HEAD: other }],
@@ -202,6 +242,7 @@ test('head movement immediately before recovery cannot publish a pending edge', 
   const result = f.run({ HAM_BASE_HEAD: validated, MOVE_HEAD: other });
   assert.equal(result.status, 20, result.stderr);
   assert.match(result.stdout, /outcome=exact-head-review-required/);
+  assert.match(result.stdout, /release-retryable=\n/);
   assert.equal(f.posts(), 5);
 });
 
@@ -228,7 +269,10 @@ test('an unvalidated range cannot produce durable attestation evidence', t => {
   }
 });
 
-test('sibling hammer phase classifiers retry GraphQL server errors and refuse permission failures', () => {
+test('sibling hammer phase classifiers retry GraphQL server errors and refuse permission failures', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-classifiers-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const errorPath = join(dir, 'error.txt');
   for (const [file, name] of [
     ['hammer-verify-head', 'ham_gate_cap_gh_transient'],
     ['hammer-verify-head', 'ham_update_branch_transient'],
@@ -238,8 +282,9 @@ test('sibling hammer phase classifiers retry GraphQL server errors and refuse pe
     const body = source.match(new RegExp(`${name}\\(\\) \\{\\n\\s*(grep -Eiq [^\\n]+)\\n\\s*\\}`))?.[1];
     assert.ok(body, `${file}: ${name}`);
     for (const error of [...errors, 'HTTP 403: permission denied']) {
-      const result = spawnSync('/bin/bash', ['-c', `${name}() { ${body}; }\n${name} /dev/stdin`],
-        { input: error, encoding: 'utf8', timeout: 5000 });
+      writeFileSync(errorPath, error);
+      const result = spawnSync('/bin/bash', ['-c', `${name}() { ${body}; }\n${name} "$1"`, '_', errorPath],
+        { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, error.includes('403') ? 1 : 0, `${name}: ${error}: ${result.stderr}`);
     }
   }

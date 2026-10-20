@@ -3720,7 +3720,11 @@ range proof, audit, predicate and green exact-head checks. Mismatches supply no
 proof and retain ordinary exact-head review fallback. An exhausted-delivery
 closing status preserves `HAM_NO_MERGE_NOTE`: audit delivery failed transiently
 and the next hammer will recover the edge when those inputs match. It does not
-request a source re-review for a delivery failure.
+request a source re-review for a delivery failure. Both initial validated-edge
+delivery failure and recovery delivery failure mark the lease release as a
+retryable `audit-comment-unavailable` abort before releasing ownership. Recovery
+retains the existing pending edge; head changes still request exact-head review
+without that retryable delivery classification.
 
 The prompt runs `bin/hammer-review-handoff.mjs` as `HAM_HQ_OWNER`, using
 `sudo -A -H -u` when the worker differs, so lease and review state retain

@@ -563,8 +563,10 @@ path. Publication retries transient GitHub errors five times under the lease,
 then retains a validated base/head edge in AMA audit state. A later hammer can
 post that edge before its provenance check only when the current head, last
 reviewed base and authenticated App identity match. Different inputs retain the
-exact-head review fallback. Existing lifecycle states and smoke promises remain
-unchanged; offline recovery fixtures live in `test/hammer-attestation-retry.test.mjs`.
+exact-head review fallback. Failed recovery delivery marks the lease release as a
+retryable `audit-comment-unavailable` abort, preserving the pending edge for retry.
+Existing lifecycle states and smoke promises remain unchanged; offline recovery
+fixtures live in `test/hammer-attestation-retry.test.mjs`.
 
 The hammer does **not** run a local test battery or a pre-push CI mirror as a
 merge gate — GitHub required checks are the sole CI authority. This removes the

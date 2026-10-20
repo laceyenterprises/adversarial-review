@@ -330,8 +330,11 @@ for (const { name, candidateBase, liveBase, held } of [
   });
 }
 
-for (const mode of ['os', 'local']) {
-  test(`recovered job default cannot hide a merged parent before ${mode} remediation`, async t => {
+for (const { mode, branch } of [
+  { mode: 'os' }, { mode: 'local' },
+  { mode: 'os', branch: 'feature/child' }, { mode: 'local', branch: 'feature/child' },
+]) {
+  test(`recovered job default cannot hide a merged parent before ${mode} remediation (${branch ? 'known' : 'missing'} head branch)`, async t => {
     const f = fixture(t, { defaultBranch: 'main' });
     // Seed the same transport's default cache as a previous poll would.
     const execFileImpl = async (cmd, args) => args[1] === `repos/${repo}/pulls/42`
@@ -339,18 +342,31 @@ for (const mode of ['os', 'local']) {
       : f.execFileImpl(cmd, args);
     assert.equal((await inspectStackedBase({ repo, prNumber: 42, execFileImpl })).ok, true);
     createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
-      baseBranch: 'main', reviewerModel: 'claude',
+      baseBranch: 'main', branch, reviewerModel: 'claude',
       createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
       changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
+    let guardCalls = 0;
+    const hydrated = mode === 'os' && !branch;
     const result = await consumeNextFollowUpJob({ ...f, execFileImpl,
       healthRouter: { getMode: () => mode }, promptTemplate: 'synthetic prompt',
       resolvePRLifecycleImpl: async () => ({ state: 'OPEN', source: 'live' }),
+      guardStackedBaseImpl: async options => {
+        guardCalls++;
+        assert.equal(options.baseBranch, hydrated ? 'feature/parent' : undefined,
+          'only the hydration read can supply base evidence, never the persisted main');
+        assert.equal(options.defaultBranch, hydrated ? 'main' : undefined);
+        return guardStackedBase(options);
+      },
       spawnImpl: () => assert.fail('recovered stacked job cannot spawn remediation'),
       log: { log() {}, warn() {} } });
     assert.equal(result.reason, 'stacked-base-merged');
     assert.equal(result.job.status, 'stopped');
     assert.equal(result.job.remediationPlan.stop.code, 'stacked-base-merged');
     assert.equal(result.job.remediationWorker.state, 'never-spawned');
+    assert.equal(result.job.baseBranch, 'main', 'the persisted base is not rewritten to implement the guard');
+    assert.equal(guardCalls, 1);
+    assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, hydrated ? 2 : 1,
+      'unhydrated jobs still read the live PR despite a populated default cache');
     assert.equal(f.comments.length, 1);
   });
 }

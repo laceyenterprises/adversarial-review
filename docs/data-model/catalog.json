@@ -67,7 +67,7 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "identityVersion": "reversalprov-v1",
+      "identityVersion": "reversalprov-v3",
       "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
       "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],

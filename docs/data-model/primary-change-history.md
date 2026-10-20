@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalprov-v1` |
+| 7 | History proof cache identity version: `reversalprov-v3` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -32,7 +32,13 @@ history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 which prevents disk publication as described below. The identity version forces
 one recomputation of older records, including cached original-reversal refusals
 and proofs from before context-tolerant, structure-preserving reversal matching
-and before proof-backed HAM-author reversals with a foreign rebase committer;
+and before proof-backed HAM-author reversals with a foreign rebase committer
+or REVERSALPROV-02 content multiset matching across context-only rebases,
+including parent-state insertion authorization, mixed replacement restorations
+and segment identity over both removed and added content. Reviewed-parent
+matching uses multisets; original-commit provenance retains ordered edits,
+hunk/context-run boundaries and newline-marker attachment. Evaluator coverage
+uses the commit's own parent region and excludes removals elsewhere in the file;
 those older records remain disposable and expire through the ordinary sweep.
 New hammer-history records also include optional `diagnosticCommitRange`: an ordered array of
 `{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,

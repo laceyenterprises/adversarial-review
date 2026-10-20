@@ -26,8 +26,10 @@ const reviews = [review('PRR_gemini', 'gemini', [card(90), card(10), card(20)].j
   review('PRR_claude', 'claude', card(90), card(30))];
 const file = { filename: 'run.py', status: 'modified', additions: 3, deletions: 3,
   patch: [10, 20, 30].map((n) => `@@ -${n} +${n} @@\n-old ${n}\n+new ${n}`).join('\n') };
+// The author baseline and its reversing HAM commit have opposite changes.
+const reversed = { ...file, patch: file.patch.replaceAll('-old', '-new').replaceAll('+new', '+old') };
 const citations = ['PRR_gemini finding=2', 'PRR_gemini finding=3 kind=blocking', 'PRR_claude finding=1 kind=non-blocking'];
-async function collect({ cites = citations, worker = 'hammer', list = reviews, touched = file } = {}) {
+async function collect({ cites = citations, worker = 'hammer', list = reviews, touched = reversed } = {}) {
   const message = `HAM repair\n\nWorker-Class: ${worker}\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${author}\n${cites.map((c) => `Reversal-Authorized-By: ${c}`).join('\n')}`;
   const commit = { sha: head, parents: [{ sha: author }], author: { login: null }, committer: { login: 'the-hammer-lacey[bot]' }, commit: { message }, files: [touched] };
   const comparison = { status: 'ahead', merge_base_commit: { sha: base }, files: [file] };
@@ -58,7 +60,7 @@ test('every citation is required; ranges and hammer provenance fail closed', asy
   list[1].body = list[1].body.replace('`30`', '`31`');
   assert.equal((await replay({ list })).reason, 'primary-change-reverted');
   assert.equal((await collect({ worker: 'codex' })).hasHammerCommits, false, 'non-hammer worker trailers keep rebased builder commits in builder history');
-  assert.equal((await replay({ touched: { ...file, patch: file.patch.replaceAll('30', '31') } })).reason, 'primary-change-reverted');
+  assert.equal((await replay({ touched: { ...reversed, patch: reversed.patch.replaceAll('30', '31') } })).reason, 'primary-change-reverted');
 });
 test('superseding a cited reviewer final review refuses its waiver', async () => {
   assert.equal((await replay({ list: [...reviews, { ...reviews[0], node_id: 'PRR_new', body: '## Verdict\nApproved' }] })).reason,

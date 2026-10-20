@@ -2124,9 +2124,9 @@ removed or renamed; restoring the merge-base name does not qualify.
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse and a `reversalprov-v1` identity version to
+compatibility checked on reuse and a `reversalprov-v3` identity version to
 invalidate older proof records, including original-reversal refusals cached before
-context-tolerant, structure-preserving matching. Already-held PRs recompute on
+context-tolerant matching and insertion/mixed-restoration authorization. Already-held PRs recompute on
 their next evaluation without head/review movement or a manual cache purge. Live head/base and
 merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
 history reads are stored. An unresolved optional rename-proof read failure
@@ -2211,11 +2211,18 @@ evaluation, so multi-file rename scans fetch verification once per commit.
 A fresh evaluation reads verification again. A verification SHA mismatch records
 `commit-provenance` in `rejectedReversalAuthorizations`, including for historical
 snapshots; an otherwise unclassified verification read error records `unverifiable`.
-Equal-length replacements map by line position; unequal-length replacements and
-insertions require the finding to cover the entire projected span. A one-line
-finding cannot waive the uncited remainder of a contiguous author hunk.
+Equal-length replacements map by line position; unequal-length replacements
+require the finding to cover the entire projected span. Insertion-only regions
+remain protected: deleting the insertion requires a citation covering its entire
+introduced span and HAM removals covering the remaining parent-state added-line
+multiset at its projected parent coordinates (REVERSALPROV-02). In-place repairs
+may still change introduced text while preserving the changed region. A one-line finding cannot waive the uncited
+remainder of a contiguous author hunk.
 Unrelated regions, missing trailers and old reviews outside
-the closure cannot authorize a reversal. Opaque files and rename checks remain
+the closure cannot authorize a reversal. Restoring a deleted base line requires
+matching HAM additions, including when the author hunk also introduced new lines;
+that restoration does not require deleting the retained author additions.
+Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
 **Rebased reversals (REVERSALREBASE-01).** A rebase or conflict-owner rebase
@@ -2224,18 +2231,22 @@ rewrites the HAM commit, so its parent no longer descends from the cited
 compare from the cited review head to the HAM parent is exactly `diverged`, the
 collector still accepts the citation if the trailer is on a HAM commit in the
 current history, the review is on this pull request and contains that finding
-and kind, and the protected hunk has the same patch lines in the reviewed diff
-(`<base>...<review head>`) as in the current primary diff. The matching segment
-must be unique in both diffs; one reviewed segment cannot authorize repeated
-primary segments. A citation with no later superseding authoritative review
-remains current by GitHub review order. If a later review supersedes it (same
-family, or another family on another head), the first such review's immutable
-head must contain the original HAM commit with the same message and complete
-reversal change: each file's path, previous path, status and ordered removed and
-added lines must match exactly, including hunk boundaries, context-run boundaries
-and `\ No newline at end of file` markers. Context text, context-run lengths and
-hunk coordinates are ignored only for this original-commit match. Moving an
-addition across a context run or into another hunk refuses the proof.
+and kind, and the protected region has the same removed/added-line multisets in the
+reviewed diff (`<base>...<review head>`) as in the current primary diff
+(REVERSALPROV-02). Multiplicity matters; matches must remain unambiguous in both
+diffs. Distinct additions disambiguate hunks with identical deletions; identical
+changed-content segments still refuse ambiguous mapping. Context, offsets and
+changed-line order do not establish authority.
+Reviewed-parent content comparisons retain path, status and changed-content
+multisets while ignoring context and hunk partitioning. A citation with no later
+superseding authoritative review remains current by GitHub review order.
+If a later review supersedes it (same family, or another family on another
+head), the first such review's immutable head must contain the original HAM
+commit with the same message and complete reversal content: each file's path,
+previous path, status and ordered changed lines must match, retaining hunk and
+context-run boundaries and newline-marker attachment. Context text/counts and
+hunk offsets may drift; reordering edits, moving an edit across a context run or
+hunk, or moving a newline marker to another line/side refuses the original proof.
 REVERSALPROV-01 also admits a linked HAM author with a foreign linked rebase
 committer when exact-SHA App validation verifies, or the immutable original
 HAM commit passes the shared identity predicate and carries the same trailer
@@ -2245,16 +2256,27 @@ rejected as `rebased-commit-unproven`. A linked foreign author, conflicting
 identity trailers, or unsigned web-flow committer still fails as
 `commit-provenance`; a HAM committer alone cannot establish rebase provenance.
 App validation does not waive the original proof for a superseded citation.
-The reviewed-parent rebase proof retains
-its existing context and hunk checks. The collector verifies original
-HAM identity, citation freshness at its original parent, and the parent's merge
-base. The evaluator rechecks finding coverage and HAM touch against that original
-patch as well as the rebased patch. Author and committer dates supply no freshness
-evidence. Missing or capped snapshot history cannot establish that
-original authorization and refuses the waiver. Coordinates are translated through that
-matched hunk; File/Lines coverage and the HAM commit's own touch are checked as
-before. A changed, ambiguous or missing hunk, an unknown review or finding, or
-a review superseded before the reversal stays refused. Every refusal carries
+The reviewed-parent rebase proof uses the same context-independent content
+comparison. The collector verifies original HAM identity, citation freshness
+at its original parent, and the parent's merge base. The evaluator rechecks finding coverage and the HAM commit's removed content
+against both the original and rebased patches. It derives the protected content
+from that commit's own parent diff, so earlier in-place repairs and split deletions
+can be followed by a cited removal of the remaining span. The authorizing patch
+must overlap the projected parent region; only removals within that region count
+toward its parent-state content multiset. Identical text elsewhere in the file
+supplies no authority. Full-span coverage is cached per commit to avoid repeatedly
+scanning an unequal-length replacement for every base line.
+A primary deletion may still be restored under its cited finding: the
+authorizing commit must add back the matching deleted content with sufficient
+multiplicity. This retains the existing deletion-restoration authorization.
+Author and committer dates supply no freshness evidence. Missing or capped snapshot history cannot establish that
+original authorization and refuses the waiver. Coordinates are translated
+through matched changed content for File/Lines coverage. Insertion-only regions
+map to their full introduced span and appear in reversal diagnostics when
+removed without authorization. Whole-file absence for newly added files, opaque-file
+preservation and renames remain independently protected. Changed, ambiguous or
+missing content, an unknown review or finding, or a review superseded before
+the reversal stays refused. Every refusal carries
 `missingEvidence` (with collector and evaluator rejection reasons, including
 missing findings and failed patch or File/Lines coverage; verified counts include
 only citations that passed evaluation) into the hammer gate

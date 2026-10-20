@@ -79,9 +79,32 @@ test('ORPHANACTION-01: an older Comment-only verdict without a settled final rou
   assert.equal(calls.reviews[0].targetRevisionRef, 'current');
 });
 
+// LAC-2072: these facts select dispatch admission only. False or absent
+// terminal evidence on an unreviewed current head must retain exact-head review.
+for (const facts of [
+  {},
+  { reviewCycleExhausted: false, commentOnlyFinalRoundCompleted: false },
+  { reviewCycleExhausted: true, commentOnlyFinalRoundCompleted: false },
+  { reviewCycleExhausted: false, commentOnlyFinalRoundCompleted: true },
+  { reviewCycleExhausted: true, commentOnlyFinalRoundCompleted: true },
+  { reviewCycleExhausted: 'false', commentOnlyFinalRoundCompleted: 'true' },
+]) test(`LAC-2072: recovery respects terminal owner facts: ${JSON.stringify(facts)}`, async t => {
+  const { tick, calls } = setup(t);
+  const overrides = {
+    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    result: { amaEnabled: true, ownerProofFacts: {
+      headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only', ...facts,
+    } },
+  };
+  await tick(0, overrides); await tick(15, overrides);
+  const closed = facts.reviewCycleExhausted === true || facts.commentOnlyFinalRoundCompleted === true;
+  assert.equal(calls.launches.length, closed ? 1 : 0);
+  assert.equal(calls.reviews.length, closed ? 0 : 1);
+  if (!closed) assert.equal(calls.reviews[0].targetRevisionRef, 'current');
+  assert.equal(calls.pages.length, 0);
+});
+
 for (const evidence of [
-  { result: { amaEnabled: true, ownerProofFacts: { reviewCycleExhausted: true } } },
-  { result: { amaEnabled: true, ownerProofFacts: { commentOnlyFinalRoundCompleted: true } } },
   { reviewStateRow: { rereview_reason: 'system-review-ceiling-closure' } },
   { dispatchJob: { reviewCycleCapReached: true } },
   { dispatchJob: { remediationStopCode: 'max-rounds-reached' } },

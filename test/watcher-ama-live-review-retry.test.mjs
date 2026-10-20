@@ -110,7 +110,8 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
     assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
       closureOwner: { owner: 'hammer', reason: 'comment-only' },
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
+        verdict: 'comment-only', reviewCycleExhausted: false,
+        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' } });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -148,7 +149,8 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
       namedReason: 'request-changes',
       amaEnabled: true,
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'request-changes', checks: [], mergeable: 'TRUE' },
+        verdict: 'request-changes', reviewCycleExhausted: false,
+        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' },
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -184,7 +186,8 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
     assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
       closureOwner: { owner: 'hammer', reason: 'comment-only' },
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
+        verdict: 'comment-only', reviewCycleExhausted: false,
+        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' } });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -219,7 +222,8 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
       namedReason: 'fail-closed',
       amaEnabled: true,
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: null, checks: [], mergeable: 'TRUE' },
+        verdict: null, reviewCycleExhausted: false,
+        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' },
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -254,3 +258,35 @@ test('closure uses an initialized database while rereading the current round cou
     assert.deepEqual(exhausted, [true, false]);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+// LAC-2072: exercise the producer contract independently of orphan recovery's
+// injected facts. A final round can close review before the cycle is exhausted.
+for (const reviewCycleExhausted of [false, true]) {
+  for (const commentOnlyFinalRoundCompleted of [false, true]) {
+    test(`AMA owner proof projects cycle=${reviewCycleExhausted}, finalRound=${commentOnlyFinalRoundCompleted}`, async t => {
+      const rootDir = tempRoot();
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const seenReviewStates = [];
+      const result = await maybeDispatchAmaClosureFor({
+        ...baseArgs(rootDir),
+        resolveReviewCycleExhaustionImpl: () => ({
+          reviewCycleExhausted,
+          commentOnlyFinalRoundRevisionRefs: commentOnlyFinalRoundCompleted ? ['head-live'] : [],
+        }),
+        fetchLatestHeadReviewBodiesImpl: async () => ['## Verdict\n\nComment only'],
+        maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
+          seenReviewStates.push(reviewState);
+          return { dispatched: false, reason: 'not-eligible' };
+        },
+      });
+
+      assert.equal(seenReviewStates.length, 1);
+      assert.equal(seenReviewStates[0].reviewCycleExhausted, reviewCycleExhausted);
+      assert.deepEqual(result.ownerProofFacts, {
+        headSha: 'head-live', reviewedHeadSha: 'head-live', verdict: 'comment-only',
+        reviewCycleExhausted, commentOnlyFinalRoundCompleted,
+        checks: [], mergeable: 'TRUE',
+      });
+      assert.equal(result.dispatched, false, 'routing facts do not waive closer eligibility');
+    });
+  }
+}

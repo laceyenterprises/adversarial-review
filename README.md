@@ -896,7 +896,8 @@ to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
 Ownerless recovery routes settled final rounds and exhausted review cycles to
 the hammer even after head movement, using shared review-admission evidence.
-Transient quota-status and stacked-base read failures refund recovery attempts;
+Transient quota-status (including explicit `holdReason` without an outer reason)
+and stacked-base read failures refund recovery attempts;
 genuine quota exhaustion still spends them. Exhausted pages name both outcomes'
 reasons. The existing lifecycle states and smoke promises are unchanged.
 The offline `test/wake-closeout.test.mjs` regression exercises the pending-to-green

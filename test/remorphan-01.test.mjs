@@ -7,7 +7,7 @@ import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS, isOrphanRecoveryWait } from '../src/ama/orphan-watchdog.mjs';
 import Database from 'better-sqlite3';
-import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
+import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdict } from '../src/review-state.mjs';
 
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
@@ -116,7 +116,49 @@ for (const evidence of [
   assert.equal(calls.reviews.length, 0);
 });
 
+for (const reason of [undefined, null, 42, {}, '']) {
+  test(`HAM: partial retry reason settles without throwing: ${JSON.stringify(reason)}`, async t => {
+    const { args, tick, calls } = setup(t);
+    await tick(0);
+    await tick(15, { dispatchHammer: async () => ({ reason }) });
+    const state = recoveryState(args.rootDir);
+    assert.equal(state.attempts, 1);
+    assert.equal(JSON.parse(state.outcomes)[0].reason, String(reason || ''));
+    assert.equal(calls.pages.length, 0);
+  });
+}
+
+for (const settled of [false, true]) {
+  test(`HAM: unmigrated review database falls back without mutation (settled=${settled})`, async t => {
+    const { args, record, tick, calls } = setup(t);
+    const dir = join(args.rootDir, 'data');
+    mkdirSync(dir, { recursive: true });
+    const db = new Database(join(dir, 'reviews.db'));
+    db.close();
+    if (settled) record('completed', { status: 'completed', revisionRef: args.headSha,
+      reviewBody: '## Verdict\nComment only' });
+    const warnings = [];
+    assert.equal(hasSettledCommentOnlyVerdict(args.rootDir, args, { warn: message => warnings.push(message) }), settled);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /no such table: reviewer_passes/);
+    const readonly = new Database(join(dir, 'reviews.db'), { readonly: true });
+    try { assert.deepEqual(readonly.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(), []); }
+    finally { readonly.close(); }
+    if (settled) assert.equal(hasSettledCommentOnlyVerdict(args.rootDir,
+      { ...args, automaticMalformedRecovery: true }, { warn() {} }), false);
+    const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' } };
+    await tick(0, overrides); await tick(15, overrides);
+    assert.equal(calls.launches.length, settled ? 1 : 0);
+    assert.equal(calls.reviews.length, settled ? 0 : 1);
+    assert.equal(calls.pages.length, 0);
+  });
+}
+
 for (const hold of [
+  { holdReason: 'fleet-quota-status-unavailable' },
+  { holdReason: 'fleet-quota-status-unreadable' },
+  { reason: 'adapter-failed', holdReason: 'fleet-quota-status-unavailable' },
+  { reason: 'adapter-failed', holdReason: 'fleet-quota-status-unreadable' },
   { reason: 'all-fallbacks-grounded', holdReason: 'fleet-quota-status-unavailable' },
   { reason: 'all-fallbacks-grounded', holdReason: 'fleet-quota-status-unreadable' },
   { reason: 'harness-hold:fleet-quota-status-unavailable' },
@@ -133,9 +175,9 @@ for (const hold of [
   const state = recoveryState(args.rootDir);
   assert.equal(state.attempts, 0);
   assert.deepEqual(JSON.parse(state.outcomes), []);
-  assert.equal(JSON.parse(state.evidence).reason, hold.reason);
+  assert.equal(JSON.parse(state.evidence).reason, hold.reason || '');
   assert.equal(JSON.parse(state.evidence).holdReason,
-    hold.holdReason || (hold.reason.startsWith('harness-hold:') ? hold.reason.slice('harness-hold:'.length) : undefined));
+    hold.holdReason || (hold.reason?.startsWith('harness-hold:') ? hold.reason.slice('harness-hold:'.length) : undefined));
   assert.equal(calls.pages.length, 0);
   // A route-level observation also holds without spending or probing ownership.
   await tick(18, { result: { amaEnabled: true, ...hold },

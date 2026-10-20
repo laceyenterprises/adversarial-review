@@ -1105,12 +1105,17 @@ export function hasSettledCommentOnlyVerdict(rootDir, {
       ownedDb = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: DEFAULT_BUSY_TIMEOUT_MS });
       db = ownedDb;
     }
-    const settledBodies = db ? db.prepare(
-      `SELECT verdict, body_md FROM reviewer_passes
-        WHERE repo = ? AND pr_number = ? AND head_sha = ?
-          AND pass_kind IN ('first-pass', 'rereview')
-          AND status = 'completed'`
-    ).all(repo, prNumber, headSha) : [];
+    let settledBodies = [];
+    try {
+      settledBodies = db ? db.prepare(
+        `SELECT verdict, body_md FROM reviewer_passes
+          WHERE repo = ? AND pr_number = ? AND head_sha = ?
+            AND pass_kind IN ('first-pass', 'rereview')
+            AND status = 'completed'`
+      ).all(repo, prNumber, headSha) : [];
+    } catch (error) {
+      logger.warn?.(`[review-state] Cannot read settled review passes for ${repo}#${prNumber}@${headSha}: ${error.message}`);
+    }
     return settledBodies.some((pass) =>
       (pass.verdict === 'comment-only' ||
       (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only'))

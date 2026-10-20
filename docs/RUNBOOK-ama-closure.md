@@ -2529,7 +2529,9 @@ proven transient waits refund that reservation. In addition to existing
 coexistence/background and rate-limit waits, `stacked-base-read-failed` and
 quota status read failures (`fleet-quota-status-unavailable` or
 `fleet-quota-status-unreadable`) wait. The latter may arrive as
-`harness-hold:<reason>` or `all-fallbacks-grounded` with `holdReason`. Genuine
+`harness-hold:<reason>` or an explicit `holdReason` with any outer reason,
+including an absent one. A failed readonly captured-pass query logs a warning
+and falls back to filesystem review evidence without migrating the store. Genuine
 quota exhaustion and unknown holds, other refusals, exceptions and missing
 receipts still consume the attempt. The next ownerless observation pages with
 both durable outcomes' reasons in the message and payload, once delivery succeeds.

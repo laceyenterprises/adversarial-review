@@ -1100,7 +1100,7 @@ Key control points:
   the bound), with a PR-wide clock that survives head changes. Refused or thrown
   launches consume the same two per-head attempts as successful dispatches,
   except proven transient waits. Quota status read failures (via
-  `harness-hold:<reason>` or `all-fallbacks-grounded` plus `holdReason`) and
+  `harness-hold:<reason>` or an explicit `holdReason` regardless of outer reason) and
   `stacked-base-read-failed` refund the reservation; genuine quota exhaustion
   still spends it. Settled final rounds and exhausted review cycles route to
   HAM even when the reviewed head is older. The next ownerless observation

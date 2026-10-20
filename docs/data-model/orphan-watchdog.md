@@ -28,7 +28,9 @@ After the bound, current-head review evidence chooses the next action: request
 review if absent and re-review remains open, otherwise request a hammer. Recovery
 shares review admission's settled Comment-only predicate (captured completed
 passes and follow-up jobs), and reads the terminal final-round ledger even when
-the reviewed head is older. Closed final-round and exhausted-cycle facts also
+the reviewed head is older. If the readonly captured-pass query fails (including
+an unmigrated database), it logs a warning and falls back to filesystem review
+evidence without migrating the database. Closed final-round and exhausted-cycle facts also
 select the hammer; historical verdicts alone do not close review on a new head.
 Historical dispatch stops and
 retry counters are set aside for this bounded recovery. The hammer and merge
@@ -56,7 +58,8 @@ and remove its outcome from the spent-attempt history, retaining its summary in
 `evidence`. These include coexistence/background waits, rate limits,
 `stacked-base-read-failed`, and quota status read failures
 (`fleet-quota-status-unavailable` or `fleet-quota-status-unreadable`) reported as
-`harness-hold:<reason>` or as `all-fallbacks-grounded` with `holdReason`.
+`harness-hold:<reason>` or with an explicit `holdReason`, regardless of the outer
+reason (including a missing or generic reason).
 Genuine quota exhaustion and unknown holds still consume attempts. Other
 exceptions consume an attempt; missing receipts cannot refund it.
 Attempts do not prove ownership or restart the idle timer. At two attempts, the next

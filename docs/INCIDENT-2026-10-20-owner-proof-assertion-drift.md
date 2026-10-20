@@ -86,3 +86,27 @@ request solely for the Comment-only remediation.
   809.49 seconds (835.00 seconds including the bounded wrapper).
 - `git diff --check` passed. Required exact-head GitHub CI remains the merge
   gate after publication; no local result substitutes for that gate.
+
+## Subsequent watcher profiling failure
+
+The later remediation head `3dda4563b5813499a97e8c2d7a01f21ca3025aee`
+failed both Node lanes in
+[run 39431624502](https://github.com/laceyenterprises/adversarial-review/actions/runs/39431624502).
+Both failures were the existing posted-review profiling assertion in
+`test/watcher-closure-latency.test.mjs`: six adapter calls instead of four.
+This was a separate fixture contract drift, not another owner-proof failure.
+The synthetic adapter in `test/helpers/posted-review-profile.mjs` identified
+every unsupported command as `read`, while the client caches unsupported
+capabilities by the concrete invoked command. Returning `requested: args[0]`
+restores the fixture's contract and the original four-call assertion.
+
+Hammer reproduced and repaired that failure without changing production
+routing or weakening the assertion. During closure,
+[PR #1408](https://github.com/laceyenterprises/adversarial-review/pull/1408)
+landed the same repair on `main` at
+`4d86210ae1207b1d28170039fc6cf7d5c0c1334d`. The conflict rebase preserves
+that repair and its explanatory comments, dropping the duplicate fixture
+commit. The explicit hold-reason precedence fix and both directions of its
+classifier coverage remain in this PR. Full-suite validation of any earlier
+head does not certify this rebased head; its required GitHub checks must pass
+before merge.

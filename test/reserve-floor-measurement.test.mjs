@@ -76,3 +76,62 @@ test('a measured zero in the current shape still counts as exhausted', () => {
   s.reserveFloors['openai-oauth'] = floor(0);
   assert.equal(selectCodexWorkerAccount(s).provider, 'codex-corp');
 });
+
+for (const legacy of [false, true]) {
+  const shape = legacy ? 'legacy status' : 'provider confidence';
+  const reading = percentRemaining => legacy
+    ? { status: 'measured', percentRemaining }
+    : { confidence: 'measured', inferred: false, percentRemaining };
+
+  test(`${shape}: missing and invalid percentages hold instead of exhausting or admitting accounts`, () => {
+    for (const value of [null, undefined, false, true, '', '  ', 'invalid', Infinity, NaN, [], {}]) {
+      assert.ok(Number.isNaN(reserveFloorWeeklyMeasurement({ weeklyMeasurement: reading(value) }).percentRemaining));
+      const s = snapshot();
+      s.reserveFloors['openai-oauth'] = { weeklyMeasurement: reading(value) };
+      s.reserveFloors['openai-oauth-corp'] = { weeklyMeasurement: reading(value) };
+      s.reserveFloors['anthropic-oauth-corp'] = { weeklyMeasurement: reading(value) };
+      assert.equal(selectCodexWorkerAccount(s).reason, 'codex-account-evidence-unknown');
+      assert.equal(selectCodexReviewerAccount(s).reason, 'codex-account-evidence-unknown');
+      assert.equal(selectClaudeAccountLaneFromSnapshot(s, { workerClass: 'hammer-claude' }).reason,
+        'claude-account-evidence-unknown');
+    }
+  });
+
+  test(`${shape}: numeric strings admit accounts and string zero still proves exhaustion`, () => {
+    for (const [value, expected] of [['50', 50], [' 50 ', 50], ['0', 0]]) {
+      assert.equal(reserveFloorWeeklyMeasurement({ weeklyMeasurement: reading(value) }).percentRemaining, expected);
+      const s = snapshot();
+      s.reserveFloors['openai-oauth'] = { weeklyMeasurement: reading(value) };
+      s.reserveFloors['openai-oauth-corp'] = { weeklyMeasurement: reading(value) };
+      s.reserveFloors['anthropic-oauth-corp'] = { weeklyMeasurement: reading(value) };
+      assert.equal(selectCodexWorkerAccount(s).hold, expected === 0);
+      assert.equal(selectCodexReviewerAccount(s).hold, expected === 0);
+      assert.equal(selectClaudeAccountLaneFromSnapshot(s, { workerClass: 'hammer-claude' }).provider,
+        expected === 0 ? 'claude-code' : 'claude-code-corp');
+    }
+  });
+}
+
+test('unusable weekly readings fall back to the measured provider reading', () => {
+  for (const weeklyMeasurement of [{}, { confidence: 'unknown' }, { status: 'stale' },
+    { confidence: 'measured', percentRemaining: null }, { status: 'measured', percentRemaining: 'invalid' }]) {
+    const s = snapshot();
+    for (const policy of Object.values(s.reserveFloors)) policy.weeklyMeasurement = weeklyMeasurement;
+    assert.deepEqual(reserveFloorWeeklyMeasurement(s.reserveFloors['openai-oauth']),
+      { status: 'measured', percentRemaining: 40 });
+    assert.equal(selectCodexWorkerAccount(s).provider, 'codex');
+    assert.equal(selectCodexReviewerAccount(s).provider, 'codex-corp');
+    assert.equal(selectClaudeAccountLaneFromSnapshot(s, { workerClass: 'hammer-claude' }).provider, 'claude-code-corp');
+  }
+});
+
+test('usable weekly readings retain precedence, including measured zero', () => {
+  for (const percentRemaining of [0, 25]) {
+    assert.deepEqual(reserveFloorWeeklyMeasurement({
+      weeklyMeasurement: { confidence: 'measured', inferred: false, percentRemaining },
+      measurement: { confidence: 'measured', percentRemaining: 90 },
+    }), { status: 'measured', percentRemaining });
+  }
+  assert.deepEqual(reserveFloorWeeklyMeasurement({ weeklyMeasurement: { status: 'unknown' } }),
+    { status: 'unknown', percentRemaining: NaN });
+});

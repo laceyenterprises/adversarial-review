@@ -165,18 +165,23 @@ export function parseHqFleetQuotaStatus(stdout) {
 // `weeklyMeasurement: {status, percentRemaining}`. Account routing reads
 // `status === 'measured'`, so normalize every shape to {status, percentRemaining};
 // otherwise every healthy account reads as unknown evidence and holds.
+// Missing/invalid percentages stay NaN, never fabricated zero capacity. A
+// weekly reading without finite measured evidence can use `measurement` instead.
 function normalizeWeeklyMeasurement(reading) {
   if (!reading || typeof reading !== 'object') return null;
-  if (typeof reading.status === 'string') return reading;
+  const percentRemaining = normalizedCount(reading.percentRemaining) ?? NaN;
+  if (typeof reading.status === 'string') return { ...reading, percentRemaining };
   const measured = reading.confidence === 'measured' && reading.inferred !== true;
   return {
     status: measured ? 'measured' : (reading.inferred === true ? 'inferred' : String(reading.confidence || 'unknown')),
-    percentRemaining: Number(reading.percentRemaining),
+    percentRemaining,
   };
 }
 
 export function reserveFloorWeeklyMeasurement(floor) {
-  return normalizeWeeklyMeasurement(floor?.weeklyMeasurement) || normalizeWeeklyMeasurement(floor?.measurement);
+  const weekly = normalizeWeeklyMeasurement(floor?.weeklyMeasurement);
+  if (weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)) return weekly;
+  return normalizeWeeklyMeasurement(floor?.measurement) || weekly;
 }
 
 export function quotaStatusesFromSnapshot(payload) {

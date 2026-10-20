@@ -26,6 +26,7 @@
       "store": "data/stacked-base-holds/",
       "schemaSurface": "src/ama/stacked-base.mjs",
       "persistence": "best-effort receipt; filesystem failure preserves the hold result",
+      "readErrorValues": ["timeout", "auth", "5xx", "parse", "unknown", null],
       "owner": "AMA closure and remediation"
     },
     {

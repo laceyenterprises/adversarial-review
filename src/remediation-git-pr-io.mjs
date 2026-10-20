@@ -256,7 +256,7 @@ async function fetchPRBranchMetadata({
   // head.repo.full_name lets callers tell same-repo PRs (push-back works
   // against origin) from fork PRs (head branch is not on origin).
   const headRepo = parsed?.head?.repo?.full_name || null;
-  return { baseBranch, branch, headRepo };
+  return { baseBranch, branch, headRepo, defaultBranch: parsed?.base?.repo?.default_branch || null };
 }
 
 async function ensureJobBranchMetadata({
@@ -306,7 +306,7 @@ async function ensureJobBranchMetadata({
   if (jobPath) {
     writeFollowUpJob(jobPath, nextJob);
   }
-  return { job: nextJob, baseBranch, branch, hydrated: true };
+  return { job: nextJob, baseBranch, branch, defaultBranch: metadata.defaultBranch, hydrated: true };
 }
 
 async function ensureJobBaseBranch({

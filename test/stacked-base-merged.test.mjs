@@ -186,8 +186,8 @@ test('hold persistence failures return the hold without posting or throwing', as
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.recoveryWait, true);
     assert.equal(f.comments.length, 0);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /hold persistence failed/);
+    assert.equal(warnings.length, failure === 'write' ? 2 : 1);
+    assert.match(warnings.at(-1), /hold persistence failed/);
   }
 });
 
@@ -283,7 +283,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
     const result = await runDaemonCleanMergeAttempt({
       rootDir: f.rootDir, repoPath: repo, prNumber: 41,
       cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
-      candidate: { title: 'Synthetic change', baseBranch: base, headSha: head,
+      candidate: { title: 'Synthetic change', baseBranch: base, defaultBranch: 'trunk', headSha: head,
         statusCheckRollup: checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
         prState: 'open', labels: [], branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] } },
       gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
@@ -315,6 +315,7 @@ test('an otherwise mergeable PR cannot click daemon merge into a merged parent b
     } else {
       assert.equal(result.merged, true, 'the same otherwise eligible PR merges after a safe retarget');
       assert.equal(clicks, 1);
+      assert.equal(f.calls.filter(args => args[1] === `repos/${repo}/pulls/41`).length, 0);
     }
     assert.equal(released, 1);
   }

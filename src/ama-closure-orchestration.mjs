@@ -2509,6 +2509,7 @@ async function dispatchAmaClosureFor({
     allowStaleReviewHeadHammerResume,
     liveHeadCloserAuthored,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
+    defaultBranch: candidate?.defaultBranch || null,
     riskClass: reviewState.riskClass,
     requiredGateContext,
     reviewedBy: reviewStateRow?.reviewer_login || '',

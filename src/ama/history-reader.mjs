@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { readClosureImmutable } from '../closure-evaluation-cache.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,7 +25,7 @@ export function createHistoryReader(options = {}) {
         || /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}(?:\?|$)/i.test(path);
       const execute = async () => {
         const { stdout } = await execGhWithRetryImpl({ ...ghOptions,
-          args: ['api', path, '--jq', jq], timeoutMs: 15000 });
+          args: ['api', path, '--jq', jq], timeoutMs: loadAwareTimeoutMs(15000) });
         return JSON.parse(stdout);
       };
       const env = ghOptions.env || process.env;
@@ -101,7 +102,7 @@ export function createHistoryReader(options = {}) {
           let patch;
           try {
             ({ stdout: patch } = await diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
-              { cwd: dir, encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER, ...(ghOptions.signal ? { signal: ghOptions.signal } : {}) }));
+              { cwd: dir, encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: GH_LOOKUP_MAX_BUFFER, ...(ghOptions.signal ? { signal: ghOptions.signal } : {}) }));
           } catch (error) {
             if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
               throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });

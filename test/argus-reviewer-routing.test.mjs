@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // ARGUSDRAIN-01 item 3 — the Argus reviewer runs while codex is exhausted:
 // routed through the adversarial reviewer's harness across Claude, Gemini and
 // codex, honouring builder diversity, reviewer.gemini.mode and the HHR quota

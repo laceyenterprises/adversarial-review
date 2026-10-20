@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { evaluateNoProgressLane, readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
 import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';

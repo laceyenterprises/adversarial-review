@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -199,7 +200,7 @@ async function execGhWithRetry({
   args,
   env = process.env,
   signal,
-  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
   retries = 2,
   backoffMs = 500,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

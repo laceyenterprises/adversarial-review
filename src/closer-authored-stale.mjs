@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // STALECLOSER-03: ONE eligibility rule for a closer-authored stale head.
 //
 // A head is closer-authored-stale when the PR head moved past the reviewed head
@@ -55,7 +56,7 @@ export async function proveCloserAuthoredStaleHead({
     for (let page = 1; ; page++) {
       const batch = JSON.parse((await execGhWithRetryImpl({ ...options,
         args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
-        timeoutMs: 15000 })).stdout);
+        timeoutMs: loadAwareTimeoutMs(15000) })).stdout);
       comments.push(...batch);
       if (batch.length < 100) break;
     }

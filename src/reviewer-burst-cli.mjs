@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 // RPL-07 operator surface — request, inspect, and revoke a burst reviewer
 // capacity lease.
 //
@@ -192,7 +194,7 @@ export function collectBurstQuotaSignal({
     try {
       const stdout = execFileSyncImpl(hqPath || resolveHqPath(env), ['fleet', 'quota', 'status', '--json'], {
         encoding: 'utf8',
-        timeout: 20_000,
+        timeout: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
       });
       statuses = parseHqFleetQuotaStatus(stdout);
       break;

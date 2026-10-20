@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // Defense-in-depth for the 2026-05-18 session-ledger DB-path bug class
 // — see adversarial-review#129 + agent-os#669/#670.
 //

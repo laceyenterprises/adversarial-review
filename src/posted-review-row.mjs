@@ -1,4 +1,5 @@
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
@@ -213,7 +214,7 @@ function parsePositiveMs(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function resolveMergeAgentCoexistenceStepDeadlineMs(
+export function resolveNominalMergeAgentCoexistenceStepDeadlineMs(
   env = process.env,
   {
     handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(env),
@@ -228,18 +229,25 @@ export function resolveMergeAgentCoexistenceStepDeadlineMs(
   return Math.min(overrideDeadlineMs, derivedDeadlineMs);
 }
 
+export function resolveMergeAgentCoexistenceStepDeadlineMs(env = process.env, opts = {}) {
+  return loadAwareTimeoutMs(resolveNominalMergeAgentCoexistenceStepDeadlineMs(env, opts));
+}
+
 export function resolveMergeAgentCoexistenceOperationTimeoutMs(
   env = process.env,
   { stepDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs(env) } = {},
 ) {
   const resolvedStepDeadlineMs = parsePositiveMs(stepDeadlineMs, resolveMergeAgentCoexistenceStepDeadlineMs(env));
   const headroomMs = Math.min(5_000, Math.max(1, Math.floor(resolvedStepDeadlineMs * 0.2)));
-  const derivedTimeoutMs = Math.max(1, Math.min(60_000, resolvedStepDeadlineMs - headroomMs));
+  const derivedTimeoutMs = Math.max(1, Math.min(loadAwareTimeoutMs(60_000), resolvedStepDeadlineMs - headroomMs));
   const overrideTimeoutMs = parsePositiveMs(
     env?.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_OPERATION_TIMEOUT_MS,
-    derivedTimeoutMs,
+    null,
   );
-  return Math.max(1, Math.min(overrideTimeoutMs, Math.max(1, resolvedStepDeadlineMs - 1)));
+  return Math.max(1, Math.min(
+    overrideTimeoutMs === null ? derivedTimeoutMs : loadAwareTimeoutMs(overrideTimeoutMs),
+    Math.max(1, resolvedStepDeadlineMs - 1),
+  ));
 }
 
 export async function timePostedReviewStep(
@@ -961,7 +969,7 @@ export async function preparePostedReviewHandlers(handlers, {
         if (!['approved', 'comment-only'].includes(settled.verdict) || settled.remediationPending !== false) continue;
         const value = await timePostedReviewStep('prepare-merge-ready', postedReviewHandlerKey(handler), logger,
           ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { execFileImpl, signal }),
-          undefined, { deadlineMs: Math.max(1, Math.min(10_000, deadlineAt - now())) });
+          undefined, { deadlineMs: Math.max(1, Math.min(loadAwareTimeoutMs(10_000), deadlineAt - now())) });
         if (value?.headRefOid !== handler.headSha) continue;
         const candidate = { value, fetchedAt: now(), repoPath: handler.repoPath, prNumber: handler.prNumber };
         prepared[index] = { ...handler, mergeReady: String(value.state).toUpperCase() === 'OPEN' && !value.mergedAt
@@ -1257,7 +1265,8 @@ export async function runQueuedReviewAdoptionPhase({
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
-  minimumHandlerStartBudgetMs = resolveMergeAgentCoexistenceStepDeadlineMs(
+  // Admission is a share of the fixed phase budget, not a child wait timeout.
+  minimumHandlerStartBudgetMs = resolveNominalMergeAgentCoexistenceStepDeadlineMs(
     process.env,
     { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
   ),
@@ -1374,7 +1383,7 @@ export async function runQueuedReviewAdoptionPhase({
   const phaseStartedMs = Date.now();
   const preparedHandlers = await preparePostedReviewHandlersImpl(postedReviewHandlers, {
     rootDir, logger, execFileImpl, laneGate: noProgressLaneGate,
-    deadlineAt: phaseStartedMs + Math.min(30_000, effectivePostedReviewPhaseBudgetMs / 2),
+    deadlineAt: phaseStartedMs + Math.min(loadAwareTimeoutMs(30_000), effectivePostedReviewPhaseBudgetMs / 2),
   });
   const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({
     handlers: preparedHandlers,

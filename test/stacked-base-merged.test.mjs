@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { spawnSync } from 'node:child_process';

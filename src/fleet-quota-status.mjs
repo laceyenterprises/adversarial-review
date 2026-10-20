@@ -1,3 +1,6 @@
+/** Shared nominal budget; scale at each quota-status call. */
+export const FLEET_QUOTA_STATUS_TIMEOUT_MS = 45_000;
+
 // Shared HHR (harness rate-limit resilience) fleet-quota provider-state reader.
 //
 // Single source of truth for parsing `hq fleet quota status --json` and mapping

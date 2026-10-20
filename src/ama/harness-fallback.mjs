@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from '../claude-account-routing.mjs';
 import { codexWorkerLaneFromSnapshot } from '../codex-account-routing.mjs';
 // LANEFAILOVER-01: unpinned Codex hammers first resolve personal -> corporate
@@ -76,7 +78,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 const LAST_GOOD_SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 
 // Closer/hammer worker_class → HHR provider whose OAuth quota gates whether that
@@ -211,7 +212,7 @@ export async function resolveCloserDispatchHarness({
     const stdout = await readFleetQuotaStatusStdoutWithRetry({
       resolvedHqPath: hqPath,
       hqCwd: String(env?.AGENT_OS_ROOT || AGENT_OS_ROOT).trim() || AGENT_OS_ROOT,
-      execFileImpl, env, timeoutMs: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+      execFileImpl, env, timeoutMs: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
       retryDelaysMs: AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS, sleepImpl,
     });
     failureReason = 'fleet-quota-status-unreadable';

@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { parseHqFleetQuotaSnapshot } from './fleet-quota-status.mjs';
@@ -23,13 +25,6 @@ const execFileAsync = promisify(execFileCb);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
-// Measured on the reference host 2026-09-21: `hq fleet quota status --json` runs
-// 5-7s standalone but 10-100s (median 18.0s) inside a loaded watcher poll, so a
-// 20s bound killed 31 of 76 reads (41%). Each kill costs the full bound plus two
-// retries and then fails open, which silently drops the reviewer-routing signal
-// this call exists to provide. 45s clears the observed median with headroom while
-// still bounding a genuinely wedged read.
-export const FLEET_QUOTA_STATUS_TIMEOUT_MS = 45_000;
 const FLEET_QUOTA_STATUS_RETRY_DELAYS_MS = Object.freeze([250, 1000]);
 // This cache exists so one watcher poll reads fleet quota status once, not once
 // per PR. At a 10s TTL it never achieved that: a poll does substantial per-PR work
@@ -212,7 +207,7 @@ async function executeFleetQuotaStatusWithRetry({
         cwd: hqCwd,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
-        timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS),
       });
       const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
       const durationMs = Date.now() - startedAtMs;
@@ -627,3 +622,5 @@ export async function resolveReviewerWorkerClassWithFallback({
     },
   };
 }
+
+export { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';

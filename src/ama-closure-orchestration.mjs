@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
@@ -2865,7 +2866,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   recoverOrphanImpl = recoverOrphan,
   orphanOptions = {},
   signal = null,
-  operationTimeoutMs = DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
+  operationTimeoutMs = loadAwareTimeoutMs(DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS),
   operationTracker = null,
 }) {
   throwIfAborted(signal);

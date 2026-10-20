@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withGitHubBudgetScope, isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 // Poll-loop fairness — keep new-PR discovery alive when the loop is carrying a
 // backlog of PRs it cannot advance.
@@ -525,7 +526,10 @@ export async function runPostedReviewHandlersFairly({
    */
   async function executeHandler({ handler, key, positionLabel, laneAdmission = null }) {
     const handlerStartedMs = nowMs();
-    const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
+    const handlerDeadlineMs = Math.max(1, Math.min(
+      loadAwareTimeoutMs(parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs)),
+      effectiveBudgetMs - (handlerStartedMs - startedMs),
+    ));
     let resourceLimited = false;
     if (handler.mergeReady) summary.mergeReadyHandled += 1;
     const work = Promise.resolve().then(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {

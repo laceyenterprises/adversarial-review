@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import test from 'node:test';
@@ -148,7 +149,7 @@ test('fleet quota status runs from the configured Agent OS root', async () => {
   assert.equal(result.fellBack, true);
   assert.equal(exec.calls.length, 1);
   assert.equal(exec.calls[0].options.cwd, '/tmp/agent-os-root-for-hammer');
-  assert.equal(exec.calls[0].options.timeout, 20_000);
+  assert.equal(exec.calls[0].options.timeout, 45_000);
 });
 
 test('codex healthy (ok) → keep primary hammer (auto-revert, no fallback)', async () => {
@@ -576,7 +577,7 @@ test('HAMMERQUOTAREAD-01: timeout uses a three-minute-old snapshot without renew
   assert.equal(result.evidenceAgeMs, 3 * 60_000);
   assert.equal(result.evidenceReadAt, SNAPSHOT_NOW - 3 * 60_000);
   assert.equal(result.liveReadReason, 'fleet-quota-status-unavailable');
-  assert.deepEqual(timeouts, [20_000, 5_000, 5_000]);
+  assert.deepEqual(timeouts, [45_000, 11_250, 11_250]);
   assert.equal(readFileSync(closerQuotaSnapshotPath(args.rootDir), 'utf8'), before);
 });
 

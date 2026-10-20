@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).
 //
@@ -448,7 +449,7 @@ test('AFH-04: transient hq quota-status failures retry before failing open', asy
     sleepImpl: async () => {},
   });
   assert.equal(calls, 2, 'the transient failure was retried once');
-  assert.deepEqual(timeouts, [20_000, 5_000], 'retry attempts use a shorter child timeout');
+  assert.deepEqual(timeouts, [45_000, 11_250], 'retry attempts use a shorter child timeout');
   assert.equal(grounding.available, true);
   assert.equal(grounding.reason, 'ok');
 });

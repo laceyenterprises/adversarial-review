@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 // STALECLOSER-03: one eligibility rule for closer-authored stale heads.
 import test from 'node:test';
 import assert from 'node:assert/strict';

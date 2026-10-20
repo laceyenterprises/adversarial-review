@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 // ARC-19 leaf module: local-admission subsystem extracted verbatim from
 // follow-up-remediation.mjs. Owns quota-hold revalidation/backpressure, drain
 // accounting log lines, and transient-retry ceiling resolution. This is a LEAF:
@@ -22,7 +24,6 @@ const execFileAsync = promisify(execFile);
 
 const REMEDIATION_MAX_TRANSIENT_RETRIES_ENV = 'ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES';
 const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
-const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
 
 function resolveMaxTransientRemediationRetries(env = process.env) {
   const raw = env?.[REMEDIATION_MAX_TRANSIENT_RETRIES_ENV];
@@ -78,7 +79,7 @@ function createQuotaHoldRevalidator({
   env = process.env,
   nowMs: defaultNowMs = () => Date.now(),
   ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
-  timeoutMs = QUOTA_HOLD_REVALIDATION_TIMEOUT_MS,
+  timeoutMs = FLEET_QUOTA_STATUS_TIMEOUT_MS,
   // Threaded from the monolith (which owns resolveHqBin for its other callers)
   // to keep this leaf non-circular. Faithful default mirrors resolveHqBin so
   // standalone/test callers that omit it behave identically.
@@ -115,7 +116,7 @@ function createQuotaHoldRevalidator({
         env,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
-        timeout: timeoutMs,
+        timeout: loadAwareTimeoutMs(timeoutMs),
       });
       const stdout = typeof result === 'string' ? result : result?.stdout;
       const cap = harnessCapFromFleetStatus(stdout || '', { harness: String(harness || '').trim().toLowerCase(), model });

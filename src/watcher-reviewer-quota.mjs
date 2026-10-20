@@ -1,5 +1,6 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createAfhReviewerGroundingCache, readFleetQuotaStatusStdoutWithRetry } from './afh-reviewer-fallback.mjs';
-import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './review-worker-class-fallback.mjs';
+import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 
 // Retain AFH's bounded stale-if-error evidence across polls, including its
 // fail-closed managed-account hold. Poll-local promises never expire mid-poll.
@@ -29,9 +30,7 @@ export function createWatcherReviewerQuotaPollFactory(options = {}) {
       if (!groundings.has(key)) groundings.set(key, readGrounding({
         claudeRuntimeProbeUid,
         readOptions: { fleetQuotaExecFileImpl: execQuotaOnce, includeFleetQuotaStatus: true,
-          // Keep the existing worker-class reader's bound: loaded reads can
-          // exceed AFH's shorter standalone timeout without being wedged.
-          timeoutMs: FLEET_QUOTA_STATUS_TIMEOUT_MS, retryDelaysMs: [] },
+          timeoutMs: loadAwareTimeoutMs(FLEET_QUOTA_STATUS_TIMEOUT_MS), retryDelaysMs: [] },
       }));
       firstGrounding ||= groundings.get(key);
       return groundings.get(key);

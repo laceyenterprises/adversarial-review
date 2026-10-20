@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -290,6 +291,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
   const ownerPath = join(lockPath, 'owner.json');
   await mkdirImpl(dirname(lockPath), { recursive: true, mode: 0o700 });
   const startedAt = nowMs();
+  const timeoutMs = loadAwareTimeoutMs(LOCK_TIMEOUT_MS);
   let acquiredLock = false;
 
   async function shouldReclaimLock() {
@@ -323,7 +325,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
       break;
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
-      if ((nowMs() - startedAt) >= LOCK_TIMEOUT_MS) {
+      if ((nowMs() - startedAt) >= timeoutMs) {
         throw new Error(`Timed out waiting for rate-limit lock: ${lockPath}`);
       }
       if (await shouldReclaimLock()) {

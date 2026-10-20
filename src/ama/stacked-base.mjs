@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,7 +14,7 @@ const COMMENT_MARKER = '<!-- ama:stacked-base-merged -->';
 export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFileAsync, signal }) {
   const get = async path => {
     const { stdout } = await execGhWithRetry({ execFileImpl,
-      args: ['api', path], timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
+      args: ['api', path], timeoutMs: loadAwareTimeoutMs(15_000), retries: 2, backoffMs: 500, signal });
     return JSON.parse(stdout);
   };
   try {
@@ -75,7 +76,7 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     // GitHub is the receipt after a crash between posting and the local write.
     const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api',
       `repos/${repo}/issues/${prNumber}/comments`, '--paginate', '--slurp'],
-    timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
+    timeoutMs: loadAwareTimeoutMs(15_000), retries: 2, backoffMs: 500, signal });
     const comments = JSON.parse(stdout);
     if (!Array.isArray(comments)) throw new Error('comment history unavailable');
     if (!comments.flat().some(comment => String(comment.body || '').includes(COMMENT_MARKER))) {
@@ -95,7 +96,7 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
         return execFileImpl(command, args, options);
       };
       await execGhWithRetry({ execFileImpl: postWithReceiptProbe, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
-        '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
+        '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: loadAwareTimeoutMs(15_000), retries: 2, backoffMs: 500, signal });
     }
     writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason, commentedAt: new Date().toISOString() }));
   } catch { /* Hold persists; retry comment delivery on the next observation. */ } finally { if (claimed) { try { unlinkSync(lock); } catch { /* expired claim */ } } }

@@ -1,15 +1,42 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 import {
   CPU_BUSY_THRESHOLD_PERCENT,
+  corroboratedLoadAwareMultiplier,
   loadAwareMultiplier,
+  loadAwareTimeoutMs,
   loadAwareTimeoutSeconds,
   MIN_MULTIPLIER,
   MAX_MULTIPLIER,
   DEFAULT_MAX_TIMEOUT_SECONDS,
 } from '../src/load-aware-timeout.mjs';
+
+test('shared load-aware multiplier parity table', () => {
+  // Inputs and expected multipliers match the platform configuration contract.
+  const cases = [
+    // lpc, CPU busy percent (null = unavailable), cap, enabled, multiplier
+    [0.5, 100, 6, true, '1.000'],
+    [2.0, 85, 6, true, '3.500'],
+    [3.0, 85, 6, true, '6.000'],
+    [3.0, 42.5, 6, true, '3.500'],
+    [2.51, 22.9, 6, true, '2.017'],
+    [3.0, null, 6, true, '1.000'],
+    [10.0, 100, 6, true, '6.000'],
+    [10.0, 100, 20, true, '20.000'],
+    [3.0, 100, 6, false, '1.000'],
+  ];
+  for (const [lpc, cpuBusyPercent, maxMultiplier, enabled, expected] of cases) {
+    const multiplier = corroboratedLoadAwareMultiplier(lpc, cpuBusyPercent, maxMultiplier, enabled);
+    const label = JSON.stringify({ lpc, cpuBusyPercent, maxMultiplier, enabled });
+    assert.equal(multiplier.toFixed(3), expected, label);
+    const opts = { loadAvg1m: lpc * 4, cpuCount: 4, cpuBusyPercent, maxMultiplier, enabled };
+    assert.equal(loadAwareTimeoutSeconds(100, opts), Math.ceil(100 * multiplier), label);
+    assert.equal(loadAwareTimeoutMs(100, opts), Math.ceil(100 * multiplier), label);
+  }
+});
 
 test('multiplier is 1x at or below one core of load (tight cap when idle)', () => {
   assert.equal(loadAwareMultiplier(0), 1);

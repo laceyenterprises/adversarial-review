@@ -817,6 +817,22 @@ function schemaV1() {
           },
         },
       },
+      // Inert OAuth declarations, validated atomically after the cascade.
+      oauth: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          token_accounts: { __type: 'any', __default: {} },
+          identity_token_pools: { __type: 'any', __default: {} },
+          // Preserve existing Python OAuth children when mirroring this root:
+          // platform/agent-os-config/src/agent_os_config/schema_v1/core.py
+          // _oauth_litellm_vk_schema_keys(), wired by oauth_github_ci.py.
+          ...Object.fromEntries(['codex', 'claude', 'gemini', 'opencode', 'hermes', 'pi', 'oss_local', 'patch'].map(role => [`litellm_vk_${role}`, {
+            __type: TYPE_DICT, __strict: true,
+            __keys: { op_ref: { __type: TYPE_STRING, __default: null, __nullable: true } },
+          }])),
+        },
+      },
       // OAuth broker watchdog tuning. Mirrors the Python authority
       // (`oauth_broker.watchdog` in
       // platform/agent-os-config/src/agent_os_config/__init__.py). The Node
@@ -827,20 +843,6 @@ function schemaV1() {
       // docker_bin, broker_internal_healthz_url,
       // portforward_wedge_restart_max_attempts) landed in #1958, both
       // Python-only — this section heals the drift.
-      oauth: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // Atomic declaration maps: validate all fields after the cascade,
-          // including fields a tolerant generic loader would otherwise drop.
-          token_accounts: { __type: 'any', __default: {} },
-          identity_token_pools: { __type: 'any', __default: {} },
-          ...Object.fromEntries(['codex', 'claude', 'gemini', 'opencode', 'hermes', 'pi', 'oss_local', 'patch'].map(role => [`litellm_vk_${role}`, {
-            __type: TYPE_DICT, __strict: true,
-            __keys: { op_ref: { __type: TYPE_STRING, __default: null, __nullable: true } },
-          }])),
-        },
-      },
       oauth_broker: {
         __type: TYPE_DICT,
         __strict: true,
@@ -4903,7 +4905,16 @@ function validateDictPresentKeysOnly(
   return out;
 }
 
-export function validateSchema(
+export function validateSchema(doc, options = {}) {
+  const validated = validateSchemaLayer(doc, options);
+  validateOAuthDeclarations(validated.oauth ?? {}, null, options.source);
+  return validated;
+}
+
+// Cascade layers may reference accounts from another layer or be superseded.
+// Only the public single-document validator and final merged config validate
+// declaration semantics; this private layer validator preserves atomic maps.
+function validateSchemaLayer(
   doc,
   {
     source = null,
@@ -5876,7 +5887,7 @@ function loadConfigImpl({
     topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const { doc: topDoc, rawText: topRaw } = loadLayerFile(topPathResolved);
   if (topDoc !== null && topDoc !== undefined && !isEmptyDoc(topDoc)) {
-    const validated = validateSchema(topDoc, {
+    const validated = validateSchemaLayer(topDoc, {
       source: topPathResolved,
       rawText: topRaw,
       tolerateNestedUnknownLocalKeys: tolerateCheckedInUnknown,
@@ -5917,7 +5928,7 @@ function loadConfigImpl({
       !Array.isArray(localDoc) &&
       'version' in localDoc
     ) {
-      validatedLocal = validateSchema(localDoc, {
+      validatedLocal = validateSchemaLayer(localDoc, {
         source: local,
         rawText: localRaw,
         tolerateForeignTopLevelSections: true,
@@ -6011,13 +6022,7 @@ function loadConfigImpl({
 
   enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
-  try {
-    validateTokenPoolDeclarations(merged.oauth);
-  } catch (error) {
-    throw new AgentOSConfigError(error.message, {
-      key: error.message.split(':', 1)[0], expected: 'valid token pool declaration',
-    });
-  }
+  validateOAuthDeclarations(merged.oauth, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {
@@ -6031,6 +6036,30 @@ function loadConfigImpl({
     schema,
     runtimeDroppedUnknownKeys,
   });
+}
+
+function validateOAuthDeclarations(oauth, trace = null, source = null) {
+  try {
+    validateTokenPoolDeclarations(oauth);
+  } catch (error) {
+    // Never copy trace values: descriptors and bindings must remain redacted.
+    const declarationSources = Object.fromEntries([...TOKEN_POOL_DECLARATION_PATHS].map(key => {
+      const winner = trace?.[key]?.at(-1);
+      return [key, { source: winner?.source ?? source, path: winner?.path ?? source }];
+    }));
+    const key = error.message.split(':', 1)[0];
+    const mapKey = [...TOKEN_POOL_DECLARATION_PATHS].find(path => key === path || key.startsWith(`${path}.`));
+    const winner = declarationSources[mapKey];
+    const origins = Object.entries(declarationSources)
+      .filter(([, origin]) => origin.path || origin.source)
+      .map(([path, origin]) => `${path} from ${origin.path || origin.source}`);
+    const wrapped = new AgentOSConfigError(
+      `${error.message}${origins.length ? ` (${origins.join('; ')})` : ''}`,
+      { key, expected: 'valid token pool declaration', source: winner?.path || winner?.source },
+    );
+    wrapped.declarationSources = declarationSources;
+    throw wrapped;
+  }
 }
 
 function isEmptyDoc(doc) {

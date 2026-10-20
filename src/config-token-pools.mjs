@@ -4,10 +4,43 @@
 import { readFileSync } from 'node:fs';
 
 const contract = JSON.parse(readFileSync(new URL('./identity-token-pools.v1.json', import.meta.url)));
+const mapping = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+validateContract(contract);
 const idPattern = new RegExp(`^(?:${contract.id_pattern})$`);
 const modelPattern = new RegExp(`^(?:${contract.model_pattern})$`);
 export const TOKEN_POOL_DECLARATION_PATHS = new Set(['oauth.token_accounts', 'oauth.identity_token_pools']);
-const mapping = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+function validateContract(value) {
+  const requireField = (condition, field) => {
+    if (!condition) throw new Error(`invalid ITP-01 vocabulary: ${field}`);
+  };
+  requireField(mapping(value) && value.version === 1, 'version must be 1');
+  for (const key of ['families', 'account_fields', 'required_fields']) {
+    const items = value[key];
+    requireField(Array.isArray(items) && items.length > 0 &&
+      items.every(item => typeof item === 'string' && item.length > 0) &&
+      new Set(items).size === items.length, key);
+  }
+  requireField(value.families.length === 3 &&
+    ['codex', 'claude', 'gemini'].every(family => value.families.includes(family)), 'families');
+  requireField(['family', 'allowed_models', 'concurrency'].every(key => value.required_fields.includes(key)) &&
+    value.required_fields.every(key => value.account_fields.includes(key)) &&
+    ['broker_provider', 'holder_user'].every(key => value.account_fields.includes(key)), 'account_fields / required_fields');
+  for (const key of ['max_concurrency', 'max_models', 'max_pool_accounts']) {
+    requireField(Number.isSafeInteger(value[key]) && value[key] > 0, key);
+  }
+  for (const key of ['id_pattern', 'model_pattern']) {
+    requireField(typeof value[key] === 'string' && value[key].length > 0, key);
+    try { new RegExp(`^(?:${value[key]})$`); }
+    catch { requireField(false, key); }
+  }
+  for (const key of ['broker_families', 'role_families']) {
+    requireField(mapping(value[key]) && Object.keys(value[key]).length > 0 &&
+      Object.entries(value[key]).every(([name, family]) =>
+        /^[a-z][a-z0-9_-]{0,63}$/.test(name) && value.families.includes(family) &&
+        (key !== 'broker_families' || family !== 'gemini')), key);
+  }
+}
+
 function requireValue(condition, path, reason) {
   if (!condition) throw new Error(`${path}: ${reason}`);
 }

@@ -59,6 +59,7 @@ import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mj
 import { execFile } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { setTimeout as retryDelay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -408,7 +409,8 @@ export async function readFleetQuotaStatusStdoutWithRetry({
   sleepImpl,
 }) {
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
-  const pause = typeof sleepImpl === 'function' ? sleepImpl : sleep;
+  // An awaited quota retry must keep standalone callers alive until it settles.
+  const pause = typeof sleepImpl === 'function' ? sleepImpl : retryDelay;
   const attempts = delays.length + 1;
   let lastError = null;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {

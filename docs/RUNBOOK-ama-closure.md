@@ -502,6 +502,7 @@ provenance still key off the configured logical class). It emits a loud
 - **Bounded quota evidence (HAMMERQUOTAREAD-01):** each launch tries the live
   read with the shared retry reader: 20 seconds initially, then up to two
   5-second retries for transient errors, with 250 ms and 1-second delays.
+  Awaited retry delays keep standalone callers alive until the read settles.
   Successful parsed reads atomically refresh
   `data/ama-closer-quota-snapshot.json` under the dispatch state root. A failed
   or unreadable live read may reuse that payload only while its original read

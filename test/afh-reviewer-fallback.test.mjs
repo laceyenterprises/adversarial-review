@@ -15,6 +15,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +44,24 @@ import { applyGeminiReviewerRoute, routeSubject } from '../src/adapters/subject/
 import { selectReviewerRouteForAttempt } from '../src/reviewer-route-selection.mjs';
 import { parseHqFleetQuotaStatus } from '../src/fleet-quota-status.mjs';
 import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
+
+test('fleet quota retry completes when its delay is the only remaining event-loop work', () => {
+  const moduleUrl = new URL('../src/afh-reviewer-fallback.mjs', import.meta.url).href;
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', `
+    import { readFleetQuotaStatusStdoutWithRetry } from ${JSON.stringify(moduleUrl)};
+    let attempts = 0;
+    const result = await readFleetQuotaStatusStdoutWithRetry({
+      resolvedHqPath: 'unused', hqCwd: process.cwd(), env: {},
+      timeoutMs: 1000, retryDelaysMs: [10],
+      execFileImpl: async () => {
+        if (++attempts === 1) throw new Error('quota status timed out');
+        return { stdout: 'recovered' };
+      },
+    });
+    console.log(JSON.stringify({ result, attempts }));
+  `], { encoding: 'utf8', timeout: 10_000 });
+  assert.deepEqual(JSON.parse(stdout), { result: 'recovered', attempts: 2 });
+});
 
 const HERMETIC = { env: {}, topPath: '/dev/null' };
 

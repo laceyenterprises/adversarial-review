@@ -44,7 +44,8 @@ export const DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS = 15 * 60 * 1000;
 export function isAmaCloserLaunching(result) {
   return (result?.reason === AMA_HAMMER_BACKGROUND_REASON
       && Number.isFinite(Date.parse(result?.closerProgressAt || '')))
-    || result?.reason?.startsWith('in-flight:')
+    || (result?.reason?.startsWith('in-flight:')
+      && Number.isFinite(Date.parse(result?.closerProgressAt || '')))
     || result?.reason?.startsWith('ama-closer-dispatch-overrun:');
 }
 

@@ -106,7 +106,7 @@ function finalRound(t) {
 }
 
 async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, timeoutMs } = {}) {
-  const rootDir = finalRound(t), pages = [], waits = [];
+  const rootDir = finalRound(t), pages = [], waits = [], waitInputs = [];
   let clock = Date.parse(started) + 40 * 60_000;
   t.mock.timers.enable({ apis: ['Date'], now: clock });
   const launchAt = clock;
@@ -117,6 +117,8 @@ async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, ti
   const identity = { rootDir, repo, prNumber, headSha };
   await observeClosureWait({ ...identity, waitClass: 'final-round', startedAt: Date.parse(started),
     now: Date.parse(started), env: {}, reason: 'dispatch-pending', pageImpl: async text => pages.push(text) });
+  await observeClosureWait({ ...identity, waitClass: 'bounded-wait',
+    now: Date.parse(started), env: {}, reason: 'earlier-phase', pageImpl: async text => pages.push(text) });
   const args = { rootDir, repoPath: repo, prNumber, currentRevisionRef: headSha, labelNames: [],
     now: () => clock, env: {}, operationTimeoutMs: dispatchOnly ? 10 : 1000,
     reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
@@ -139,13 +141,14 @@ async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, ti
       return pending;
     },
     observeClosureWaitImpl: async args => {
+      waitInputs.push(args);
       const wait = await observeClosureWait({ ...args, now: clock, env: {}, pageImpl: async text => pages.push(text) });
       waits.push(wait);
       return wait;
     },
     logger: { log() {}, warn() {} },
   };
-  return { args, identity, queue, pages, waits, launchAt, finish, calls: () => calls,
+  return { args, identity, queue, pages, waits, waitInputs, launchAt, finish, calls: () => calls,
     advance: ms => { clock = launchAt + ms; t.mock.timers.setTime(clock); } };
 }
 
@@ -235,6 +238,8 @@ test('HAMCLOSEWAIT-02 pending lease held by the running background dispatch gets
   assert.equal(result.closerProgressAt, new Date(f.launchAt).toISOString());
   assert.equal(f.waits.length, before + 2, 'inner and outer lease observations both apply launch credit');
   assert.equal(result.boundedWait.exhausted, false);
+  for (const input of f.waitInputs.slice(before)) assert.equal(input.waitClass, 'final-round');
+  for (const wait of f.waits.slice(before)) assert.equal(wait.boundedMs, 900_000);
   assert.deepEqual(f.pages, []);
   f.advance(DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS + 1);
   assert.match((await maybeDispatchAmaClosureFor(f.args)).reason, /ama-closer-dispatch-overrun/);
@@ -275,17 +280,24 @@ test('HAMCLOSEWAIT-02 a foreign-host pending lease with the same PID gets no bac
   assert.match(f.pages[0], /in-flight:/);
 });
 
-test('HAMCLOSEWAIT-02 immediate background retries still page with the settled blocker', async t => {
+for (const reason of ['operator-label-classification-pending', 'background-pr-state-unavailable', 'deferred-by-drain']) {
+test(`HAMCLOSEWAIT-02 immediate background retries still page with the settled blocker ${reason}`, async t => {
   const f = await backgroundFinalRound(t);
   await maybeDispatchAmaClosureFor(f.args);
   f.advance(200_000);
-  f.finish({ dispatched: false, reason: 'operator-label-classification-pending' });
+  f.finish({ dispatched: false, reason });
   await f.queue.drain();
+  const before = f.waitInputs.length;
   await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(f.waitInputs[before].reason, reason);
+  assert.equal(f.waitInputs[before].waitClass, 'final-round');
+  assert.equal(f.waits[before].startedAt, Date.parse(started));
+  assert.equal(f.waits[before].exhausted, true);
   assert.equal(f.pages.length, 1);
-  assert.match(f.pages[0], /operator-label-classification-pending/);
+  assert.ok(f.pages[0].includes(reason));
   assert.doesNotMatch(f.pages[0], /dispatch-backgrounded/);
 });
+}
 
 const minute = 60_000;
 for (const [reason, age, expectedPages] of [

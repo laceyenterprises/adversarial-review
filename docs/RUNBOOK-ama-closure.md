@@ -4045,7 +4045,11 @@ an undispatched settlement resumes that clock and pages with the settled
 reasons. An in-progress overrun pages once with `ama-closer-dispatch-overrun`,
 `elapsed_ms` and `bound_ms`. Successful settlement credits the fixed launch
 time. Background work logs “closer is launching” only when it carries actual
-execution-start evidence; queued submissions do not emit that launch hint.
+execution-start evidence; queued submissions and foreign or unconfirmed in-flight
+leases without a valid progress timestamp do not emit that launch hint.
+Inner lease and retriable-refusal observations use the shared final-round
+wait wrapper, preserving the final-round clock and page receipt independently
+of older bounded-wait rows.
 Restart intent alone supplies
 no progress. Other pending/uncertain ownership, held dispatches, exhausted
 fallbacks, daemon failures and review handoffs retain their existing waits;

@@ -75,6 +75,15 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test('HAMCLOSEWAIT-02 in-flight launch hints require valid progress evidence', () => {
+  for (const closerProgressAt of [undefined, '', 'invalid']) {
+    assert.equal(isAmaCloserLaunching({ reason: 'in-flight:foreign-worker', closerProgressAt }), false);
+  }
+  assert.equal(isAmaCloserLaunching({ reason: 'in-flight:local-worker',
+    closerProgressAt: '2026-01-01T00:00:00Z' }), true);
+  assert.equal(isAmaCloserLaunching({ reason: 'ama-closer-dispatch-overrun: elapsed_ms=900001 bound_ms=900000' }), true);
+});
+
 test('HAMCLOSEWAIT-02 queue credits actual start, not submission or repeated observations', async () => {
   let clock = 1000;
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1, nowMs: () => clock });

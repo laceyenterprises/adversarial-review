@@ -4,6 +4,7 @@
 timeouts:
   load_aware:
     enabled: true
+    # Multiplier cap: 1..20 inclusive (default 6).
     max_multiplier: 6
 
 reviewer:

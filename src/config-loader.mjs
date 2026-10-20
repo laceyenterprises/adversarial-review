@@ -328,7 +328,7 @@ function schemaV1() {
             __type: TYPE_DICT, __strict: true,
             __keys: {
               enabled: { __type: TYPE_BOOL, __default: true },
-              max_multiplier: { __type: TYPE_FLOAT, __default: 6, __min: 1 },
+              max_multiplier: { __type: TYPE_FLOAT, __default: 6, __min: 1, __max: 20 },
             },
           },
         },

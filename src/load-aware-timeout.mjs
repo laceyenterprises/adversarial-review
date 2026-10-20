@@ -91,8 +91,9 @@ function timeoutPolicy() {
 }
 
 /**
- * Host-load → patience multiplier in `[MIN_MULTIPLIER, MAX_MULTIPLIER]`.
+ * Host-load → patience multiplier in `[MIN_MULTIPLIER, maxMultiplier]`.
  * @param {number} loadPerCore  1-minute loadavg divided by CPU count.
+ * @param {number} [maxMultiplier=6]  Configured cap (1..20 inclusive).
  * @returns {number}
  */
 export function loadAwareMultiplier(loadPerCore, maxMultiplier = MAX_MULTIPLIER) {
@@ -100,6 +101,21 @@ export function loadAwareMultiplier(loadPerCore, maxMultiplier = MAX_MULTIPLIER)
   const factor = Math.max(0, (lpc - 1) / 2);
   const multiplier = 1 + factor * 5;
   return Math.min(Math.max(MIN_MULTIPLIER, maxMultiplier), Math.max(MIN_MULTIPLIER, multiplier));
+}
+
+/** Pure load-aware multiplier; unavailable CPU readings supply no corroboration. */
+export function corroboratedLoadAwareMultiplier(
+  loadPerCore,
+  cpuBusyPercent,
+  maxMultiplier = MAX_MULTIPLIER,
+  enabled = true,
+) {
+  if (enabled === false) return MIN_MULTIPLIER;
+  const rawMultiplier = loadAwareMultiplier(loadPerCore, maxMultiplier);
+  const corroboration = Number.isFinite(cpuBusyPercent)
+    ? Math.min(1, Math.max(0, cpuBusyPercent / CPU_BUSY_THRESHOLD_PERCENT))
+    : 0;
+  return MIN_MULTIPLIER + (rawMultiplier - MIN_MULTIPLIER) * corroboration;
 }
 
 /**
@@ -156,11 +172,9 @@ function scaledTimeout(baseValue, opts, maxValue) {
   // threshold. Both endpoints are unchanged: at or above the threshold the
   // full multiplier still applies, and an unreadable CPU still yields no
   // extension at all.
-  const rawMultiplier = loadAwareMultiplier(loadPerCore, policy.maxMultiplier);
-  const corroboration = Number.isFinite(busy)
-    ? Math.min(1, Math.max(0, busy / CPU_BUSY_THRESHOLD_PERCENT))
-    : 0;
-  const multiplier = MIN_MULTIPLIER + (rawMultiplier - MIN_MULTIPLIER) * corroboration;
+  const multiplier = corroboratedLoadAwareMultiplier(
+    loadPerCore, busy, policy.maxMultiplier, policy.enabled,
+  );
   const effective = Math.ceil(base * multiplier);
   // Never below the nominal. The max cap limits load inflation, not the
   // caller's explicit nominal timeout.

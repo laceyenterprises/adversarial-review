@@ -95,6 +95,23 @@ test('local config disables scaling and sets the multiplier cap', t => {
   }
 });
 
+test('load-aware config accepts multiplier bounds 1 and 20 and rejects values outside them', () => {
+  const topPath = process.env.AGENT_OS_CONFIG_PATH;
+  const localPath = join(dirname(topPath), 'config.local.yaml');
+  for (const value of [1, 20]) {
+    writeFileSync(localPath, `timeouts:\n  load_aware:\n    max_multiplier: ${value}\n`);
+    assert.equal(loadConfig({ topPath, env: {} }).get('timeouts.load_aware.max_multiplier'), value);
+  }
+  for (const [value, error] of [[0.5, /below minimum 1/], [21, /above maximum 20/]]) {
+    writeFileSync(localPath, `timeouts:\n  load_aware:\n    max_multiplier: ${value}\n`);
+    assert.throws(() => loadConfig({ topPath, env: {} }), {
+      name: 'AgentOSConfigError',
+      message: error,
+      key: 'timeouts.load_aware.max_multiplier',
+    });
+  }
+});
+
 test('GitHub default and all quota readers scale at the call site', async t => {
   syntheticBusyHost(t);
   const rootDir = dirname(process.env.AGENT_OS_CONFIG_PATH);

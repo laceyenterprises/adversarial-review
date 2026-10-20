@@ -37,7 +37,7 @@ test('blocking finding authorizes matching HAM removed content; invalid citation
   assert.equal(checkPrimaryChange(evidence(), head).ok, true);
   const shifted = structuredClone(evidence());
   shifted.reversalAuthorizations[0].commit.files[0].patch = '@@ -9 +9 @@\n-enforcement: true\n+enforcement: false';
-  assert.equal(checkPrimaryChange(shifted, head).ok, true);
+  assert.equal(checkPrimaryChange(shifted, head).reason, 'primary-change-reverted');
   for (const mutate of [
     (e) => { e.reversalAuthorizations = []; },
     (e) => { e.reversalAuthorizations[0].commit.commit.message = 'HAM\n\nWorker-Class: hammer'; },
@@ -53,6 +53,39 @@ test('blocking finding authorizes matching HAM removed content; invalid citation
     assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
   }
 });
+for (const splitDeletion of [false, true]) {
+  test(`parent-state authorization accepts ${splitDeletion ? 'an insertion deleted across two cited HAM commits' : 'a HAM repair followed by a cited deletion'}`, async () => {
+    const middle = 'd'.repeat(40);
+    const insertion = content => ({ filename: path, status: 'modified', additions: content.length, deletions: 0,
+      patch: `@@ -9,0 +10,${content.length} @@\n${content.map(line => `+${line}`).join('\n')}` });
+    const primary = insertion(['a()', 'b()']);
+    const parent = insertion(splitDeletion ? ['b()'] : ['a2()', 'b()']);
+    const cited = { ...review, body: body.replace('`10`', '`10-11`') };
+    const first = { ...structuredClone(commit), sha: middle, files: [{ filename: path, status: 'modified',
+      additions: splitDeletion ? 0 : 1, deletions: 1,
+      patch: splitDeletion ? '@@ -10 +9,0 @@\n-a()' : '@@ -10 +10 @@\n-a()\n+a2()' }] };
+    const last = { ...structuredClone(commit), parents: [{ sha: middle }], files: [{ filename: path, status: 'modified',
+      additions: 0, deletions: splitDeletion ? 1 : 2,
+      patch: splitDeletion ? '@@ -10 +9,0 @@\n-b()' : '@@ -10,2 +9,0 @@\n-a2()\n-b()' }] };
+    const get = async url => {
+      if (url.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: base } };
+      if (url.includes('/reviews?')) return [cited];
+      if (url.endsWith(`/commits/${middle}`)) return first;
+      if (url.endsWith(`/commits/${head}`)) return last;
+      if (url.endsWith(`${base}...${head}`)) return { status: 'ahead', merge_base_commit: { sha: base },
+        files: [], total_commits: 3, commits: [{ sha: author, commit: { message: 'author' } }, first, last] };
+      return { status: 'ahead', merge_base_commit: { sha: base },
+        files: [url.endsWith(`${base}...${middle}`) ? parent : primary] };
+    };
+    const e = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
+    assert.equal(e.reversalAuthorizations.length, 2);
+    assert.equal(checkPrimaryChange(e, head).ok, true);
+    // The earlier commit alone does not cover the remaining parent-state span.
+    e.reversalAuthorizations.pop();
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+  });
+}
+
 test('collector binds authorization to closure history, review ancestry and live commit patch', async () => {
   const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
   const get = async (url) => {

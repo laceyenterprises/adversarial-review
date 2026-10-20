@@ -170,7 +170,7 @@ test('conflict resolution changing exact removed or added lines still refuses th
   }
 });
 
-test('original proof accepts changed hunk/context-run boundaries and removal order', async () => {
+test('original proof refuses changed hunk/context-run boundaries and removal order', async () => {
   for (const rewrite of [
     patch => patch.replace('@@ -15,2 +15 @@', '@@ -15,2 +15,0 @@')
       .replace('\n+start()', '\n@@ -55,0 +54 @@\n+start()'),
@@ -181,8 +181,8 @@ test('original proof accepts changed hunk/context-run boundaries and removal ord
     const { evidence, result } = await snapshotReversal({ transform: (path, response) =>
       path.endsWith(`/commits/${head}`)
         ? { ...response, files: response.files.map(file => ({ ...file, patch: rewrite(file.patch) })) } : response });
-    assert.equal(result.ok, true);
-    assert.equal(evidence.rejectedReversalAuthorizations, undefined);
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
   }
 });
 
@@ -195,6 +195,22 @@ test('original proof ignores context run lengths but retains matching newline ma
     })) };
   } });
   assert.equal(matching.ok, true);
+});
+
+test('original proof binds newline markers to their changed line and side', async () => {
+  for (const foreignCommitter of [false, true]) {
+    const { evidence, result } = await snapshotReversal({ transform: (path, response) => {
+      const current = path.endsWith(`/commits/${head}`);
+      if (!current && !path.endsWith(`/commits/${sha('d')}`)) return response;
+      return { ...response, ...(current && foreignCommitter ? { committer: { login: 'fixture-rebase-worker' } } : {}),
+        files: response.files.map(file => ({ ...file, patch: current
+          ? file.patch.replace('-log_startup()', '-log_startup()\n\\ No newline at end of file')
+          : `${file.patch}\n\\ No newline at end of file` })) };
+    } });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason,
+      foreignCommitter ? 'rebased-commit-unproven' : 'original-reversal-not-proven-before-supersession');
+  }
 });
 
 test('original proof diagnostics bound paths, aggregate detail and operator summaries', async () => {
@@ -521,7 +537,7 @@ test('a historical snapshot must bind the same reversal patch, provenance and or
   const later = review({ node_id: 'PRR_later', commit_id: sha('f'), state: 'COMMENTED',
     body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
   for (const options of [{ originalRecorded: false }, { originalAdded: '-other_change()' },
-    { originalLogin: 'foreign-builder' }, { originalParent: sha('9') }, { snapshotCapped: true }]) {
+    { originalLogin: 'foreign-builder' }, { originalParent: sha('9') }, { originalLine: 45 }, { snapshotCapped: true }]) {
     const { result } = await collect({ originalRecorded: true, reviews: [review(), later], ...options });
     assert.equal(result.reason, 'primary-change-reverted', JSON.stringify(options));
   }
@@ -731,7 +747,6 @@ test('REVERSALPROV-02: cited non-blocking cleanup survives shifted context and c
     parentContext: '\n shifted_context()', reviewedContext: '\n previous_context()' });
   const authorization = evidence.reversalAuthorizations[0];
   authorization.commit = withReversalContext(authorization.commit, 'shifted');
-  authorization.commit.files[0].patch = authorization.commit.files[0].patch.replace('14,4 +14,3', '84,4 +84,3');
   assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, true);
   const uncited = { ...evidence, reversalAuthorizations: [] };
   const refused = checkPrimaryChange(uncited, head, { strictNonBlockingRemediation: true });
@@ -847,7 +862,7 @@ function insertionReversal(evidence, { rebased = true, line = 15, reviewedLine =
   const first = (rebased ? reviewedLine : line) + 1;
   authorization.review.body = review().body.replace('`10-11`', `\`${first}-${first + 1}\``);
   authorization.commit.files = [{ filename: 'src/a.mjs', status: 'modified', additions: 0, deletions: 2,
-    patch: '@@ -86,2 +85,0 @@\n-introduced_one()\n-introduced_two()' }];
+    patch: `@@ -${line + 1},2 +${line},0 @@\n-introduced_one()\n-introduced_two()` }];
   return authorization;
 }
 
@@ -861,8 +876,9 @@ test('REVERSALPROV-02: insertion reversal requires a full citation and removal m
     authorization.review.body = body.replace(/(\*\*Lines:\*\* `\d+)-\d+`/, '$1`');
     assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
     authorization.review.body = body;
-    for (const patch of ['@@ -86 +85,0 @@\n-introduced_one()',
-      '@@ -86,2 +85,0 @@\n-introduced_one()\n-unrelated()']) {
+    const line = (options.line ?? 15) + 1;
+    for (const patch of [`@@ -${line} +${line - 1},0 @@\n-introduced_one()`,
+      `@@ -${line},2 +${line - 1},0 @@\n-introduced_one()\n-unrelated()`]) {
       authorization.commit.files[0].patch = patch;
       authorization.commit.files[0].deletions = patch.split('\n').filter(line => line.startsWith('-')).length;
       const result = checkPrimaryChange(evidence, head);
@@ -878,7 +894,7 @@ test('REVERSALPROV-02: insertion removal matching retains duplicate-line multipl
   const duplicated = JSON.parse(JSON.stringify(evidence).replaceAll('introduced_two()', 'introduced_one()'));
   assert.equal(checkPrimaryChange(duplicated, head).ok, true);
   const file = duplicated.reversalAuthorizations[0].commit.files[0];
-  file.patch = '@@ -86 +85,0 @@\n-introduced_one()';
+  file.patch = '@@ -16 +15,0 @@\n-introduced_one()';
   file.deletions = 1;
   assert.equal(checkPrimaryChange(duplicated, head).reason, 'primary-change-reverted');
 });
@@ -904,9 +920,9 @@ test('REVERSALPROV-02: mixed replacements allow cited restoration of deleted bas
   evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 0,
     patch: '@@ -15,0 +16,2 @@\n+start_unsafe()\n+log_startup()' }];
   authorization.commit.files = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 0,
-    patch: '@@ -85,0 +86 @@\n+start()' }];
+    patch: '@@ -14,0 +15 @@\n+start()' }];
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
-  authorization.commit.files[0].patch = '@@ -85,0 +86 @@\n+unrelated()';
+  authorization.commit.files[0].patch = '@@ -14,0 +15 @@\n+unrelated()';
   const result = checkPrimaryChange(evidence, head);
   assert.equal(result.reason, 'primary-change-reverted');
   assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['hammer-patch-does-not-touch-region']);

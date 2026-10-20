@@ -1027,9 +1027,11 @@ Key control points:
   preserving occurrence counts and rejecting ambiguous matches. Distinct added
   content disambiguates identical deletions. Surrounding context, line offsets
   and changed-line order do not determine authorization.
-  The authorizing HAM commit must remove the protected introduced content with
-  sufficient multiplicity; touching the same coordinates alone supplies no
-  authority. Each removed occurrence can cover only one protected occurrence.
+  The authorizing HAM commit must overlap the projected region in its own
+  parent's coordinates and remove the remaining parent-state content with
+  sufficient multiplicity. Only removals inside that span count; identical text
+  elsewhere supplies no authority. Earlier in-place repairs or split deletions
+  may change the parent-state span before the cited final removal.
   A cited restoration of a primary deletion similarly binds the deleted
   content to the authorizing commit's additions, including in mixed replacements
   whose introduced lines remain present. File/Lines coverage still uses the cited
@@ -1039,10 +1041,11 @@ Key control points:
   introduced text. Whole-file absence, opaque-file and rename preservation remain
   independent protections.
   A superseded citation additionally requires the original HAM reversal, with
-  the same message, file paths, previous paths, statuses and removed/added
-  content multisets and valid original authorization, in the first superseding
-  GitHub review's immutable head. Hunk boundaries, context runs and offsets do
-  not bind this content proof; changed content and multiplicity remain refused.
+  the same message, file paths, previous paths, statuses and ordered removed/added
+  change lines and valid original authorization, in the first superseding
+  GitHub review's immutable head. This original-commit proof retains hunk/context-run
+  boundaries and newline-marker attachment; only context text/counts and hunk
+  offsets may drift. Reordered edits or moved markers refuse the proof.
   REVERSALPROV-01 routes a linked HAM author with a foreign linked rebase
   committer through exact-SHA App validation or that immutable original proof,
   binding the same trailer set and reversal patch identity. Without either it

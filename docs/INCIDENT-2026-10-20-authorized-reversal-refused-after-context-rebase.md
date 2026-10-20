@@ -29,11 +29,15 @@ even though their base-coordinate removed sets are empty.
 ## Repair
 
 The guard matches protected removed and added content as multisets, preserving
-duplicate counts and distinguishing replacements with identical base deletions. It binds original and rebased commit content without surrounding
-context, line offsets, ordering or hunk boundaries. Finding coverage still uses
-the cited review's coordinates. The authorizing commit must actually remove
-the protected introduced content; coordinate overlap alone cannot waive it,
-and one removed occurrence cannot cover multiple protected occurrences.
+duplicate counts and distinguishing replacements with identical base deletions.
+The reviewed-parent comparison ignores context, offsets, ordering and hunk
+boundaries. Original-commit provenance retains ordered edits, hunk/context-run
+boundaries and newline-marker attachment while allowing context text/counts and
+hunk offsets to drift. Finding coverage still uses the cited review's coordinates.
+The authorizing commit must overlap the projected region in its own parent's
+coordinates and remove the remaining parent-state content there. Identical text
+elsewhere cannot waive the region. Deriving this content from the parent permits
+earlier in-place repairs and insertion deletions split across cited commits.
 Cited restoration of a primary deletion uses the content added back by the
 authorizing commit, including in mixed replacement hunks. Insertion-only regions
 remain protected: their reversal requires full finding coverage of the introduced
@@ -63,6 +67,10 @@ passing tests, six skips and zero failures.
 Remediation regressions additionally cover insertion reversals with and without
 a final file diff, rebased and first-line insertions, full citation spans, duplicate
 inserted content, mixed replacement restorations and distinct replacement hunks.
+The follow-up 205-test focused run also covers two-commit repair-then-delete and
+split-deletion histories, refusal of duplicate content at another location, and
+original-proof order/marker attachment. Full-span coverage is cached before
+repeated base-unit scans, avoiding quadratic multiset checks.
 
 After deployment, observe the next naturally occurring hammer cleanup of cited
 primary-change content after a context-only rebase. Its citation should remain

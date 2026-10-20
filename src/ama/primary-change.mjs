@@ -33,7 +33,7 @@ function reversalCommitIdentityMatches(authorization, cache) {
   const original = originalAuthorization?.commit;
   const matches = Boolean(original && isHammer(original) && hamCommitIdentityMatches(original)
     && reversalTrailerIdentity(original) === reversalTrailerIdentity(commit)
-    && reversalPatchIdentity(original.files) === reversalPatchIdentity(commit.files));
+    && reversalCommitPatchIdentity(original.files) === reversalCommitPatchIdentity(commit.files));
   cache?.set(authorization, matches);
   return matches;
 }
@@ -416,7 +416,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           }
         }
         const parent = projectRegion(parentFiles, path, region, cache);
-        const segment = protectedSegment(evidence.primaryFiles, path, region, cache);
+        const segment = protectedSegment(parentFiles, path, region, cache);
+        if (!segment) return reject('hammer-patch-does-not-touch-region');
         const added = segment.addedLines ??= segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
         // Restored base lines need addition coverage, including in mixed
         // replacements. Disappearing insertion regions need removal coverage.
@@ -431,24 +432,31 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         if (!segment.protectedContent.has(key)) segment.protectedContent.set(key, lineMultiset(
           positional ? content.slice(region.start - segment.old, region.end - segment.old) : content));
         const protectedLines = segment.protectedContent.get(key);
-        const { segments } = patchSegments(commit.files, parent.filename, cache);
-        segments.authorizingContent ??= new Map();
-        if (!segments.authorizingContent.has(prefix)) segments.authorizingContent.set(prefix, lineMultiset(segments.flatMap(entry => entry.lines)
-          .filter(line => line.startsWith(prefix)).map(line => line.slice(1))));
-        const removed = segments.authorizingContent.get(prefix);
         if (!cache.has('reversalContentCoverage')) cache.set('reversalContentCoverage', new Map());
         const coverageByCommit = cache.get('reversalContentCoverage');
         const coverageKey = `${commit.sha}:${parent.filename}:${prefix}`;
-        if (!coverageByCommit.has(coverageKey)) coverageByCommit.set(coverageKey, { units: new Set(), used: new Map() });
+        if (!coverageByCommit.has(coverageKey)) coverageByCommit.set(coverageKey, new Set());
         const coverage = coverageByCommit.get(coverageKey);
-        const alreadyCovered = coverage.units.has(protectedLines);
-        if (!protectedLines.size || [...protectedLines].some(([line, count]) =>
-          (removed.get(line) || 0) < (coverage.used.get(line) || 0) + (alreadyCovered ? 0 : count))) {
-          return reject('hammer-patch-does-not-touch-region');
-        }
-        if (!alreadyCovered) {
-          coverage.units.add(protectedLines);
-          for (const [line, count] of protectedLines) coverage.used.set(line, (coverage.used.get(line) || 0) + count);
+        // Unequal replacements share one full-span multiset across base units.
+        // Do not re-scan it for every unit after this commit has covered it.
+        if (!coverage.has(protectedLines)) {
+          const { segments } = patchSegments(commit.files, parent.filename, cache);
+          const overlapping = segments.filter(entry => entry.old <= parent.end
+            && Math.max(entry.old, entry.oldEnd - 1) >= parent.start);
+          const authorizingLines = overlapping.flatMap(entry => {
+            let old = entry.old;
+            return entry.lines.filter(line => {
+              const position = old;
+              if (line.startsWith('-')) old++;
+              return line.startsWith(prefix) && (prefix === '+'
+                || position >= parent.start && position <= parent.end);
+            }).map(line => line.slice(1));
+          });
+          const removed = lineMultiset(authorizingLines);
+          if (!protectedLines.size || [...protectedLines].some(([line, count]) => (removed.get(line) || 0) < count)) {
+            return reject('hammer-patch-does-not-touch-region');
+          }
+          coverage.add(protectedLines);
         }
         if (!cache.has('verifiedReversals')) cache.set('verifiedReversals', new Set());
         cache.get('verifiedReversals').add(`${commit.sha}:${cite[1]}:${cite[2]}:${kind}`);
@@ -677,6 +685,23 @@ function reversalPatchIdentity(files, cache) {
   return identity;
 }
 
+// Immutable original-commit provenance retains ordered edits, context-run/hunk
+// boundaries and newline-marker attachment. Only rebase context and offsets drift.
+function reversalCommitPatchIdentity(files) {
+  changes(files);
+  return JSON.stringify(files.map(file => {
+    if (typeof file.patch !== 'string') throw new Error('opaque original reversal');
+    const lines = [];
+    for (const line of file.patch.split('\n')) {
+      if (line.startsWith('@@ ')) lines.push('@@');
+      else if (line.startsWith(' ')) {
+        if (lines.at(-1) !== ' ') lines.push(' ');
+      } else if (/^[+\\-]/.test(line)) lines.push(line);
+    }
+    return [file.filename, file.previous_filename || '', file.status, lines];
+  }).sort((a, b) => a[0].localeCompare(b[0])));
+}
+
 function boundedReversalText(text, limit = 1200) {
   return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
 }
@@ -772,7 +797,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
     || snapshot.commits.length !== snapshot.total_commits) return { detail: 'incomplete or unsupported superseding snapshot' };
-  const identity = reversalPatchIdentity(commit.files);
+  const identity = reversalCommitPatchIdentity(commit.files);
   const sameMessage = snapshot.commits.filter(entry => matchTrailers
     ? reversalTrailerIdentity(entry) === reversalTrailerIdentity(commit)
     : entry.commit?.message === commit.commit.message);
@@ -790,7 +815,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
     let originalIdentity;
     try {
-      originalIdentity = reversalPatchIdentity(original.files);
+      originalIdentity = reversalCommitPatchIdentity(original.files);
     } catch {
       reject('opaque or malformed original patch');
       continue;
@@ -1136,9 +1161,6 @@ async function describeRevertedRegions(args, evidence, refusal) {
     return JSON.stringify(patchSegments(files, region.path, new Map()).segments
       .filter(segment => region.start === region.end
         ? segment.old <= region.start && segment.oldEnd >= region.start
-          // Added files use coordinate zero in changes(), while patchSegments
-          // projects their first insertion to head line one.
-          || region.start === 0 && segment.old === 1 && segment.oldEnd === 1
         : segment.old < region.end && segment.oldEnd > region.start)
       .map(segment => [segment.old, segment.oldEnd, segment.lines]));
   };

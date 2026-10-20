@@ -34,8 +34,11 @@ one recomputation of older records, including cached original-reversal refusals
 and proofs from before context-tolerant, structure-preserving reversal matching
 and before proof-backed HAM-author reversals with a foreign rebase committer
 or REVERSALPROV-02 content multiset matching across context-only rebases,
-including insertion authorization, mixed replacement restorations and segment
-identity over both removed and added content;
+including parent-state insertion authorization, mixed replacement restorations
+and segment identity over both removed and added content. Reviewed-parent
+matching uses multisets; original-commit provenance retains ordered edits,
+hunk/context-run boundaries and newline-marker attachment. Evaluator coverage
+uses the commit's own parent region and excludes removals elsewhere in the file;
 those older records remain disposable and expire through the ordinary sweep.
 New hammer-history records also include optional `diagnosticCommitRange`: an ordered array of
 `{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,

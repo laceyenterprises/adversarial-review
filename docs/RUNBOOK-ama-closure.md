@@ -2214,9 +2214,9 @@ snapshots; an otherwise unclassified verification read error records `unverifiab
 Equal-length replacements map by line position; unequal-length replacements
 require the finding to cover the entire projected span. Insertion-only regions
 remain protected: deleting the insertion requires a citation covering its entire
-introduced span and HAM removals covering its added-line multiset
-(REVERSALPROV-02). In-place repairs may still change introduced text while
-preserving the changed region. A one-line finding cannot waive the uncited
+introduced span and HAM removals covering the remaining parent-state added-line
+multiset at its projected parent coordinates (REVERSALPROV-02). In-place repairs
+may still change introduced text while preserving the changed region. A one-line finding cannot waive the uncited
 remainder of a contiguous author hunk.
 Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Restoring a deleted base line requires
@@ -2243,9 +2243,10 @@ superseding authoritative review remains current by GitHub review order.
 If a later review supersedes it (same family, or another family on another
 head), the first such review's immutable head must contain the original HAM
 commit with the same message and complete reversal content: each file's path,
-previous path, status and removed/added line multisets must match. Hunk and
-context-run boundaries and coordinates do not bind this proof. Content changes,
-including changed counts of duplicate lines or newline markers, still refuse it.
+previous path, status and ordered changed lines must match, retaining hunk and
+context-run boundaries and newline-marker attachment. Context text/counts and
+hunk offsets may drift; reordering edits, moving an edit across a context run or
+hunk, or moving a newline marker to another line/side refuses the original proof.
 REVERSALPROV-01 also admits a linked HAM author with a foreign linked rebase
 committer when exact-SHA App validation verifies, or the immutable original
 HAM commit passes the shared identity predicate and carries the same trailer
@@ -2258,10 +2259,13 @@ App validation does not waive the original proof for a superseded citation.
 The reviewed-parent rebase proof uses the same context-independent content
 comparison. The collector verifies original HAM identity, citation freshness
 at its original parent, and the parent's merge base. The evaluator rechecks finding coverage and the HAM commit's removed content
-against both the original and rebased patches. It compares the protected
-introduced content with the authorizing commit's removed-line multiset on the
-same path, retaining counts; overlapping coordinates alone cannot authorize it.
-A removed occurrence cannot be reused to cover another protected occurrence.
+against both the original and rebased patches. It derives the protected content
+from that commit's own parent diff, so earlier in-place repairs and split deletions
+can be followed by a cited removal of the remaining span. The authorizing patch
+must overlap the projected parent region; only removals within that region count
+toward its parent-state content multiset. Identical text elsewhere in the file
+supplies no authority. Full-span coverage is cached per commit to avoid repeatedly
+scanning an unequal-length replacement for every base line.
 A primary deletion may still be restored under its cited finding: the
 authorizing commit must add back the matching deleted content with sufficient
 multiplicity. This retains the existing deletion-restoration authorization.

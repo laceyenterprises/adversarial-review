@@ -96,7 +96,7 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
   const dir = join(args.rootDir, 'data', 'primary-change-history');
   mkdirSync(dir, { recursive: true });
-  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalprov-v2'];
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalprov-v1'];
   const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
   writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args),
     rejectedReversalAuthorizations: [{ reason: 'commit-provenance' }] } }));

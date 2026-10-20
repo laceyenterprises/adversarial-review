@@ -13,7 +13,9 @@ without a state root retain live-only resolution. No configuration key is added.
 | `readAt` | finite epoch milliseconds | Local time after the successful live read and parse. |
 | `payload` | JSON object | Parsed quota status, preserving account, broker and provider evidence together. |
 
-The existing atomic writer replaces the file with mode `0600`. Write failures
+The existing atomic writer recursively creates the parent directory when absent
+and replaces the file with mode `0600`. Fresh dispatch roots need no separate
+`data/` initialization before the first successful live read. Write failures
 do not discard successful live evidence. Failed or malformed live reads consult
 the snapshot only after bounded transport retries. Age must be non-negative and
 strictly less than ten minutes at fallback time. Missing, corrupt, future-dated

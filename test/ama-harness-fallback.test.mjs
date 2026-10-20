@@ -2,7 +2,7 @@
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
@@ -604,6 +604,30 @@ test('HAMMERQUOTAREAD-01: successful live read refreshes expired snapshot after 
   assert.deepEqual(JSON.parse(readFileSync(closerQuotaSnapshotPath(args.rootDir), 'utf8')),
     { readAt: SNAPSHOT_NOW, payload });
   assert.deepEqual(readdirSync(join(args.rootDir, 'data')), ['ama-closer-quota-snapshot.json']);
+});
+
+test('HAMMERQUOTAREAD-01: fresh state root persists a snapshot for a subsequent quota outage', async t => {
+  const args = snapshotArgs(t);
+  rmSync(join(args.rootDir, 'data'), { recursive: true });
+  const payload = codexAccountFixture();
+  const live = await resolveCloserDispatchHarness({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify(payload) }) });
+  assert.equal(live.hold, false);
+  assert.equal(live.evidenceSource, 'live');
+  assert.equal(live.snapshotWriteError, undefined);
+  const file = closerQuotaSnapshotPath(args.rootDir);
+  const before = readFileSync(file, 'utf8');
+  assert.deepEqual(JSON.parse(before), { readAt: SNAPSHOT_NOW, payload });
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+
+  const cached = await resolveCloserDispatchHarness({ ...args,
+    nowMs: () => SNAPSHOT_NOW + 3 * 60_000 });
+  assert.equal(cached.hold, false);
+  assert.equal(cached.reason, 'personal-ready');
+  assert.equal(cached.evidenceSource, 'last-good-snapshot');
+  assert.equal(cached.evidenceAgeMs, 3 * 60_000);
+  assert.equal(cached.evidenceReadAt, SNAPSHOT_NOW);
+  assert.equal(readFileSync(file, 'utf8'), before);
 });
 
 test('HAMMERQUOTAREAD-01: corrupt cache and malformed live output hold without replacing cache', async t => {

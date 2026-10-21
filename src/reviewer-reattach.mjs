@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { updateReviewerTokenLease } from './reviewer-token-pool.mjs';
 import {
   loginsMatch,
   resolveReviewerBotLogin,
@@ -542,6 +543,7 @@ async function reconcileReviewerSessions({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
   recordReviewLatencyEventImpl = recordReviewLatencyEvent,
+  updateReviewerTokenLeaseImpl = updateReviewerTokenLease,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
@@ -551,6 +553,16 @@ async function reconcileReviewerSessions({
   // Start with terminal claims, then share a capped poll with stale open rows.
   const rows = selectReconcileRows(db, matchingRows, limit);
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
+
+  const terminalCallback = onTerminalDeadSession;
+  onTerminalDeadSession = async event => {
+    const receipt = readReviewerRunRecordBestEffort(rootDir, event.row)?.subjectContext?.reviewerAccountReceipt;
+    await terminalCallback(event);
+    if (receipt) {
+      try { await updateReviewerTokenLeaseImpl(receipt, 'release'); }
+      catch { log.warn('[watcher] reviewer account release unavailable after confirmed process drain'); }
+    }
+  };
 
   const failureAt = now.toISOString();
   const recoveryCap = Number.isInteger(Number(leaseRecoveryMaxAttempts)) && Number(leaseRecoveryMaxAttempts) > 0
@@ -602,6 +614,11 @@ async function reconcileReviewerSessions({
   }
 
   for (const listedRow of rows) {
+    const accountReceipt = readReviewerRunRecordBestEffort(rootDir, listedRow)?.subjectContext?.reviewerAccountReceipt;
+    if (accountReceipt) {
+      try { await updateReviewerTokenLeaseImpl(accountReceipt, 'renew'); }
+      catch { log.warn('[watcher] reviewer account renewal unavailable during recovery; binding retained'); }
+    }
     let row = listedRow;
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';

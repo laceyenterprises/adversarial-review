@@ -2,6 +2,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
+import { selectReviewerTokenAccount } from './reviewer-token-pool.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).
 //
@@ -454,6 +455,7 @@ export async function readAfhReviewerGrounding({
   claudeRuntimeProbeUid = null,
   claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
+  selectReviewerTokenAccountImpl = selectReviewerTokenAccount,
 } = {}) {
   const routingDisabled = afhReviewerFallbackDisabled(env);
   // Standalone AFH rollback remains a no-I/O operation. Watcher callers also
@@ -495,13 +497,22 @@ export async function readAfhReviewerGrounding({
   // terminal snapshot so every probe outcome retains the same fleet result.
   const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
     ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
-  const finalizeSnapshot = result => Object.freeze({ ...result,
-    ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled',
-      // Account-only reads must not widen Claude's existing rollback path.
-      claudeAccountSnapshot: null, claudeAccountSelection: null, claudeAccountModel: null,
-    } : {}),
-    ...(fleetQuotaStatus ? { fleetQuotaStatus } : {}),
-  });
+  const finalizeSnapshot = async result => {
+    const [codex, claude] = await Promise.all([
+      selectReviewerTokenAccountImpl({ reviewerModel: 'codex', env }),
+      routingDisabled ? null : selectReviewerTokenAccountImpl({ reviewerModel: 'claude', env }),
+    ]);
+    return Object.freeze({ ...result,
+      available: Boolean(result.available || codex || claude),
+      ...(codex ? { codexAccountSelection: codex } : {}),
+      ...(claude ? { claudeAccountSelection: claude } : {}),
+      ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled',
+        // Account-only reads must not widen Claude's existing rollback path.
+        claudeAccountSnapshot: null, claudeAccountSelection: null, claudeAccountModel: null,
+      } : {}),
+      ...(fleetQuotaStatus ? { fleetQuotaStatus } : {}),
+    });
+  };
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
   const probeImpl = runtimeProbeUid === null
     ? null
@@ -703,17 +714,20 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     const key = account.provider === 'codex-corp' ? 'openai/oauth-corp' : 'openai';
     const entry = grounding.providers?.[key] || base;
     return { ...base, ...entry, known: true,
-      grounded: account.hold === true && account.reason !== 'codex-account-evidence-unknown',
+      grounded: account.pooled ? account.status === 'unavailable' : account.hold === true && account.reason !== 'codex-account-evidence-unknown',
       accountHold: account.hold === true,
+      accountSelection: account,
       brokerProvider: account.provider || null, source: 'fleet-quota-status' };
   }
   if (model === 'claude' && grounding?.claudeAccountSelection) {
     const account = grounding.claudeAccountSelection;
-    const key = account.authPath === 'oauth-corp' ? 'anthropic/oauth-corp' : 'anthropic';
+    const key = account.brokerProvider === 'claude-code-corp' || account.authPath === 'oauth-corp'
+      ? 'anthropic/oauth-corp' : 'anthropic';
     const entry = grounding.providers?.[key] || base;
     return { ...base, ...entry, known: true,
-      grounded: account.hold === true && account.reason !== 'claude-account-evidence-unknown',
+      grounded: account.pooled ? account.status === 'unavailable' : account.hold === true && account.reason !== 'claude-account-evidence-unknown',
       accountHold: account.hold === true,
+      accountSelection: account,
       brokerProvider: account.provider || null, source: 'fleet-quota-status' };
   }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
@@ -927,6 +941,7 @@ export function afhReviewerFallbackDecision({
       considered,
       primary,
       brokerProvider: status.brokerProvider,
+      accountSelection: status.accountSelection,
       builderClass: normalizedBuilder,
     };
   }
@@ -941,6 +956,10 @@ export function afhReviewerFallbackDecision({
 export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
   if (!decision?.applied) {
+    if (decision?.primary?.model === 'claude' && decision.primary.accountSelection?.pooled) {
+      return { ...baseRoute, claudeAccountSelection: decision.primary.accountSelection,
+        quotaBlocked: decision.primary.accountHold === true };
+    }
     if (decision?.primary?.model === 'codex' && decision.primary.accountHold) return { ...baseRoute,
       codexAccountHold: true, quotaBlocked: true, quotaGrounding: { reviewer: 'codex',
         state: 'codex-account-unavailable', reason: decision.reason, source: 'fleet-quota-status' } };
@@ -965,6 +984,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
     ...baseRoute,
     reviewerModel: target.reviewerModel,
     codexBrokerProvider: decision.brokerProvider || 'codex',
+    ...(decision.to === 'claude' && decision.accountSelection ? { claudeAccountSelection: decision.accountSelection } : {}),
     quotaBlocked: false,
     quotaGrounding: null,
     botTokenEnv: target.botTokenEnv,

@@ -203,6 +203,13 @@ also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
 watcher can adopt or settle the subprocess without relying only on SQLite spawn
 columns.
 
+For declared Claude/Codex pools (ITP-12), the run's subject context retains the
+canonical reviewer account receipt and broker execution lease. Renewal and
+reattach keep the original account and generation; confirmed drain releases the
+slot while preserving receipt history. Active or uncertain runs retain capacity.
+Unknown account admission releases the existing delivery claim without charging
+retry budgets. These rules add no run state or merge-authority transition.
+
 | run-state | Meaning |
 |---|---|
 | `launching` | runtime-adapter launch intent written before the detached reviewer PGID is authoritative; because the fork may already have succeeded, null-PGID reconciliation treats this as ambiguous process evidence rather than proven pre-spawn failure |

@@ -81,6 +81,7 @@ export function logCodexWorkerDispatch(log, workerClass, routing = {}, prefix = 
 }
 
 export function codexReviewerAccountForGrounding(grounding, options = {}) {
+  if (grounding?.codexAccountSelection?.pooled && !grounding.staleIfError) return grounding.codexAccountSelection;
   if (grounding?.staleIfError || !grounding?.codexAccountSnapshot) {
     return { hold: true, reason: 'codex-account-evidence-unknown' };
   }

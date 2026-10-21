@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "reviewer-account-cooldowns",
+      "title": "Reviewer Account Cooldowns",
+      "path": "docs/data-model/reviewer-account-cooldowns.md",
+      "store": "<adversarial review state dir>/reviewer-account-cooldowns/<sha256(account ID)>.json",
+      "schemaSurface": "src/reviewer-token-pool.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs"],
+      "timestampSource": "typed provider reset, bounded to seven days; default 15 minutes",
+      "owner": "reviewer orchestration"
+    },
+    {
       "id": "ama-closer-quota-snapshot",
       "title": "AMA Closer Quota Snapshot",
       "path": "docs/data-model/ama-closer-quota-snapshot.md",
@@ -817,6 +827,8 @@
       "store": "data/reviewer-runs/<sessionUuid>.json",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
       "relatedSchemaSurfaces": [
+        "src/reviewer-token-pool.mjs",
+        "src/reviewer-reattach.mjs",
         "src/reviewer-spawn-settle.mjs",
         "src/agy-reviewer-identities.mjs",
         "src/watcher-reviewer-pool.mjs"

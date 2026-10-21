@@ -218,6 +218,7 @@ test('stale dispatch recovery awaits the async live probe and suppresses histori
     execFileImpl: async (command, args, options) => {
       assert.equal(command, '/fixture/hq');
       assert.deepEqual(args.slice(0, 3), ['dispatch', 'status', lrq]);
+      assert.ok(args.includes('--json'));
       assert.equal(options.timeout, 5000);
       probes++;
       if (probes === 1) return { stdout: '{"status":"blocked"}' };

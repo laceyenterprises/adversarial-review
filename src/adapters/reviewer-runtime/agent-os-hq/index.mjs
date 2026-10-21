@@ -1,3 +1,4 @@
+import { parseHqDispatchStatusOutput } from '../../../hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
 import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../../../producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
@@ -336,6 +337,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
   leaseExpiredGraceMs = LEASE_EXPIRED_GRACE_MS,
   now = () => new Date().toISOString(),
   nowMs = () => Date.now(),
+  logger = console,
 } = {}) {
   const activeRuns = new Map();
 
@@ -447,11 +449,12 @@ function createAgentOsHqReviewerRuntimeAdapter({
           error: `reviewer timeout exceeded for ${dispatchId}`,
         });
       }
-      const { stdout } = await runHq(command, ['dispatch', 'status', dispatchId, '--root', resolvedHqRoot], {
+      const args = ['dispatch', 'status', dispatchId, '--json', '--root', resolvedHqRoot];
+      const { stdout } = await runHq(command, args, {
         env: { ...runtimeEnv, HQ_ROOT: resolvedHqRoot },
         timeout: resolveHqCommandTimeoutMs(deadlineMs),
       });
-      const statusPayload = normalizeStatusPayload(stdout);
+      const statusPayload = parseHqDispatchStatusOutput(stdout, args, normalizeStatusPayload, logger);
       const status = String(statusPayload.status || '');
       const progressKey = makeProgressKey(statusPayload);
 

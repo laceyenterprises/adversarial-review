@@ -33,6 +33,16 @@ Use this when a review has already been posted to GitHub and you need to inspect
 
 ---
 
+## HQ dispatch status probes (STATUSJSON-01)
+
+Machine consumers must call `hq dispatch status <id> --json`; the default
+output is a human summary. Merge-agent, reviewer-runtime, remediation liveness,
+and workspace probes preserve their owner/root arguments when requesting JSON.
+If a probe receives non-JSON output, it keeps its existing failure behavior and
+logs `[hq-dispatch-status]` with the arguments (bounded to 1000 characters) and
+the first 200 output characters. These warnings share one budget per process:
+at most one warning per minute, across dispatch IDs and probe types.
+
 ## Infrastructure refunds (REMREFUND-01)
 
 An exited remediation worker can retry its charged round once when an

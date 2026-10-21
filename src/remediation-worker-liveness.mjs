@@ -1,3 +1,4 @@
+import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -94,6 +95,7 @@ function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWor
 }
 
 async function assessWorkerLivenessDetailed(job, {
+  logger = console,
   now = () => new Date().toISOString(),
   isWorkerRunning = isWorkerProcessRunning,
   execFileImpl = execFileAsync,
@@ -127,20 +129,22 @@ async function assessWorkerLivenessDetailed(job, {
   const hqBin = resolveHqBin(env);
 
   try {
-    const { stdout } = await execFileImpl(hqBin, [
+    const args = [
       'dispatch',
       'status',
       worker.dispatchId,
+      '--json',
       '--root',
       hqRoot,
-    ], {
+    ];
+    const { stdout } = await execFileImpl(hqBin, args, {
       env: {
         ...env,
         HQ_ROOT: hqRoot,
       },
       maxBuffer: 5 * 1024 * 1024,
     });
-    const statusPayload = parseHqDispatchStatus(stdout);
+    const statusPayload = parseHqDispatchStatusOutput(stdout, args, parseHqDispatchStatus, logger);
     if (HQ_TERMINAL_STATUSES.has(statusPayload.status)) {
       return {
         state: 'exited',

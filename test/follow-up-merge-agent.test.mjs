@@ -5721,6 +5721,7 @@ test('dispatchMergeAgentForPR retries a failed same-head dispatch when merge-age
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args });
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: '{"status":"failed"}\n', stderr: '' };
       }
       return { stdout: `{"dispatchId":"disp_retry","lrq":"${retryLrq}"}\n`, stderr: '' };
@@ -5777,6 +5778,7 @@ test('dispatchMergeAgentForPR recovers a bound-exhausted stuck PR when merge-age
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args });
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: '{"status":"failed"}\n', stderr: '' };
       }
       return { stdout: `{"dispatchId":"disp_retry","lrq":"${retryLrq}"}\n`, stderr: '' };
@@ -7278,6 +7280,7 @@ test('cancelMergeAgentDispatchOnMerge converges when an unreadable cancel failur
         throw err;
       }
       if (args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
       }
       throw new Error('unexpected hq call: ' + args.join(' '));
@@ -7294,7 +7297,7 @@ test('cancelMergeAgentDispatchOnMerge converges when an unreadable cancel failur
   assert.equal(result.labelRemoved, true);
   assert.ok(hqCalls.some((c) => c.startsWith('dispatch status')), 'must probe the LRQ status after an unreadable cancel');
   assert.ok(
-    hqCalls.some((c) => c === 'dispatch status lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66 --as-owner cross-account-owner'),
+    hqCalls.some((c) => c === 'dispatch status lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66 --json --as-owner cross-account-owner'),
     'must probe through the authoritative owner persisted with the dispatch'
   );
 });
@@ -7323,6 +7326,7 @@ test('cancelMergeAgentDispatchOnMerge keeps cleanup retryable when the status pr
         throw new Error('unreadable cancel failure');
       }
       if (args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         throw new Error('Input/output error');
       }
       throw new Error('unexpected hq call: ' + args.join(' '));
@@ -7334,7 +7338,7 @@ test('cancelMergeAgentDispatchOnMerge keeps cleanup retryable when the status pr
   assert.match(result.probeError, /Input\/output error/);
   assert.deepEqual(hqCalls, [
     'dispatch cancel lrq_22222222-2222-4222-8222-222222222222',
-    'dispatch status lrq_22222222-2222-4222-8222-222222222222 --as-owner cross-account-owner',
+    'dispatch status lrq_22222222-2222-4222-8222-222222222222 --json --as-owner cross-account-owner',
   ]);
   assert.equal(result.cleanupComplete, false);
   assert.equal(result.retryable, true);

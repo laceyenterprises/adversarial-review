@@ -2357,8 +2357,11 @@ response headers and waits at least that long. Reads, retry waits and local
 diffs share the existing 90-second context budget; attempts use only the
 remaining time, and a retry whose delay cannot fit fails with the original error.
 An exhausted shared GitHub quota defers instead of entering an unbounded throttle
-sleep. Permanent 404, non-rate-limit 403 and 422 errors and malformed data are
-not retried; rejected credentials use
+sleep. Permanent 404, non-rate-limit 403 and 422 errors, malformed data and
+process-output buffer overflows (`ERR_CHILD_PROCESS_STDIO_MAXBUFFER` / `ENOBUFS`)
+are not retried, including overflows that terminate the process with SIGTERM.
+Transport classification also accepts raw string rejections from wrappers.
+Rejected credentials use
 the helper's single forced token-refresh attempt. Exhausted reads and malformed
 JSON emit head-scoped `historyReadFailed: true` evidence and a non-zero helper
 exit, which the predicate treats as `history-read-failed` rather than a proven reversal. The hammer prompt's

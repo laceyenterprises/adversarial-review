@@ -21,7 +21,9 @@ export function historyReadFailureReason(error) {
 // response can itself contain words such as "timeout" or "proxy".
 export function historyReadRetryDelayMs(error, attempt) {
   if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') return null;
-  const detail = [error?.stderr, error?.stdout, error?.message].filter(Boolean).join('\n');
+  // Output overflow can also set killed/SIGTERM; repeating the read cannot fit it.
+  if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error?.code === 'ENOBUFS') return null;
+  const detail = [error?.stderr, error?.stdout, typeof error === 'string' ? error : error?.message].filter(Boolean).join('\n');
   const status = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b|"status"\s*:\s*(\d{3})/i.exec(detail);
   const code = Number(status?.[1] || status?.[2] || error?.response?.status || error?.status);
   const retryAfter = /\bretry-after\s*:\s*([^\r\n]+)/i.exec(detail)?.[1].trim();

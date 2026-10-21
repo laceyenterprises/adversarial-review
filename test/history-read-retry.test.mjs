@@ -101,6 +101,39 @@ test('successful malformed data is terminal without retries', async () => {
   }
 });
 
+for (const code of ['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ENOBUFS']) {
+  test(`history output overflow is terminal even when the process was killed: ${code}`, async () => {
+    const cause = transportError('stdout maxBuffer length exceeded', { code, killed: true, signal: 'SIGTERM' });
+    assert.equal(historyReadRetryDelayMs(cause, 0), null);
+    let calls = 0;
+    const get = createHistoryReader({ env: fakeEnv(),
+      sleep: async () => assert.fail('output overflow must not retry'),
+      execFileImpl: async () => { calls++; throw cause; } });
+    await assert.rejects(get(prPath), error => {
+      assert.equal(error.cause, cause);
+      assert.match(error.message, /output limit \d+ bytes exceeded/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+test('raw string transport rejections retry and recover', async () => {
+  assert.equal(historyReadRetryDelayMs('connection reset by peer', 0), 500);
+  let calls = 0;
+  const delays = [];
+  const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); },
+    execFileImpl: async () => {
+      if (++calls < 3) throw 'connection reset by peer';
+      return { stdout: '{}' };
+    } });
+  assert.deepEqual(await get(prPath), {});
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [500, 1000]);
+  assert.equal(historyReadRetryDelayMs('HTTP 404: proxy timeout document does not exist', 0), null);
+  assert.equal(historyReadRetryDelayMs('malformed response', 0), null);
+});
+
 test('backoff scales with corroborated host load and metadata reads recover', async t => {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
   const delays = [];

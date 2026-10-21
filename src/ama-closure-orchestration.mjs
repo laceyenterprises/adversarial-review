@@ -2451,8 +2451,11 @@ async function dispatchAmaClosureFor({
   const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen && !finalRoundConflicting
     ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
     : null;
+  // A known rollup without external checks may precede CI registration. It
+  // stays non-green, but shares the bounded wait rather than burning recovery.
   const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
-    finalRoundChecks.failedChecks.length === 0 && finalRoundChecks.pendingChecks.length > 0);
+    finalRoundChecks.failedChecks.length === 0 &&
+    (finalRoundChecks.pendingChecks.length > 0 || finalRoundChecks.totalExternalChecks === 0));
   const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven &&
     (!finalRoundCiNotGreen || finalRoundConflicting || finalRoundChecks?.failedChecks.length > 0);
   // The wait is bounded: CI still pending past the deadline (a hung or never-

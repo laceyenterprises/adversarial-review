@@ -18,7 +18,7 @@ const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
-const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
+const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
@@ -325,6 +325,17 @@ if (scenario === 'clean') {
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
+  for (const reviewCycleExhausted of [false, true]) {
+    for (const findings of [[], ['verdict-not-settled-success'], ['non-blocking-findings-present']]) {
+      const reasons = ['stale-review-head', 'ci-not-green', ...findings];
+      const options = { reviewCycleExhausted, commentOnlyFinalRoundResume: true };
+      assert.equal(isHammerRemediableEligibilityMiss(reasons, { reviewCycleExhausted }), false);
+      assert.equal(isHammerRemediableEligibilityMiss(reasons, options), true);
+      for (const hold of ['blocking-findings-present', 'blocking-findings-unknown', 'ama-disabled']) {
+        assert.equal(isHammerRemediableEligibilityMiss([...reasons, hold], options), false);
+      }
+    }
+  }
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
   const ceilingPr = 8, ceilingLogs = [];
   ceilingDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha)
@@ -436,7 +447,7 @@ if (scenario === 'clean') {
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
-  evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+  evidence = { finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,

@@ -93,22 +93,26 @@ test('a stale review head still parks even past the grace', () => {
   );
 });
 
-test('a completed final round admits a stale comment-only descendant with green or red checks', () => {
-  const reasons = ['stale-review-head', 'non-blocking-findings-present', 'verdict-not-settled-success'];
-  for (const reviewCycleExhausted of [false, true]) {
-    const options = { reviewCycleExhausted, commentOnlyFinalRoundResume: true };
-    assert.equal(isHammerRemediableEligibilityMiss(reasons, { reviewCycleExhausted }), false);
-    assert.equal(isHammerRemediableEligibilityMiss(reasons, options), true);
-    const red = [...reasons, 'ci-not-green'];
-    assert.equal(isHammerRemediableEligibilityMiss(red, options), true);
-    assert.equal(isHammerRemediableEligibilityMiss([...red, 'pr-not-mergeable'], options), true);
-    for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown',
-      'ama-disabled', 'pr-not-open', 'pr-is-draft', 'risk-class-not-permitted',
-      'branch-protection-missing-gate', 'duplicate-family-unresolved', 'fast-merge-state-unsupported']) {
-      assert.equal(isHammerRemediableEligibilityMiss([...red, blocker], options), false, blocker);
+for (const findings of [[], ZERO_FINDINGS, [...NB, ...ZERO_FINDINGS]]) {
+  test(`a completed final round admits a stale comment-only descendant with green or red checks: ${JSON.stringify(findings)}`, () => {
+    const reasons = ['stale-review-head', ...findings];
+    for (const reviewCycleExhausted of [false, true]) {
+      const options = { reviewCycleExhausted, commentOnlyFinalRoundResume: true };
+      assert.equal(isHammerRemediableEligibilityMiss(reasons, { reviewCycleExhausted }), false);
+      assert.equal(isHammerRemediableEligibilityMiss(reasons, options), findings.length > 0, 'a bare stale head remains non-actionable');
+      const red = [...reasons, 'ci-not-green'];
+      assert.equal(isHammerRemediableEligibilityMiss(red, { reviewCycleExhausted }), false, 'unproven stale heads still park');
+      assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'pr-not-mergeable'], options), true);
+      assert.equal(isHammerRemediableEligibilityMiss(red, options), true);
+      assert.equal(isHammerRemediableEligibilityMiss([...red, 'pr-not-mergeable'], options), true);
+      for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown',
+        'ama-disabled', 'pr-not-open', 'pr-is-draft', 'risk-class-not-permitted',
+        'branch-protection-missing-gate', 'duplicate-family-unresolved', 'fast-merge-state-unsupported']) {
+        assert.equal(isHammerRemediableEligibilityMiss([...red, blocker], options), false, blocker);
+      }
     }
-  }
-});
+  });
+}
 
 test('the grace is overridable', () => {
   assert.equal(

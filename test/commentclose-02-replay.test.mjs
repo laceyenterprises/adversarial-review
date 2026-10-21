@@ -217,7 +217,10 @@ test('an exhausted review cycle admits a proven final-round head, and nothing el
   const exhausted = { reviewCycleExhausted: true };
   assert.equal(isHammerRemediableEligibilityMiss(reasons, exhausted), false, 'an unproven stale head still parks');
   assert.equal(isHammerRemediableEligibilityMiss(reasons, { ...exhausted, commentOnlyFinalRoundResume: true }), true);
-  for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown', 'ci-not-green']) {
+  // HAMREDCI-01: failed CI is repair work, not a safety blocker.
+  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'ci-not-green'],
+    { ...exhausted, commentOnlyFinalRoundResume: true }), true);
+  for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown']) {
     assert.equal(
       isHammerRemediableEligibilityMiss([...reasons, blocker], { ...exhausted, commentOnlyFinalRoundResume: true }),
       false,

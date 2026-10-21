@@ -8,6 +8,7 @@ import { resolveGeminiCredentialConcurrencyForDispatchCandidates } from '../src/
 import { runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
 import { readIdentityPoolProjection } from '../src/identity-token-snapshot.mjs';
 import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { createAgyHolderLeaseStore } from '../src/agy-holder-leases.mjs';
 
 const owner = 'fixture-owner';
 const users = ['fixture-login-a', 'fixture-login-b'];
@@ -307,25 +308,42 @@ for (const failure of ['cleanup', 'survivor', 'unknown-processes']) {
   });
 }
 
-test('ITP-11: dead-watcher reclaim reconstructs pending workspace cleanup from its durable claim', async t => {
+for (const path of ['readiness', 'acquire']) test(`ITP-11: ${path} dead-watcher reclaim cleans under lock and survives another restart`, async t => {
   const root = fixture(t);
   const options = { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]) };
   const first = pool(root, options);
-  const lease = await first.acquire({ reviewId: 'abandoned-workspace' });
+  const store = createAgyHolderLeaseStore(join(root, 'data'));
+  let lease;
   let dirty = true;
   let cleanupCalls = 0;
-  const restarted = pool(root, { ...options, isLeaseOwnerAliveImpl: () => false,
+  let expectLock = true;
+  const restart = () => pool(root, { ...options, isLeaseOwnerAliveImpl: () => false,
     runPinnedImpl: async ({ args }) => {
       if (args[0] === 'cleanup') {
-        assert.equal(args[1], lease.reviewId);
+        if (args[1] !== lease.reviewId) return { code: 0, stdout: '' };
         cleanupCalls++;
+        if (expectLock) {
+          assert.equal(await store.update(users[0], () => assert.fail('reclaim must hold the holder lock')), null);
+          expectLock = false;
+        }
         return { code: dirty ? 75 : 0, stdout: '' };
       }
       return { code: 0, stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
     } });
+  let restarted = restart();
+  if (path === 'acquire') await restarted.refreshReadiness();
+  lease = await first.acquire({ reviewId: 'abandoned-workspace' });
   assert.equal(await restarted.acquire(), null);
   assert.ok(cleanupCalls > 0);
+  assert.equal(expectLock, false, 'reclaim cleanup verified the holder lock');
   const read = () => JSON.parse(readFileSync(join(root, 'data', 'agy-holder-leases', `${users[0]}.json`)));
+  assert.equal(read().lease.generation, lease.generation);
+  const beforeRestart = cleanupCalls;
+  expectLock = true;
+  restarted = restart();
+  assert.equal(await restarted.refreshReadiness(), 0);
+  assert.ok(cleanupCalls > beforeRestart, 'durable review ID preserves cleanup after another crash');
+  assert.equal(expectLock, false, 'restarted reclaim cleanup verified the holder lock');
   assert.equal(read().lease.generation, lease.generation);
   dirty = false;
   await restarted.refreshReadiness();
@@ -334,6 +352,43 @@ test('ITP-11: dead-watcher reclaim reconstructs pending workspace cleanup from i
   await first.release(lease);
   assert.equal(read().lease.generation, replacement.generation);
   await restarted.release(replacement);
+});
+
+test('ITP-11: release retains its receipt during cleanup and an already-running readiness pass', async t => {
+  const root = fixture(t);
+  const statusEntered = Promise.withResolvers(), finishStatus = Promise.withResolvers();
+  const cleanupEntered = Promise.withResolvers(), finishCleanup = Promise.withResolvers();
+  t.after(() => { finishStatus.resolve(); finishCleanup.resolve(); });
+  let pause = false;
+  const p = pool(root, { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]),
+    runPinnedImpl: async ({ args }) => {
+      if (pause && args[0] === 'status') { statusEntered.resolve(); await finishStatus.promise; }
+      if (pause && args[0] === 'cleanup') { cleanupEntered.resolve(); await finishCleanup.promise; }
+      return { code: 0, stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+    } });
+  const lease = await p.acquire({ reviewId: 'in-flight-release' });
+  pause = true;
+  const readiness = p.refreshReadiness();
+  await statusEntered.promise;
+  const releasing = p.release(lease);
+  await cleanupEntered.promise;
+  const read = () => JSON.parse(readFileSync(join(root, 'data', 'agy-holder-leases', `${users[0]}.json`)));
+  assert.equal(p.snapshot()[0].leased, true, 'local receipt stays populated until durable release');
+  assert.equal(read().lease.generation, lease.generation);
+  assert.equal(await p.acquire({ reviewId: lease.reviewId }), null, 'release fences idempotent re-acquisition too');
+  finishStatus.resolve();
+  assert.equal(await readiness, 1, 'an already-running pass recognizes its own releasing lease');
+  assert.deepEqual(p.snapshot()[0].reasons, []);
+  await p.refreshReadiness();
+  assert.deepEqual(p.snapshot()[0].reasons, [], 'a new pass skips the releasing holder');
+  finishCleanup.resolve();
+  await releasing;
+  assert.equal(read().lease, null);
+  assert.equal(p.snapshot()[0].leased, false);
+  pause = false;
+  const next = await p.acquire();
+  assert.ok(next);
+  await p.release(next);
 });
 
 test('ITP-11: conflicting legacy/new holder declarations hold admission', async t => {

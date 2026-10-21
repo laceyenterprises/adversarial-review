@@ -1204,13 +1204,10 @@ function createAgyReviewerIdentityPool({
     if (!lease || lease.legacy) return;
     const state = states.get(lease.user);
     if (!state || state.lease?.generation !== lease.generation || state.releasing) return;
-    // Free bookkeeping in the timeout tick, before any helper I/O. Keep
-    // admission closed until cleanup and an actual process-exit observation.
-    if (state) {
-      state.lease = null;
-      state.releasing = true;
-      if (!lease.hqOwner) setDraining(state, true);
-    }
+    // Fence new passes before helper I/O, and retain the local receipt until
+    // persistence completes so an already-running pass recognizes our claim.
+    state.releasing = true;
+    if (!lease.hqOwner) setDraining(state, true);
     let survivors = null;
     let drained = lease.hqOwner;
     try {
@@ -1239,7 +1236,7 @@ function createAgyReviewerIdentityPool({
         state.lease = lease;
         state.pendingRelease = { failed, reason };
         transition(state, false, ['holder release pending']);
-      } else { state.pendingRelease = null; state.foreignLease = null; }
+      } else { state.lease = null; state.pendingRelease = null; state.foreignLease = null; }
       if (state) state.releasing = false;
       if (state) {
         const reasons = [];

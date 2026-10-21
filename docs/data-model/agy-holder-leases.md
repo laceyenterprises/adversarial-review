@@ -19,7 +19,9 @@ legacy duplicate usernames count once. Concurrency remains one per holder.
 
 An exclusive nonblocking flock serializes read/modify/atomic-write operations.
 Acquisition persists the claim before spawn. Release compares the unique lease
-generation; a stale release cannot clear a replacement. Failed added-user workspace
+generation; a stale release cannot clear a replacement. The local receipt remains
+populated and release is fenced in memory through cleanup and durable persistence,
+so an overlapping readiness pass recognizes the watcher's own claim. Failed added-user workspace
 cleanup, surviving processes, unknown process evidence, and busy release writes
 retain the durable claim and retry on readiness, while admission stays held.
 Failed-review auth requirements are persisted even while release is pending.

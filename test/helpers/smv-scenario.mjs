@@ -84,6 +84,8 @@ if (scenario === 'clean') {
   assert.deepEqual(leaseOps, ['renew', 'release', 'release']);
   const { createAgyReviewerIdentityPool } = await import('../../src/agy-reviewer-identities.mjs');
   let cleanupBlocked = false, survivorRunning = false;
+  let cleanupGate = null;
+  const cleanupEntered = Promise.withResolvers();
   const makeHolderPool = () => createAgyReviewerIdentityPool({
     env: {}, runStateRootDir: rootDir, log: quiet, leaseWaitMs: 0, hqOwner: 'fixture-owner',
     resolveRuntime: () => 'antigravity', resolveModel: () => 'synthetic-model',
@@ -93,8 +95,11 @@ if (scenario === 'clean') {
     listUserProcessesImpl: async () => ({ ok: true, processes: survivorRunning
       ? [{ pid: 4242, pgid: 4242, comm: 'agy' }] : [] }),
     deliverAlertImpl: async () => { throw new Error('unexpected holder alert'); },
-    runPinnedImpl: async ({ args }) => ({ code: cleanupBlocked && args[0] === 'cleanup' ? 75 : 0, stdout: args[0] === 'status'
-      ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' }),
+    runPinnedImpl: async ({ args }) => {
+      if (args[0] === 'cleanup' && cleanupGate) { cleanupEntered.resolve(); await cleanupGate.promise; }
+      return { code: cleanupBlocked && args[0] === 'cleanup' ? 75 : 0, stdout: args[0] === 'status'
+        ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+    },
   });
   const holders = makeHolderPool(), independent = makeHolderPool();
   const first = await holders.acquire(), second = await holders.acquire();
@@ -113,13 +118,21 @@ if (scenario === 'clean') {
   survivorRunning = false;
   await holders.refreshReadiness();
   assert.equal(holderRecord().lease, null);
-  await holders.release(second);
+  cleanupGate = Promise.withResolvers();
+  const releasing = holders.release(second);
+  await cleanupEntered.promise;
+  try {
+    assert.equal(holders.snapshot().find(row => row.user === second.user).leased, true);
+    await holders.refreshReadiness();
+    assert.deepEqual(holders.snapshot().find(row => row.user === second.user).reasons, []);
+    assert.equal(holders.projection().tokens.find(row => row.holderRef === second.user).free, 0);
+  } finally { cleanupGate.resolve(); await releasing; cleanupGate = null; }
   writeReviewerRunRecord(rootDir, { sessionUuid: 'pre-spawn-failure', state: 'failed', pgid: null,
     subjectContext: { agyHolderLease: { user: first.user, reviewId: 'never-spawned' } } });
   assert.equal(await independent.refreshReadiness(), 2);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
     leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true,
-    durableCleanupAndDrainFence: true, terminalWithoutPgidReadmitted: true };
+    durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true };
 } else if (scenario === 'handoff') {
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');

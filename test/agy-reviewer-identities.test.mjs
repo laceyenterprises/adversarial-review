@@ -1888,7 +1888,7 @@ test('CCX-08: helper failure retains the bounded preceding diagnostic lines', as
   }), (err) => /permission denied.*helper failed/.test(err.message));
 });
 
-test('CHUNKTIME-01: timeout releases its lease before cleanup and drains until child exit', async () => {
+test('CHUNKTIME-01: timeout fences its lease through cleanup and drains until child exit', async () => {
   const fake = makeFakeInstall({ users: ['reviewer-sample'] });
   const cleanup = Promise.withResolvers();
   let holdCleanup = false;
@@ -1910,7 +1910,7 @@ test('CHUNKTIME-01: timeout releases its lease before cleanup and drains until c
     holdCleanup = true;
     childRunning = true;
     released = pool.release(lease, { reason: 'reviewer-timeout' });
-    assert.equal(pool.snapshot()[0].leased, false, 'release happens in the timeout tick');
+    assert.equal(pool.snapshot()[0].leased, true, 'receipt remains until durable release completes');
     assert.equal(pool.snapshot()[0].draining, true, 'cleanup cannot race another lease');
     cleanup.resolve();
     await released;
@@ -1918,6 +1918,7 @@ test('CHUNKTIME-01: timeout releases its lease before cleanup and drains until c
     assert.equal(await pool.acquire({ reviewId: 'synthetic-waiter' }), null);
     childRunning = false;
     assert.equal(await pool.refreshReadiness(), 1, 'actual child exit permits re-admission');
+    assert.equal(pool.snapshot()[0].leased, false, 'successful durable release clears the receipt');
   } finally {
     cleanup.resolve();
     await released;

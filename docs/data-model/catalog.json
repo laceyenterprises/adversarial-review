@@ -846,7 +846,7 @@
         "src/reviewer-spawn-settle.mjs"
       ],
       "timestampSource": "auth.retryAt is local epoch milliseconds; lease generations are unique IDs, not expiries",
-      "recovery": "Cleanup or process-drain failure retains the generation-fenced claim; dead-owner reclaim retries workspace cleanup from lease.reviewId under the holder lock",
+      "recovery": "The local receipt and releasing guard remain until durable release completes; cleanup or process-drain failure retains the generation-fenced claim; dead-owner reclaim retries workspace cleanup from lease.reviewId under the holder lock",
       "owner": "Gemini reviewer holder admission"
     },
     {

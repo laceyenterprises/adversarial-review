@@ -148,7 +148,7 @@ const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remed
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude'];
-const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['codex', 'claude-code'];
+const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['plan', 'codex', 'codex-corp', 'claude-code'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
 export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = ['observe', 'enforce'];
@@ -229,11 +229,11 @@ const ROLE_FALLBACK_CLASSES = [
 ];
 // Worker-class options for `dispatch.default_worker_class_by_task_kind` leaves.
 // Mirrors `_ENUM_DISPATCH_DEFAULT_WORKER_CLASS` in
-// `platform/agent-os-config/src/agent_os_config/__init__.py`. Constrained to
-// the supported coding-family worker classes plus `merge-agent` for the merge
-// family. Operators can still pass
+// `platform/agent-os-config/src/agent_os_config/schema_v1/core.py`. Includes
+// both Codex accounts plus the merge and review worker classes.
+// Operators can still pass
 // `--worker-class` at the call site to escape this constraint.
-const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent'];
+const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'codex-corp', 'claude-code', 'merge-agent', 'reviewer'];
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
@@ -3502,6 +3502,10 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  'worker_pool.post_merge_actions.rca_worker_class': {
+    canonical: 'AGENT_OS_WORKER_POOL_POST_MERGE_ACTIONS_RCA_WORKER_CLASS',
+    aliases: [],
+  },
   'apple.developer_dir': {
     canonical: 'AGENT_OS_APPLE_DEVELOPER_DIR',
     aliases: [],

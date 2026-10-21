@@ -27,7 +27,8 @@
     "host": {
       "prerequisites": [
         "SRE approval: SMV_HOST_CANARY_APPROVED=1; no worker identity",
-        "Run from deployed registered checkout; disposable offline safe canary only"
+        "Run from deployed registered checkout; disposable offline safe canary only",
+        "PRM-06 activation/post-deploy check (separate read-only live check): hq fleet quota status --json must show measured weeklyMeasurement objects with finite numeric percentRemaining in [0, 100] for openai-oauth and openai-oauth-corp; hold activation until both pass. Inspect probe/broker state and hold reasons; see docs/producer-contract-readers.md#activation-and-verification."
       ],
       "exclusions": [
         "Live PR mutation, service restart, live pager delivery, deployed queue and credential health"

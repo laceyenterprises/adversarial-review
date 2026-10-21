@@ -127,7 +127,10 @@ no new gate, CI job or workflow was added.
 Current typed weekly evidence remains distinct from short windows; pre-repair
 confidence/status and numeric-string shapes retain their documented shims.
 Dispatch identity alias precedence, legacy status subsets, account order,
-thresholds, selection/hold policies and merge/retry authority are retained.
+thresholds and merge/retry authority are retained. Weekly fallback is narrowed:
+a reason key (including null) prevents short-window evidence from replacing
+missing, stale or invalid weekly evidence, so previously admitted accounts can
+now hold with `codex-account-evidence-unknown` until a successful weekly probe.
 Diagnostics identify the producer and field for missing, malformed, stale or
 unrecognized evidence; unavailable transport paths name `$stdout`/`$body`.
 Malformed capture mutations are explicitly labelled negative tests.
@@ -137,11 +140,44 @@ reader refactor. Lifecycle transitions, state/smoke promises and enforcement
 policy are unchanged. The AMA audit domain and existing catalog document the
 optional diagnostic array.
 
-`operator_steps`: None. No migration, configuration flip or privileged activation
-is required. Long-running consumers pick up the readers at their next normal
-operator-managed deployment/reload; this worker requests no restart. Same-user
-read-only verification: `hq fleet quota status --json`, inspecting weekly
-object/reason, provider probe state and matching broker provider fields together.
+`operator_steps`: Before activating a superproject submodule bump or deploying
+these readers, run read-only `hq fleet quota status --json` on the deployed
+producer. Both `openai-oauth` and `openai-oauth-corp` floors must have non-null
+`weeklyMeasurement` objects with `status: "measured"` and finite numeric
+`percentRemaining` in [0, 100]. Hold activation until both pass. Inspect provider
+probe state and matching broker readiness/servability separately. Repeat this
+check after deployment and inspect account hold reasons. Weekly expiry/reset
+can hold accounts until the next successful probe; unknown evidence alone does
+not trigger AFH model fallback. No migration or configuration flip is required;
+consumers load on their normal operator-managed deployment/reload, with no
+restart requested by this worker. See the reader guide's activation contract.
+
+### Review remediation validation (2026-10-21)
+
+After a clean fetch/rebase onto current `origin/main` and a clean patch-equivalence
+audit, the targeted producer-reader, legacy weekly-measurement and SMV suites
+passed: **86 tests, zero failures/skips** (11.413 seconds):
+
+```bash
+bash bin/run-bounded.sh --timeout 180 -- node test/run-tests.mjs \
+  test/producer-contract-readers.test.mjs \
+  test/reserve-floor-measurement.test.mjs test/smv.test.mjs
+```
+
+Coverage now pins reason-key presence (including null), legacy fallback only
+when that key is absent, invalid weekly outcomes, current-shape Codex admission
+via a labelled probe-state mutation, disabled-capture equality, and both released
+fixture/generator hashes. Optional Python refresh checks probe a working isolated
+interpreter and scrub `PYTHON*` variables. Vendored bytes remain unchanged.
+
+The initial test invocation lacked installed dependencies; `npm ci --offline
+--no-audit --no-fund` installed the locked dependencies from cache before the
+passing rerun. Lint passed with zero errors and 147 existing warnings; contract
+typecheck, the offline byte-equivalence walkthrough, all 46 provenance hashes,
+the 69-entry data-model catalog validator and `git diff --check` passed. The full
+suite remains the PR-head CI gate. No runtime code or offline smoke promise was
+changed; declarations and README now name the required live activation check
+separately from the disposable offline smoke harness.
 
 ### core (18 files)
 

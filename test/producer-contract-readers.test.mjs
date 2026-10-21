@@ -23,9 +23,12 @@ const capture = path => JSON.parse(readFileSync(new URL(`./fixtures/producer-con
 
 test('refresh CLI rejects missing or extra source arguments with usage, without a traceback', t => {
   const script = fileURLToPath(new URL('../scripts/contracts/refresh.py', import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PYTHON')));
+  const options = { encoding: 'utf8', timeout: 5000, env };
+  const probe = spawnSync('python3', ['-I', '-c', 'import sys'], options);
+  if (probe.error || probe.status !== 0) return t.skip('python3 is optional; no working interpreter for artifact refresh');
   for (const args of [[], ['unused-source', 'extra']]) {
-    const result = spawnSync('python3', [script, ...args], { encoding: 'utf8', timeout: 5000 });
-    if (result.error?.code === 'ENOENT') return t.skip('python3 is optional; required only for producer artifact refresh');
+    const result = spawnSync('python3', ['-I', script, ...args], options);
     assert.ifError(result.error);
     assert.equal(result.status, 2);
     assert.equal(result.stdout, '');
@@ -35,7 +38,7 @@ test('refresh CLI rejects missing or extra source arguments with usage, without 
 
 test('fleet captures pin shared quota sections and collapsed expired evidence', () => {
   const ready = capture('quota/fleet-ready');
-  for (const scenario of ['degraded', 'unavailable']) {
+  for (const scenario of ['degraded', 'unavailable', 'disabled']) {
     const other = capture(`quota/fleet-${scenario}`);
     for (const key of ['providerStatuses', 'reserveFloors']) assert.deepEqual(other[key], ready[key], key);
   }
@@ -58,6 +61,8 @@ test('real released fleet output admits personal Claude after local corporate ex
   const provenance = capture('released-provenance');
   const bytes = readFileSync(new URL('./fixtures/producer-contracts/quota/fleet-released.json', import.meta.url));
   assert.equal(createHash('sha256').update(bytes).digest('hex'), provenance.sha256);
+  const generator = readFileSync(new URL(`../${provenance.generator}`, import.meta.url));
+  assert.equal(createHash('sha256').update(generator).digest('hex'), provenance.generatorSha256);
 });
 
 test('dispatch status probes keep worker vocabulary and producer diagnostics', () => {
@@ -157,7 +162,49 @@ for (const [label, mutate, field] of [
   mutate(floors);
   const evidence = readReserveFloorWeeklyEvidence(floors['openai-oauth-corp'], 'openai-oauth-corp');
   assert.ok(evidence.diagnostics.some(d => d.includes('quota_reserve.snapshot') && d.includes(field)));
+  assert.ok(evidence.measurement?.status !== 'measured' || !Number.isFinite(evidence.measurement.percentRemaining),
+    'invalid weekly evidence cannot supply measured capacity through the short-window fallback');
 });
+
+// Labelled consumer mutation: owner captures deliberately use unknown OpenAI
+// probes. Change only those probe states to exercise current-shape admission.
+function fleetWithHealthyOpenaiProbes() {
+  const fleet = capture('quota/fleet-ready');
+  for (const row of fleet.providerStatuses) if (row.provider === 'openai') row.state = 'ok';
+  return fleet;
+}
+
+test('consumer probe mutation admits current-shape Codex weekly evidence', () => {
+  const fleet = fleetWithHealthyOpenaiProbes();
+  const route = selectCodexReviewerAccount(fleet);
+  assert.equal(route.hold, false);
+  assert.equal(route.provider, 'codex-corp');
+  assert.equal(selectCodexWorkerAccount(fleet).hold, false);
+});
+
+for (const reason of ['no-weekly-window', null]) {
+  test(`weekly reason key ${JSON.stringify(reason)} holds; absent key retains legacy fallback`, () => {
+    const fleet = fleetWithHealthyOpenaiProbes();
+    for (const credential of ['openai-oauth', 'openai-oauth-corp']) {
+      const floor = fleet.reserveFloors[credential];
+      assert.equal(floor.measurement.status, 'measured');
+      floor.weeklyMeasurement = null;
+      floor.weeklyMeasurementReason = reason;
+      assert.equal(readReserveFloorWeeklyEvidence(floor, credential).measurement, null);
+    }
+    for (const route of [selectCodexReviewerAccount(fleet), selectCodexWorkerAccount(fleet)]) {
+      assert.equal(route.hold, true);
+      assert.equal(route.reason, 'codex-account-evidence-unknown');
+    }
+    for (const credential of ['openai-oauth', 'openai-oauth-corp']) {
+      delete fleet.reserveFloors[credential].weeklyMeasurementReason;
+    }
+    const legacy = selectCodexReviewerAccount(fleet);
+    assert.equal(legacy.hold, false);
+    assert.equal(legacy.provider, 'codex-corp');
+    assert.equal(selectCodexWorkerAccount(fleet).hold, false);
+  });
+}
 
 test('negative fleet mutation: wrong providerStatuses type preserves the routing exception and names its field', () => {
   const fleet = capture('quota/fleet-ready');

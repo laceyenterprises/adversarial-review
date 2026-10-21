@@ -6,7 +6,7 @@ capture scenario. The scenario invokes the real quota-input publisher before
 reading status JSON, using disposable state and fake external transport. See
 [validation evidence](validation/prm-06.md).
 
-The review service reads four existing producer boundaries without depending on
+The review service reads five existing producer boundaries without depending on
 an Agent OS checkout or a Python process at runtime. Routing, holds, retry
 budgets and publication authority remain with their existing owners.
 
@@ -28,8 +28,11 @@ Weekly percentages still accept the documented old status/confidence shapes
 and numeric-string compatibility. The pre-repair `measurement` fallback remains
 for floors without `weeklyMeasurementReason`. Current producers explicitly name
 unavailable weekly evidence with that field: a five-hour measurement does not
-replace their absent, stale or invalid weekly object. No reserve threshold,
-account order or unknown-evidence selection rule changes.
+replace their absent, stale or invalid weekly object. Presence of the reason
+key, even with a null value, disables that fallback. This narrows admission:
+accounts previously admitted through short-window evidence now hold with
+`codex-account-evidence-unknown` until weekly evidence is measured. Reserve
+thresholds and account order are unchanged.
 
 Broker readiness and cached-token servability are separate observations. Account
 routers still require both explicit booleans. OAuth preflight still accepts a
@@ -79,9 +82,12 @@ disposition, drift and backfill examples listed in the owner README are
 intentionally not vendored. `repaired-expired` and `repaired-five-hour-only` are
 byte-identical because the producer collapses both to `no-weekly-window`;
 consumer tests assert this equivalence rather than claiming distinct shapes.
-The ready, degraded and unavailable fleet captures share identical
+The ready, degraded, disabled and unavailable fleet captures share identical
 `providerStatuses` and `reserveFloors`; an equality test makes recapture drift
-explicit.
+explicit. All their reserve floors are paused; "ready" names broker readiness,
+not account admission. Positive Claude admission uses `fleet-released`; a
+labelled consumer mutation of `fleet-ready` changes only OpenAI probe states to
+healthy to exercise current-shape Codex admission.
 
 `quota/fleet-released.json` is an additional consumer-side capture of the pinned
 producer, with its hash and input provenance in `released-provenance.json`.
@@ -130,17 +136,23 @@ that distinction. Older synthetic routing scenarios remain compatibility tests,
 not claims about current producer output. Missing/null/wrong-type/status
 mutations of captures are explicitly labelled negative tests.
 
-No migration, configuration change or privileged activation is required.
-`operator_steps`: None. Long-running review consumers load the new readers on
-their next normal operator-managed deployment/reload; this change requests no
-service restart. Same-user read-only verification is `hq fleet quota status
---json`: inspect weekly object/reason, provider probe state and the matching
-broker provider fields together. Existing lifecycle transitions, state/smoke
-promises and enforcement policy are unchanged.
+## Activation and verification
 
-Before activating a superproject submodule bump, run that read-only check on
-the deployed producer and require both `openai-oauth` and `openai-oauth-corp`
-floors to contain a non-null `weeklyMeasurement` with `status: "measured"`
-and a finite percentage. If either fails, keep activation held until the
-producer publishes current weekly evidence; a reason key alone must not turn a
-short-window `measurement` into weekly capacity.
+`operator_steps`: Before activating a superproject submodule bump or deploying
+these readers, run the read-only `hq fleet quota status --json` on the deployed
+producer. Require both `openai-oauth` and `openai-oauth-corp` reserve floors to
+contain a non-null `weeklyMeasurement` with `status: "measured"` and a finite
+numeric `percentRemaining` in [0, 100]. Inspect each account's provider probe
+state and matching broker provider readiness/servability separately; weekly
+capacity alone does not admit an account. If either weekly check fails, keep
+activation held until the producer publishes current weekly evidence.
+
+This is a required pre-activation check, not an instruction to restart a
+service. Long-running consumers load the readers at their next normal
+operator-managed deployment/reload; no migration or configuration flip is
+required. After deployment, repeat the same read-only check and inspect routing
+hold reasons. Weekly expiry or reset can produce `no-weekly-window`, which
+holds the affected account with `codex-account-evidence-unknown` until the next
+successful weekly probe; unknown evidence alone does not trigger AFH model
+fallback. A reason key must never promote short-window evidence to weekly
+capacity. Existing lifecycle states and offline smoke promises are unchanged.

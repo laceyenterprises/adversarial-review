@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { archiveStoppedFollowUpJobs, summarizePRRemediationLedger } from '../src/follow-up-jobs.mjs';
 import {
   FINAL_ROUND_REPLAY_PROOF,
+  isCompletedCommentOnlyFinalRoundJob,
   findCommentOnlyFinalRoundPushJob,
   hasCommentOnlyFinalRoundPush,
   hasUnprovenCommentOnlyFinalRoundHead,
@@ -15,6 +16,17 @@ import {
   proveCommentOnlyFinalRoundHead,
   proveFinalRoundWorkerPush,
 } from '../src/comment-only-final-round.mjs';
+
+test('completed final-round predicate requires all canonical markers', () => {
+  const job = { status: 'completed', finalRound: 'comment-only',
+    reReview: { suppressed: 'comment-only-final-round' } };
+  assert.equal(isCompletedCommentOnlyFinalRoundJob(job), true);
+  for (const partial of [null, undefined, {}, { ...job, status: 'stopped' },
+    { ...job, finalRound: undefined }, { ...job, finalRound: 'ordinary' },
+    { ...job, reReview: undefined }, { ...job, reReview: { requested: false } }]) {
+    assert.equal(isCompletedCommentOnlyFinalRoundJob(partial), false);
+  }
+});
 
 const oldHead = '1'.repeat(40);
 const newHead = '2'.repeat(40);

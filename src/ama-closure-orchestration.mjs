@@ -90,6 +90,7 @@ import {
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
+import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -1163,9 +1164,10 @@ async function dispatchAmaClosureFor({
   // checks on the current candidate head, and carry their names into the prompt.
   const requiredCiContexts = new Set(resolveRequiredCheckContextsFromCfg(cfg)
     .map(context => String(context).trim().toLowerCase()).filter(Boolean));
-  const derivedCiFailedChecks = reviewCycleExhausted && candidate?.headSha
+  const finalRoundKnown = commentOnlyFinalRoundRevisionRefs.length > 0;
+  const derivedCiFailedChecks = (reviewCycleExhausted || finalRoundKnown) && candidate?.headSha
     && reviewStateRow?.review_status === 'ci-blocked'
-    && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]')
+    && CI_BLOCKED_HAMMER_RESCUE_PREFIXES.some(prefix => String(reviewStateRow?.failure_message || '').startsWith(prefix))
     ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks
       .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(String(check?.name || '').toLowerCase())) : [];
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
@@ -1176,7 +1178,6 @@ async function dispatchAmaClosureFor({
   const finalPush = commentOnlyFinalRoundPushedHeads.find(entry => entry.workerPushedHeadSha === finalHead);
   // Final-round ownership survives a later hammer push. This is dispatch
   // admission only; neither the historical verdict nor the new head is merge authority.
-  const finalRoundKnown = commentOnlyFinalRoundRevisionRefs.length > 0;
   if ((reviewCycleExhausted || finalPush || finalRoundKnown) && cfg.autonomousMergeExecutionEnabled !== false && finalRoundSink) {
     finalRoundSink.value = { rootDir, repo: repoPath, prNumber, headSha: finalHead,
       startedAt: Date.parse(finalPush?.completedAt || '') || finalRoundCompletedAt

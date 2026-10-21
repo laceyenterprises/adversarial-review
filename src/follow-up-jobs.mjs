@@ -21,7 +21,7 @@ import { loadRoleConfig } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
 import { withCommentOnlyRecovery } from './comment-only-recovery-record.mjs';
-import { scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
+import { isCompletedCommentOnlyFinalRoundJob, scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
   DEFAULT_RISK_CLASS,
   DEFAULT_ROUND_BUDGET_BY_RISK,
@@ -3367,7 +3367,7 @@ function requeueFollowUpJobForNextRound({
   const currentJob = readFollowUpJob(jobPath);
   // This terminal handoff is progress. Keep its completed provenance even at
   // the round cap; callers already handle a refused requeue through this error.
-  if (currentJob.status === 'completed' && currentJob.reReview?.suppressed === 'comment-only-final-round') {
+  if (isCompletedCommentOnlyFinalRoundJob(currentJob)) {
     throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from completed:comment-only-final-round; ownership belongs to the hammer`);
   }
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);

@@ -409,6 +409,12 @@ if (scenario === 'clean') {
   assert.equal(finalAdmission.hammerOwner, true);
   assert.throws(() => requeueFollowUpJobForNextRound({ rootDir, jobPath: finalPath }), /completed:comment-only-final-round/);
   assert.equal(readFileSync(finalPath, 'utf8'), finalBytes);
+  const incompleteAdmission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview',
+    reviewerHeadSha: headSha, inspectCiImpl: async () => ciGate,
+    latestJobFinder: () => ({ jobPath: finalPath, job: { ...finalJob, finalRound: undefined } }),
+    requeueImpl: () => ({ job: { status: 'pending' } }),
+    execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
+  assert.equal(incompleteAdmission.reason, 'ci-regression-requeued');
   const finalProof = await fetchHammerHeadRange({ repo, reviewedHead: base, currentHead: headSha, hammerBaseHead: headSha,
     remediationRounds: await readCompletedRemediationRounds(rootDir, repo, prNumber), env: {}, get: async path => {
       assert.equal(path, `repos/${repo}/compare/${base}...${headSha}`);
@@ -470,7 +476,7 @@ if (scenario === 'clean') {
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
-  evidence = { finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, completedFinalRoundPreserved: true, finalRoundStartingBaseProven: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+  evidence = { incompleteFinalRoundRequeued: true, finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, completedFinalRoundPreserved: true, finalRoundStartingBaseProven: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,

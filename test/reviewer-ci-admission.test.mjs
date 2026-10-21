@@ -130,6 +130,22 @@ for (const finalRound of [true, false]) {
   });
 }
 
+test('suppression alone does not bypass failed-CI requeue', async () => {
+  let requeued = false;
+  const result = await guardRereviewCiBeforeReviewer({
+    rootDir: '/unused', repo: 'fixture/repo', prNumber: 42, passKind: 'rereview',
+    reviewerHeadSha: 'head-red', log: silentLog(),
+    inspectCiImpl: async () => ({ state: 'failed', headSha: 'head-red',
+      failedChecks: [{ name: 'synthetic-ci', state: 'FAILURE' }] }),
+    latestJobFinder: () => ({ jobPath: '/unused/job.json', job: { status: 'completed',
+      reReview: { suppressed: 'comment-only-final-round' } } }),
+    requeueImpl: () => { requeued = true; return { job: { status: 'pending' } }; },
+  });
+  assert.equal(requeued, true);
+  assert.equal(result.reason, 'ci-regression-requeued');
+  assert.notEqual(result.hammerOwner, true);
+});
+
 test('guardRereviewCiBeforeReviewer bypasses first-pass review admission', async () => {
   let inspected = false;
   const result = await guardRereviewCiBeforeReviewer({

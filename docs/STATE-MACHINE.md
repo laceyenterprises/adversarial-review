@@ -681,8 +681,8 @@ If that durable flag is absent or false:
 - the job stops with `code = "no-progress"`
 
 That conservatism is intentional. A completed comment-only final round with
-`reReview.suppressed = "comment-only-final-round"` is an intentional hammer
-handoff, not a no-progress completion. Failed-CI admission returns
+`finalRound = "comment-only"` and
+`reReview.suppressed = "comment-only-final-round"` is an intentional hammer handoff, not a no-progress completion. Failed-CI admission returns
 `ci-regression-hammer-owned` without requeueing it. Direct round requeue refuses
 with an error before applying no-progress or round-cap stops. The job stays in
 `completed/` with completed start/result edges for strict hammer provenance.
@@ -1188,10 +1188,11 @@ matching pending lease whose owner is dead or whose bounded launch reclaim age
 elapsed, regardless of wake outcome; missing leases, receipts and live work
 remain owned. The retired unlaunched prompt is removed only within its generated
 prompt namespace. Early daemon and background pre-dispatch exits do not settle
-closer intents. Rescue projects an exhausted `[ci-regression-stopped]` row to
-the final hammer only with live failed external CI on the candidate head and
-passes those failed checks into its prompt, filtering to configured required
-contexts when present. Actual merges still require green CI and exact-head proof.
+closer intents. Rescue projects a `[ci-regression-stopped]` or
+`[ci-regression-hammer-owned]` row with exhausted remediation or recorded
+final-round evidence to the final hammer only with live failed external CI on
+the candidate head and passes those failed checks into its prompt, filtering to
+configured required contexts when present. Actual merges still require green CI and exact-head proof.
 
 ## 3) Fast-merge skip lane
 

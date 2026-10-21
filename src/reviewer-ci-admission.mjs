@@ -3,6 +3,7 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { isCompletedCommentOnlyFinalRoundJob } from './comment-only-final-round.mjs';
 import { recoverCancelledChecks } from './ci-recovery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
@@ -21,6 +22,11 @@ const CI_BLOCKED_PARK_CAUSES = Object.freeze({
   // The requeue re-stops a job at its round cap (or a no-progress round).
   'ci-regression-stopped': 'no remediation round is left to requeue',
 });
+
+// Durable park messages accepted by closer rescue after the dispatch flag is lost.
+export const CI_BLOCKED_HAMMER_RESCUE_PREFIXES = Object.freeze(
+  ['ci-regression-stopped', 'ci-regression-hammer-owned'].map(reason => `[${reason}]`),
+);
 
 function buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate, reason = 'ci-regression-no-job' }) {
   const cause = CI_BLOCKED_PARK_CAUSES[reason] || CI_BLOCKED_PARK_CAUSES['ci-regression-no-job'];
@@ -160,7 +166,7 @@ async function guardRereviewCiBeforeReviewer({
     }
 
     // Preserve the completed round's start/result edge for the hammer's proof.
-    if (latest.job?.status === 'completed' && latest.job?.reReview?.suppressed === 'comment-only-final-round') {
+    if (isCompletedCommentOnlyFinalRoundJob(latest.job)) {
       return ciBlockedHammerOwnerResult({
         repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
         jobPath: latest.jobPath, job: latest.job,

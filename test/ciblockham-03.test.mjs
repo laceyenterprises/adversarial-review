@@ -448,6 +448,29 @@ for (const requiredFailure of [false, true]) test(`rescue prompt includes only c
   assert.equal(invoked, true);
 });
 
+for (const conclusion of ['FAILURE', 'SUCCESS', 'IN_PROGRESS']) {
+  test(`final-round park rescue without dispatch ownership uses live CI: ${conclusion}`, async t => {
+    const { args } = fixture(t);
+    args.dispatchJob = {};
+    args.reviewStateRow.failure_message = '[ci-regression-hammer-owned] Completed final round';
+    args.resolveReviewCycleExhaustionImpl = () => ({ reviewCycleExhausted: false,
+      commentOnlyFinalRoundRevisionRefs: [reviewed] });
+    args.candidate.statusCheckRollup = [{ ...red[0],
+      status: conclusion === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'COMPLETED',
+      conclusion: conclusion === 'IN_PROGRESS' ? null : conclusion }];
+    let invoked = false;
+    args.maybeDispatchAmaCloserImpl = async payload => {
+      invoked = true;
+      assert.equal(payload.dispatchContext.ciBlockedHammerOwner, conclusion === 'FAILURE');
+      assert.deepEqual(payload.dispatchContext.ciFailedChecks.map(check => check.name),
+        conclusion === 'FAILURE' ? ['synthetic-ci'] : []);
+      return { dispatched: false, reason: 'synthetic-probe' };
+    };
+    await maybeDispatchAmaClosureFor(args);
+    assert.equal(invoked, true);
+  });
+}
+
 test('watcher CI handoff cannot treat only the adversarial gate as failed CI ownership or a repair wake', async t => {
   const { args, wakes } = fixture(t);
   args.candidate.statusCheckRollup = [

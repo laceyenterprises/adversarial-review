@@ -4449,6 +4449,20 @@ for (const maxRounds of [1, 3]) {
   });
 }
 
+test('suppression without finalRound retains ordinary no-progress handling', (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'partial-final-round-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 3 });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-01T10:00:00.000Z' });
+  const completed = markFollowUpJobCompleted({ rootDir, jobPath: claimed.jobPath,
+    reReview: { requested: false, suppressed: 'comment-only-final-round' },
+  });
+  assert.notEqual(completed.job.finalRound, 'comment-only');
+  const result = requeueFollowUpJobForNextRound({ rootDir, jobPath: completed.jobPath });
+  assert.equal(result.job.status, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
+});
+
 test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

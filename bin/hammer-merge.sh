@@ -560,18 +560,14 @@ while :; do
     echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
+    # The lease was released before polling; keep that attempt charged.
+    # Timeout records the outcome without marking or releasing another lease.
     if ham_required_gate_pending_only; then
-      ham_append_terminal_audit deferred required-checks-pending || {
-        ham_mark_merge_lease_retryable_abort required-checks-pending
-        ham_release_merge_lease
-        return 20
-      }
+      ham_append_terminal_audit deferred required-checks-pending || return 20
       echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
-      ham_mark_merge_lease_retryable_abort required-checks-pending
     else
       ham_append_terminal_audit failed-without-merge github-gate-timeout || true
     fi
-    ham_release_merge_lease
     return 20
   fi
   # Remote CI does not own the serialized merge lane. Reacquisition below

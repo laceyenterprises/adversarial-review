@@ -963,7 +963,9 @@ export function acquireMergeLease({
     } catch (err) {
       if (err?.code === 'EEXIST') {
         const beat = readJsonFile(leasePath, null);
-        return { acquired: false, leasePath, lease: beat, existingLease: beat, waiter };
+        const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
+        return { acquired: false, leasePath, lease: beat, existingLease: beat, waiter,
+          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
       }
       throw err;
     }

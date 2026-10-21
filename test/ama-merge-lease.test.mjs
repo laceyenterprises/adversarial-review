@@ -99,6 +99,40 @@ test('failed served-waiter write rolls back the holder and retains the reservati
   assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
 });
 
+for (const requester of ['queued', 'pruned', 'unregistered']) {
+  test(`lease creation collision reports queue position for ${requester} requester`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const leasePath = mergeLeaseFilePath(rootDir, IDENTITY);
+    const competingLease = { leaseId: 'competing-holder', holderPr: 999 };
+    const link = fs.linkSync;
+    let collisions = 0;
+    const mocked = t.mock.method(fs, 'linkSync', (from, to) => {
+      if (to === leasePath) {
+        // Another writer wins after the initial holder read, before atomic create.
+        writeFileSync(to, JSON.stringify(competingLease));
+        collisions++;
+      }
+      return link(from, to);
+    });
+    syncBuiltinESMExports();
+    try {
+      const result = acquire(rootDir, { registerWaiter: requester !== 'unregistered',
+        waiterId: 'requester', pidAliveFn: () => requester !== 'pruned' });
+      assert.equal(collisions, 1, 'exercise the atomic EEXIST path');
+      assert.equal(result.acquired, false);
+      assert.deepEqual(result.existingLease, competingLease);
+      assert.deepEqual(result.lease, competingLease);
+      assert.equal(result.queuePosition, requester === 'queued' ? 1 : null);
+      assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId),
+        requester === 'queued' ? ['requester'] : [], 'collision never removes a queued request');
+    } finally {
+      mocked.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+}
+
 for (const holderPresent of [false, true]) {
   test(`pruned requester reports unknown queue position with holder ${holderPresent ? 'present' : 'absent'}`, t => {
     const rootDir = freshRoot();

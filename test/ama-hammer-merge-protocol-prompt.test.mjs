@@ -176,7 +176,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.ok(HAMMER_PROMPT.includes('"${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}"'));
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
-  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
+  assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
   assert.match(HAMMER_PROMPT, /ham_required_gate_pending_only\(\)/);
   assert.match(HAMMER_PROMPT, /\.checksConclusion == "PENDING" and/);
   assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks\)/);
@@ -368,14 +368,14 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
 });
 
-test('hammer refunds a pending-only remote CI timeout before releasing its lease', () => {
+test('hammer CI timeout records its outcome after the charged pre-poll release', () => {
   const start = HAMMER_PROMPT.indexOf('HAM_REMOTE_CI_STATUS=remote-ci-timeout');
-  const end = HAMMER_PROMPT.indexOf('echo "HAM remote CI: waiting', start);
+  const end = HAMMER_PROMPT.indexOf('# Remote CI does not own', start);
   assert.ok(start > 0 && end > start);
   const timeoutBranch = HAMMER_PROMPT.slice(start, end);
   assert.match(timeoutBranch, /if ham_required_gate_pending_only/);
   assert.match(timeoutBranch, /failed-without-merge github-gate-timeout/);
-  assert.match(timeoutBranch, /ham_mark_merge_lease_retryable_abort required-checks-pending[\s\S]*ham_release_merge_lease/);
+  assert.doesNotMatch(timeoutBranch, /ham_mark_merge_lease_retryable_abort|ham_release_merge_lease/);
 });
 
 test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {
@@ -614,11 +614,11 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
   assert.match(HAMMER_PROMPT, /resumeOwed: \(\$reason == "required-checks-pending"\)/);
   assert.match(HAMMER_PROMPT, /resumeHead:.*\$validatedHead/);
   assert.match(HAMMER_PROMPT, /hammer-ci-pending-resume-owed head=\$POST_REMEDIATION_SHA/);
-  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{\s*ham_mark_merge_lease_retryable_abort required-checks-pending\s*ham_release_merge_lease\s*return 20\s*\}/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| return 20/);
 });
 
-for (const auditFails of [false, true]) {
-  test(`pending CI marks the lease retryable before release when audit fails=${auditFails}`, () => {
+for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, false], [true, true]]) {
+  test(`CI timeout retains the pre-poll release charge with pending-only=${pendingOnly}, audit fails=${auditFails}`, () => {
     const source = readFileSync(join(REPO_ROOT, 'bin', 'hammer-merge.sh'), 'utf8');
     const start = source.indexOf('HAM_ALREADY_MERGED_VALIDATED_HEAD=0\nham_release_merge_lease');
     const end = source.indexOf('\n  # Remote CI does not own', start);
@@ -633,7 +633,8 @@ for (const auditFails of [false, true]) {
       ham_live_head_moved() { return 1; }
       ham_required_gate_ok() { return 1; }
       ham_required_gate_red() { return 1; }
-      ham_required_gate_pending_only() { return 0; }
+      ham_required_gate_mergeability_unknown() { return 1; }
+      ham_required_gate_pending_only() { return ${pendingOnly ? 0 : 1}; }
       jq() { return 0; }
       ham_append_terminal_audit() { echo audit:$1:$2; return ${auditFails ? 1 : 0}; }
       ham_mark_merge_lease_retryable_abort() { marker="$1"; echo marker:$marker; }
@@ -654,10 +655,9 @@ for (const auditFails of [false, true]) {
     assert.deepEqual(result.stdout.trim().split('\n'), [
       'release:none',
       'gate-read',
-      'audit:deferred:required-checks-pending',
-      'marker:required-checks-pending',
-      'release:required-checks-pending',
+      pendingOnly ? 'audit:deferred:required-checks-pending' : 'audit:failed-without-merge:github-gate-timeout',
     ]);
+    assert.equal(result.stderr.includes('hammer-ci-pending-resume-owed head=validated-head'), pendingOnly && !auditFails);
   });
 }
 

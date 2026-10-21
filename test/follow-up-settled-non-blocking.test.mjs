@@ -97,7 +97,7 @@ test('second non-blocking review stops at one round while blocking review restor
     rmSync(first.jobPath);
     const completedDir = getFollowUpJobDir(rootDir, 'completed');
     mkdirSync(completedDir, { recursive: true });
-    writeFollowUpJob(join(completedDir, 'first.json'), {
+    writeFollowUpJob(join(completedDir, `${first.job.jobId}.json`), {
       ...first.job, status: 'completed', completedAt: new Date().toISOString(),
       remediationWorker: { state: 'completed', model: 'codex' },
       remediationPlan: { ...first.job.remediationPlan, currentRound: 1 },

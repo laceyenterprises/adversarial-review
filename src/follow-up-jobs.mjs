@@ -1026,6 +1026,8 @@ function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
   return null;
 }
 
+// Filename narrowing requires both repo and prNumber; partial or omitted filters
+// read the whole bucket. Callers must still check each parsed job's identity.
 function listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo = false } = {}) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];

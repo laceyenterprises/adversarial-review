@@ -28,8 +28,9 @@ The watcher's latest-job, revision, active-ownership and filtered merge-agent
 dispatch lookups also narrow filenames before reading. Case-insensitive
 ownership predicates retain case-insensitive filename matching.
 `listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo })`
-optionally narrows reads; callers retain their parsed identity checks. Omitting
-the filter retains the whole-bucket reader used by reports and maintenance.
+narrows reads only when both `repo` and `prNumber` are supplied; callers retain
+their parsed identity checks. Partial filters (including repo-only) or an omitted
+filter retain the whole-bucket reader used by reports and maintenance.
 Health/latency reports, diagnosis/reset/recovery tools, replay reports and
 queue-wide admission, reconciliation, shutdown and retention sweeps retain
 their existing whole-history or whole-active-queue behavior.

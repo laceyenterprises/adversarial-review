@@ -1,4 +1,5 @@
 import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import fs from 'node:fs';
@@ -3217,7 +3218,7 @@ test('active remediation rollback does not recreate a deleted dispatch record', 
   t.mock.method(fs, 'readdirSync', (path, ...args) => {
     if (String(path) === pendingDir && fs.existsSync(recordPath) && !appeared) {
       appeared = true;
-      writeFileSync(join(pendingDir, 'active.json'), JSON.stringify({
+      writeFileSync(join(pendingDir, `${followUpJobFilePrefix(REPO, PR_NUMBER)}active.json`), JSON.stringify({
         repo: REPO, prNumber: PR_NUMBER, status: 'pending',
       }));
     }

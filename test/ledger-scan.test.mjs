@@ -9,7 +9,7 @@ import { buildFollowUpJob, getFollowUpJobDir, listFollowUpJobsInDir, summarizePR
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { findActiveRemediationJob } from '../src/ama/active-remediation-job.mjs';
 import { findLatestFollowUpJob, findFollowUpJobForRevision } from '../src/operator-retrigger-helpers.mjs';
-import { findLatestFollowUpJobForPR, listMergeAgentDispatches } from '../src/follow-up-merge-agent.mjs';
+import { findLatestFollowUpJobForPR, listMergeAgentDispatches, recordMergeAgentDispatch } from '../src/follow-up-merge-agent.mjs';
 import { ledgerSubjects, writeLedgerScanFixture } from './helpers/ledger-scan-fixture.mjs';
 
 function fixtureRoot(t) {
@@ -156,4 +156,19 @@ test('LEDGERSCAN-01: filtered merge-agent dispatch lookup reads only its PR', (t
   assert.deepEqual(result, [records[0]]);
   assert.deepEqual(paths, [join(dir, 'sample__project-pr-87-head.json')]);
   assert.deepEqual(new Set(listMergeAgentDispatches(root).map(JSON.stringify)), new Set(records.map(JSON.stringify)));
+});
+
+test('LEDGERSCAN-01: dispatch prefix matches production filenames and rejects sanitized repo collisions', (t) => {
+  const root = fixtureRoot(t);
+  const subject = { repo: 'sample/proj+ect._-', prNumber: 87 };
+  const target = recordMergeAgentDispatch(root, { ...subject, headSha: 'target' });
+  const collision = recordMergeAgentDispatch(root, { repo: 'sample/proj?ect._-', prNumber: 87, headSha: 'collision' });
+  recordMergeAgentDispatch(root, { ...subject, prNumber: 8776, headSha: 'near' });
+  recordMergeAgentDispatch(root, { repo: 'sample/other', prNumber: 87, headSha: 'other' });
+
+  const { result, paths } = captureReads(t, () => listMergeAgentDispatches(root, subject));
+  assert.deepEqual(paths.sort(), [target, collision].sort());
+  assert.equal(result.length, 1);
+  assert.equal(result[0].repo, subject.repo);
+  assert.equal(result[0].headSha, 'target');
 });

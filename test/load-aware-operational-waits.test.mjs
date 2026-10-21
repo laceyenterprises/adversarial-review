@@ -18,6 +18,8 @@ import { readPipelineGithub } from '../src/pipeline-health-github.mjs';
 import { resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
 import { resolveReviewPipelineHealthConfig, summarizeFirstPassCiOrphans } from '../src/review-pipeline-health.mjs';
 import { createSlackThreadCommsAdapter } from '../src/adapters/comms/slack-thread/index.mjs';
+import { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
+
 
 function busyHost(t) {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
@@ -373,4 +375,27 @@ test('branch lookup and unpublished-work Git probe from the current base also sc
     },
   });
   assert.equal(debt.commitSha, commitSha);
+});
+
+test('merge lease fairness retains load-scaled holders and closer waits with fixed daemon reservations', t => {
+  busyHost(t);
+  const rootDir = mkdtempSync(join(os.tmpdir(), 'lease-fair-load-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, repo: 'owner/name', base: 'main', holderPr: 101,
+    holderHead: 'holder-head', holderPid: process.pid, holderHost: os.hostname(),
+    deadlineSeconds: 90, now: '2026-06-20T18:00:00Z' };
+  const holder = acquireMergeLease(request);
+  assert.equal(holder.acquired, true);
+  assert.equal(holder.lease.deadlineSeconds, 540);
+  const closer = acquireMergeLease({ ...request, holderPr: 102, registerWaiter: true });
+  assert.equal(closer.acquired, false);
+  assert.equal(closer.waiter.deadlineSeconds, 540);
+  const daemon = acquireDaemonMergeLease({ ...request, holderPr: 103 });
+  assert.equal(daemon.acquired, false);
+  assert.equal(daemon.waiter.deadlineSeconds, 120);
+  assert.equal(daemon.queuePosition, 1);
+  assert.equal(releaseMergeLease({ rootDir, ...holder.lease }).released, true);
+  const resumed = acquireDaemonMergeLease({ ...request, holderPr: 103 });
+  assert.equal(resumed.acquired, true);
+  assert.equal(resumed.lease.deadlineSeconds, 540);
 });

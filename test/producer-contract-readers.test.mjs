@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, copyFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../src/producer-contracts/launch-status.mjs';
+import { boundedDiagnostics, diagnosticValue } from '../src/producer-contracts/diagnostics.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../src/producer-contracts/dispatch-receipt.mjs';
 import { readBrokerProvider } from '../src/producer-contracts/broker-evidence.mjs';
@@ -114,10 +117,97 @@ test('changing broker diagnostics do not repeat the same quota deferral', () => 
 
 for (const stdout of ['', 'unavailable', 'banner\n{invalid}']) {
   test(`negative stdout mutation: ${JSON.stringify(stdout)} names producer and transport field`, () => {
-    assert.throws(() => parseHqFleetQuotaSnapshot(stdout), /cwp_dispatch.cli_fleet: \$stdout (empty|invalid JSON)/);
-    assert.throws(() => parseHqDispatchStatus(stdout), /cwp_dispatch.dispatch: \$stdout (empty|invalid JSON)/);
+    const condition = stdout ? 'invalid JSON' : 'empty';
+    assert.throws(() => parseHqFleetQuotaSnapshot(stdout), new RegExp(`cwp_dispatch.cli_fleet: \\$stdout ${condition}`));
+    assert.throws(() => parseHqDispatchStatus(stdout), new RegExp(`cwp_dispatch.dispatch: \\$stdout ${condition}`));
+    assert.throws(() => readDispatchReceipt(stdout), new RegExp(`cwp_dispatch.dispatch: \\$stdout ${condition}`));
   });
 }
+
+test('malformed status probes retain a bounded stdout tail with and without braces', () => {
+  for (const output of ['x'.repeat(4000) + 'last output', 'x'.repeat(4000) + '{invalid}']) {
+    assert.throws(() => parseHqDispatchStatus(output), error => {
+      assert.ok(error.message.endsWith(`stdout tail: ${output.slice(-1000)}`));
+      assert.ok(error.message.length < 1200);
+      return true;
+    });
+  }
+});
+
+test('producer diagnostics stay bounded through routing, repeated fallbacks and logs', async () => {
+  const detail = 'producer stderr '.repeat(4000);
+  assert.equal(diagnosticValue(detail).length, 200);
+  const many = Array.from({ length: 40 }, (_, i) => `${i}: ${detail}`);
+  const limited = boundedDiagnostics(many.flatMap(value => [value, value]));
+  assert.equal(limited.length, 20);
+  assert.ok(limited.every(value => value.length === 500));
+  const fleet = capture('quota/fleet-ready');
+  fleet.unavailableSections = { brokerAuth: detail };
+  for (const row of fleet.providerStatuses) row.state = 'exhausted';
+  for (const state of Object.values(fleet.brokerAuth.provider_states)) state.ready = false;
+  const result = await resolveCloserDispatchHarness({ workerClass: 'hammer-corp',
+    fallbackWorkerClasses: Array(40).fill('hammer-claude'),
+    execFileImpl: async () => ({ stdout: JSON.stringify(fleet) }), env: {},
+  });
+  assert.equal(result.hold, true);
+  for (const route of [result, selectCodexWorkerAccount(fleet),
+    selectClaudeAccountLaneFromSnapshot(fleet, { workerClass: 'claude-reviewer' })]) {
+    assert.ok(route.diagnostics.some(value => value.includes('unavailableSections.brokerAuth=')));
+    assert.equal(new Set(route.diagnostics).size, route.diagnostics.length);
+    assert.ok(route.diagnostics.length <= 20);
+    assert.ok(route.diagnostics.every(value => value.length <= 500 && !value.includes(detail)));
+  }
+  const messages = [];
+  createReviewerQuotaBlockLogger()({ repoPath: 'example/repo', prNumber: 1,
+    route: { quotaBlocked: true, quotaGrounding: { diagnostics: many } },
+    logger: { warn: message => messages.push(message) } });
+  assert.ok(messages[0].length < 11000);
+});
+
+test('refresh removes deleted managed artifacts and preserves separately pinned captures', t => {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PYTHON')));
+  const options = { encoding: 'utf8', timeout: 10000, env };
+  const probe = spawnSync('python3', ['-I', '-c', 'import sys'], options);
+  if (probe.error || probe.status !== 0) return t.skip('python3 is optional; no working interpreter');
+  const scratch = mkdtempSync(join(tmpdir(), 'producer-refresh-'));
+  const put = (path, bytes) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes); };
+  try {
+    const source = join(scratch, 'producer');
+    const consumer = join(scratch, 'consumer');
+    mkdirSync(join(consumer, 'src/producer-contracts'), { recursive: true });
+    const fixtures = join(consumer, 'test/fixtures/producer-contracts');
+    const provenance = capture('provenance');
+    for (const [artifact, record] of Object.entries(provenance.files)) {
+      put(join(source, record.source), readFileSync(new URL(`./fixtures/producer-contracts/${artifact}`, import.meta.url)));
+    }
+    // Definitions are inert excerpts; only this dependency-free module executes.
+    put(join(source, 'platform/session-ledger/src/session_ledger/launch_request_terminal_statuses.py'),
+      'LAUNCH_REQUEST_STATUSES = {"running", "succeeded"}\nTERMINAL_LAUNCH_REQUEST_STATUSES = {"succeeded"}\n');
+    const script = join(consumer, 'scripts/contracts/refresh.py');
+    mkdirSync(dirname(script), { recursive: true });
+    copyFileSync(new URL('../scripts/contracts/refresh.py', import.meta.url), script);
+    for (const directory of ['quota', 'broker', 'launch', 'dispatch', 'publication', 'definitions']) {
+      put(join(fixtures, directory, directory === 'definitions' ? 'deleted.py.txt' : 'deleted.json'), 'stale');
+    }
+    put(join(fixtures, 'quota/fleet-released.json'), 'separately pinned');
+    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture']]) {
+      const git = spawnSync('git', ['-C', source, ...args], options);
+      assert.ifError(git.error);
+      assert.equal(git.status, 0, git.stderr);
+    }
+    const result = spawnSync('python3', ['-I', script, source], options);
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    for (const directory of ['quota', 'broker', 'launch', 'dispatch', 'publication', 'definitions']) {
+      assert.equal(existsSync(join(fixtures, directory, directory === 'definitions' ? 'deleted.py.txt' : 'deleted.json')), false);
+    }
+    assert.equal(readFileSync(join(fixtures, 'quota/fleet-released.json'), 'utf8'), 'separately pinned');
+    const refreshed = JSON.parse(readFileSync(join(fixtures, 'provenance.json')));
+    for (const [artifact, record] of Object.entries(refreshed.files)) {
+      assert.equal(createHash('sha256').update(readFileSync(join(fixtures, artifact))).digest('hex'), record.sha256);
+    }
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+});
 
 test('unavailable closer evidence retains hold policy and names producer stdout', async () => {
   const result = await resolveCloserDispatchHarness({ workerClass: 'hammer', codexAccountPolicy: 'personal-first', env: {},
@@ -354,7 +444,7 @@ for (const scenario of ['refused', 'structured-refused', 'dry-run-refused']) {
   test(`dispatch producer unavailable capture: ${scenario} never supplies launch identity`, () => {
     const sample = capture(`dispatch/${scenario}`);
     assert.notEqual(sample.exitCode, 0);
-    if (!sample.stdout.trim()) assert.throws(() => readDispatchReceipt(sample.stdout), /cwp_dispatch.dispatch: \$stdout invalid JSON/);
+    if (!sample.stdout.trim()) assert.throws(() => readDispatchReceipt(sample.stdout), /cwp_dispatch.dispatch: \$stdout empty/);
     else {
       const result = readDispatchReceipt(sample.stdout);
       assert.equal(result.launchRequestId, null);

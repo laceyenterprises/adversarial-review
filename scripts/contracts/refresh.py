@@ -33,6 +33,13 @@ records = {}
 for name, path in files.items():
     target = dest / name
     target.mkdir(parents=True, exist_ok=True)
+    # The released capture has its own provenance and generator. Everything
+    # else in these directories is managed by this refresh, including removals.
+    for old in target.iterdir():
+        if name == "quota" and old.name == "fleet-released.json":
+            continue
+        if old.is_file() and (old.suffix == ".json" or old.name == "README.md"):
+            old.unlink()
     for item in sorted((source / path).iterdir()):
         if name == "publication" and item.name not in {
             "accepted.json",
@@ -68,6 +75,8 @@ definitions = [
     wp + "docs/pr-publication-contract.md",
 ]
 (dest / "definitions").mkdir(exist_ok=True)
+for old in (dest / "definitions").glob("*.txt"):
+    old.unlink()
 for path in definitions:
     item = source / path
     name = "definitions/" + item.name + ".txt"

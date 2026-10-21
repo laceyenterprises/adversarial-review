@@ -1,3 +1,4 @@
+import { boundedDiagnostics } from '../producer-contracts/diagnostics.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { resolvePooledWorkerRouting } from '../worker-token-pool.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../fleet-quota-status.mjs';
@@ -258,7 +259,7 @@ export async function resolveCloserDispatchHarness({
     workerClass: primary, policy: codexAccountPolicy, statuses: providerStatuses,
     model: modelForWorkerClass(primary),
   }) : null;
-  if (codexAccount) return { ...base, ...codexAccount,
+  if (codexAccount) return { ...base, ...codexAccount, ...(codexAccount.diagnostics ? { diagnostics: boundedDiagnostics(codexAccount.diagnostics) } : {}),
     fellBack: codexAccount.workerClass !== primary, from: primary, to: codexAccount.workerClass,
     provider: primaryProvider, fallbackProvider: primaryProvider };
 
@@ -269,7 +270,7 @@ export async function resolveCloserDispatchHarness({
   });
   const primaryAccount = accountLane(primary);
   if (primaryAccount?.reason === 'claude-account-evidence-unknown') {
-    return { ...base, hold: true, reason: primaryAccount.reason, diagnostics: primaryAccount.diagnostics };
+    return { ...base, hold: true, reason: primaryAccount.reason, diagnostics: boundedDiagnostics(primaryAccount.diagnostics) };
   }
   if (primaryAccount && !primaryAccount.hold) {
     return { ...base, workerClass: primaryAccount.workerClass,
@@ -293,7 +294,7 @@ export async function resolveCloserDispatchHarness({
       primaryState: primaryAvailability.state,
       softGrounded: false,
       softGrounding: primarySoft.verdict,
-      ...(!primaryAvailability.available ? { diagnostics: [primaryAvailability.diagnostic, primaryCap.diagnostic, primarySoft.diagnostic].filter(Boolean) } : {}),
+      ...(!primaryAvailability.available ? { diagnostics: boundedDiagnostics([primaryAvailability.diagnostic, primaryCap.diagnostic, primarySoft.diagnostic]) } : {}),
     };
   }
 
@@ -355,7 +356,7 @@ export async function resolveCloserDispatchHarness({
     ...base,
     reason: 'all-fallbacks-grounded',
     hold: true,
-    diagnostics,
+    diagnostics: boundedDiagnostics(diagnostics),
     ...groundingFields,
   };
 }

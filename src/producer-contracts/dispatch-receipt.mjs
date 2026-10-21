@@ -5,6 +5,7 @@ const producer = 'cwp_dispatch.dispatch';
 /** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readLaunchRequestStatus>}} */
 export function readDispatchReceipt(value, { identityFields = ['launchRequestId', 'dispatchId', 'lrq'], allowNonObject = false } = {}) {
   if (typeof value === 'string' && !allowNonObject) {
+    if (!value.trim()) throw new Error(`${producer}: $stdout empty`);
     try { value = JSON.parse(value); }
     catch { throw new Error(`${producer}: $stdout invalid JSON`); }
   }
@@ -42,6 +43,7 @@ export function parseDispatchJsonOutput(stdout) {
 // Keep their vocabulary and producer diagnostics intact.
 export function parseHqJsonObject(text, label) {
   const raw = String(text || '').trim();
+  const invalidJsonMessage = `cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON; stdout tail: ${raw.slice(-1000)}`;
   if (!raw) throw new Error(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
   try { return JSON.parse(raw); }
   catch {
@@ -49,9 +51,9 @@ export function parseHqJsonObject(text, label) {
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
       try { return JSON.parse(raw.slice(start, end + 1)); }
-      catch (cause) { throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON`, { cause }); }
+      catch (cause) { throw new Error(invalidJsonMessage, { cause }); }
     }
-    throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON`);
+    throw new Error(invalidJsonMessage);
   }
 }
 

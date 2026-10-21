@@ -1,3 +1,4 @@
+import { boundedDiagnostics } from './producer-contracts/diagnostics.mjs';
 import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,10 +51,10 @@ function selectCodexAccount(payload, order, { model = null,
       return { provider, authPath, hold: false, reason: 'codex-account-ready' };
     }
     if (!exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      return { hold: true, reason: 'codex-account-evidence-unknown', diagnostics };
+      return { hold: true, reason: 'codex-account-evidence-unknown', diagnostics: boundedDiagnostics(diagnostics) };
     }
   }
-  return { hold: true, reason: 'no-ready-codex-account', diagnostics };
+  return { hold: true, reason: 'no-ready-codex-account', diagnostics: boundedDiagnostics(diagnostics) };
 }
 
 // Only unpinned Codex lanes opt into account substitution. Corporate classes

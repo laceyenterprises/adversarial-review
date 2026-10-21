@@ -22,6 +22,11 @@ Reader result shapes use JSDoc. Missing, invalid, stale and unfamiliar evidence
 adds producer/field diagnostics to account holds, reviewer transition logs,
 status results, adapter mutation results and the closer's `harnessResolution`
 audit. Stable routing reason codes retain their existing meanings.
+Producer values in quota diagnostics are limited to 200 characters. Diagnostic
+lists are deduplicated and limited to 20 entries of at most 500 characters before
+account holds, closer audits and reviewer logs persist them. Malformed dispatch
+status output retains its last 1,000 characters for investigation; blank stdout
+is consistently identified as `$stdout empty`.
 Existing malformed-input exceptions still throw, now naming the producer field.
 
 Weekly percentages still accept the documented old status/confidence shapes
@@ -118,6 +123,10 @@ python3 scripts/contracts/refresh.py ../agent-os
 
 The refresh command requires exactly one source checkout path; missing or extra
 arguments print usage to stderr and exit with status 2 before copying artifacts.
+Refresh removes stale managed JSON/owner records and definition excerpts, while
+preserving the separately maintained `quota/fleet-released.json` capture and its
+provenance. Deleted or renamed producer artifacts therefore cannot remain as
+untracked evidence in a managed capture directory.
 
 This copies artifacts only. To recapture, first use the exact commands and
 inputs in the copied owner records below in the producer checkout, review the

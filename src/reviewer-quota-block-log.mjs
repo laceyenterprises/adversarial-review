@@ -1,3 +1,4 @@
+import { boundedDiagnostics } from './producer-contracts/diagnostics.mjs';
 // One breadcrumb per candidate's grounding transition, before claim/dispatch.
 export function createReviewerQuotaBlockLogger() {
   const states = new Map();
@@ -12,7 +13,7 @@ export function createReviewerQuotaBlockLogger() {
     const source = grounding.source || 'fleet-quota-status';
     const state = grounding.state || 'unknown';
     const reason = grounding.reason || 'no-allowed-reviewer-available';
-    const diagnostic = (grounding.diagnostics || []).join('; ');
+    const diagnostic = boundedDiagnostics(grounding.diagnostics).join('; ');
     const signature = JSON.stringify([reviewer, source, state, reason]);
     if (states.get(key) !== signature) {
       logger.warn?.(`[watcher] reviewer-route DEFERRED repo=${repoPath} pr=${prNumber} `

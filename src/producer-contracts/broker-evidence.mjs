@@ -1,3 +1,4 @@
+import { diagnosticValue } from './diagnostics.mjs';
 const producer = 'oauth_broker.server.readyz';
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -19,7 +20,7 @@ export function readBrokerProvider(payload, provider) {
       else if (!state[key]) diagnostics.push(`${producer}: ${path}.${key}=false`);
     }
     if (state.state != null && !['ready', 'degraded', 'not_ready'].includes(state.state)) {
-      diagnostics.push(`${producer}: ${path}.state unrecognized ${JSON.stringify(state.state)}`);
+      diagnostics.push(`${producer}: ${path}.state unrecognized ${diagnosticValue(state.state)}`);
     }
   }
   if (payload?.providers && Object.hasOwn(payload.providers, provider)) {

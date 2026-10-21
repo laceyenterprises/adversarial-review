@@ -6640,6 +6640,7 @@ test('dispatchMergeAgentForPR records JSON-string stdout after successful hq dis
       now: '2026-05-18T13:00:00.000Z',
     });
     assert.equal(result.decision, 'dispatch');
+    assert.match(result.diagnostic, /cwp_dispatch\.dispatch: \$stdout invalid type; expected object/);
     const records = listMergeAgentDispatches(rootDir);
     assert.equal(records.length, 1);
     assert.equal(records[0].launchRequestId, null);

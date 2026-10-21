@@ -1,3 +1,4 @@
+import { boundedDiagnostics } from './producer-contracts/diagnostics.mjs';
 import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -65,10 +66,10 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
       return { workerClass: lane, provider, authPath, hold: false, reason: 'claude-account-ready' };
     }
     if (lane === corporate && !exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      return { workerClass, hold: true, reason: 'claude-account-evidence-unknown', diagnostics };
+      return { workerClass, hold: true, reason: 'claude-account-evidence-unknown', diagnostics: boundedDiagnostics(diagnostics) };
     }
   }
-  return { workerClass, hold: true, reason: 'no-ready-claude-account', diagnostics };
+  return { workerClass, hold: true, reason: 'no-ready-claude-account', diagnostics: boundedDiagnostics(diagnostics) };
 }
 
 // Credential outage state is account-scoped. The review family remains Claude.

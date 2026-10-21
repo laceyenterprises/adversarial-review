@@ -232,6 +232,7 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
   const overrides = { ...env, AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '1',
+    AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy'),
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
     CODEX_AUTH_PATH: join(authHome, 'auth.json'), CODEX_HOME: authHome };
   const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));

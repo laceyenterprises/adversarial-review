@@ -1,3 +1,4 @@
+import { diagnosticValue } from './producer-contracts/diagnostics.mjs';
 import { readIdentityPoolProjection } from './identity-token-snapshot.mjs';
 
 /** Shared nominal budget; scale at each quota-status call. */
@@ -248,7 +249,7 @@ export function providerAvailabilityFromStatuses(statuses, { provider, authPath 
     // AFH-02 soft verdict rides alongside; `available`/`state` keep their exact
     // pre-AFH hard semantics so existing HHR consumers are unchanged.
     afhGrounding: status.afhGrounding || null,
-    ...(status.state !== 'ok' ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${normalizedProvider},authPath=${status.authPath}].state=${JSON.stringify(status.state)}` } : {}),
+    ...(status.state !== 'ok' ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${normalizedProvider},authPath=${status.authPath}].state=${diagnosticValue(status.state)}` } : {}),
   };
 }
 
@@ -352,7 +353,7 @@ export function harnessCapFromStatuses(statuses, { harness, model = null, authPa
     state: row.state || 'unknown',
     model: modelName,
     modelState: modelRow?.state || null,
-    ...(row.state !== 'ok' || (modelRow && modelRow.state !== 'ok') ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${provider},authPath=${row.authPath}]${modelRow && modelRow.state !== 'ok' ? `.models[model=${modelName}].state=${JSON.stringify(modelRow.state)}` : `.state=${JSON.stringify(row.state)}`}` } : {}),
+    ...(row.state !== 'ok' || (modelRow && modelRow.state !== 'ok') ? { diagnostic: `cwp_dispatch.cli_fleet: providerStatuses[provider=${provider},authPath=${row.authPath}]${modelRow && modelRow.state !== 'ok' ? `.models[model=${modelName}].state=${diagnosticValue(modelRow.state)}` : `.state=${diagnosticValue(row.state)}`}` } : {}),
     resetAt: modelRow?.resetAtUtc || row.resetAtUtc || null,
     lastGoodAt: modelRow?.lastGoodAt || row.lastGoodAt || null,
     afhGrounding: soft.verdict,
@@ -372,9 +373,9 @@ export function readReserveFloorWeeklyEvidence(floor, credential) {
   const measurement = reserveFloorWeeklyMeasurement(floor);
   const diagnostics = [];
   if (!floor || typeof floor !== 'object' || Array.isArray(floor)) diagnostics.push(`${prefix}${path} missing/invalid object`);
-  else if (!measurement) diagnostics.push(`${prefix}${path}.weeklyMeasurement missing/invalid or null; ${path}.weeklyMeasurementReason=${JSON.stringify(floor.weeklyMeasurementReason)}`);
+  else if (!measurement) diagnostics.push(`${prefix}${path}.weeklyMeasurement missing/invalid or null; ${path}.weeklyMeasurementReason=${diagnosticValue(floor.weeklyMeasurementReason)}`);
   else {
-    if (measurement.status !== 'measured') diagnostics.push(`${prefix}${path}.weeklyMeasurement.status=${JSON.stringify(measurement.status)}`);
+    if (measurement.status !== 'measured') diagnostics.push(`${prefix}${path}.weeklyMeasurement.status=${diagnosticValue(measurement.status)}`);
     if (!Number.isFinite(measurement.percentRemaining) || measurement.percentRemaining < 0 || measurement.percentRemaining > 100) diagnostics.push(`${prefix}${path}.weeklyMeasurement.percentRemaining missing/invalid percentage`);
     else if (measurement.percentRemaining === 0) diagnostics.push(`${prefix}${path}.weeklyMeasurement.percentRemaining=0`);
   }
@@ -389,16 +390,16 @@ export function quotaAccountDiagnostics(payload, { provider, authPath, cap, rese
   if (!row) diagnostics.push(`cwp_dispatch.cli_fleet: ${path} missing`);
   else {
     if (row.cachedEvidenceStale === true) diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.cachedEvidenceStale=true (stale)`);
-    if (row.state !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.state=${JSON.stringify(row.state)}`);
-    if (!cap.available && cap.modelState && cap.modelState !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.models[model=${cap.model}].state=${JSON.stringify(cap.modelState)}`);
+    if (row.state !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.state=${diagnosticValue(row.state)}`);
+    if (!cap.available && cap.modelState && cap.modelState !== 'ok') diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.models[model=${cap.model}].state=${diagnosticValue(cap.modelState)}`);
     if (cap.capped) diagnostics.push(`cwp_dispatch.cli_fleet: ${path}.${cap.capSource === 'model-exhausted' ? 'models' : cap.capSource === 'afh-soft-grounded' ? 'afhGrounding.grounded' : 'state'} ${cap.capSource}`);
   }
-  if (payload?.unavailableSections?.brokerAuth) diagnostics.push(`cwp_dispatch.cli_fleet: unavailableSections.brokerAuth=${JSON.stringify(payload.unavailableSections.brokerAuth)}`);
+  if (payload?.unavailableSections?.brokerAuth) diagnostics.push(`cwp_dispatch.cli_fleet: unavailableSections.brokerAuth=${diagnosticValue(payload.unavailableSections.brokerAuth)}`);
   const credential = `${provider}-${authPath}`;
   const floor = payload?.reserveFloors?.[credential];
   diagnostics.push(...readReserveFloorWeeklyEvidence(floor, credential).diagnostics);
   if (reserve) for (const key of ['active', 'paused', 'nearCap']) {
-    if (floor?.[key] !== false) diagnostics.push(`quota_reserve.snapshot: reserveFloors.${credential}.${key}=${JSON.stringify(floor?.[key])}; expected false`);
+    if (floor?.[key] !== false) diagnostics.push(`quota_reserve.snapshot: reserveFloors.${credential}.${key}=${diagnosticValue(floor?.[key])}; expected false`);
   }
   return diagnostics;
 }

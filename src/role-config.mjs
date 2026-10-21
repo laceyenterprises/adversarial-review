@@ -22,6 +22,7 @@
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
 
 import {
   AgentOSConfigError,
@@ -508,6 +509,16 @@ export function resolveGeminiReviewerIdentities({
   });
   const value = cfg.get('reviewer.gemini.identities', null);
   return Array.isArray(value) ? value.map((user) => String(user)) : [];
+}
+
+// Reader-only rollout: callers opt in; existing role/pin selectors are intact.
+export function resolveIdentityTokenPools(options = {}) {
+  const cfg = loadRoleConfig({ ...options, contextKey: 'oauth.identity_token_pools' });
+  const legacy = cfg.get('reviewer.gemini.identities', null);
+  return readIdentityTokenPools({
+    token_accounts: cfg.get('oauth.token_accounts', {}),
+    identity_token_pools: cfg.get('oauth.identity_token_pools', {}),
+  }, { legacyGeminiHolders: legacy === null ? undefined : legacy });
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker

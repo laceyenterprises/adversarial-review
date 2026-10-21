@@ -1,0 +1,5022 @@
+{
+  "version": 1,
+  "merge": "Recursively merge objects into defaults; arrays, scalars and null replace. No production policy is encoded by merge.",
+  "defaults": {
+    "oauth": {
+      "token_accounts": {
+        "openai-corporate": {
+          "family": "codex",
+          "allowed_models": [
+            "gpt-6"
+          ],
+          "concurrency": 1,
+          "broker_provider": "codex-corp"
+        },
+        "openai-primary": {
+          "family": "codex",
+          "allowed_models": [
+            "gpt-6"
+          ],
+          "concurrency": 1,
+          "broker_provider": "codex"
+        },
+        "anthropic-corporate": {
+          "family": "claude",
+          "allowed_models": [
+            "opus"
+          ],
+          "concurrency": 1,
+          "broker_provider": "claude-code-corp"
+        },
+        "anthropic-primary": {
+          "family": "claude",
+          "allowed_models": [
+            "opus"
+          ],
+          "concurrency": 1,
+          "broker_provider": "claude-code"
+        },
+        "agy-login-a": {
+          "family": "gemini",
+          "allowed_models": [
+            "gemini-pro"
+          ],
+          "concurrency": 1,
+          "holder_user": "agy-a"
+        },
+        "agy-login-b": {
+          "family": "gemini",
+          "allowed_models": [
+            "gemini-pro"
+          ],
+          "concurrency": 1,
+          "holder_user": "agy-b"
+        }
+      },
+      "identity_token_pools": {
+        "codex": [
+          "openai-corporate",
+          "openai-primary"
+        ],
+        "codex-reviewer": [
+          "openai-corporate",
+          "openai-primary"
+        ],
+        "hammer": [
+          "openai-primary",
+          "openai-corporate"
+        ],
+        "remediator-codex": [
+          "openai-primary",
+          "openai-corporate"
+        ],
+        "claude-code": [
+          "anthropic-corporate",
+          "anthropic-primary"
+        ],
+        "claude-reviewer": [
+          "anthropic-corporate",
+          "anthropic-primary"
+        ],
+        "hammer-claude": [
+          "anthropic-corporate",
+          "anthropic-primary"
+        ],
+        "remediator-claude": [
+          "anthropic-corporate",
+          "anthropic-primary"
+        ],
+        "gemini-reviewer": [
+          "agy-login-a",
+          "agy-login-b"
+        ]
+      }
+    },
+    "request": {
+      "identity": "codex",
+      "family": "codex",
+      "identity_models": [
+        "gpt-6"
+      ],
+      "requested_models": [
+        "gpt-6"
+      ],
+      "generation": "cfg-7",
+      "now": 100,
+      "snapshot": {
+        "version": 1,
+        "identity": "codex",
+        "requested_models": [
+          "gpt-6"
+        ],
+        "generation": "cfg-7",
+        "reserve_exemptions": [],
+        "accounts": {
+          "openai-corporate": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "openai-primary": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "anthropic-corporate": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "anthropic-primary": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "agy-login-a": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          },
+          "agy-login-b": {
+            "declaration": {
+              "state": "enabled",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "readiness": {
+              "state": "ready",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "quota": {
+              "state": "available",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "reserve": {
+              "state": "admit",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "model": {
+              "state": "authorized",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110
+            },
+            "capacity": {
+              "state": "measured",
+              "generation": "cfg-7",
+              "observed_at": 90,
+              "expires_at": 110,
+              "active_leases": 0
+            }
+          }
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "codex-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "codex-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-not-ready",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-model-denied",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reviewer-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "codex-reviewer-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reviewer-not-ready",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reviewer-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reviewer-model-denied",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "codex-reviewer-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "hammer-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-not-ready",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-model-denied",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-codex-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "remediator-codex-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-codex-not-ready",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-codex-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-codex-model-denied",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-codex-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-code-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "claude-code-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-code-not-ready",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-code-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-code-model-denied",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-code-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-reviewer-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "claude-reviewer-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-reviewer-not-ready",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-reviewer-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-reviewer-model-denied",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "claude-reviewer-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-claude-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "hammer-claude-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-claude-not-ready",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-claude-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-claude-model-denied",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "hammer-claude-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-claude-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "remediator-claude-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-claude-not-ready",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-claude-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-claude-model-denied",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "remediator-claude-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gemini-reviewer-declared-preference",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-a",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "gemini-reviewer-quota-exhausted",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gemini-reviewer-not-ready",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "readiness": {
+                  "state": "not-ready"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gemini-reviewer-reserve-refused",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gemini-reviewer-model-denied",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "model": {
+                  "state": "denied"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gemini-reviewer-capacity-saturated",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "capacity": {
+                  "state": "measured",
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "declaration-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "declaration-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "declaration-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "declaration-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "declaration-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "declaration-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "readiness-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "readiness-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "readiness-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "readiness-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "readiness-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "readiness-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "readiness": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "quota-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "quota-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "quota-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "quota-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "quota-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "quota-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "reserve-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "reserve-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "reserve-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "reserve-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "reserve-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "reserve-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "reserve": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "model-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "model-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "model-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "model-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "model-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "model-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "model": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "capacity-expires_at-100",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "expires_at": 100
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "capacity-generation-cfg-6",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "capacity-state-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "capacity-state-contradictory",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "state": "contradictory"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "capacity-observed_at-101",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "observed_at": 101
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "capacity-missing",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "missing-account-is-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": null
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "snapshot-generation-hold",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "generation": "cfg-6"
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": null,
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "snapshot-role-hold",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "identity": "hammer"
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": null,
+        "reason": "evidence-request-mismatch"
+      }
+    },
+    {
+      "name": "snapshot-model-hold",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "requested_models": [
+              "gpt-6.1"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": null,
+        "reason": "evidence-request-mismatch"
+      }
+    },
+    {
+      "name": "explicit-disabled",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "state": "disabled"
+                },
+                "quota": null,
+                "readiness": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "explicit-absent",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "declaration": {
+                  "state": "absent"
+                },
+                "quota": null,
+                "readiness": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "fallback-unknown-holds",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              },
+              "openai-primary": {
+                "readiness": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "stale-refusal-holds",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted",
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "fresh-refusal-does-not-hide-unknown",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                },
+                "readiness": null
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "all-exhausted",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              },
+              "openai-primary": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "account_id": null,
+        "reason": "accounts-unavailable"
+      }
+    },
+    {
+      "name": "all-saturated",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "active_leases": 1
+                }
+              },
+              "openai-primary": {
+                "capacity": {
+                  "active_leases": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": null,
+        "reason": "capacity-saturated"
+      }
+    },
+    {
+      "name": "saturated-and-exhausted-still-transient",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "active_leases": 1
+                }
+              },
+              "openai-primary": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": null,
+        "reason": "capacity-saturated"
+      }
+    },
+    {
+      "name": "over-limit-occupancy-is-saturation",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "active_leases": 2
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "configured-model-denial",
+      "patch": {
+        "oauth": {
+          "token_accounts": {
+            "openai-corporate": {
+              "allowed_models": [
+                "gpt-other"
+              ]
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "all-account-models-deny",
+      "patch": {
+        "oauth": {
+          "token_accounts": {
+            "openai-corporate": {
+              "allowed_models": [
+                "gpt-other"
+              ]
+            },
+            "openai-primary": {
+              "allowed_models": [
+                "gpt-other"
+              ]
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "account_id": null,
+        "reason": "accounts-unavailable"
+      }
+    },
+    {
+      "name": "explicit-corporate-lane-exemption",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            },
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "reserve_exemptions": [
+              {
+                "identity": "claude-reviewer",
+                "account_id": "anthropic-corporate"
+              }
+            ]
+          },
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ]
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "corporate-floor-without-exemption",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            },
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "reserve_exemptions": []
+          },
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ]
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "exemption-does-not-transfer-roles",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            },
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "reserve_exemptions": [
+              {
+                "identity": "hammer-claude",
+                "account_id": "anthropic-corporate"
+              }
+            ]
+          },
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ]
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "exemption-does-not-bypass-pause",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "anthropic-corporate": {
+                "reserve": {
+                  "state": "paused"
+                }
+              }
+            },
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "reserve_exemptions": [
+              {
+                "identity": "claude-reviewer",
+                "account_id": "anthropic-corporate"
+              }
+            ]
+          },
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ]
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready"
+      }
+    },
+    {
+      "name": "primary-floor-remains",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "anthropic-corporate": {
+                "quota": {
+                  "state": "exhausted"
+                }
+              },
+              "anthropic-primary": {
+                "reserve": {
+                  "state": "floor-refused"
+                }
+              }
+            },
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "reserve_exemptions": [
+              {
+                "identity": "claude-reviewer",
+                "account_id": "anthropic-corporate"
+              }
+            ]
+          },
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ]
+        }
+      },
+      "expected": {
+        "status": "unavailable",
+        "account_id": null,
+        "reason": "accounts-unavailable"
+      }
+    },
+    {
+      "name": "primary-exemption-rejected",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "reserve_exemptions": [
+              {
+                "identity": "codex",
+                "account_id": "openai-primary"
+              }
+            ]
+          }
+        }
+      },
+      "error": "corporate account"
+    },
+    {
+      "name": "family-rejected",
+      "patch": {
+        "request": {
+          "family": "claude"
+        }
+      },
+      "error": "family"
+    },
+    {
+      "name": "identity-model-rejected",
+      "patch": {
+        "request": {
+          "identity_models": [
+            "gpt-other"
+          ]
+        }
+      },
+      "error": "identity model"
+    },
+    {
+      "name": "empty-model-rejected",
+      "patch": {
+        "request": {
+          "requested_models": []
+        }
+      },
+      "error": "model"
+    },
+    {
+      "name": "unknown-role-rejected",
+      "patch": {
+        "request": {
+          "identity": "codex-corp"
+        }
+      },
+      "error": "canonical role"
+    },
+    {
+      "name": "snapshot-version-rejected",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "version": 2
+          }
+        }
+      },
+      "error": "version"
+    },
+    {
+      "name": "unknown-snapshot-field-rejected",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "access_token": "synthetic"
+          }
+        }
+      },
+      "error": "unknown field"
+    },
+    {
+      "name": "negative-occupancy-rejected",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "active_leases": -1
+                }
+              }
+            }
+          }
+        }
+      },
+      "error": "active_leases"
+    },
+    {
+      "name": "boolean-occupancy-rejected",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "capacity": {
+                  "active_leases": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "error": "active_leases"
+    },
+    {
+      "name": "boolean-time-rejected",
+      "patch": {
+        "request": {
+          "now": true
+        }
+      },
+      "error": "now"
+    },
+    {
+      "name": "missing-time-holds",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "expires_at": null
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "reversed-time-holds",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "expires_at": 80
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory"
+      }
+    },
+    {
+      "name": "recovery-next-attempt",
+      "patch": {},
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "codex-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "codex-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "codex-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "codex-reviewer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "codex-reviewer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "hammer-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "hammer-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "hammer-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "hammer",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "hammer",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "remediator-codex",
+          "family": "codex",
+          "identity_models": [
+            "gpt-6"
+          ],
+          "requested_models": [
+            "gpt-6"
+          ],
+          "snapshot": {
+            "identity": "remediator-codex",
+            "requested_models": [
+              "gpt-6"
+            ],
+            "accounts": {
+              "openai-primary": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "openai-primary",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "claude-code-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "claude-code-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "claude-code-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "claude-code",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-code",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "claude-reviewer",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "claude-reviewer",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "hammer-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "hammer-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "remediator-claude",
+          "family": "claude",
+          "identity_models": [
+            "opus"
+          ],
+          "requested_models": [
+            "opus"
+          ],
+          "snapshot": {
+            "identity": "remediator-claude",
+            "requested_models": [
+              "opus"
+            ],
+            "accounts": {
+              "anthropic-corporate": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-unknown",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "readiness": {
+                  "state": "unknown"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "agy-login-a",
+        "reason": "evidence-unknown"
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-stale",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "readiness": {
+                  "expires_at": 99
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "agy-login-a",
+        "reason": "evidence-stale"
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-wrong-generation",
+      "patch": {
+        "request": {
+          "identity": "gemini-reviewer",
+          "family": "gemini",
+          "identity_models": [
+            "gemini-pro"
+          ],
+          "requested_models": [
+            "gemini-pro"
+          ],
+          "snapshot": {
+            "identity": "gemini-reviewer",
+            "requested_models": [
+              "gemini-pro"
+            ],
+            "accounts": {
+              "agy-login-a": {
+                "readiness": {
+                  "generation": "cfg-6"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "status": "hold",
+        "account_id": "agy-login-a",
+        "reason": "evidence-generation-mismatch"
+      }
+    },
+    {
+      "name": "order-is-declared-not-inferred",
+      "patch": {
+        "oauth": {
+          "identity_token_pools": {
+            "codex": [
+              "openai-primary",
+              "openai-corporate"
+            ]
+          }
+        }
+      },
+      "expected": {
+        "status": "selected",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready"
+      }
+    },
+    {
+      "name": "snapshot-boolean-version",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "version": true
+          }
+        }
+      },
+      "error": "version"
+    },
+    {
+      "name": "unknown-account",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "undeclared": {}
+            }
+          }
+        }
+      },
+      "error": "unknown account"
+    },
+    {
+      "name": "unknown-evidence-state",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "accounts": {
+              "openai-corporate": {
+                "quota": {
+                  "state": "okay"
+                }
+              }
+            }
+          }
+        }
+      },
+      "error": "evidence state"
+    },
+    {
+      "name": "duplicate-exemption",
+      "patch": {
+        "request": {
+          "snapshot": {
+            "reserve_exemptions": [
+              {
+                "identity": "codex",
+                "account_id": "openai-corporate"
+              },
+              {
+                "identity": "codex",
+                "account_id": "openai-corporate"
+              }
+            ]
+          }
+        }
+      },
+      "error": "duplicate exemption"
+    }
+  ]
+}

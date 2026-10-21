@@ -1,5 +1,11 @@
 CCX-04 implements `credential-capacity-expansion@aaef99e5bd2e` §2a/§3.
 
+ITP-10 adds [common account snapshot readers](../README.md#common-account-snapshot-readers-itp-10)
+for the shared Python owner's selection outcomes and fleet `identityPools`
+diagnostics. These APIs are additive: the routing and explicit-pin behavior
+described here remains active until the later consumer tickets. Snapshot
+metadata cannot replace lease acquisition, signing or cross-model checks.
+
 The quota reader separates `openai/oauth` from `openai/oauth-corp`, including
 model caps and AFH soft grounding. Corporate fallback requires confirmed
 admission; missing, degraded, unknown or capped corporate evidence is skipped.

@@ -2449,10 +2449,20 @@ changed-content segments still refuse ambiguous mapping. Context, offsets and
 changed-line order do not establish authority.
 Mapping refusals identify `region-moved` when the protected base lines no longer
 select a parent segment, `content-changed-by-author` when parent/reviewed content
-does not match, `not-covered-by-cited-finding` for file/line coverage failures,
-or `ambiguous:<n>` for multiple matching segment candidates. Without a rebase,
-shared base coordinates select both segments directly; changed content after
-review still cannot borrow the earlier finding. Immutable original reversal
+has no matching segment, `reviewed-parent-patch-differs` when the rebased whole-PR
+diffs differ (including unrelated files or earlier HAM edits),
+`not-covered-by-cited-finding` for file/line coverage failures,
+or `ambiguous:<n>` for multiple matching segment candidates. The segment-level
+`content-changed-by-author` label describes a content mismatch, not proof of who
+made the change. The old `finding-does-not-cover-region` reason is now
+`not-covered-by-cited-finding`; the old `rebased protected region patch differs or is ambiguous`
+diagnostic is split into `region-moved`, `content-changed-by-author`,
+`reviewed-parent-patch-differs` and `ambiguous:<n>` by the failing proof.
+Without a rebase, verified ancestry and shared base coordinates project the
+reviewed and parent spans directly. Earlier HAM edits may change the segment
+before a cited reversal; equality of the whole segment is not required.
+Finding coverage and the authorizing HAM patch's parent-state content proof
+remain required. Immutable original reversal
 proofs use the same parent-state mapping, including earlier HAM edits.
 Reviewed-parent content comparisons retain path, status and changed-content
 multisets while ignoring context and hunk partitioning. A citation with no later

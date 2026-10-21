@@ -443,15 +443,12 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
         if (rebased) {
-          if (reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('content-changed-by-author');
-        } else {
-          // Shared base coordinates establish provenance without a text search.
-          // An intervening author edit cannot borrow the earlier finding.
-          const source = protectedSegment(reviewedFiles, path, region, cache);
-          const target = protectedSegment(parentFiles, path, region, cache);
-          if (!source || !target) return reject('region-moved');
-          if (segmentContentIdentity(source) !== segmentContentIdentity(target)) return reject('content-changed-by-author');
+          if (reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
         }
+        // Direct ancestry already establishes shared base coordinates. Earlier
+        // HAM repairs may change the segment; whole-segment equality cannot
+        // attribute those changes to the author. Retain finding coverage and
+        // the authorizing HAM patch's parent-state content proof below.
         if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) {
           return reject('not-covered-by-cited-finding');
         }

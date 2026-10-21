@@ -15,14 +15,14 @@ export const review = (overrides = {}) => ({ node_id: 'PRR_cited', html_url: 'ht
 // The author hunk, in the coordinates of the base it was written against.
 const authorPatch = (line, added = '+start_unsafe()') => ({ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 1,
   patch: `@@ -${line} +${line},2 @@\n-start()\n${added}\n+log_startup()` });
-const message = (cites) => ['HAM repair', '', 'Worker-Class: hammer', 'Worker-Ticket: HAM',
-  'Closed-By: hammer (adversarial-pipe-mode)', `Reviewed-Head: ${reviewedHead}`,
+const message = (cites, reviewHead = reviewedHead) => ['HAM repair', '', 'Worker-Class: hammer', 'Worker-Ticket: HAM',
+  'Closed-By: hammer (adversarial-pipe-mode)', `Reviewed-Head: ${reviewHead}`,
   ...cites.map((cite) => `Reversal-Authorized-By: ${cite}`)].join('\n');
 
 // shift: how far the rebases moved the author hunk. reviewedPatch: the author
 // hunk as the cited review saw it, in the older base's coordinates.
 export async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=blocking'], reviews = [review()],
-  rebasedAdded, reviewedAdded, earlierHammerAdded, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
+  rebasedAdded, reviewedAdded, earlierHammerAdded, reviewHead = reviewedHead, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
   duplicatePrimary = false, duplicateReviewed = false, originalRecorded = false, originalAdded,
   originalLogin = 'the-hammer-lacey[bot]', originalParent = reviewedHead, snapshotCapped = false,
   originalLine = 10, snapshotStatus = 'ahead', hammerLogin = 'the-hammer-lacey[bot]', nullAuthor = false, builderOnly = false, parentExtraHunk = false, parentContext = '', reviewedContext = '', unrelated = true, attestationAuthor = null, attestationHead = head } = {}) {
@@ -35,7 +35,7 @@ export async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=bl
   const parentHead = earlierHammerAdded ? sha('3') : author;
   const ham = { sha: head, parents: [{ sha: parentHead }], author: nullAuthor ? null : { login: hammerLogin },
     committer: { login: 'the-hammer-lacey[bot]' },
-    commit: { verification: { verified: false, reason: 'unsigned' }, message: builderOnly ? 'Builder change\n\nWorker-Class: codex' : message(cites), author: { date: authoredAt }, committer: { date: '2026-10-11T17:30:00Z', email: 'the-hammer-lacey[bot]@users.noreply.github.com' } },
+    commit: { verification: { verified: false, reason: 'unsigned' }, message: builderOnly ? 'Builder change\n\nWorker-Class: codex' : message(cites, reviewHead), author: { date: authoredAt }, committer: { date: '2026-10-11T17:30:00Z', email: 'the-hammer-lacey[bot]@users.noreply.github.com' } },
     files: [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 2,
       patch: `@@ -${10 + shift},2 +${10 + shift} @@\n-${(earlierHammerAdded || rebasedAdded || '+start_unsafe()').slice(1)}\n-log_startup()\n+start()` }] };
   const earlierHammer = { ...ham, sha: parentHead, parents: [{ sha: author }],

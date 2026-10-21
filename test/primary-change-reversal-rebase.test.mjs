@@ -525,6 +525,7 @@ test('evaluator diagnostics explain nonexistent findings, patch mismatches and l
   for (const [options, reason] of [
     [{ cites: ['PRR_cited finding=2 kind=blocking'] }, 'finding-not-found'],
     [{ rebasedAdded: '+start_unsafe(retry=True)' }, 'content-changed-by-author'],
+    [{ parentExtraHunk: true }, 'reviewed-parent-patch-differs'],
     [{ reviews: [review({ body: review().body.replace('`10-11`', '`11`') })] }, 'not-covered-by-cited-finding'],
   ]) {
     const { result } = await collect(options);
@@ -532,6 +533,15 @@ test('evaluator diagnostics explain nonexistent findings, patch mismatches and l
     assert.deepEqual(result.missingEvidence.rejected.map((entry) => entry.reason), [reason]);
     assert.ok(result.missingEvidence.summary.includes(reason));
   }
+});
+
+test('whole-patch mismatch in an unrelated file has its own diagnostic', async () => {
+  const { evidence } = await collect();
+  evidence.reversalAuthorizations[0].parentFiles.push({ filename: 'src/other.mjs',
+    status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old()\n+new()' });
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['reviewed-parent-patch-differs']);
 });
 
 test('a historical snapshot must bind the same reversal patch, provenance and original coverage', async () => {
@@ -956,6 +966,33 @@ const terminalPolicyReview = () => review({ state: 'COMMENTED',
 const earlierHammerOptions = () => ({ earlierHammerAdded: '+generated_terminal_policy()',
   reviews: [terminalPolicyReview()], cites: ['PRR_cited finding=1 kind=non-blocking'] });
 
+test('direct ancestry permits a cited reversal after an earlier HAM changes the reviewed segment', async () => {
+  for (const nonBlocking of [false, true]) {
+    const citedReview = nonBlocking ? terminalPolicyReview() : review();
+    const options = { earlierHammerAdded: '+generated_terminal_policy()', shift: 0,
+      reviewHead: author, reviewToParent: 'ahead', reviews: [{ ...citedReview, commit_id: author }],
+      cites: [`PRR_cited finding=1 kind=${nonBlocking ? 'non-blocking' : 'blocking'}`] };
+    const { evidence, result } = await collect(options);
+    const authorization = evidence.reversalAuthorizations[0];
+    assert.equal(authorization.review.commit_id, evidence.primaryHead);
+    assert.equal(authorization.commit.parents[0].sha, sha('3'));
+    assert.notEqual(authorization.rebased, true);
+    assert.match(authorization.reviewedFiles[0].patch, /start_unsafe/);
+    assert.match(authorization.parentFiles[0].patch, /generated_terminal_policy/);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.missingEvidence, undefined);
+    // The earlier HAM edit does not waive citation, coverage, identity or patch proof.
+    assert.equal((await collect({ ...options, cites: [] })).result.ok, false);
+    assert.equal((await collect({ ...options, reviews: [{ ...citedReview, commit_id: author,
+      body: citedReview.body.replace('`10-11`', '`11`') }] })).result.ok, false);
+    assert.equal((await collect({ ...options, hammerLogin: 'fixture-builder' })).result.ok, false);
+    if (nonBlocking) assert.equal(checkPrimaryChange(evidence, head).ok, false);
+    authorization.commit.files[0].patch = authorization.commit.files[0].patch
+      .replace('-generated_terminal_policy()', '-different_content()');
+    assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, false);
+  }
+});
+
 test('REVAUTHVERIFY-01: current non-blocking finding authorizes reversal of an earlier hammer edit', async () => {
   const { evidence, result } = await collect(earlierHammerOptions());
   assert.equal(result.ok, true);
@@ -1021,15 +1058,10 @@ test('REVAUTHVERIFY-01: genuinely duplicate reviewed-state candidates refuse wit
   assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['ambiguous:2']);
 });
 
-test('REVAUTHVERIFY-01: intervening author content and moved regions cannot borrow a finding', async () => {
-  for (const rebased of [true, false]) {
+test('REVAUTHVERIFY-01: changed rebased content and moved regions cannot borrow a finding', async () => {
+  {
     const { evidence } = await collect(earlierHammerOptions());
     const authorization = evidence.reversalAuthorizations[0];
-    authorization.rebased = rebased;
-    if (!rebased) {
-      authorization.reviewedFiles = structuredClone(authorization.parentFiles);
-      authorization.review.body = authorization.review.body.replace('`10-11`', '`15-16`');
-    }
     authorization.parentFiles[0].patch = authorization.parentFiles[0].patch
       .replace('generated_terminal_policy()', 'author_changed_policy()');
     authorization.commit.files[0].patch = authorization.commit.files[0].patch

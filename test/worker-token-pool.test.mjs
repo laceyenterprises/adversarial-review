@@ -195,3 +195,14 @@ test('ITP-14 enrolling a pool cannot silently reinterpret an existing personal c
   assert.equal(result.reason, 'legacy-account-pin-requires-migration');
   assert.equal(result.tokenAccountId, undefined);
 });
+
+test('ITP-14 model/selection failures hold before closer legacy error recovery', async () => {
+  for (const failModel of [false, true]) {
+    const result = await resolveCloserDispatchHarness({ workerClass: 'hammer', env: {},
+      modelForWorkerClass: () => { if (failModel) throw new Error('synthetic model unavailable'); return 'gpt-6'; },
+      selectAccountImpl: async () => { throw new Error('synthetic owner unavailable'); },
+      execFileImpl: () => assert.fail('no legacy fleet read') });
+    assert.equal(result.hold, true);
+    assert.equal(result.reason, 'evidence-unknown');
+  }
+});

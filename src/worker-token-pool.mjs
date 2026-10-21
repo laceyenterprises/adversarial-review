@@ -65,7 +65,11 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   const identity = canonical(primary);
   if (!Object.hasOwn(FAMILIES, identity)
     || (kind === 'hammer' ? !identity.startsWith('hammer') : !identity.startsWith('remediator-'))) return null;
-  const select = role => selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options });
+  const select = async role => {
+    try { return await selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options }); }
+    catch { return { identity: role, workerClass: role, pooled: true,
+      hold: true, status: 'held', reason: 'evidence-unknown' }; }
+  };
   const account = await select(identity);
   if (!account) return null; // Undeclared installations retain compatibility.
   const base = { ...account, workerClass: identity, fellBack: false };

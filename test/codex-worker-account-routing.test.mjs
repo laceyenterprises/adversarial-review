@@ -81,7 +81,7 @@ for (const [label, mutate, expected, reason] of [
   const policy = codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', 'hammer', { env: corporateEnv });
   assert.equal(policy, 'corporate-first');
   assert.equal(isAutomaticCodexAccountPolicy(policy), true);
-  const selected = selectCodexWorkerAccount(snapshot, { policy, fallThroughUnknown: false });
+  const selected = selectCodexWorkerAccount(snapshot, { policy });
   assert.equal(selected.provider, expected ?? undefined);
   assert.equal(selected.hold, expected === null);
   const hammer = await resolveCloserDispatchHarness({ workerClass: 'hammer', codexAccountPolicy: policy,

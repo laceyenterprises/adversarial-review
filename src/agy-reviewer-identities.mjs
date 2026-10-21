@@ -730,6 +730,7 @@ function createAgyReviewerIdentityPool({
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
         initialFailureReasonSets: new Set(),
         needsProbe: false,
+        probeFailureReason: null,
         draining: !identity.hqOwner,
         drainingSince: identity.hqOwner ? null : now(),
         drainAlertedAt: null,
@@ -831,14 +832,17 @@ function createAgyReviewerIdentityPool({
         // Authentication succeeded, but cannot attest the new declaration.
         // Keep admission fenced without inventing an authentication failure.
         row.auth = { needsProbe: true, failures: row.auth?.failures || 0, retryAt: 0 };
+        state.probeFailureReason = null;
         isolate(state, ['holder declaration changed during authenticated probe']);
       } else if (ok) {
         row.auth = null;
         state.needsProbe = false;
+        state.probeFailureReason = null;
         if (!state.checkFailed && !state.draining && state.adopted.length === 0) transition(state, true, []);
       } else {
         const failures = (row.auth?.failures || 0) + 1;
         row.auth = { needsProbe: true, failures, retryAt: now() + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(failures - 1, 4)) };
+        state.probeFailureReason = reason;
         transition(state, false, [reason]);
       }
     }).catch(error => transition(state, false, [`holder probe state unreadable: ${error.message}`]))
@@ -1094,7 +1098,9 @@ function createAgyReviewerIdentityPool({
           }
         }
         if (state.needsProbe) {
-          transition(state, false, ['authenticated holder probe required']);
+          // A cheap pass cannot supersede authenticated failure evidence while
+          // the durable retry deadline prevents a replacement probe.
+          transition(state, false, [state.probeFailureReason || 'authenticated holder probe required']);
           startProbe(state);
           return;
         }

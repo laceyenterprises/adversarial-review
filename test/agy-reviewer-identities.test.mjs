@@ -812,10 +812,20 @@ test('AGYDRIFT-01: initial failures that differ every pass stop logging at the b
 
 test('CCX-08: a failed review isolates only its identity, and a passing readiness check re-admits it', async () => {
   const fake = makeFakeInstall();
+  const addedProbe = Promise.withResolvers();
+  const ownerProbe = Promise.withResolvers();
+  let pool;
   try {
     const log = quietLog();
     let at = Date.now();
-    const pool = makePool(fake, { log, now: () => at });
+    pool = makePool(fake, {
+      log, now: () => at,
+      runPinnedImpl: async (options) => {
+        if (options.user === REVIEWER_A && options.args[0] === 'probe') await addedProbe.promise;
+        return fake.runPinned(options);
+      },
+      checkHqOwnerAuthImpl: () => ownerProbe.promise,
+    });
     assert.equal(await pool.refreshReadiness(), 3);
     const failing = { ok: false, failureClass: 'reviewer-exit', error: 'agy exited 1' };
     const adapter = { describe: () => ({ capabilities: { agyReviewerIdentity: true } }) };
@@ -840,6 +850,7 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
 
     // Its probe keeps failing: it stays out.
     writeFileSync(join(fake.home(REVIEWER_A), '.probe-fails'), '');
+    addedProbe.resolve();
     assert.equal(await pool.refreshReadiness(), 2);
     await pool.settleProbes();
     assert.equal(pool.readyCount(), 2);
@@ -863,10 +874,15 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
     await assert.rejects(runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => { throw new Error('boom'); }), /boom/);
     assert.equal(pool.snapshot().find((state) => state.user === HQ_OWNER).ready, false);
     assert.equal(pool.snapshot().every((state) => !state.leased), true);
+    ownerProbe.resolve({ ok: true });
+    await pool.settleProbes();
     await pool.refreshReadiness();
     await pool.settleProbes();
     assert.equal(pool.readyCount(), 3, 'the HQ owner is re-admitted by its own auth probe');
   } finally {
+    addedProbe.resolve();
+    ownerProbe.resolve({ ok: true });
+    await pool?.settleProbes();
     fake.cleanup();
   }
 });

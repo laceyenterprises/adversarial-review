@@ -276,6 +276,42 @@ for (const user of [owner, users[0]]) test(`ITP-11: failed release immediately i
   await p.release(next);
 });
 
+for (const user of [owner, users[0]]) test(`ITP-11: readiness retains failed probe diagnostics during cooldown for ${user}`, async t => {
+  const root = fixture(t);
+  let at = 1000;
+  let calls = 0;
+  let authenticated = false;
+  const p = pool(root, {
+    now: () => at, loadIdentities: () => [user], loadTokenPools: () => declarations([user]),
+    checkHqOwnerAuthImpl: async () => { calls++; return { ok: authenticated, reason: 'authentication-required' }; },
+    runPinnedImpl: async ({ args }) => {
+      if (args[0] === 'probe') {
+        calls++;
+        return authenticated ? { code: 0, stdout: 'probe.ok=yes\n' }
+          : { code: 1, stdout: 'probe.ok=no\nprobe.reason=authentication-required\n' };
+      }
+      return { code: 0, stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+    },
+  });
+  const lease = await p.acquire();
+  await p.release(lease, { failed: true });
+  await p.settleProbes();
+  const reasons = p.snapshot()[0].reasons;
+  assert.match(reasons[0], /authentication-required/);
+  await p.refreshReadiness();
+  await p.settleProbes();
+  assert.deepEqual(p.snapshot()[0].reasons, reasons, 'cheap checks preserve the authenticated failure evidence');
+  assert.equal(calls, 1, 'readiness retains the durable retry deadline');
+  assert.equal(p.projection().free, 0);
+  authenticated = true;
+  at += 60_001;
+  await p.refreshReadiness();
+  await p.settleProbes();
+  assert.equal(calls, 2);
+  assert.equal(p.readyCount(), 1);
+  assert.deepEqual(p.snapshot()[0].reasons, []);
+});
+
 test('ITP-11: acquisition synchronizes a peer authentication hold and initiates recovery', async t => {
   const root = fixture(t);
   const probe = Promise.withResolvers();

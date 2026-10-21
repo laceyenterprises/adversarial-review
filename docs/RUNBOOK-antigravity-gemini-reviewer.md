@@ -236,6 +236,8 @@ generation keeps admission fenced for a fresh probe without adding failures or
 backoff. Sibling holders remain usable. Only a successful authenticated probe for
 the current generation clears the hold. Quota cooldown stays in the
 existing username-keyed store and does not change role or signing identity.
+Within a watcher, cheap readiness passes retain the latest authenticated probe
+failure diagnostic throughout its cooldown; successful recovery clears it.
 
 **Readiness and isolation.** Each drain that has a leasing Gemini candidate
 runs `status` and `settings` on the keychain helper for every added identity.

@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';

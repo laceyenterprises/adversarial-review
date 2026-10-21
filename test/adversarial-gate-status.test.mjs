@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 
 import {
   buildAdversarialGateSnapshot,
@@ -381,11 +382,12 @@ test('a newer clean pending job cannot release the gate over same-PR active reme
   const base = path.join(rootDir, 'data', 'follow-up-jobs');
   mkdirSync(path.join(base, 'in-progress'), { recursive: true });
   mkdirSync(path.join(base, 'pending'), { recursive: true });
-  writeFileSync(path.join(base, 'in-progress', 'active.json'), JSON.stringify(makeJob({
+  const prefix = followUpJobFilePrefix(makeJob().repo, makeJob().prNumber);
+  writeFileSync(path.join(base, 'in-progress', `${prefix}active.json`), JSON.stringify(makeJob({
     status: 'in_progress',
     claimedAt: '2026-04-21T08:00:00.000Z',
   })));
-  writeFileSync(path.join(base, 'pending', 'new-clean.json'), JSON.stringify(makeJob({
+  writeFileSync(path.join(base, 'pending', `${prefix}new-clean.json`), JSON.stringify(makeJob({
     status: 'pending',
     createdAt: '2026-04-21T09:00:00.000Z',
     reviewBody: '## Summary\nClean.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
@@ -1216,7 +1218,7 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
     const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(completedDir, { recursive: true });
     writeFileSync(
-      path.join(completedDir, 'job-54.json'),
+      path.join(completedDir, `${followUpJobFilePrefix(repo, prNumber)}posted.json`),
       `${JSON.stringify({
         jobId: 'job-54',
         repo,
@@ -2880,7 +2882,7 @@ test('projectAdversarialGateStatus adopts a settled fallback verdict for quota-c
     const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(completedDir, { recursive: true });
     writeFileSync(
-      path.join(completedDir, 'job-quota-fallback.json'),
+      path.join(completedDir, `${followUpJobFilePrefix(repo, prNumber)}quota-fallback.json`),
       `${JSON.stringify({
         jobId: 'job-quota-fallback',
         repo,

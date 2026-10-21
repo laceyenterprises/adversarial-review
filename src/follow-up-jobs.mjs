@@ -1,4 +1,5 @@
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
+import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -1025,13 +1026,17 @@ function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
   return null;
 }
 
-function listFollowUpJobsInDir(rootDir, key) {
+// Filename narrowing requires both repo and prNumber; partial or omitted filters
+// read the whole bucket. Callers must still check each parsed job's identity.
+function listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo = false } = {}) {
   const dir = getFollowUpJobDir(rootDir, key);
   if (!existsSync(dir)) return [];
+  const prefix = repo != null && prNumber != null ? followUpJobFilePrefix(repo, prNumber) : null;
 
   const jobs = [];
   for (const name of readdirSync(dir)
-    .filter((name) => name.endsWith('.json'))
+    .filter((name) => name.endsWith('.json') && (prefix === null || (caseInsensitiveRepo
+      ? name.toLowerCase().startsWith(prefix.toLowerCase()) : name.startsWith(prefix))))
     .sort()) {
     const jobPath = join(dir, name);
     try {
@@ -1699,6 +1704,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   if (!targetRepo || !Number.isFinite(targetPr)) {
     return { completedRoundsForPR: 0, consecutiveNonBlockingRounds: 0, latestMaxRounds: null, latestJobId: null };
   }
+  const prefix = followUpJobFilePrefix(targetRepo, targetPr);
 
   let completedRoundsForPR = 0;
   const infrastructureRefunds = new Set();
@@ -1779,7 +1785,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     let names;
     try {
       names = readdirSync(dir).filter((name) => name.endsWith('.json')
-        && (!refundsOnly || name.startsWith(`${sanitizeRepo(targetRepo)}-pr-${targetPr}-`)));
+        && name.startsWith(prefix));
     } catch (err) {
       console.error(
         `[follow-up-jobs] Failed to list ${key} directory while summarizing ` +
@@ -2009,10 +2015,6 @@ function voidSingleReviewCredit({
     previousCompletedRounds: before.completedRoundsForPR,
     completedRoundsForPR: after.completedRoundsForPR,
   };
-}
-
-function sanitizeRepo(repo) {
-  return String(repo ?? '').replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-');
 }
 
 function sanitizeTimestamp(timestamp) {

@@ -1098,7 +1098,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   // made review evidence unsettled. Operator retriggers can queue a worker
   // without resetting ci-blocked; neither row status nor job recency waives it.
   const hasActiveSamePrRemediation = ['pending', 'inProgress'].some((dir) =>
-    listFollowUpJobsInDir(rootDir, dir).some(({ job }) =>
+    listFollowUpJobsInDir(rootDir, dir, { repo, prNumber, caseInsensitiveRepo: true }).some(({ job }) =>
       String(job?.repo || '').toLowerCase() === String(repo || '').toLowerCase()
       && Number(job?.prNumber) === Number(prNumber)));
   // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,

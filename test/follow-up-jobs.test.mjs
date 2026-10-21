@@ -1,8 +1,10 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import { activeRemediationStopDecision } from '../src/follow-up-lifecycle.mjs';
@@ -76,7 +78,6 @@ function writeLedgerTerminalJob(rootDir, {
 } = {}) {
   const dir = getFollowUpJobDir(rootDir, status);
   mkdirSync(dir, { recursive: true });
-  const jobPath = path.join(dir, fileName);
   const job = {
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
     kind: 'adversarial-review-follow-up',
@@ -116,6 +117,7 @@ function writeLedgerTerminalJob(rootDir, {
     job.remediationWorker = remediationWorker;
   }
 
+  const jobPath = path.join(dir, `${followUpJobFilePrefix(job.repo, job.prNumber)}${fileName}`);
   writeFollowUpJob(jobPath, job);
 }
 

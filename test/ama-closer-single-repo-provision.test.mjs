@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -158,16 +159,17 @@ test('AMA defers closer dispatch while a remediation job is pending or in progre
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'job.json'), JSON.stringify({
-      jobId: 'job', repo: 'laceyenterprises/finch', prNumber: 2, status,
+    const identity = closerArgs(rootDir, 'sample/project');
+    writeFileSync(join(dir, 'sample__project-pr-2-active.json'), JSON.stringify({
+      jobId: 'sample__project-pr-2-active', repo: 'sample/project', prNumber: 2, status,
     }));
     const deps = testDeps();
     const result = await maybeDispatchAmaCloser({
-      ...closerArgs(rootDir, 'laceyenterprises/finch'), ...deps,
+      ...identity, ...deps,
     });
     assert.equal(result.dispatched, false);
     assert.equal(result.reason, 'active-remediation-job');
     assert.equal(deps.calls.length, 0);
-    assert.equal(existsSync(amaAuditFilePath(join(rootDir, 'hq-root'), 'laceyenterprises/finch', 2, HEAD)), false);
+    assert.equal(existsSync(amaAuditFilePath(join(rootDir, 'hq-root'), 'sample/project', 2, HEAD)), false);
   }
 });

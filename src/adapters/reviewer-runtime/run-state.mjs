@@ -133,7 +133,7 @@ function readActiveReviewerRunRecords(rootDir) {
 // mistake a damaged record for an absent one (CCX-08 agy identity lease
 // recovery). Returns every active record plus the file names it could not
 // read or parse; a record removed between listing and reading is simply gone.
-function scanActiveReviewerRunRecords(rootDir) {
+function scanActiveReviewerRunRecords(rootDir, { includeTerminalAgyLeases = false } = {}) {
   const dir = reviewerRunStateDir(rootDir);
   if (!existsSync(dir)) return { records: [], unreadable: [] };
   const records = [];
@@ -149,7 +149,9 @@ function scanActiveReviewerRunRecords(rootDir) {
     }
     try {
       const parsed = normalizeReviewerRunRecord(JSON.parse(raw));
-      if (ACTIVE_RUN_STATES.has(parsed.state)) records.push(parsed);
+      const holder = parsed.subjectContext?.agyHolderLease || parsed.subjectContext?.agyIdentityLease;
+      if (ACTIVE_RUN_STATES.has(parsed.state)
+        || (includeTerminalAgyLeases && holder?.user && holder?.reviewId)) records.push(parsed);
     } catch (err) {
       unreadable.push({ name, error: err?.message || String(err) });
     }

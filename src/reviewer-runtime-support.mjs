@@ -141,7 +141,9 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
   });
   const readyUsers = readyIdentities === null ? [] : identityPool.readyUsers?.() || [];
   const report = (limit, brokerLimit = null) => {
+    const projection = readyIdentities !== null ? identityPool.projection?.() : null;
     logger.log?.(`[agy-identities] ready=${readyUsers.join(',') || '<none>'} limit=${limit ?? '<unknown>'} brokerLimit=${brokerLimit ?? '<unknown>'} leasingCandidates=${leasingCandidates.length}/${geminiCandidates.length}`);
+    if (projection) logger.log?.(`[agy-holders] ${JSON.stringify(projection)}`);
     return limit;
   };
   // Clear prior per-candidate evidence on each pass (config and readiness can

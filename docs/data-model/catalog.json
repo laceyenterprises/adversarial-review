@@ -836,6 +836,20 @@
       "owner": "watcher reviewer spawn fences and Gemini dispatch reservations"
     },
     {
+      "id": "agy-holder-leases",
+      "title": "agy Execution Holder Leases",
+      "path": "docs/data-model/agy-holder-leases.md",
+      "store": "<resolved adversarial review state directory>/agy-holder-leases/<user>.json",
+      "schemaSurface": "src/agy-holder-leases.mjs",
+      "relatedSchemaSurfaces": [
+        "src/agy-reviewer-identities.mjs",
+        "src/reviewer-spawn-settle.mjs"
+      ],
+      "timestampSource": "auth.retryAt is local epoch milliseconds; lease generations are unique IDs, not expiries",
+      "recovery": "The local receipt and releasing guard remain until durable release completes; cleanup or process-drain failure retains the generation-fenced claim; dead-owner reclaim retries workspace cleanup from lease.reviewId under the holder lock; failed drained release and acquisition-discovered auth holds immediately start isolated recovery; obsolete successful probes add no authentication backoff",
+      "owner": "Gemini reviewer holder admission"
+    },
+    {
       "id": "reviewer-run-records",
       "title": "Reviewer Run Records",
       "path": "docs/data-model/reviewer-run-records.md",
@@ -849,7 +863,7 @@
         "src/watcher-reviewer-pool.mjs",
         "src/reviewer-token-leases.mjs"
       ],
-      "owner": "reviewer runtime adapters and agy identity lease recovery"
+      "owner": "reviewer runtime adapters and agy holder lease recovery"
     },
     {
       "id": "review-failure-archive",

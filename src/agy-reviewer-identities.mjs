@@ -1,6 +1,6 @@
 import { resolveHqRoot } from './hq-root.mjs';
-// CCX-08 — multi-identity agy reviewer (credential-capacity-expansion SPEC
-// §2b, §3 CCX-08).
+// ITP-11: agy logins are execution holders for gemini-reviewer. CCX-08
+// identity-named exports/env fields remain compatibility transport only.
 //
 // `reviewer.gemini.identities` is an ordered list of OS users. Unset (or a
 // list naming only the HQ owner) is one identity: the HQ owner the watcher
@@ -26,14 +26,15 @@ import { resolveHqRoot } from './hq-root.mjs';
 // launchd starts for that user), so a surviving agy never shares a HOME with
 // the next review.
 //
-// Leases live in watcher memory, and each one is also written into the
-// reviewer run record (`subjectContext.agyIdentityLease`). cli-direct reviewer
+// Holder claims are durable, locked by OS user, and mirrored into the
+// reviewer run record (`subjectContext.agyHolderLease`, with the old
+// `agyIdentityLease` field retained for rolling readers). cli-direct reviewer
 // children outlive a watcher bounce, so every readiness pass re-reads the
 // active run records and keeps an identity out while a review from a previous
 // watcher still runs on it.
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -43,8 +44,11 @@ import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from './gemini-quota-cooldown.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
-import { isPgidAlive } from './process-group-identity.mjs';
-import { resolveGeminiReviewerIdentities, resolveGeminiRuntime } from './role-config.mjs';
+import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
+import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveIdentityTokenPools } from './role-config.mjs';
+import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
+import { createAgyHolderLeaseStore, agyLeaseOwnerAlive } from './agy-holder-leases.mjs';
+import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 // Fixed install path of the pinned commands (CCX-07 setup-reviewer-os-user.sh).
@@ -625,6 +629,8 @@ function createAgyReviewerIdentityPool({
   hqOwner = resolveHqOwner(),
   loadIdentities = () => resolveGeminiReviewerIdentities({ env }),
   resolveRuntime = () => resolveGeminiRuntime({ env }),
+  loadTokenPools = () => resolveIdentityTokenPools({ env }),
+  resolveModel = () => resolveGeminiAntigravityModel({ env }),
   runPinnedImpl = runPinnedCommand,
   checkHqOwnerAuthImpl = defaultCheckHqOwnerAuth,
   readBootstrapRecordImpl = (user) => readBootstrapRecord(user, { env }),
@@ -635,9 +641,11 @@ function createAgyReviewerIdentityPool({
     rootDir: runStateRootDir, env, nowMs: now(), log, hqOwner, identityUser,
   }),
   // `{ records, unreadable }`; a plain array is taken as a complete read.
-  readActiveRunRecordsImpl = () => scanActiveReviewerRunRecords(runStateRootDir),
+  readActiveRunRecordsImpl = () => scanActiveReviewerRunRecords(runStateRootDir, { includeTerminalAgyLeases: true }),
   readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
   isPgidAliveImpl = isPgidAlive,
+  verifyPgidIdentityImpl = verifyPgidIdentity,
+  isLeaseOwnerAliveImpl = agyLeaseOwnerAlive,
   deliverAlertImpl = deliverAlert,
   alertAfterMs = IDENTITY_ALERT_AFTER_MS,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -645,7 +653,9 @@ function createAgyReviewerIdentityPool({
   leasePollMs = LEASE_POLL_MS,
   readinessMaxAgeMs = READINESS_MAX_AGE_MS,
 } = {}) {
+  const holderStore = createAgyHolderLeaseStore(resolveAdversarialReviewStateDir(runStateRootDir, env));
   const states = new Map();
+  let readinessGeneration = null;
   const probes = new Map();
   // Pinned-command calls the pool itself has running as a user (readiness,
   // probe, cleanup). They look like review processes to agyReviewSurvivors.
@@ -676,18 +686,34 @@ function createAgyReviewerIdentityPool({
   }
 
   function currentPlan() {
-    let runtime;
-    let identities;
     try {
-      runtime = resolveRuntime();
-      identities = runtime === 'antigravity' ? loadIdentities() : [];
-    } catch (err) {
-      // An unreadable config leaves the pre-CCX-08 path in charge rather than
-      // guessing at identities.
-      log.warn?.(`[agy-identities] reviewer.gemini.identities unreadable; using the HQ owner only: ${err?.message || err}`);
-      return resolveAgyReviewerIdentityPlan({ identities: [], runtime: 'cli', hqOwner, env });
+      const runtime = resolveRuntime();
+      if (runtime !== 'antigravity') return resolveAgyReviewerIdentityPlan({ runtime, hqOwner, env });
+      const legacy = loadIdentities() || [];
+      const oauth = readIdentityTokenPools(loadTokenPools(), { legacyGeminiHolders: legacy.length ? legacy : undefined });
+      const members = oauth.identity_token_pools['gemini-reviewer'];
+      const users = members ? members.map(id => oauth.token_accounts[id].holder_user) : (legacy.length ? legacy : [hqOwner]);
+      const plan = resolveAgyReviewerIdentityPlan({ identities: users, runtime, hqOwner, env });
+      // Antigravity always has one slot per holder, including an owner-only
+      // installation. Other runtimes retain their existing broker path.
+      plan.multi = true;
+      plan.identities = [...new Set(users)].flatMap(user => {
+        const refusal = identityRefusal(user, { workerUsers: resolveDispatchWorkerUsers(env) });
+        if (refusal) return [];
+        const index = members ? users.indexOf(user) : -1;
+        return [{ user, hqOwner: user === hqOwner,
+          tokenAccountId: members ? members[index] : `agy-${createHash('sha256').update(user).digest('hex').slice(0, 32)}`,
+          allowedModels: members ? oauth.token_accounts[members[index]].allowed_models : null }];
+      });
+      // Fingerprint the validated non-secret declaration. A readiness result
+      // from a prior membership/model generation cannot admit new work.
+      plan.model = resolveModel();
+      plan.generation = createHash('sha256').update(JSON.stringify({ holders: plan.identities, model: plan.model })).digest('hex');
+      return plan;
+    } catch (error) {
+      log.warn?.(`[agy-identities] holder declaration unreadable; admission held: ${error.message}`);
+      return { multi: true, hqOwner, identities: [], refused: [], generation: 'invalid' };
     }
-    return resolveAgyReviewerIdentityPlan({ identities, runtime, hqOwner, env });
   }
 
   function stateFor(identity) {
@@ -704,6 +730,7 @@ function createAgyReviewerIdentityPool({
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
         initialFailureReasonSets: new Set(),
         needsProbe: false,
+        probeFailureReason: null,
         draining: !identity.hqOwner,
         drainingSince: identity.hqOwner ? null : now(),
         drainAlertedAt: null,
@@ -779,7 +806,9 @@ function createAgyReviewerIdentityPool({
   // the background so a watcher pass never waits for the bounded helper call.
   function startProbe(state) {
     if (probes.has(state.user)) return;
-    const run = (async () => {
+    const probeGeneration = currentPlan().generation;
+    const run = holderStore.update(state.user, async row => {
+      if (row.lease || row.auth?.retryAt > now()) return;
       let ok = false;
       let reason = 'readiness probe failed';
       try {
@@ -799,13 +828,25 @@ function createAgyReviewerIdentityPool({
       } catch (err) {
         reason = `readiness probe threw: ${err?.message || err}`;
       }
-      if (ok) {
+      if (ok && probeGeneration !== currentPlan().generation) {
+        // Authentication succeeded, but cannot attest the new declaration.
+        // Keep admission fenced without inventing an authentication failure.
+        row.auth = { needsProbe: true, failures: row.auth?.failures || 0, retryAt: 0 };
+        state.probeFailureReason = null;
+        isolate(state, ['holder declaration changed during authenticated probe']);
+      } else if (ok) {
+        row.auth = null;
         state.needsProbe = false;
+        state.probeFailureReason = null;
         if (!state.checkFailed && !state.draining && state.adopted.length === 0) transition(state, true, []);
       } else {
+        const failures = (row.auth?.failures || 0) + 1;
+        row.auth = { needsProbe: true, failures, retryAt: now() + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(failures - 1, 4)) };
+        state.probeFailureReason = reason;
         transition(state, false, [reason]);
       }
-    })().finally(() => probes.delete(state.user));
+    }).catch(error => transition(state, false, [`holder probe state unreadable: ${error.message}`]))
+      .finally(() => probes.delete(state.user));
     probes.set(state.user, run);
   }
 
@@ -903,7 +944,7 @@ function createAgyReviewerIdentityPool({
   // reviewer child can be between extraction and starting agy, where the
   // survivor check sees nothing. The identities stay out until the record is
   // repaired or removed.
-  function leasesFromRunRecords() {
+  async function leasesFromRunRecords() {
     let records;
     try {
       const scan = readActiveRunRecordsImpl() || [];
@@ -922,12 +963,18 @@ function createAgyReviewerIdentityPool({
     }
     const byUser = new Map();
     for (const record of records) {
-      const held = record?.subjectContext?.agyIdentityLease;
+      const held = record?.subjectContext?.agyHolderLease || record?.subjectContext?.agyIdentityLease;
       if (!held?.user || !held.reviewId) continue;
       if (states.get(held.user)?.lease?.reviewId === held.reviewId) continue;
       let running;
       try {
-        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : true;
+        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : record.state === 'launching';
+        if (running && ['completed', 'failed', 'cancelled'].includes(record.state)) {
+          const identity = await verifyPgidIdentityImpl(record.pgid, record.spawnedAt);
+          // A proven recycled leader is not this review. Unreadable identity
+          // evidence (including an exited leader with live descendants) holds.
+          if (!identity.match && identity.startedAt) running = false;
+        }
       } catch {
         running = true;
       }
@@ -968,7 +1015,8 @@ function createAgyReviewerIdentityPool({
       try { record = entry.sessionUuid ? readRunRecordImpl(entry.sessionUuid) : null; } catch { record = null; }
       if (record?.state === 'failed') state.needsProbe = true;
       if (!state.hqOwner) {
-        await cleanupAgyReviewWorkspace({ user: state.user, reviewId: entry.reviewId, runPinnedImpl: runHelper, log });
+        const cleanup = await cleanupAgyReviewWorkspace({ user: state.user, reviewId: entry.reviewId, runPinnedImpl: runHelper, log });
+        if (!cleanup.ok) state.pendingCleanup.add(entry.reviewId);
       }
     }
     if (!state.hqOwner) setDraining(state, true);
@@ -997,12 +1045,24 @@ function createAgyReviewerIdentityPool({
         log.error?.(`[agy-identities] identity=${refused.user} ${refused.reason}`);
       }
     }
-    const runningLeases = leasesFromRunRecords();
+    const runningLeases = await leasesFromRunRecords();
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
       if (state.releasing) return;
+      if (state.pendingRelease) {
+        await release(state.lease, state.pendingRelease);
+        if (state.pendingRelease) return;
+      }
       try {
+        const durable = holderStore.read(state.user);
+        state.foreignLease = durable.lease && durable.lease.generation !== state.lease?.generation ? durable.lease : null;
+        if (durable.auth?.needsProbe) state.needsProbe = true;
         if (await applyAdoptedLeases(state, runningLeases === null ? null : (runningLeases.get(identity.user) || []))) return;
+        if (durable.lease && durable.lease.generation !== state.lease?.generation
+          && isLeaseOwnerAliveImpl(durable.lease.ownerPid)) {
+          transition(state, false, ['holder leased by another watcher']);
+          return;
+        }
         if (readQuotaCooldownImpl(identity.user)) return;
         if (!identity.hqOwner) {
           if (state.draining && !state.lease) {
@@ -1026,21 +1086,38 @@ function createAgyReviewerIdentityPool({
             return;
           }
         }
+        if (durable.lease && !state.lease) {
+          const reclaimed = await holderStore.update(state.user, async row => {
+            if (row.lease && !(await canReclaimHolder(state, row.lease))) return false;
+            row.lease = null;
+            return true;
+          });
+          if (!reclaimed) {
+            transition(state, false, ['holder occupancy could not be cleared']);
+            return;
+          }
+        }
         if (state.needsProbe) {
+          // A cheap pass cannot supersede authenticated failure evidence while
+          // the durable retry deadline prevents a replacement probe.
+          transition(state, false, [state.probeFailureReason || 'authenticated holder probe required']);
           startProbe(state);
           return;
         }
         transition(state, true, []);
+      } catch (error) {
+        transition(state, false, [`holder state unreadable: ${error.message}`]);
       } finally {
         maybeAlertDraining(state);
       }
     }));
     lastReadinessAt = now();
-    return readyCount(plan);
+    readinessGeneration = plan.generation;
+    return readyCount(currentPlan());
   }
 
   function readinessStale(plan) {
-    if (lastReadinessAt === null || now() - lastReadinessAt >= readinessMaxAgeMs) return true;
+    if (readinessGeneration !== plan.generation || lastReadinessAt === null || now() - lastReadinessAt >= readinessMaxAgeMs) return true;
     return plan.identities.some((identity) => !identity.hqOwner && !states.has(identity.user));
   }
 
@@ -1054,17 +1131,57 @@ function createAgyReviewerIdentityPool({
   }
 
   function readyUsers(plan = currentPlan()) {
-    return plan.identities.filter((identity) => states.get(identity.user)?.ready && !readQuotaCooldownImpl(identity.user))
+    if (readinessGeneration !== plan.generation) return [];
+    return plan.identities.filter(identity => !identity.allowedModels || identity.allowedModels.includes(plan.model))
+      .filter((identity) => states.get(identity.user)?.ready && !readQuotaCooldownImpl(identity.user))
       .map((identity) => identity.user);
   }
 
-  function tryAcquire(plan, { reviewId }) {
+  async function canReclaimHolder(state, lease) {
+    if (isLeaseOwnerAliveImpl(lease.ownerPid)) return false;
+    const records = await leasesFromRunRecords();
+    if (records === null || records.get(state.user)?.length) return false;
+    // The old watcher's in-memory cleanup queue did not survive its exit.
+    // Recover it from the durable claim before clearing the cross-watcher fence.
+    if (!state.hqOwner) state.pendingCleanup.add(lease.reviewId);
+    return state.hqOwner || (await checkDrained(state)).drained;
+  }
+
+  async function tryAcquire(plan, { reviewId }) {
+    if (readinessGeneration !== plan.generation) return null;
     for (const identity of plan.identities) {
       const state = stateFor(identity);
+      if (identity.allowedModels && !identity.allowedModels.includes(plan.model)) continue;
       if (!state.ready || state.lease || state.releasing || state.draining || state.adopted.length || readQuotaCooldownImpl(identity.user)) continue;
-      const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
-      state.lease = lease;
-      return lease;
+      // Reserve locally before awaiting the cross-watcher CAS.
+      state.releasing = true;
+      try {
+        const lease = await holderStore.update(identity.user, async row => {
+          if (row.auth?.needsProbe) {
+            isolate(state, ['authenticated holder probe required']);
+            return null;
+          }
+          if (row.lease) {
+            // A dead watcher can leave a live reviewer. Re-read run/process
+            // evidence under the holder lock; heartbeat age grants no release.
+            if (!(await canReclaimHolder(state, row.lease))) return null;
+          }
+          if (currentPlan().generation !== plan.generation || !state.ready || state.needsProbe) return null;
+          const receipt = { identity: 'gemini-reviewer', tokenAccountId: identity.tokenAccountId,
+            user: identity.user, hqOwner: identity.hqOwner, reviewId,
+            generation: randomUUID(), evidenceGeneration: plan.generation, ownerPid: process.pid,
+            selectionReason: identity === plan.identities[0] ? 'preferred-ready' : 'fallback-ready' };
+          row.lease = receipt;
+          return receipt;
+        });
+        if (lease) { state.lease = lease; state.foreignLease = null; return lease; }
+      } catch (error) {
+        transition(state, false, [`holder lease unavailable: ${error.message}`]);
+      } finally {
+        state.releasing = false;
+        // Start after update releases the cross-watcher lock.
+        if (state.needsProbe && !state.lease && !state.draining && !state.adopted.length) startProbe(state);
+      }
     }
     return null;
   }
@@ -1077,6 +1194,8 @@ function createAgyReviewerIdentityPool({
   // pipeline stage) gets one here.
   async function acquire({ reviewId = `agy-${randomUUID()}` } = {}) {
     assertReviewId(reviewId);
+    const existing = [...states.values()].find(state => state.lease?.reviewId === reviewId && !state.releasing && !state.pendingRelease);
+    if (existing) return existing.lease;
     const deadline = now() + leaseWaitMs;
     for (;;) {
       const plan = currentPlan();
@@ -1088,7 +1207,7 @@ function createAgyReviewerIdentityPool({
           log.warn?.(`[agy-identities] readiness pass before lease failed: ${err?.message || err}`);
         }
       }
-      const lease = tryAcquire(plan, { reviewId });
+      const lease = await tryAcquire(plan, { reviewId });
       if (lease) return lease;
       if (now() >= deadline) return null;
       await sleepImpl(leasePollMs);
@@ -1102,15 +1221,13 @@ function createAgyReviewerIdentityPool({
   async function release(lease, { failed = false, reason = '' } = {}) {
     if (!lease || lease.legacy) return;
     const state = states.get(lease.user);
-    if (state && state.lease !== lease) return;
-    // Free bookkeeping in the timeout tick, before any helper I/O. Keep
-    // admission closed until cleanup and an actual process-exit observation.
-    if (state) {
-      state.lease = null;
-      state.releasing = true;
-      if (!lease.hqOwner) setDraining(state, true);
-    }
+    if (!state || state.lease?.generation !== lease.generation || state.releasing) return;
+    // Fence new passes before helper I/O, and retain the local receipt until
+    // persistence completes so an already-running pass recognizes our claim.
+    state.releasing = true;
+    if (!lease.hqOwner) setDraining(state, true);
     let survivors = null;
+    let drained = lease.hqOwner;
     try {
       if (!lease.hqOwner) {
         const cleanup = await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl: runHelper, log });
@@ -1118,15 +1235,35 @@ function createAgyReviewerIdentityPool({
           state.pendingCleanup.add(lease.reviewId);
           setDraining(state, true);
           survivors = `workspace cleanup for ${lease.reviewId} failed; not leased until cleanup succeeds`;
-        } else if (state) survivors = (await checkDrained(state)).reason;
+        } else if (state) {
+          const result = await checkDrained(state);
+          drained = result.drained;
+          survivors = result.reason;
+        }
       }
     } finally {
+      let cleared = false;
+      try { cleared = await holderStore.update(lease.user, row => {
+        if (row.lease?.generation !== lease.generation) return true;
+        if (failed) row.auth = { needsProbe: true, failures: 0, retryAt: 0 };
+        if (!drained) return false;
+        row.lease = null;
+        return true;
+      }); } catch (error) { log.warn?.(`[agy-identities] holder release persistence failed: ${error.message}`); }
+      if (!cleared) {
+        state.lease = lease;
+        state.pendingRelease = { failed, reason };
+        transition(state, false, ['holder release pending']);
+      } else { state.lease = null; state.pendingRelease = null; state.foreignLease = null; }
       if (state) state.releasing = false;
       if (state) {
         const reasons = [];
         if (failed) reasons.push(`review ${lease.reviewId} failed${reason ? ` (${reason})` : ''}`);
         if (survivors) reasons.push(survivors);
-        if (failed) isolate(state, reasons);
+        if (failed) {
+          isolate(state, reasons);
+          if (cleared && !state.draining && !state.adopted.length) startProbe(state);
+        }
         else if (survivors) transition(state, false, reasons);
       }
     }
@@ -1173,6 +1310,24 @@ function createAgyReviewerIdentityPool({
     refreshReadinessIfStale: () => readinessStale(currentPlan()) ? refreshReadiness() : Promise.resolve(readyCount()),
     readyCount: () => readyCount(),
     readyUsers,
+    projection: () => {
+      const plan = currentPlan();
+      const tokens = plan.identities.map(holder => {
+        const state = stateFor(holder);
+        const ready = readyUsers(plan).includes(holder.user);
+        const active = state.lease || state.adopted.length || state.foreignLease || state.releasing ? 1 : 0;
+        const denied = holder.allowedModels && !holder.allowedModels.includes(plan.model);
+        const cooled = Boolean(readQuotaCooldownImpl(holder.user));
+        const reason = denied ? 'model-denied' : cooled ? 'quota-exhausted'
+          : !ready ? 'not-ready' : active ? 'capacity-saturated' : 'ready';
+        const component = denied ? 'model' : cooled ? 'quota' : !ready ? 'readiness' : active ? 'capacity' : null;
+        return { tokenAccountId: holder.tokenAccountId, brokerProvider: null, holderRef: holder.user,
+          capacity: ready ? 1 : 0, active, free: ready && !active ? 1 : 0, held: ready ? 0 : 1,
+          reason, component };
+      });
+      return { identity: 'gemini-reviewer', generation: plan.generation, tokens,
+        ...Object.fromEntries(['capacity', 'active', 'free', 'held'].map(key => [key, tokens.reduce((sum, row) => sum + row[key], 0)])) };
+    },
     acquire,
     release,
     sweepAll,
@@ -1228,13 +1383,13 @@ function warnIdentitiesInert(adapter, log) {
   log.warn?.(`[agy-identities] reviewer.gemini.identities is set but reviewer runtime ${id} cannot run a review as an added identity; Gemini reviews on it stay on the HQ owner under the broker cap`);
 }
 
-// Wrap one reviewer spawn in an identity lease. Non-Gemini reviews, the
-// single-identity case and runtimes that cannot carry an identity call
+// Wrap a Gemini spawn in a holder lease. Non-Gemini reviews and
+// runtimes that cannot carry an added holder call
 // `spawnFn(null)` untouched (the pre-CCX-08 path). Otherwise `spawnFn`
 // receives `{ user, reviewId }` for an added identity, or null for the HQ
-// owner, plus the lease itself as `{ user, reviewId }` for every identity; the
+// owner, plus the canonical account/holder receipt for every holder; the
 // caller records that in the reviewer run record (subjectContext
-// `agyIdentityLease`) so a restarted watcher sees the lease. The lease is
+// `agyHolderLease`, mirrored into `agyIdentityLease`) for restart recovery. The lease is
 // released (scratch cleanup, failure isolation) whether the review succeeds,
 // fails, times out or throws.
 async function runWithAgyReviewerIdentity({
@@ -1265,7 +1420,7 @@ async function runWithAgyReviewerIdentity({
   try {
     const result = await spawnFn(
       lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
-      { user: lease.user, reviewId: lease.reviewId },
+      { ...lease },
     );
     failed = !result?.ok && !NON_ISOLATING_FAILURE_CLASSES.has(result?.failureClass);
     reason = result?.failureClass || '';

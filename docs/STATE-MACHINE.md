@@ -237,6 +237,20 @@ selections even without a local cooldown; fresh pooled selections remain eligibl
 | `failed` | reviewer subprocess failed; terminal for the run-state ledger |
 | `cancelled` | reviewer subprocess was cancelled or the watcher settled the session as cancelled; terminal for the run-state ledger, but still recoverable for PGID adoption/killing |
 
+ITP-11 adds an orthogonal holder claim before an Antigravity spawn. A holder
+moves from available to leased, then drains before reuse; auth failure requires
+an authenticated probe with durable bounded backoff. Failed release starts
+recovery immediately after draining; acquisition also isolates and probes a
+durable authentication hold. Successful probes for an obsolete declaration
+remain fenced for fresh evidence without adding authentication backoff. All leases carry
+`identity: gemini-reviewer` and account/holder metadata. `agyHolderLease` is
+mirrored into the legacy run-record field during rolling deployment. Strict
+holder recovery includes terminal records whose PGID remains live; neither a
+terminal status nor an expired heartbeat releases an execution slot. Durable
+claims, generation fencing and failure recovery are described in
+[data model](data-model/agy-holder-leases.md). Review-row and run-state status
+values and merge authority remain unchanged.
+
 ### Transitions
 
 ```text

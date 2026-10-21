@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // Workflow-file push-capability preflight for remediation.
 //
@@ -399,7 +400,7 @@ async function mintMergeAgentWorkflowPushToken({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
-  timeoutMs = WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS),
 } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('fetch implementation unavailable');

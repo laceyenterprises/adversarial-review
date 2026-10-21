@@ -18,7 +18,7 @@ const commitFields = '{sha, commit: {message: .commit.message, author: .commit.a
 // patches, and never treat a server cap as a complete protected file list.
 export function createHistoryReader(options = {}) {
   const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execFileAsync,
-    contextTimeoutMs = HISTORY_CONTEXT_TIMEOUT_MS, nowMs = () => performance.now(), ...ghOptions } = options;
+    contextTimeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS), nowMs = () => performance.now(), ...ghOptions } = options;
   let deadline;
   const remainingMs = () => {
     ghOptions.signal?.throwIfAborted();

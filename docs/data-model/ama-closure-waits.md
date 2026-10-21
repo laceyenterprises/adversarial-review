@@ -39,7 +39,7 @@ row. A future timestamp seeds a new row at observation time, but is ignored
 when advancing an existing row until the timestamp is reached. Only running/starting retained dispatches supply launch progress; stalled,
 blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Repeated
 observations of the same timestamp do not extend the deadline;
-thirty minutes without further progress still pages. Pending or uncertain
+the load-aware thirty-minute base without further progress still pages. Pending or uncertain
 ownership and other blockers retain their existing clocks and page receipts.
 HAMCLOSEWAIT-02 adds an ephemeral `launchWait: { startedAt, boundMs }` observation
 for a running process-queue background dispatch, including its own pending lease.
@@ -55,9 +55,19 @@ For `final-round`, head movement replaces prior class rows and restarts the
 deadline while carrying the maximum `paged` value forward. Final-round stalls
 and cap exhaustion therefore share one receipt per PR, including across heads;
 an immediate primary-change alert cannot consume it.
-The default bound is 30 minutes; a finite positive
-`AMA_CLOSURE_WAIT_BOUND_MS` overrides it. Invalid or nonpositive values retain
-the default. Observations return a 30-second `retryAfterMs`.
+LOADAR-01: the nominal bound is 30 minutes; a finite positive
+`AMA_CLOSURE_WAIT_BOUND_MS` overrides that base. The existing load-aware timeout
+helper scales either base at observation time, honoring the shared policy and
+multiplier without the helper's default one-hour cap. Invalid or nonpositive
+values retain the nominal default. A background launch boundary is already sized
+by its dispatcher and is consumed without another multiplier. Observations return a 30-second `retryAfterMs`.
+
+Confirmed running/starting status from the existing live-status read supplies
+`launchAlive`; a running in-process background dispatch also proves liveness.
+At the bound that evidence changes the notice to "still running after N minutes".
+Unknown or terminal evidence retains "closure wait exhausted"; immediate pages
+retain their exhaustion wording. The returned `exhausted` flag, wait debt,
+once-only receipt, retry cadence and ownership behavior remain unchanged.
 
 At exhaustion, an atomic `paged=0 → 1` update reserves one SEV1 alert before
 delivery. The alert names repo, PR, head and reason, with source

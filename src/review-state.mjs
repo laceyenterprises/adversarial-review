@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
@@ -938,7 +939,7 @@ async function fetchLivePRLifecycle({
   repo,
   prNumber,
   execFileImpl = execFileAsyncDefault,
-  timeoutMs = DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS),
   signal,
   awaitThrottleImpl = awaitThrottleIfNeeded,
 } = {}) {
@@ -1055,7 +1056,7 @@ async function resolvePRLifecycle(rootDir, {
   repo,
   prNumber,
   execFileImpl = execFileAsyncDefault,
-  liveLookupTimeoutMs = DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS,
+  liveLookupTimeoutMs = loadAwareTimeoutMs(DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS),
 } = {}) {
   const live = await fetchLivePRLifecycle({
     repo,

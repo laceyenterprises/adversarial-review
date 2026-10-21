@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 
@@ -32,7 +33,7 @@ const DEFAULT_ROUTING_TIER_READINESS_TIMEOUT_MS = 5000;
 
 function resolveRoutingTierReadinessTimeoutMs(env = process.env) {
   const v = Number(env.WATCHER_ROUTING_TIER_READINESS_TIMEOUT_MS);
-  return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROUTING_TIER_READINESS_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(v) && v > 0 ? v : DEFAULT_ROUTING_TIER_READINESS_TIMEOUT_MS);
 }
 
 function isRoutingTierReadinessProbeDisabled(env = process.env) {

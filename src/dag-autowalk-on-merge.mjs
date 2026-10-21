@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -96,7 +97,7 @@ function resolveDagAutowalkOnMergeTimeoutMs(env = process.env) {
     env.ADVERSARIAL_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS || `${DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS}`,
     10
   );
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS);
 }
 
 function normalizeNonEmptyText(value) {

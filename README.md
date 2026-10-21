@@ -1067,8 +1067,12 @@ running/starting closer advances the deadline from its recorded launch or confir
 dispatched lease progress, including on existing wait rows. Only running/starting retained dispatches supply launch progress; stalled,
 blocked, unknown and succeeded-awaiting-audit-or-merged-signal holds supply none. Future-dated
 timestamps seed new rows at the first observation but cannot advance existing
-waits until reached. Repeated polls do not reset that clock; thirty minutes
-without progress still pages. Other blockers and immediate pages retain their
+waits until reached. Repeated polls do not reset that clock. LOADAR-01 scales
+the thirty-minute base (including the existing env override) through the shared
+load-aware helper; confirmed live launches report "still running after N minutes"
+at the bound. Retry cadence, page receipts and ownership remain unchanged.
+Operational budgets, probes, reads and lease deadlines share that policy; see
+the [wait inventory](docs/load-aware-wait-inventory.md) for bases and fixed exceptions. Other blockers and immediate pages retain their
 existing behavior. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
 The follow-up graph maps operator-only review holds and preservation-refusal

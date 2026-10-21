@@ -1,4 +1,5 @@
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -164,7 +165,7 @@ async function signReviewedAttestation({
   hqPath = process.env.HQ_BIN || 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
-  timeoutMs = REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS),
   maxAttempts = REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
   retryDelayMs = REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   delayImpl = delay,
@@ -240,7 +241,7 @@ async function recordSignedReviewedAttestation({
   hqPath = process.env.HQ_BIN || 'hq',
   execFileImpl = execFileAsync,
   env = process.env,
-  timeoutMs = REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS),
   maxAttempts = REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
   retryDelayMs = REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   delayImpl = delay,
@@ -332,7 +333,7 @@ function reviewedAttestationQueueLockPath(rootDir) {
 }
 
 async function acquireReviewedAttestationQueueLock(rootDir, {
-  waitMs = REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS,
+  waitMs = loadAwareTimeoutMs(REVIEWED_ATTESTATION_QUEUE_LOCK_WAIT_MS, { maxMs: Infinity }),
   staleMs = REVIEWED_ATTESTATION_QUEUE_LOCK_STALE_MS,
   writeOwnerFileImpl = writeFileSync,
 } = {}) {

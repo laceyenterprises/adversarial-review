@@ -20,7 +20,12 @@ that review may acquire a fresh hammer lease through `fromReviewHandoff` under
 the sibling `.handoff.lock` exclusive flock and atomic single-claim acquisition.
 Clean reviews use daemon merge. Existing hammer retry and lifetime caps remain.
 `acquiredAt`, `updatedAt`, `watcherPid`, `host`, and `dispatchTimeoutMs`
-identify the launch window. A dispatched lease carries `lrqId`. Rekeys retain
+identify the launch window. LOADAR-01 records the load-aware effective
+subprocess budget in `dispatchTimeoutMs`; pending-lease expiry consumes that
+value once, including the existing retry and token-poll overhead. Nominal
+pending fallback and dispatched/unknown reclaim ages use the shared load-aware
+helper. Confirmed live launches still retain ownership at any age; no store
+fields or lifecycle states change. A dispatched lease carries `lrqId`. Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.
 
@@ -45,7 +50,7 @@ as `failed-without-merge` under the existing caps after the 60-second
 terminal settlement grace when `terminal_at` is readable; a missing timestamp
 allows immediate same-head settlement. Both synchronous follow-up and asynchronous
 watcher probes request `autoMergeRequest`. Armed auto-merge holds ownership only
-until 30 minutes from the lease's `updatedAt` (falling back to `acquiredAt`),
+until the load-aware 30-minute base from the lease's `updatedAt` (falling back to `acquiredAt`),
 without refreshing that clock on observation. A no-merge audit bypasses the hold.
 At the bound an OPEN terminal launch settles as `failed-without-merge`, so ordinary
 retry/refund caps can admit CI repair even while GitHub auto-merge remains armed.

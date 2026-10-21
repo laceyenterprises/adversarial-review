@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // PR comment poster for the remediation pipeline.
@@ -1021,7 +1022,7 @@ async function findExistingRemediationComment({
   execFileImpl,
   env,
   log,
-  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
 }) {
   if (!marker) return { found: false };
   try {
@@ -1080,7 +1081,7 @@ async function postRemediationOutcomeComment({
   env = process.env,
   rootDir = process.cwd(),
   log = console,
-  timeoutMs = GH_COMMENT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GH_COMMENT_TIMEOUT_MS),
   // Test seam: skip the dedup lookup entirely. Production callers
   // never set this — the dedup check is the whole point of the
   // idempotency contract.

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
 import { reviewerBrokerProviders } from '../../../reviewer-token-pool.mjs';
 import { execFile } from 'node:child_process';
@@ -150,7 +151,7 @@ function acpxPathForOpenclawRoot(openclawInstallRoot) {
 async function resolveAcpxCliPath({
   env = process.env,
   execFileImpl = execFileAsync,
-  timeout = DEFAULT_DISCOVERY_TIMEOUT_MS,
+  timeout = loadAwareTimeoutMs(DEFAULT_DISCOVERY_TIMEOUT_MS),
   configLoaderImpl = loadConfigCached,
   topPath,
   modulePaths = [MODULE_CONFIG_PATH],
@@ -238,7 +239,7 @@ async function assertCodexOAuthLayers({
   domainConfig,
   execFileImpl = execFileAsync,
   acpxCli = null,
-  timeout = DEFAULT_OAUTH_PROBE_TIMEOUT_MS,
+  timeout = loadAwareTimeoutMs(DEFAULT_OAUTH_PROBE_TIMEOUT_MS),
 } = {}) {
   const probeCommand = acpxCli || 'codex';
   const probeArgs = (...args) => (acpxCli ? buildAcpxProbeArgs(...args) : args);

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 // COMMENTCLOSE-01: queue one follow-up per posted review.
 //
@@ -111,7 +112,7 @@ function sleepSync(ms) {
 function abandonedReason(held, nowMs, { host, isProcessAlive }) {
   const heldAtMs = Date.parse(held?.claimedAt || '');
   if (!held || !Number.isFinite(heldAtMs)) return 'unreadable';
-  if (nowMs - heldAtMs >= REVIEW_CLAIM_STALE_MS) return 'stale';
+  if (nowMs - heldAtMs >= loadAwareTimeoutMs(REVIEW_CLAIM_STALE_MS)) return 'stale';
   if (held.host === host && Number.isInteger(held.pid) && !isProcessAlive(held.pid)) return 'holder-exited';
   return null;
 }
@@ -165,7 +166,7 @@ export function claimFollowUpForReview(rootDir, job, {
       if (held === MISSING) continue;
       const abandoned = abandonedReason(held, clock(), { host, isProcessAlive });
       if (!abandoned) {
-        if (clock() - startedAt >= REVIEW_CLAIM_MAX_WAIT_MS) {
+        if (clock() - startedAt >= loadAwareTimeoutMs(REVIEW_CLAIM_MAX_WAIT_MS)) {
           const err = new Error(`[follow-up-jobs] Follow-up for ${label} is still being created by pid ${held.pid} on ${held.host}; not queued by this caller`);
           err.code = REVIEW_FOLLOW_UP_IN_FLIGHT;
           throw err;

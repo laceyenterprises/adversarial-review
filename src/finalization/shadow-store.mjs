@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Merge Authority v2 shadow mode — the observation store (ARC-16;
 // docs/SPEC-merge-authority-v2.md §5). Append-only persistence for the shadow
 // `(v1 action, v2 decision)` pairs the recorder produces, in the app store
@@ -47,7 +48,7 @@ export function ensureFinalizationShadowSchema(db) {
   `);
 }
 
-function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
+function openDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
   const dataDir = join(rootDir, 'data');
   const dbPath = join(dataDir, 'reviews.db');
   const callerUid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -70,7 +71,7 @@ function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   return db;
 }
 
-function openReadOnlyDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
+function openReadOnlyDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
   const db = new Database(join(rootDir, 'data', 'reviews.db'), { readonly: true });
   db.pragma(`busy_timeout = ${Math.max(0, Number(busyTimeoutMs) || 0)}`);
   db.pragma('query_only = 1');

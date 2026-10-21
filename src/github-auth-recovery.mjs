@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -19,7 +20,7 @@ const GITHUB_ADAPTER_FILES = Object.freeze([
   'modules/worker-pool/bin/git-safe',
 ]);
 
-const LOCAL_GIT_OPTIONS = Object.freeze({ timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+function localGitOptions() { return { timeout: loadAwareTimeoutMs(15000), maxBuffer: 5 * 1024 * 1024 }; }
 
 // HQ supplies the trusted workspace. Scope cross-UID trust to that repository
 // for this invocation, overriding inherited wildcard trust without global edits.
@@ -187,7 +188,7 @@ async function preserveUnpushedCommit({
 }) {
   const sha = String(commitSha || '').trim();
   if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
-  await execFileImpl('git', recoveryGitArgs(workspaceDir, ['cat-file', '-e', `${sha}^{commit}`]), LOCAL_GIT_OPTIONS);
+  await execFileImpl('git', recoveryGitArgs(workspaceDir, ['cat-file', '-e', `${sha}^{commit}`]), localGitOptions());
   const safeRepo = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]+/g, '_');
   const safeJob = String(jobId || `pr-${prNumber}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
   const stamp = String(observedAt || new Date().toISOString()).replace(/[^0-9A-Za-z]+/g, '-');
@@ -197,14 +198,14 @@ async function preserveUnpushedCommit({
   const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
   const rescueRef = `refs/adversarial-review/rescues/${safeJob}/${sha}`;
   try {
-    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), LOCAL_GIT_OPTIONS);
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), localGitOptions());
     await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef]), {
-      ...LOCAL_GIT_OPTIONS, timeout: 60000,
+      ...localGitOptions(), timeout: loadAwareTimeoutMs(60000),
     });
-    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'verify', bundlePath]), LOCAL_GIT_OPTIONS);
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'verify', bundlePath]), localGitOptions());
   } finally {
     try {
-      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', '-d', rescueRef]), LOCAL_GIT_OPTIONS);
+      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', '-d', rescueRef]), localGitOptions());
     } catch {
       // Best-effort cleanup; the durable artifact is the verified bundle.
     }
@@ -237,7 +238,7 @@ async function prepareWorkflowRecoveryPush({
   try {
     const { stdout } = await execFileImpl('git', recoveryGitArgs(workspaceDir, [
       'log', '--format=', '--name-only', '-z', '--no-renames',
-      expectedHead + '..' + commitSha, '--', '.github/workflows/']), LOCAL_GIT_OPTIONS);
+      expectedHead + '..' + commitSha, '--', '.github/workflows/']), localGitOptions());
     const raw = String(stdout || '');
     if (!raw || !raw.endsWith('\0')) {
       return { ok: false, reason: 'workflow-push-paths-unproven' };
@@ -288,7 +289,7 @@ async function readRecoveryPrHead({ repo, prNumber, execFileImpl, env, retryDela
     try {
       const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['pr', 'view', String(prNumber),
         '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
-      { env, timeout: 15000, maxBuffer: 1024 * 1024 });
+      { env, timeout: loadAwareTimeoutMs(15000), maxBuffer: 1024 * 1024 });
       const head = String(stdout || '').trim();
       if (!FULL_SHA_PATTERN.test(head)) throw new Error('workflow recovery PR head is unreadable');
       // GitHub's PR projection can lag behind the successful ref update.
@@ -346,7 +347,7 @@ async function retryGithubAuthPushOnce({
   let targetBranch = String(branch || '').trim();
   if (!targetBranch) {
     try {
-      const checkedOut = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--abbrev-ref', 'HEAD']), LOCAL_GIT_OPTIONS);
+      const checkedOut = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--abbrev-ref', 'HEAD']), localGitOptions());
       targetBranch = String(checkedOut.stdout || '').trim();
       if (targetBranch === 'HEAD') targetBranch = '';
     } catch { /* Detached or unavailable workspace. */ }
@@ -359,7 +360,7 @@ hq_resolve_worker_class_gh_token "$WORKER_CLASS"
 export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN"
 "$AGENT_OS_ROOT/modules/worker-pool/lib/shims/gh" pr view "$PR_NUMBER" --repo "$PR_REPO" --json headRefName --jq .headRefName`;
     const viewOptions = {
-      ...(requiresWorkflowPush ? { timeout: 15000 } : {}),
+      ...(requiresWorkflowPush ? { timeout: loadAwareTimeoutMs(15000) } : {}),
       env: { ...env, AGENT_OS_ROOT: agentOsRoot, WORKER_CLASS: workerClass, PR_NUMBER: String(prNumber), PR_REPO: repo },
     };
     const attempts = [0, ...retryDelaysMs];
@@ -407,7 +408,7 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
     // is the head it built on. Prefer it over the reviewed revision, which is
     // stale whenever the head moved between review and spawn.
     try {
-      const tracked = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${targetBranch}^{commit}`]), LOCAL_GIT_OPTIONS);
+      const tracked = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${targetBranch}^{commit}`]), localGitOptions());
       expectedHead = String(tracked.stdout || '').trim();
     } catch { /* No tracking ref in this workspace. */ }
   }
@@ -515,7 +516,7 @@ export GIT_TERMINAL_PROMPT=0
       EXPECTED_REMOTE_SHA: expectedHead,
     },
     maxBuffer: 5 * 1024 * 1024,
-    ...(workflowPush ? { timeout: 600000 } : {}),
+    ...(workflowPush ? { timeout: loadAwareTimeoutMs(600000) } : {}),
   };
   const attempts = [0, ...retryDelaysMs];
   let lastError = null;

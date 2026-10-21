@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { buildMergeCommitBody } from './ama/closing-keywords.mjs';
@@ -558,7 +559,7 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
     'state,isDraft,mergedAt,closedAt,headRefOid,labels,title,body',
   ], {
     maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
   }));
   return normalizePrView(parseGhJson(stdout));
 }
@@ -575,7 +576,7 @@ async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
     'mergeCommit',
   ], {
     maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
   }));
   const parsed = parseGhJson(stdout, {});
   const oid = parsed?.mergeCommit?.oid;
@@ -595,7 +596,7 @@ async function fetchFastMergePrState({ ghClient, repo, prNumber }) {
       'state',
     ], {
       maxBuffer: 1024 * 1024,
-      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
     }));
     const parsed = parseGhJson(stdout, {});
     const state = String(parsed?.state || '').trim().toUpperCase();
@@ -667,7 +668,7 @@ async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
       'name,state,bucket,workflow,link',
     ], {
       maxBuffer: 5 * 1024 * 1024,
-      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
     })));
   } catch (err) {
     const code = Number(err?.code);
@@ -741,7 +742,7 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, bod
       '--delete-branch',
     ], {
       maxBuffer: 5 * 1024 * 1024,
-      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
     });
   });
 }
@@ -1393,7 +1394,7 @@ async function processFastMergePR({
   const commitBody = buildMergeCommitBody({ prTitle: preMergeView.title, prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
   let mergeActor = null;
   try {
-    const { stdout } = await meteredExecFile(execFileFromGhClient(ghClient), 'gh', ['api', 'user', '--jq', '.login'], { timeout: FAST_MERGE_GH_TIMEOUT_MS });
+    const { stdout } = await meteredExecFile(execFileFromGhClient(ghClient), 'gh', ['api', 'user', '--jq', '.login'], { timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS) });
     const login = stdout.trim();
     if (/^[a-z0-9][a-z0-9-]*(?:\[bot\])?$/i.test(login)) mergeActor = login;
   } catch (err) {

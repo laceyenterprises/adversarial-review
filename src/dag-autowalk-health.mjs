@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 import { isSqliteBusyError, sleepSync } from './sqlite-busy-retry.mjs';
 
@@ -67,7 +68,7 @@ export function collectDagAutowalkHealth({
       try {
         // Three attempts plus backoff stay inside the original 10s budget.
         raw = execFileSyncImpl('hq', ['ojo', '--owners', owner, 'job', 'dag-autowalk'], {
-          encoding: 'utf8', timeout: 3_000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+          encoding: 'utf8', timeout: loadAwareTimeoutMs(3_000), maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
         });
         break;
       } catch (error) {

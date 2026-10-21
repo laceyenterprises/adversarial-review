@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -203,7 +204,7 @@ async function fetchRawAddedFileForDiff(repo, prNumber, file, {
         '-H',
         'Accept: application/vnd.github.raw',
       ],
-      timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
+      timeoutMs: loadAwareTimeoutMs(Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000)),
       sleep: ghRetrySleepImpl,
     });
     recordApiCallImpl({
@@ -253,7 +254,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
         '-f',
         'per_page=100',
       ],
-      timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
+      timeoutMs: loadAwareTimeoutMs(Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000)),
       sleep: ghRetrySleepImpl,
     });
     files = parseGhApiArrayPages(stdout);
@@ -345,7 +346,7 @@ async function fetchPRDiff(repo, prNumber, headSha, {
         { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
       ),
       args: ['pr', 'diff', String(prNumber), '--repo', repo],
-      timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
+      timeoutMs: loadAwareTimeoutMs(Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000)),
       sleep: ghRetrySleepImpl,
     }));
     recordApiCallImpl({

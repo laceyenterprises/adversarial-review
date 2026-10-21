@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // REMCONFLICT-01 (SEV1, 2026-10-10) — remediation can start on a CONFLICTING PR.
 //
@@ -63,7 +64,7 @@ function classifyRemediationMergeability(reading) {
 async function readLivePrMergeability({ repo, prNumber, execFileImpl }) {
   const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'mergeable,mergeStateStatus',
-  ], { maxBuffer: 1024 * 1024, timeout: PR_READ_TIMEOUT_MS });
+  ], { maxBuffer: 1024 * 1024, timeout: loadAwareTimeoutMs(PR_READ_TIMEOUT_MS) });
   const parsed = JSON.parse(String(stdout || '').trim() || '{}');
   return { mergeable: parsed.mergeable ?? null, mergeStateStatus: parsed.mergeStateStatus ?? null };
 }
@@ -80,7 +81,7 @@ export async function hqDispatchSupportsConflictedBase({ hqBin, execFileImpl, no
   try {
     const result = await execFileImpl(hqBin, ['dispatch', '--help'], {
       maxBuffer: 1024 * 1024,
-      timeout: HELP_PROBE_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(HELP_PROBE_TIMEOUT_MS),
     });
     output = `${result?.stdout || ''}${result?.stderr || ''}`;
   } catch (err) {

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -705,7 +706,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: PSQL_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
         input: script,
@@ -715,7 +716,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: PSQL_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
       } };

@@ -1625,9 +1625,19 @@ scheduling contract without dispatching live workers.
 LEASELIVE-01: dispatched closer lease reclamation checks the recorded launch and
 retry chain through the shared closure-ownership liveness classifier. In-flight
 launches retain ownership at any age. Known-terminal launches keep the existing
-30-minute age/outcome rule; unknown liveness uses the worker execution timeout
-schema ceiling plus 30 minutes (currently 24.5 hours). Dispatch and periodic
+age/outcome rule with a load-aware 30-minute base; unknown liveness uses the
+load-aware worker execution timeout schema ceiling plus 30-minute margin
+(nominally 24.5 hours). Dispatch and periodic
 reclamation share this rule, as do closure arbitration and remediation exclusion.
 Pending reclamation, sticky success, terminal auto-merge holds and retry/lifetime
 caps keep their existing behavior. Status reads cannot retire a replacement lease
 installed during the read.
+
+LOADAR-01: operational timeout bases use the existing shared load-aware helper.
+Closure waits scale the 30-minute base or its existing env override; confirmed
+live launches report "still running after N minutes" at the effective bound.
+The exhaustion flag, retry cadence, page receipts, ownership states and
+transitions remain unchanged. Merge-lease and waiter deadlines store their
+effective load-aware 900-second base at acquisition and are read without
+rescaling. The [wait inventory](load-aware-wait-inventory.md) lists consumers
+and fixed cleanup/polling exceptions.

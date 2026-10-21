@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withSqliteBusyRetry } from './sqlite-busy-retry.mjs';
 
 // Bounded watchdog around pollOnce.
@@ -106,7 +107,7 @@ function buildSafePollOnce({
 
   return function safePollOnce(source = 'scheduled pollOnce', pollOptions = undefined) {
     let timeoutHandle;
-    const effectiveDeadlineMs = resolveDeadlineMs(deadlineMs, source);
+    const effectiveDeadlineMs = loadAwareTimeoutMs(resolveDeadlineMs(deadlineMs, source), { maxMs: Infinity });
 
     const watchdog = new Promise((resolve) => {
       timeoutHandle = setTimeout(() => {

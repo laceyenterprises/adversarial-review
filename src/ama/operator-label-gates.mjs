@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -112,7 +113,7 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
   let cache = jobCaches.get(execFileImpl);
   if (!cache) { cache = new Map(); jobCaches.set(execFileImpl, cache); }
   const expanded = [];
-  const deadline = Date.now() + JOB_READ_BUDGET_MS;
+  const deadline = Date.now() + loadAwareTimeoutMs(JOB_READ_BUDGET_MS);
   let reads = 0;
   for (const item of external) {
     const jobId = candidates.get(item);
@@ -128,7 +129,7 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
       try {
         const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/actions/jobs/${jobId}`],
           env, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(remaining)]) : AbortSignal.timeout(remaining),
-          timeoutMs: Math.min(JOB_READ_TIMEOUT_MS, remaining), retries: 1, backoffMs: 100,
+          timeoutMs: Math.min(loadAwareTimeoutMs(JOB_READ_TIMEOUT_MS), remaining), retries: 1, backoffMs: 100,
           refreshGhAuthImpl: async () => ({ skipped: 'bounded label classification' }),
         });
         if (signal?.aborted) return pending;
@@ -217,7 +218,7 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
     try { if (receiptMatches(JSON.parse(readFileSync(path, 'utf8')))) return result; } catch { /* no matching receipt */ }
     mkdirSync(dir, { recursive: true });
     try {
-      if (Date.now() - statSync(lockPath).mtimeMs > PAGE_LOCK_STALE_MS) unlinkSync(lockPath);
+      if (Date.now() - statSync(lockPath).mtimeMs > loadAwareTimeoutMs(PAGE_LOCK_STALE_MS)) unlinkSync(lockPath);
     } catch { /* no stale lock */ }
     try { closeSync(openSync(lockPath, 'wx')); claimed = true; }
     catch (error) { if (error.code === 'EEXIST') return result; throw error; }

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -343,7 +344,7 @@ function commandTel11Detector({
   env = process.env,
   retryDelayMs = 100,
   maxAttempts = 3,
-  timeoutMs = 30000,
+  timeoutMs = loadAwareTimeoutMs(30000),
 } = {}) {
   const parts = Array.isArray(command) ? command : splitCommand(command || env.TEL11_STANDING_DETECTIONS_COMMAND);
   if (!parts || parts.length === 0) {

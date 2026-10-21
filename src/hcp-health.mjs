@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 const DEFAULT_HCP_HEALTHZ_URL = 'http://127.0.0.1:8002/v1/healthz';
 const DEFAULT_HCP_HEALTHZ_TIMEOUT_MS = 8_000;
 const DEFAULT_HCP_HEALTHZ_MAX_ATTEMPTS = 3;
@@ -11,7 +12,7 @@ function resolveHcpHealthzUrl(env = process.env) {
 async function checkHcpHealthz({
   fetchImpl = globalThis.fetch,
   env = process.env,
-  timeoutMs = DEFAULT_HCP_HEALTHZ_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(DEFAULT_HCP_HEALTHZ_TIMEOUT_MS),
   maxAttempts = DEFAULT_HCP_HEALTHZ_MAX_ATTEMPTS,
   retryDelaysMs = DEFAULT_HCP_HEALTHZ_RETRY_DELAYS_MS,
   delayImpl = delay,

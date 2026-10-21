@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { createOsDispatchAgentRuntime } from './adapters/agent-runtime/os-dispatch/index.mjs';
@@ -58,7 +59,7 @@ function buildSettleSmokeRequest({ now = () => new Date() } = {}) {
     },
     idempotencyKey: `runtime-settle-smoke:sdk-settle-smoke-fixture:${at}:first:reviewer:1`,
     budget: { maxTokens: 50_000, maxWallMs: DEFAULT_TIMEOUT_MS },
-    timeoutMs: DEFAULT_TIMEOUT_MS,
+    timeoutMs: loadAwareTimeoutMs(DEFAULT_TIMEOUT_MS),
   };
 }
 

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { createHealthRouter } from '../../agent-runtime/router/index.mjs';
 import { createLocalAgentRuntime, deriveSessionUuid } from '../../agent-runtime/local/index.mjs';
 import { wrapRuntimeWithRunLedger } from '../../agent-runtime/run-ledger.mjs';
@@ -42,7 +43,7 @@ function resolveAppContractEndpointUrl(options = {}, env = process.env) {
 function resolveRequestTimeoutMs(options = {}) {
   const raw = options.request_timeout_ms ?? options.requestTimeoutMs ?? DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS);
 }
 
 function withDefaultAppContractConnectOptions(
@@ -67,7 +68,7 @@ function withDefaultAppContractConnectOptions(
 
 function createAppContractHealthzCheck({
   endpointUrl = DEFAULT_APP_CONTRACT_ENDPOINT_URL,
-  requestTimeoutMs = DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS,
+  requestTimeoutMs = loadAwareTimeoutMs(DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS),
   fetchImpl = globalThis.fetch,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
@@ -391,6 +392,7 @@ function toAgentRequest(req, { kind, rootDir = null, domainConfig = null }) {
     : reviewIdempotencyKey(req, { roleId });
   const promptSet = String(req.promptSet || ctx.promptSet || domainId);
   const promptStage = kind === 'remediator' ? remediatorPromptStage(ctx) : reviewPromptStage(ctx);
+  const timeoutMs = req.timeoutMs ?? loadAwareTimeoutMs(DEFAULT_REVIEW_BUDGET.maxWallMs, { maxMs: Infinity });
   return {
     role: {
       id: roleId,
@@ -412,9 +414,9 @@ function toAgentRequest(req, { kind, rootDir = null, domainConfig = null }) {
     idempotencyKey,
     budget: {
       maxTokens: req.tokenBudget ?? DEFAULT_REVIEW_BUDGET.maxTokens,
-      maxWallMs: req.timeoutMs ?? DEFAULT_REVIEW_BUDGET.maxWallMs,
+      maxWallMs: timeoutMs,
     },
-    timeoutMs: req.timeoutMs ?? DEFAULT_REVIEW_BUDGET.maxWallMs,
+    timeoutMs,
   };
 }
 

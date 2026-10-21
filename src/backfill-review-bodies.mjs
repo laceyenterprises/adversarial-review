@@ -1,6 +1,7 @@
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { loginsMatch, resolveReviewerBotLoginAliases } from './review-body-capture.mjs';
 import { reviewerAttributionMetadata } from './reviewer-attribution.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { REMEDIATION_COMMENT_MARKER_PREFIX } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
@@ -99,7 +100,7 @@ async function fetchPullReviews({
   prNumber,
   execFileImpl,
   env = process.env,
-  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
   retries,
 } = {}) {
   const { stdout } = await execGhWithRetry({

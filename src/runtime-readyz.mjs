@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
@@ -101,7 +102,7 @@ async function endpointSignal(baseUrl) {
   try {
     const healthzUrl = new URL('healthz', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
     const res = await fetch(healthzUrl, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(loadAwareTimeoutMs(5000)),
     });
     if (!res.ok) {
       if (res.body && typeof res.body.cancel === 'function') {

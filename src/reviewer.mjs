@@ -1,4 +1,5 @@
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
@@ -167,7 +168,6 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
 } from './reviewer-prompt.mjs';
-
 const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
 const REVIEW_ADAPTER_ENV_KEYS = [
@@ -405,7 +405,7 @@ function resolveLocalReviewShadowFamily(model, {
 
 function resolveLocalReviewShadowTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.ADVERSARIAL_REVIEW_LOCAL_SHADOW_TIMEOUT_MS || '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : LOCAL_REVIEW_SHADOW_DEFAULT_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : LOCAL_REVIEW_SHADOW_DEFAULT_TIMEOUT_MS);
 }
 
 function evaluateLocalReviewShadowEligibility({

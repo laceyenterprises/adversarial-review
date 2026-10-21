@@ -328,13 +328,18 @@ for (const [reason, age, expectedPages] of [
       resolveAmaHammerDispatchModeImpl: () => 'inline',
       fetchPullRequestMergeabilityImpl: () => new Promise(() => {}),
       runDaemonCleanMergeAttemptImpl: async () => assert.fail('wait never grants merge authority'),
-      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt }),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt,
+        closerLaunchAlive: reason === 'existing-dispatch-running' }),
       observeClosureWaitImpl: observe,
       logger: { log() {}, warn() {} },
     });
     assert.equal(result.reason, reason);
   }
   assert.equal(pages.length, expectedPages);
+  if (reason === 'existing-dispatch-running' && expectedPages) {
+    assert.match(pages[0], /still running after 35 minutes/);
+    assert.doesNotMatch(pages[0], /exhausted/);
+  }
 });
 
 for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 'succeeded']) {
@@ -353,6 +358,7 @@ for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 's
     const result = await maybeDispatchAmaCloser(f.args);
     assert.equal(result.reason, status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
     assert.equal(result.namedReason, result.reason, 'retained returns share the named no-dispatch reason');
+    assert.equal(result.closerLaunchAlive === true, status === 'running' || status === 'starting');
     if (status === 'running' || status === 'starting') assert.equal(result.closerProgressAt, started);
     else assert.equal(Object.hasOwn(result, 'closerProgressAt'), false);
     assert.equal(f.launches.length, 0, 'retained ownership never launches a duplicate');

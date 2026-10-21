@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -36,7 +37,7 @@ function currentProcessGroupId({
   try {
     const stdout = execFileSyncImpl('ps', ['-o', 'pgid=', '-p', String(pid)], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: loadAwareTimeoutMs(5_000),
     });
     const parsed = Number(String(stdout || '').trim());
     resolved = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
@@ -63,7 +64,7 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
   }
   let lstart = '';
   try {
-    const { stdout } = await execFileImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], { timeout: 5_000 });
+    const { stdout } = await execFileImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], { timeout: loadAwareTimeoutMs(5_000) });
     lstart = String(stdout || '').trim();
   } catch (err) {
     const message = err?.message || String(err);
@@ -102,7 +103,7 @@ function verifyPgidIdentitySync(pgid, expectedSpawnedAt, { execFileSyncImpl = ex
   }
   try {
     const lstart = String(execFileSyncImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], {
-      encoding: 'utf8', timeout: 5_000,
+      encoding: 'utf8', timeout: loadAwareTimeoutMs(5_000),
     }) || '').trim();
     if (!lstart) return { match: false, gone: true, reason: 'ps returned no start time' };
     const actualMs = Date.parse(lstart);

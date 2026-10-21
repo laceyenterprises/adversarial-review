@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
@@ -159,7 +160,7 @@ export async function fetchVerifiedCommitFromLocalGit({
     for (let attempt = 0; ; attempt += 1) {
       try {
         const { stdout } = await execFileImpl('git', ['-C', checkoutDir, ...args], {
-          timeout: LOCAL_GIT_TIMEOUT_MS,
+          timeout: loadAwareTimeoutMs(LOCAL_GIT_TIMEOUT_MS),
           maxBuffer: LOCAL_GIT_MAX_BUFFER,
         });
         return String(stdout || '');

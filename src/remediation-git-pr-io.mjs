@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // Remediation git & PR I/O helpers.
 //
@@ -246,7 +247,7 @@ async function fetchPRBranchMetadata({
     execFileImpl,
     command: 'gh',
     args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
-    options: { env, timeout: 8000, maxBuffer: 2 * 1024 * 1024 },
+    options: { env, timeout: loadAwareTimeoutMs(8000), maxBuffer: 2 * 1024 * 1024 },
   });
   const parsed = JSON.parse(String(stdout || '{}'));
   const baseBranch = normalizeBaseBranch(parsed?.base?.ref);

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLABEL-01: reusable production check for merge callers that bypass review.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,7 +13,7 @@ const inputsOf = pr => JSON.stringify([pr.state, pr.head?.sha, pr.base?.sha, pr.
 
 export async function checkLivePackMerge({ repo, prNumber, headSha, execFileImpl = execFileAsync,
   readPrImpl = async () => JSON.parse((await execGhWithRetry({ execFileImpl,
-    args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: 15_000 })).stdout),
+    args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: loadAwareTimeoutMs(15_000) })).stdout),
   listFilesImpl = () => listPullRequestFiles(repo, prNumber, { execFileImpl }),
   fetchFileAtRefImpl = (repo, path, ref) => fetchRepoFileAtRef(repo, path, ref, { execFileImpl }),
   readActiveDagRunsImpl, trustedStampLoginsImpl,

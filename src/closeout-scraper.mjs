@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -180,7 +181,7 @@ async function fetchPullRequestCreatedAt({
     ['api', `repos/${repo}/pulls/${encodeURIComponent(prNumber)}`],
     {
       maxBuffer: 5 * 1024 * 1024,
-      timeout: 15_000,
+      timeout: loadAwareTimeoutMs(15_000),
     }
   );
   const parsed = JSON.parse(String(stdout || '').trim() || '{}');
@@ -235,7 +236,7 @@ async function scraperFetchIssueComments({
     ],
     {
       maxBuffer: 25 * 1024 * 1024,
-      timeout: 15_000,
+      timeout: loadAwareTimeoutMs(15_000),
     }
   );
   const stderrText = String(stderr || '').trim();
@@ -530,7 +531,7 @@ async function fetchIssueComments({
   prNumber,
   execFileImpl,
   env = process.env,
-  timeoutMs = GH_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
   retries,
 } = {}) {
   try {

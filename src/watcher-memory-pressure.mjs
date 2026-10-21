@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -187,8 +188,8 @@ async function readMemoryPressureSample({
     throw new Error('Memory pressure sampling is Darwin-only');
   }
   const [vmStat, swapusage] = await Promise.all([
-    execFileImpl('vm_stat', [], { timeout: 5_000 }),
-    execFileImpl('sysctl', ['vm.swapusage'], { timeout: 5_000 }),
+    execFileImpl('vm_stat', [], { timeout: loadAwareTimeoutMs(5_000) }),
+    execFileImpl('sysctl', ['vm.swapusage'], { timeout: loadAwareTimeoutMs(5_000) }),
   ]);
   return parseMemoryPressureSample({
     vmStat: vmStat?.stdout || '',

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { collectDuplicateContent } from './adapters/subject/github-pr/duplicate-content.mjs';
 import { createHash } from 'node:crypto';
@@ -943,7 +944,7 @@ export async function runDuplicateFamilyCensusForWatcher({
   async function primeSignal(args) {
     const key = signalKey(args);
     if (signals.has(key)) return signals.get(key);
-    const result = await readSignal({ ...args, timeoutMs: 1500 });
+    const result = await readSignal({ ...args, timeoutMs: loadAwareTimeoutMs(1500) });
     signals.set(key, result);
     if (!result?.ok && shouldDisableProvenanceForTick(result?.reason)) {
       provenanceDisabledReason = result?.reason || 'duplicate-family-provenance-unavailable';

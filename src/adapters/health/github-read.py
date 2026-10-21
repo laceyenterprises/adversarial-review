@@ -53,7 +53,9 @@ def run_metered(command, *, env, capture_output, text, timeout, check):
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
-def run_gh(command, child_env, kind, *, run, sleep):
+def run_gh(
+    command, child_env, kind, *, run, sleep, timeout_seconds=GH_ATTEMPT_TIMEOUT_SECONDS
+):
     # Three 5s attempts plus 350ms backoff fit within Node's 20s outer
     # deadline. SIGTERM's TimeoutError must unwind, never restart a child.
     for attempt in range(len(GH_RETRY_DELAYS_SECONDS) + 1):
@@ -63,7 +65,7 @@ def run_gh(command, child_env, kind, *, run, sleep):
                 env=child_env,
                 capture_output=True,
                 text=True,
-                timeout=GH_ATTEMPT_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -144,7 +146,16 @@ def read(args, *, resolver_factory=None, run=run_metered, sleep=time.sleep):
     else:
         command += ["checks", args.number, "--json", "name,state,bucket"]
     command += ["--repo", args.repo]
-    proc = run_gh(command, child_env, args.kind, run=run, sleep=sleep)
+    proc = run_gh(
+        command,
+        child_env,
+        args.kind,
+        run=run,
+        sleep=sleep,
+        timeout_seconds=getattr(
+            args, "attempt_timeout_seconds", GH_ATTEMPT_TIMEOUT_SECONDS
+        ),
+    )
     data = json.loads(proc.stdout)
     if args.kind in {"list", "checks"} and not isinstance(data, list):
         raise ValueError("invalid list")
@@ -175,6 +186,9 @@ def main():
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--kind", choices=("list", "state", "checks"), required=True)
     parser.add_argument("--number")
+    parser.add_argument(
+        "--attempt-timeout-seconds", type=float, default=GH_ATTEMPT_TIMEOUT_SECONDS
+    )
     args = parser.parse_args()
     try:
         print(json.dumps(read(args)))

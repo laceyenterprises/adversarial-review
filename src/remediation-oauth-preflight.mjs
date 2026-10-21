@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Per-worker-class OAuth pre-flight assertions for remediation workers.
@@ -245,7 +246,7 @@ function claudeCodeServiceableFromReadyz(body, provider = 'claude-code') {
   return typeof evidence.canServe === 'boolean' ? evidence.canServe : evidence.legacyReady === true;
 }
 
-async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'claude-code', timeoutMs = BROKER_READYZ_TIMEOUT_MS }) {
+async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'claude-code', timeoutMs = loadAwareTimeoutMs(BROKER_READYZ_TIMEOUT_MS) }) {
   // Bound the whole exchange (headers AND body read) so a wedged broker can
   // never hang the remediation drain. `/readyz` is a PUBLIC endpoint (no shared
   // secret), so this needs no credential injection. It returns HTTP 200 when
@@ -282,7 +283,7 @@ async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'clau
 async function assertClaudeCodeBrokerOAuth({
   env = process.env,
   fetchImpl = globalThis.fetch,
-  timeoutMs = BROKER_READYZ_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(BROKER_READYZ_TIMEOUT_MS),
 } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new OAuthError('claude-code', 'no fetch implementation available to probe the OAuth broker');
@@ -479,7 +480,7 @@ async function mintClaudeCodeRemediationBrokerToken({
   provider = resolveClaudeBrokerProvider(env),
   model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim(),
   fetchImpl = globalThis.fetch,
-  timeoutMs = BROKER_TOKEN_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(BROKER_TOKEN_TIMEOUT_MS),
   retryDelaysMs = BROKER_TOKEN_RETRY_DELAYS_MS,
   log = null,
 } = {}) {
@@ -618,7 +619,7 @@ async function assertClaudeCodeOAuth({
     const result = await execFileImpl(claudeCli, ['auth', 'status', '--json'], {
       env: probeEnv,
       maxBuffer: 1 * 1024 * 1024,
-      timeout: 15_000,
+      timeout: loadAwareTimeoutMs(15_000),
     });
     raw = result.stdout;
   } catch (err) {

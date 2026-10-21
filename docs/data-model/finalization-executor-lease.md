@@ -49,3 +49,8 @@ Primary key: `(domain_id, subject_external_id)` — one lease row per subject.
 - The schema source of truth is
   `migrations/20260719_finalization_executor_lease.sql`; keep this document and
   `docs/data-model/catalog.json` current with persistent-shape changes.
+
+LOADAR-01: the executor sizes its default five-minute lease TTL with the shared
+load-aware timeout helper before constructing the absolute `deadline`. Explicit
+caller-supplied TTLs remain effective budgets. Stored deadlines are read and
+compared directly, without another multiplier; fencing and renewal are unchanged.

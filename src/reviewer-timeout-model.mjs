@@ -1,3 +1,4 @@
+import { loadAwareTimeoutSeconds } from './load-aware-timeout.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 600;
@@ -16,7 +17,7 @@ function configSeconds(key, fallback, env = process.env, options = {}) {
 }
 
 function resolveReviewerIdleTimeoutSeconds(env = process.env, options = {}) {
-  return configSeconds('reviewer.idle_timeout_seconds', DEFAULT_IDLE_TIMEOUT_SECONDS, env, options);
+  return loadAwareTimeoutSeconds(configSeconds('reviewer.idle_timeout_seconds', DEFAULT_IDLE_TIMEOUT_SECONDS, env, options), { maxSeconds: Infinity });
 }
 
 function resolveReviewerCeilingConfig(env = process.env, options = {}) {
@@ -31,7 +32,7 @@ function calculateReviewerCeilingSeconds({ changedLines = 0, effort = 'high', ba
 }
 
 function resolveReviewerCeilingSeconds({ changedLines = 0, effort = 'high', env = process.env, options = {} } = {}) {
-  return calculateReviewerCeilingSeconds({ changedLines, effort, ...resolveReviewerCeilingConfig(env, options) });
+  return loadAwareTimeoutSeconds(calculateReviewerCeilingSeconds({ changedLines, effort, ...resolveReviewerCeilingConfig(env, options) }), { maxSeconds: Infinity });
 }
 
 function countChangedLines(diff) {

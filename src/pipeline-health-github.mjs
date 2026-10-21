@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { resolveGitHubAdapterBin, buildAdapterEnv } from './github-adapter-client.mjs';
@@ -21,15 +22,17 @@ export function readPipelineGithub(kind, repo, prNumber, {
   for (const key of Object.keys(childEnv)) {
     if (key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || /^GH_.*_TOKEN$/.test(key)) delete childEnv[key];
   }
+  const timeoutMs = loadAwareTimeoutMs(20_000);
   const args = [fileURLToPath(new URL('./adapters/health/github-read.py', import.meta.url)),
     '--adapter-bin', bin, '--kind', kind, '--repo', repo,
+    '--attempt-timeout-seconds', String(timeoutMs / 4000),
     '--role', role, '--provider', env[`${prefix}_PROVIDER`] || `github-app-${role}`,
     '--app-id', String(appId), '--installation-id', String(installationId)];
   if (prNumber !== null) args.push('--number', String(prNumber));
   const python = env.HQ_PYTHON3 || (process.platform === 'darwin' ? 'python3.13' : 'python3');
   try {
     const output = execFileSyncImpl(python, args, {
-      encoding: 'utf8', timeout: 20_000, maxBuffer: 4 * 1024 * 1024,
+      encoding: 'utf8', timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'], env: childEnv,
     });
     const parsed = JSON.parse(output);

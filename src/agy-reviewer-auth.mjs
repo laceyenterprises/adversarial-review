@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { spawn } from 'node:child_process';
 
 const DEFAULT_SAFE_EXEC_MAX_BUFFER = 1024 * 1024;
@@ -175,7 +176,7 @@ function agyKeychainProbeArgs(env = process.env) {
 
 function resolveAgyAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.AGY_AUTH_PROBE_TIMEOUT_MS || '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS);
 }
 
 function resolveAgyAuthProbeMaxAttempts(env = process.env) {

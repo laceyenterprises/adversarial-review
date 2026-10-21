@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Merge Authority v2 leased executor (ARC-17; docs/SPEC-merge-authority-v2.md §4).
 // The LAST piece of MA-v2: the single finalization worker per subject that turns
 // the pure `eligible(...)` decision into an action. It is leased, idempotent, and
@@ -91,7 +92,7 @@ export function createFinalizationExecutor({
   closeSurface = null,
   mergeMethod = 'squash',
   holder,
-  leaseTtlMs = DEFAULT_LEASE_TTL_MS,
+  leaseTtlMs = loadAwareTimeoutMs(DEFAULT_LEASE_TTL_MS, { maxMs: Infinity }),
   generateLeaseId = randomUUID,
 } = {}) {
   if (!ledgerStore || typeof ledgerStore.read !== 'function') {

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 /** CIGUARD-01: independent live-head CI-cost refusal, including unprotected repos. */
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,7 @@ const label = 'ci-cost-approved';
 
 export function evaluateCiCost(payload, { python = process.env.HQ_PYTHON3 || 'python3' } = {}) {
   const run = spawnSync(python, [engine, '--json-input'], {
-    input: JSON.stringify(payload), encoding: 'utf8', timeout: 15000, maxBuffer: 2 * 1024 * 1024,
+    input: JSON.stringify(payload), encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: 2 * 1024 * 1024,
   });
   if (run.error || ![0, 1].includes(run.status)) throw new Error(`CI-cost engine unavailable: ${run.error?.message || run.stderr}`);
   const result = JSON.parse(run.stdout);

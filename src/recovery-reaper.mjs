@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 /**
  * Startup + periodic stale-state reaper — offline-period & quota-outage
  * resilience for the adversarial-review pipeline.
@@ -113,10 +114,10 @@ function resolvePositiveMs(rawValue, fallbackMs) {
  * an abandoned zombie. Env alias: `ADVERSARIAL_STALE_RUNNING_REVIEWER_PASS_MS`.
  */
 export function resolveStaleRunningReviewerPassMs(env = process.env) {
-  return resolvePositiveMs(
+  return loadAwareTimeoutMs(resolvePositiveMs(
     env.ADVERSARIAL_STALE_RUNNING_REVIEWER_PASS_MS,
     DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS,
-  );
+  ), { maxMs: Infinity });
 }
 
 /**
@@ -125,10 +126,10 @@ export function resolveStaleRunningReviewerPassMs(env = process.env) {
  * `ADVERSARIAL_STALE_CLOSER_LEASE_MS`.
  */
 export function resolveStaleCloserLeaseMs(env = process.env) {
-  return resolvePositiveMs(
+  return loadAwareTimeoutMs(resolvePositiveMs(
     env.ADVERSARIAL_STALE_CLOSER_LEASE_MS,
     DEFAULT_STALE_CLOSER_LEASE_MS,
-  );
+  ), { maxMs: Infinity });
 }
 
 /**
@@ -138,10 +139,10 @@ export function resolveStaleCloserLeaseMs(env = process.env) {
  * `ADVERSARIAL_DEAD_HOLDER_CLOSER_LEASE_MS`.
  */
 export function resolveDeadHolderCloserLeaseMs(env = process.env) {
-  return resolvePositiveMs(
+  return loadAwareTimeoutMs(resolvePositiveMs(
     env.ADVERSARIAL_DEAD_HOLDER_CLOSER_LEASE_MS,
     DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
-  );
+  ), { maxMs: Infinity });
 }
 
 /**
@@ -358,7 +359,7 @@ export function selectPrunableCloserLeases(leases, { now, pruneAfterMs } = {}) {
 export function reapStaleRunningReviewerPasses({
   db,
   now = new Date().toISOString(),
-  thresholdMs = DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS,
+  thresholdMs = loadAwareTimeoutMs(DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS, { maxMs: Infinity }),
   logger = console,
 } = {}) {
   if (!db) return { reaped: 0, passes: [] };
@@ -736,8 +737,8 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now = new
 export async function reapStaleCloserLeases({
   rootDir,
   now = new Date().toISOString(),
-  thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
-  deadHolderThresholdMs = DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS,
+  thresholdMs = loadAwareTimeoutMs(DEFAULT_STALE_CLOSER_LEASE_MS, { maxMs: Infinity }),
+  deadHolderThresholdMs = loadAwareTimeoutMs(DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS, { maxMs: Infinity }),
   pruneAfterMs = DEFAULT_TERMINAL_CLOSER_LEASE_PRUNE_MS,
   livePid = (typeof process !== 'undefined' ? process.pid : null),
   isProcessAlive = null,
@@ -774,7 +775,7 @@ export async function reapStaleCloserLeases({
     // Even a terminal launch cannot release a dispatched lease before this age.
     const stampMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
     if (!Number.isFinite(nowMs) || !Number.isFinite(stampMs)
-      || nowMs - stampMs < AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS) continue;
+      || nowMs - stampMs < loadAwareTimeoutMs(AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity })) continue;
     try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
       launchRequestId: lease.lrqId, rootDir, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }

@@ -6,7 +6,13 @@ import { resetLoadAwareTimeoutCachesForTesting } from '../../src/load-aware-time
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-beforeEach(t => {
+// Module-level sizing also needs an idle synthetic host before test imports run.
+if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) {
+  os.loadavg = () => [0, 0, 0];
+}
+
+// The runner preloads this for test workers; CLI children must stay ordinary programs.
+if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) beforeEach(t => {
   resetLoadAwareTimeoutCachesForTesting();
   const dir = mkdtempSync(join(os.tmpdir(), 'timeout-config-'));
   const previousPath = process.env.AGENT_OS_CONFIG_PATH;

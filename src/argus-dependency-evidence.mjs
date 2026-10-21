@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 item 2 — the evidence a dependency review reads, and what
 // "verified" means for a semver-major bump.
 //
@@ -520,7 +521,7 @@ export function createDefaultArgusEvidenceIo({
   logger = console,
 } = {}) {
   const python = String(env?.[ARGUS_RUBRIC_PYTHON_ENV] || '').trim() || 'python3';
-  const runPython = async (args, { pythonPath, timeoutMs = 120_000 }) => execFileImpl(python, args, {
+  const runPython = async (args, { pythonPath, timeoutMs = loadAwareTimeoutMs(120_000) }) => execFileImpl(python, args, {
     env: { ...env, PYTHONPATH: pythonPath },
     timeout: timeoutMs,
     maxBuffer: 20 * 1024 * 1024,
@@ -533,7 +534,7 @@ export function createDefaultArgusEvidenceIo({
         const { stdout } = await execGhWithRetryImpl({
           args: ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repo}/contents/${encoded}?ref=${ref}`],
           env,
-          timeoutMs: 60_000,
+          timeoutMs: loadAwareTimeoutMs(60_000),
           log: logger,
         });
         return String(stdout ?? '');
@@ -553,7 +554,7 @@ export function createDefaultArgusEvidenceIo({
       }
     },
     async scanSurface({ treeDir, packageName, pythonPath }) {
-      const { stdout } = await runPython(['-m', 'argus_review', 'scan-surface', treeDir, packageName], { pythonPath, timeoutMs: 180_000 });
+      const { stdout } = await runPython(['-m', 'argus_review', 'scan-surface', treeDir, packageName], { pythonPath, timeoutMs: loadAwareTimeoutMs(180_000) });
       return JSON.parse(stdout);
     },
     async grepUsage({ checkoutDir, packageName }) {
@@ -562,7 +563,7 @@ export function createDefaultArgusEvidenceIo({
         const { stdout } = await execFileImpl('git', [
           '-C', checkoutDir, 'grep', '-n', '-I', '-E', pattern, '--',
           ':!*package-lock.json', ':!*package.json', ':!*.lock', ':!*.md',
-        ], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024, encoding: 'utf8' });
+        ], { timeout: loadAwareTimeoutMs(60_000), maxBuffer: 10 * 1024 * 1024, encoding: 'utf8' });
         const lines = String(stdout).split('\n').filter(Boolean);
         return lines.length > MAX_USAGE_LINES
           ? `${lines.slice(0, MAX_USAGE_LINES).join('\n')}\n… (+${lines.length - MAX_USAGE_LINES} more)`
@@ -574,14 +575,14 @@ export function createDefaultArgusEvidenceIo({
     },
     async fetchReleaseNotes({ packageName, fromVersion, toVersion }) {
       const { stdout: repoUrl } = await execFileImpl('npm', ['view', packageName, 'repository.url'], {
-        timeout: 60_000, encoding: 'utf8', env,
+        timeout: loadAwareTimeoutMs(60_000), encoding: 'utf8', env,
       });
       const match = String(repoUrl).match(/github\.com[/:]([^/\s]+)\/([^/\s#]+?)(?:\.git)?(?:[#\s]|$)/u);
       if (!match) return null;
       const { stdout } = await execGhWithRetryImpl({
         args: ['api', `repos/${match[1]}/${match[2]}/releases?per_page=100`],
         env,
-        timeoutMs: 60_000,
+        timeoutMs: loadAwareTimeoutMs(60_000),
         log: logger,
       });
       const releases = JSON.parse(String(stdout || '[]'));

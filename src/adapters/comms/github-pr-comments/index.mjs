@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 /**
@@ -342,7 +343,7 @@ function createGitHubPRCommentsAdapter({
   octokit = null,
   rootDir = null,
   execFileImpl = execFileAsync,
-  commentTimeoutMs = 30_000,
+  commentTimeoutMs = loadAwareTimeoutMs(30_000),
   env = process.env,
   workerClass = null,
   resolveGhToken = null,
@@ -458,7 +459,7 @@ function createGitHubPRCommentsAdapter({
     if (deliveryIdentityByRole && roleId) {
       resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
     }
-    const deadline = Date.now() + COMMENT_DELIVERY_CLAIM_WAIT_MS;
+    const deadline = Date.now() + loadAwareTimeoutMs(COMMENT_DELIVERY_CLAIM_WAIT_MS);
 
     while (true) {
       const existing = await lookupExistingDeliveries(key);

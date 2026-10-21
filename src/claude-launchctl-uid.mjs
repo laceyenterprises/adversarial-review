@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadConfigCached } from './config-loader.mjs';
@@ -58,7 +59,7 @@ export async function resolveClaudeLaunchctlUidFromConfig({
   execFileImpl = execFileAsync,
   env = process.env,
   logger = console,
-  lookupTimeoutMs = DEFAULT_UID_LOOKUP_TIMEOUT_MS,
+  lookupTimeoutMs = loadAwareTimeoutMs(DEFAULT_UID_LOOKUP_TIMEOUT_MS),
   lookupRetryDelaysMs = DEFAULT_UID_LOOKUP_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 } = {}) {

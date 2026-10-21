@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 — review one claimed Argus job in its own process.
 //
 //   node src/argus-security-review-child.mjs --root <rootDir> --job <jobPath>
@@ -46,7 +47,7 @@ async function main() {
   // The reviewer runs in this isolated scratch dir, never in a live checkout:
   // the harness runs models with approvals bypassed. `codex exec` refuses to
   // run outside a git repository, so the scratch dir is made one.
-  spawnSync('git', ['init', '-q', workDir], { stdio: 'ignore', timeout: 30_000 });
+  spawnSync('git', ['init', '-q', workDir], { stdio: 'ignore', timeout: loadAwareTimeoutMs(30_000) });
   try {
     emit(await reviewArgusJob({
       job,

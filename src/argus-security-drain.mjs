@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 — the consumer the Argus security route shipped without.
 //
 // ASR built the classifier, the queue, the route, the rubric and the gate. The
@@ -67,8 +68,8 @@ export const ARGUS_REVIEW_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
 export function resolveArgusReviewChildTimeoutMs(env = process.env) {
   const budgets = resolveConfiguredArgusReviewerModels(env).map((model) => model === 'gemini'
     ? resolveAgyReviewerSubprocessTimeoutMs(env)
-    : resolveReviewerCeilingConfig(env).max * 1000);
-  return Math.max(ARGUS_REVIEW_CHILD_TIMEOUT_MS, budgets.reduce((sum, budget) => sum + budget, 0) + REVIEWER_PROCESS_SLACK_MS);
+    : loadAwareTimeoutMs(resolveReviewerCeilingConfig(env).max * 1000, { maxMs: Infinity }));
+  return Math.max(loadAwareTimeoutMs(ARGUS_REVIEW_CHILD_TIMEOUT_MS, { maxMs: Infinity }), budgets.reduce((sum, budget) => sum + budget, 0) + REVIEWER_PROCESS_SLACK_MS);
 }
 export const ARGUS_REVIEW_OUTCOME_PREFIX = 'ARGUS_REVIEW_OUTCOME ';
 

@@ -1,4 +1,5 @@
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -279,12 +280,12 @@ function parseTimestampMs(value) {
 function resolveRemediationCiSettleTimeoutMs(env = process.env) {
   const raw = env?.[REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV];
   if (raw === undefined || raw === null || raw === '') {
-    return DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS;
+    return loadAwareTimeoutMs(DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS, { maxMs: Infinity });
   }
   const parsed = Number.parseInt(String(raw), 10);
-  return Number.isFinite(parsed) && parsed > 0
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0
     ? parsed
-    : DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS;
+    : DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS, { maxMs: Infinity });
 }
 
 function isoAfter(startIso, deltaMs) {

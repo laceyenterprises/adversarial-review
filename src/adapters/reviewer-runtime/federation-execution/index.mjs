@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { performance } from 'node:perf_hooks';
 import { sanitizeCodexReviewPayload, normalizeEffectiveReviewVerdict } from '../../../kernel/verdict.mjs';
 import { classifyReviewerFailure } from '../cli-direct/classification.mjs';
@@ -59,7 +60,7 @@ function readArtifacts(artifacts, budget) {
 
 export function createFederationExecutionAdapter({
   seatTransport, supervisor, verifyOrder, readCurrent, signResult,
-  controlTimeoutMs = 5000, now = Date.now,
+  controlTimeoutMs = loadAwareTimeoutMs(5000), now = Date.now,
 } = {}) {
   for (const callback of [verifyOrder, readCurrent, signResult, supervisor?.run, supervisor?.snapshot]) {
     if (typeof callback !== 'function') throw new TypeError('Missing execution dependency');

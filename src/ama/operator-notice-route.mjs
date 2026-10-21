@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { findLiveAmaCloserLease } from './closer-lease.mjs';
 import { readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
 import { launchRequestInFlight } from './launch-request-status.mjs';
@@ -59,7 +60,7 @@ export async function operatorNoticeInFlight(rootDir, identity, {
     let probe;
     try {
       probe = await readLaunchRequestStatusImpl({ rootDir, hqRoot: record.hqRoot,
-        launchRequestId: record.launchRequestId, includeRetryChain: true, timeoutMs: 1000 });
+        launchRequestId: record.launchRequestId, includeRetryChain: true, timeoutMs: loadAwareTimeoutMs(1000) });
     } catch { /* Unknown liveness cannot retire a recorded active launch. */ }
     // Shared with the in-flight closure blocker and closer lease reclamation;
     // a requested/admitted/leased/running launch has no age escape here.

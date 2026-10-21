@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMEDBRANCH-01: synchronous queue writers retain their atomic creation contract.
 import { execFileSync } from 'node:child_process';
 import { meteredExecFileSync } from './metered-gh.mjs';
@@ -12,7 +13,7 @@ export function readFollowUpPRHead({ repo, prNumber }) {
   }
   const pr = JSON.parse(withGitHubBudgetScope({}, () => meteredExecFileSync(execFileSync, 'gh',
     ['api', `repos/${repo}/pulls/${Number(prNumber)}`],
-    { encoding: 'utf8', timeout: 8000, maxBuffer: 2 * 1024 * 1024 })));
+    { encoding: 'utf8', timeout: loadAwareTimeoutMs(8000), maxBuffer: 2 * 1024 * 1024 })));
   return { branch: pr?.head?.ref, builderTag: parseKnownPrefix(pr?.title)?.tag || null };
 }
 

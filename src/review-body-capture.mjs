@@ -1,5 +1,6 @@
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { promisify } from 'node:util';
@@ -184,7 +185,7 @@ async function lookupRecentReviewArtifact({
   body,
   execFileImpl = execFileAsync,
   env = process.env,
-  timeoutMs = REVIEW_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(REVIEW_LOOKUP_TIMEOUT_MS),
   timestampField = 'created_at',
 } = {}) {
   if (!repo || !prNumber || !endpoint || !login || !postedAt) return null;

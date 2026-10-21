@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // OAuth-only emergency transport for Codex reviews.
 //
 // Native Codex remains the primary path. This module exists for the narrower
@@ -104,7 +105,7 @@ function parseSseEvent(rawEvent) {
 
 async function consumeCodexOAuthSse(response, {
   controller,
-  idleTimeoutMs = DEFAULT_DIRECT_IDLE_TIMEOUT_MS,
+  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS),
 } = {}) {
   if (!response?.body?.getReader) {
     throw new Error('Codex OAuth fallback response body is not stream-readable');
@@ -168,8 +169,8 @@ async function reviewWithCodexOAuthResponses(prompt, {
   reasoningEffort = 'high',
   endpoint = DEFAULT_CODEX_RESPONSES_URL,
   fetchImpl = globalThis.fetch,
-  timeoutMs = DEFAULT_DIRECT_TIMEOUT_MS,
-  idleTimeoutMs = DEFAULT_DIRECT_IDLE_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_TIMEOUT_MS, { maxMs: Infinity }),
+  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS),
   readFileImpl = readFileSync,
 } = {}) {
   if (!authPath) throw new Error('Codex OAuth fallback requires authPath');

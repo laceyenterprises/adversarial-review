@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -785,7 +786,7 @@ async function execGhJson(execFileImpl, args) {
       const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
       const { stdout } = await meteredExecFile(execFileImpl, 'gh', effectiveArgs, {
         maxBuffer: GH_MAX_BUFFER,
-        timeout: GH_EXEC_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(GH_EXEC_TIMEOUT_MS),
         killSignal: 'SIGKILL',
         env: buildGhEnv(),
       });
@@ -2106,7 +2107,7 @@ async function fetchPullRequestMergeability(repo, prNumber, {
           'mergeable,mergeStateStatus',
         ], {
           maxBuffer: GH_MAX_BUFFER,
-          timeout: GH_EXEC_TIMEOUT_MS,
+          timeout: loadAwareTimeoutMs(GH_EXEC_TIMEOUT_MS),
           killSignal: 'SIGKILL',
           env: buildGhEnv(env),
         }));

@@ -1,5 +1,5 @@
-import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
@@ -1575,7 +1575,7 @@ function isAmaCloserAutoMergeHoldActive(lease, now) {
   const leaseAt = parseTimeMs(lease.updatedAt || lease.acquiredAt);
   const nowMs = parseTimeMs(now);
   return leaseAt !== null && nowMs !== null
-    && nowMs - leaseAt < AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+    && nowMs - leaseAt < loadAwareTimeoutMs(AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity });
 }
 
 // Watcher closure reads yield while the GitHub child runs.
@@ -2076,7 +2076,7 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
   // pre-LRQ JSON should not become a global hammer hold after a restart.
   if (options.lease === null) {
     const ageMs = amaCloserRecordAgeMs(record, options);
-    return ageMs !== null && ageMs < AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS;
+    return ageMs !== null && ageMs < loadAwareTimeoutMs(AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS);
   }
 
   return false;
@@ -2119,7 +2119,7 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   // launch-only case, so the two states are checked separately rather than
   // sharing one predicate.
   const ageMs = amaCloserRecordAgeMs(record, options);
-  if (ageMs !== null && ageMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS) {
+  if (ageMs !== null && ageMs >= loadAwareTimeoutMs(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity })) {
     return false;
   }
 
@@ -2742,7 +2742,7 @@ function formatHqDispatchError(errOrText) {
 
 function resolveAmaDispatchTimeoutMs(cfg) {
   const configured = Number(cfg?.dispatchTimeoutMs);
-  return Number.isFinite(configured) && configured > 0 ? configured : 600_000;
+  return loadAwareTimeoutMs(Number.isFinite(configured) && configured > 0 ? configured : 600_000);
 }
 
 const PROVISION_SELF_TIMEOUT_CUSHION_SECONDS = 90;
@@ -3970,7 +3970,7 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
     skipMergeAgent: true,
     reason: `existing-dispatch-${status || 'unknown'}`,
     ...(status === 'running' || status === 'starting'
-      ? { closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null } : {}),
+      ? { closerLaunchAlive: true, closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null } : {}),
     workerClass: existingRecord.workerClass || workerClass,
     dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
     launchRequestId: existingRecord.launchRequestId || null,

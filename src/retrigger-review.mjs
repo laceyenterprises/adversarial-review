@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { parseArgs as nodeParseArgs, promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -224,7 +225,7 @@ async function fetchCurrentPrHeadSha({
       '--jq',
       '.headRefOid',
     ],
-    timeoutMs: CURRENT_HEAD_LOOKUP_TIMEOUT_MS,
+    timeoutMs: loadAwareTimeoutMs(CURRENT_HEAD_LOOKUP_TIMEOUT_MS),
     retries,
     backoffMs,
     sleep: sleepImpl,

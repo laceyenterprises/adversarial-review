@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // reviewer-broker-refresh.mjs — keep the long-lived watcher's reviewer-bot
 // GitHub App installation tokens fresh.
 //
@@ -340,7 +341,7 @@ export async function resolveReviewerAppToken(identity, {
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
-  timeoutMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
 } = {}) {
   const role = resolveReviewerBrokerRole(identity);
   if (!role) {
@@ -390,7 +391,7 @@ export async function refreshReviewerBrokerTokens({
   // win (tests); otherwise resolve + validate from env so the documented
   // process.env contract is actually honored, falling back to the constants.
   const effectiveTimeoutMs =
-    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+    timeoutMs ?? loadAwareTimeoutMs(resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS));
   const effectivePostSlackMs =
     postSlackMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_POST_SLACK_MS, REVIEWER_TOKEN_POST_SLACK_MS);
   const effectiveFailureRetryMs =
@@ -595,7 +596,7 @@ export async function refreshFollowUpGithubToken({
     return summary;
   }
   const effectiveTimeoutMs =
-    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+    timeoutMs ?? loadAwareTimeoutMs(resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS));
   try {
     const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
       role,
@@ -671,7 +672,7 @@ export async function refreshWatcherGithubToken({
     return summary;
   }
   const effectiveTimeoutMs =
-    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+    timeoutMs ?? loadAwareTimeoutMs(resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS));
   try {
     const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
       role,

@@ -217,7 +217,7 @@ async function fetchProtectivePredecessorStateForPr({
         '--json',
         'state',
       ],
-      timeoutMs: 30_000,
+      timeoutMs: loadAwareTimeoutMs(30_000),
       log: logger,
     });
     const parsed = JSON.parse(String(stdout || '{}'));
@@ -257,7 +257,7 @@ async function fetchCurrentPrStateForBackgroundDispatch({
       'pr', 'view', String(prNumber), '--repo', repo,
       '--json', 'state,headRefOid,isDraft,mergeable,mergeStateStatus',
     ],
-    timeoutMs: 30_000,
+    timeoutMs: loadAwareTimeoutMs(30_000),
     log: logger,
   });
   const parsed = JSON.parse(String(stdout || '{}'));
@@ -306,7 +306,7 @@ export async function fetchMergedProtectiveDependentsForPr({
         'api',
         `search/issues?q=${encodeURIComponent(query)}&per_page=50`,
       ],
-      timeoutMs: 30_000,
+      timeoutMs: loadAwareTimeoutMs(30_000),
       log: logger,
     }));
   } catch (err) {
@@ -501,7 +501,7 @@ export const AMA_REUSABLE_PROOF_OPERATIONS = new Set([
   'closer-only-review-delta', 'stale-head-suppression-proof',
   'head-closer-verified-commit', 'ham-terminal-remediation-evidence',
 ]);
-export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
+export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = loadAwareTimeoutMs(180_000),
   setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
   maxEntries = Number.isFinite(Number(maxEntries)) ? Math.max(1, Math.floor(Number(maxEntries))) : 256;
   const entries = new Map();
@@ -898,6 +898,7 @@ export async function maybeDispatchAmaClosureFor({
       const launchAt = Date.parse(result?.closerProgressAt || '');
       const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
         ...closureWaitProgress(result, finalRoundSink.value.startedAt),
+        launchAlive: result?.closerLaunchAlive === true || Boolean(result?.closerLaunchBoundMs),
         reason: result?.reasons?.join(', ') || result?.reason || 'closure-pending',
         progress: result?.dispatched === true && !Number.isFinite(launchAt), now: observationTime,
         env: options.env || process.env, waitClass: 'final-round',
@@ -1236,7 +1237,7 @@ async function dispatchAmaClosureFor({
         if (!settled.ok) throw settled.error;
         result = settled.result;
       } else {
-        const submission = queue.submit({ key, timeoutMs: cfg.dispatchTimeoutMs,
+        const submission = queue.submit({ key, timeoutMs: Number(cfg.dispatchTimeoutMs) > 0 ? loadAwareTimeoutMs(cfg.dispatchTimeoutMs) : undefined,
           pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: finalHead },
           run: async signal => {
             let live;
@@ -1788,7 +1789,7 @@ async function dispatchAmaClosureFor({
       && (!handoffLease.holderHost || handoffLease.holderHost === hostname());
     const flight = handoffLease && ['pending', 'dispatched'].includes(handoffLease.status);
     const ownership = flight ? await probeClosureOwnershipImpl({ rootDir, repo: repoPath, prNumber,
-      headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: 5000, logger }) : null;
+      headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: loadAwareTimeoutMs(5000), logger }) : null;
     const background = resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background'
       ? amaHammerBackgroundQueueImpl({ maxConcurrent: cfg.amaCloserMaxConcurrentLaunches }).get?.(
         amaHammerBackgroundKey({ repo: repoPath, prNumber, headSha: currentPrHeadSha })) : null;
@@ -1805,10 +1806,13 @@ async function dispatchAmaClosureFor({
       const reason = launchProgress.reason || closureOwner.reason;
       const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
         headSha: currentPrHeadSha, reason, env,
+        launchAlive: Boolean(launchProgress.closerProgressAt) || (ownership?.owned === true && ownership?.uncertain !== true
+          && Array.isArray(ownership?.launchIds) && ownership.launchIds.length > 0),
         ...(finalRoundSink?.value
           ? closureWaitProgress({ ...launchProgress, closerProgressAt }, finalRoundSink.value.startedAt) : {}) });
       return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-        ...launchProgress, reason, retryAfterMs: boundedWait.retryAfterMs,
+        ...launchProgress, closerLaunchAlive: ownership?.owned === true && ownership?.uncertain !== true
+          && Array.isArray(ownership?.launchIds) && ownership.launchIds.length > 0, reason, retryAfterMs: boundedWait.retryAfterMs,
         ...(closerProgressAt ? { closerProgressAt } : {}),
         ...(boundedWait.exhausted ? { needsOperator: true } : {}), boundedWait }, { amaEnabled: true });
     }
@@ -2470,7 +2474,7 @@ async function dispatchAmaClosureFor({
     : Number.NaN;
   const finalRoundCiWaitMs = Number(now()) - finalRoundPushedAtMs;
   const commentOnlyFinalRoundAwaitingCi = finalRoundCiPending &&
-    Number.isFinite(finalRoundCiWaitMs) && finalRoundCiWaitMs < FINAL_ROUND_CI_WAIT_DEADLINE_MS;
+    Number.isFinite(finalRoundCiWaitMs) && finalRoundCiWaitMs < loadAwareTimeoutMs(FINAL_ROUND_CI_WAIT_DEADLINE_MS, { maxMs: Infinity });
   if (finalRoundCiPending && !commentOnlyFinalRoundAwaitingCi) {
     logger?.warn?.(
       `[watcher] final-round-ci-pending-timeout ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}: ` +
@@ -2643,7 +2647,7 @@ async function dispatchAmaClosureFor({
       let mergeabilityElapsedMs = 0;
       const submission = backgroundQueue.submit({
         key: backgroundKey,
-        timeoutMs: cfg.dispatchTimeoutMs,
+        timeoutMs: Number(cfg.dispatchTimeoutMs) > 0 ? loadAwareTimeoutMs(cfg.dispatchTimeoutMs) : undefined,
         pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: dispatchContext.targetRemediationSha },
         // Detached from this step's deadline on purpose: the whole point is that
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the

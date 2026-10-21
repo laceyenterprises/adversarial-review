@@ -2,10 +2,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { userInfo } from 'node:os';
+import os, { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import net from 'node:net';
 import { syncBuiltinESMExports } from 'node:module';
+// Smoke scenarios pin nominal deadlines on a synthetic idle host.
+os.loadavg = () => [0, 0, 0];
 net.Socket.prototype.connect = () => { throw new Error('SMV network boundary refused'); };
 globalThis.fetch = () => { throw new Error('SMV fetch boundary refused'); };
 syncBuiltinESMExports();
@@ -683,7 +685,11 @@ if (scenario === 'clean') {
   for (const now of [0, 1800001, 1800002]) await observeClosureWait({ ...identity(), now, reason: 'synthetic-stale-lease', pageImpl: async () => { pages++; } });
   assert.equal(pages, 1);
   const finalWait = { ...identity(), waitClass: 'final-round', env: {},
-    reason: 'in-flight:synthetic-closer', pageImpl: async () => { pages++; } };
+    reason: 'in-flight:synthetic-closer', launchAlive: true, pageImpl: async text => {
+      assert.match(text, /still running after \d+ minutes/);
+      assert.doesNotMatch(text, /exhausted/);
+      pages++;
+    } };
   await observeClosureWait({ ...finalWait, now: 0, startedAt: 0 });
   assert.equal((await observeClosureWait({ ...finalWait, now: 40 * 60_000, startedAt: 20 * 60_000 })).exhausted, false);
   assert.equal(pages, 1, 'a closer launched twenty minutes ago must not page');

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
@@ -493,7 +494,7 @@ async function runGitHubAdapter(kind, params = {}, {
   try {
     const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
       maxBuffer: ADAPTER_MAX_BUFFER,
-      timeout: ADAPTER_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
       env: buildAdapterEnv(env),
     });
     const payload = parseAdapterJson(stdout, kind);
@@ -576,7 +577,7 @@ async function writeGitHubAdapter(kind, params = {}, {
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
   const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
-    timeout: ADAPTER_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
     env: buildAdapterEnv(env),
   });
   const receipt = readAdapterReceipt(parseAdapterJson(stdout, kind));
@@ -805,7 +806,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
         execFileImpl: options?.execFileImpl,
         args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,mergedAt'],
         env,
-        timeoutMs: 15_000,
+        timeoutMs: loadAwareTimeoutMs(15_000),
       });
       const pr = JSON.parse(live.stdout);
       if (pr.state === 'MERGED' && pr.headRefOid === matchHeadCommit && pr.mergedAt) {

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLABEL-01: the remediation publisher owns the final diff check and push.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -33,14 +34,14 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   if (typeof branch !== 'string' || !branch.trim()) throw unproven();
   branch = branch.trim();
   const git = async args => (await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, ...args],
-    { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 })).stdout.replace(/\n$/, '');
+    { env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 })).stdout.replace(/\n$/, '');
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);
   await git(['check-ref-format', `refs/heads/${branch}`]);
   // Refresh the actual target branch; never compare against a stale worker base.
   await runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
     args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-tags', 'origin',
       `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
-    options: { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+    options: { env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
     // Keep the worker's selected credentials; auth failures are not transport retries.
     refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
   });
@@ -66,6 +67,6 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   // a concurrent local checkout nor a competing branch push can swap the result.
   await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
     `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
-  { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
   return { published: true, headSha: candidate, previousHead };
 }

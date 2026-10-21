@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -357,7 +358,7 @@ export async function readHeadAttestationChainForPr({
       ({ stdout } = await execFileImpl('hq', args, {
         env,
         maxBuffer: 5 * 1024 * 1024,
-        timeout: 30_000,
+        timeout: loadAwareTimeoutMs(30_000),
       }));
       break;
     } catch (err) {

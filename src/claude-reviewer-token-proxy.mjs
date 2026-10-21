@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // claude-reviewer-token-proxy.mjs — a Claude reviewer survives a broker token
 // rotation (TOKDZ-01; the BATCHTOKEN-01 mechanism, agent-os #7183, applied to
 // reviewers).
@@ -244,7 +245,7 @@ export async function startClaudeReviewerTokenProxy({
   proactiveRefreshLeadMs = DEFAULT_PROACTIVE_REFRESH_LEAD_MS,
   remintCooldownMs = DEFAULT_REMINT_COOLDOWN_MS,
   maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES,
-  upstreamIdleTimeoutMs = DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+  upstreamIdleTimeoutMs = loadAwareTimeoutMs(DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS, { maxMs: Infinity }),
 } = {}) {
   if (!String(initialToken || '').trim()) throw new Error('claude reviewer token proxy needs the spawn-time bearer');
   if (typeof remint !== 'function') throw new Error('claude reviewer token proxy needs a broker re-read function');

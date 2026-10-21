@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { lstatSync, opendirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -11,12 +12,12 @@ import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
   hammerScratchLeaseHeld,
 } from './dispatch-closer.mjs';
-import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
+import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 
 export const HAMMER_SCRATCH_MAX_AGE_MS = 4 * AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
 // Give an inconclusive cwd probe another complete launch/teardown window.
 export const HAMMER_SCRATCH_PROBE_GRACE_MS = 2 * Math.max(
-  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, amaCloserPendingLeaseExpiryMs());
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS);
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_RETRY_MS = 60 * 1000;
 const PROCESS_CENSUS_TIMEOUT_MS = 15_000;
@@ -219,19 +220,19 @@ function ledgerReadArgs(record, options, deadline, signal) {
     timeoutMs: Math.max(1, deadline - Date.now()),
     signal,
     spawnSyncImpl: options.spawnSyncImpl ? (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
-      ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
+      ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || loadAwareTimeoutMs(10_000), deadline - Date.now())),
     }) : undefined,
     // Retain the existing explicit fixture seam, while production uses async
     // psql and keeps the ledger deadline on each child.
     spawnAsyncImpl: options.spawnAsyncImpl || (options.spawnSyncImpl
       ? async (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
-        ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
+        ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || loadAwareTimeoutMs(10_000), deadline - Date.now())),
       }) : undefined),
   };
 }
 
 async function readScratchLedger(record, options, readImpl) {
-  const ledgerTimeoutMs = options.ledgerTimeoutMs ?? LEDGER_READ_TIMEOUT_MS;
+  const ledgerTimeoutMs = options.ledgerTimeoutMs ?? loadAwareTimeoutMs(LEDGER_READ_TIMEOUT_MS);
   const ledgerDeadline = Date.now() + ledgerTimeoutMs;
   const controller = new AbortController();
   let timer;
@@ -286,7 +287,7 @@ async function isTerminalOwner(record, options, getDeadline, readLedger) {
     || Date.now() >= getDeadline()) return false;
   try {
     const pr = await options.readPullRequestStateImpl({ repo: record.repo, prNumber: record.prNumber,
-      env: options.env, timeout: Math.max(1, Math.min(5000, getDeadline() - Date.now())) });
+      env: options.env, timeout: Math.max(1, Math.min(loadAwareTimeoutMs(5000), getDeadline() - Date.now())) });
     return ['MERGED', 'CLOSED'].includes(String(pr?.state || '').toUpperCase());
   } catch {
     // An unreadable PR protects this owner without deferring independent ones.
@@ -308,7 +309,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const logger = settings.logger || console;
   const nowMs = settings.nowMs ?? Date.now();
   const maxAgeMs = settings.maxAgeMs ?? HAMMER_SCRATCH_MAX_AGE_MS;
-  let deadline = Date.now() + (settings.scanBudgetMs ?? 10_000);
+  let deadline = Date.now() + (settings.scanBudgetMs ?? loadAwareTimeoutMs(10_000));
   const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
   const cursorPath = join(rootDir, 'data', 'follow-up-jobs', 'hammer-scratch-candidate-cursor.json');
   const removed = [];
@@ -331,7 +332,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
     censusStartedAt = Date.now();
     censusReads += 1;
     try {
-      const snapshot = await settings.readProcessSnapshotImpl({ timeout: PROCESS_CENSUS_TIMEOUT_MS, logger });
+      const snapshot = await settings.readProcessSnapshotImpl({ timeout: loadAwareTimeoutMs(PROCESS_CENSUS_TIMEOUT_MS), logger });
       if (typeof snapshot?.ps !== 'string' || !snapshot.ps.trim()
         || typeof snapshot?.lsof !== 'string'
         || (!snapshot.lsof.trim() && snapshot.cwdTimedOut !== true)) throw new Error('unreadable process census');

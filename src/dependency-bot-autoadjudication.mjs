@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { completeArgusJob, returnArgusJobToPending, writeArgusJob } from './argus-security-queue.mjs';
 import { ARGUS_VERDICTS } from './argus-security-verdict.mjs';
 import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
@@ -396,7 +397,7 @@ async function fetchDependencyMergeRecoveryEvidence(repo, prNumber, { env, logge
     args: ['pr', 'view', String(prNumber), '--repo', repo, '--json',
       'state,headRefOid,mergeable,mergeStateStatus,isDraft,statusCheckRollup'],
     env,
-    timeoutMs: 30_000,
+    timeoutMs: loadAwareTimeoutMs(30_000),
     log: logger,
   });
   return JSON.parse(String(stdout || '{}'));

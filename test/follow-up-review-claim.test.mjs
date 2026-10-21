@@ -156,7 +156,9 @@ test('concurrent creators recovering one stale claim queue exactly one job', asy
   }));
   const startAt = Date.now() + 750;
   const script = `
-    import { createFollowUpJob } from ${JSON.stringify(new URL('../src/follow-up-jobs.mjs', import.meta.url).href)};
+    import os from 'node:os';
+    os.loadavg = () => [0, 0, 0];
+    const { createFollowUpJob } = await import(${JSON.stringify(new URL('../src/follow-up-jobs.mjs', import.meta.url).href)});
     console.warn = () => {};
     while (Date.now() < ${startAt}) {}
     const result = createFollowUpJob({ rootDir: ${JSON.stringify(rootDir)}, ...${JSON.stringify(input())} });

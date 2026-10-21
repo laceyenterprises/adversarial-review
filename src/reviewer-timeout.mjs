@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Legacy reviewer timeout, still used for non-streaming paths. Streamed Claude
 // and Codex reviews use the idle watchdog and scaled ceiling in
 // reviewer-timeout-model.mjs.
@@ -24,7 +25,7 @@ const AGY_CHUNK_TIMEOUT_CAP_MS = 6 * 60 * 60 * 1000;
 const REVIEWER_PROCESS_SLACK_MS = 5 * 60 * 1000;
 
 function resolveAgyChunkTimeoutCapMs(env = process.env) {
-  return _resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS);
+  return loadAwareTimeoutMs(_resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS), { maxMs: Infinity });
 }
 
 function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = process.env } = {}) {
@@ -60,7 +61,7 @@ function resolveReviewerTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.timeout_ms',
   }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
-  return _resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS);
+  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS), { maxMs: Infinity });
 }
 
 function resolveProgressTimeoutMs(env = process.env, options = {}) {
@@ -71,7 +72,7 @@ function resolveProgressTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.no_progress_timeout_ms',
   }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
-  return _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
+  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS), { maxMs: Infinity });
 }
 
 function resolveFirstOutputTimeoutMs(env = process.env, options = {}) {
@@ -86,7 +87,8 @@ function resolveFirstOutputTimeoutMs(env = process.env, options = {}) {
   // positive-int guard that the other resolvers use to reject junk.
   const parsed = Number(cfgValue);
   if (Number.isFinite(parsed) && parsed === 0) return 0;
-  return _resolvePositiveInt(cfgValue, DEFAULT_FIRST_OUTPUT_TIMEOUT_MS);
+  const baseMs = _resolvePositiveInt(cfgValue, DEFAULT_FIRST_OUTPUT_TIMEOUT_MS);
+  return baseMs > 0 ? loadAwareTimeoutMs(baseMs, { maxMs: Infinity }) : 0;
 }
 
 function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
@@ -97,7 +99,7 @@ function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.gemini.antigravity.print_timeout_ms',
   }).get('reviewer.gemini.antigravity.print_timeout_ms', DEFAULT_AGY_PRINT_TIMEOUT_MS);
-  return _resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS);
+  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS), { maxMs: Infinity });
 }
 
 function resolveAgyReviewerSubprocessTimeoutMs(env = process.env, options = {}) {

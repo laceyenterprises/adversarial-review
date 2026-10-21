@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 // The health probe (v2 app architecture §6.2). A probe is healthy iff ALL of:
 //   healthz(app-contract endpoint) ok
 //   ∧ rolling dispatch-acceptance p95 ≤ threshold
@@ -30,7 +31,7 @@ async function probeOnce({
       const timeoutPromise = new Promise((_resolve, reject) => {
         timeout = setTimeoutFn(
           () => reject(new Error(`healthz timed out after ${config.healthzTimeoutMs}ms`)),
-          config.healthzTimeoutMs,
+          loadAwareTimeoutMs(config.healthzTimeoutMs),
         );
       });
       try {
@@ -89,7 +90,7 @@ function createSseLivenessTracker({ config, now = () => Date.now() } = {}) {
     },
     live() {
       if (lastEventAtMs == null) return true; // no subscription/events yet → fail open
-      return (now() - lastEventAtMs) <= config.sseLivenessTimeoutMs;
+      return (now() - lastEventAtMs) <= loadAwareTimeoutMs(config.sseLivenessTimeoutMs);
     },
     lastEventAtMs: () => lastEventAtMs,
   };

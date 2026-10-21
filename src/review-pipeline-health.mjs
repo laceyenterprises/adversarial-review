@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { meteredExecFileSync } from './metered-gh.mjs';
 import { excludingHeldOpenRows, isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
@@ -1147,21 +1148,21 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS
     ),
-    firstPassCiOrphanDeadlineMs: parsePositiveInteger(
+    firstPassCiOrphanDeadlineMs: loadAwareTimeoutMs(parsePositiveInteger(
       overrides.firstPassCiOrphanDeadlineMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS
-    ),
-    firstPassCiOrphanWorkerStatusTimeoutMs: parsePositiveInteger(
+    )),
+    firstPassCiOrphanWorkerStatusTimeoutMs: loadAwareTimeoutMs(parsePositiveInteger(
       overrides.firstPassCiOrphanWorkerStatusTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS
-    ),
-    launchdTimeoutMs: parsePositiveInteger(
+    )),
+    launchdTimeoutMs: loadAwareTimeoutMs(parsePositiveInteger(
       overrides.launchdTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
       DEFAULT_LAUNCHD_TIMEOUT_MS
-    ),
+    )),
     launchdTransientRetryDelaysMs: Array.isArray(overrides.launchdTransientRetryDelaysMs)
       ? overrides.launchdTransientRetryDelaysMs
           .map((value) => Number(value))
@@ -1431,7 +1432,7 @@ function fetchPRTerminalStateSync(repo, prNumber, {
   const args = ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,closedAt'];
   const options = {
     encoding: 'utf8',
-    timeout: 10_000,
+    timeout: loadAwareTimeoutMs(10_000),
     stdio: ['ignore', 'pipe', 'pipe'],
   };
   let lastError;
@@ -2635,7 +2636,7 @@ function branchWorkerIndex(hqRoot) {
 function liveWorkerForBranch(hqRoot, repo, branch, {
   execFileSyncImpl,
   workerIndex = branchWorkerIndex(hqRoot),
-  workerStatusTimeoutMs = DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
+  workerStatusTimeoutMs = loadAwareTimeoutMs(DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS),
 }) {
   if (!branch) return null;
   const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
@@ -2672,7 +2673,7 @@ function liveWorkerForBranch(hqRoot, repo, branch, {
 function execGhWithTransientRetry(args, {
   execFileSyncImpl,
   sleepSyncImpl = sleepSyncMs,
-  timeout = 20_000,
+  timeout = loadAwareTimeoutMs(20_000),
   acceptStdoutOnError = false,
 }) {
   const options = {
@@ -3584,7 +3585,7 @@ function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv }) {
   const options = {
     cwd: repoRoot,
     encoding: 'utf8',
-    timeout: 20_000,
+    timeout: loadAwareTimeoutMs(20_000),
     stdio: ['ignore', 'pipe', 'pipe'],
     env: gitEnv ? { ...process.env, ...gitEnv } : process.env,
   };
@@ -3708,7 +3709,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
       alternateObjectDirectory = String(execFileSyncImpl(
         'git',
         ['rev-parse', '--path-format=absolute', '--git-path', 'objects'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] },
+        { cwd: repoRoot, encoding: 'utf8', timeout: loadAwareTimeoutMs(20_000), stdio: ['ignore', 'pipe', 'pipe'] },
       )).trim();
     } catch (error) {
       return {

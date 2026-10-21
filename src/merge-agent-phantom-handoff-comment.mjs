@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -83,7 +84,7 @@ async function postPhantomHandoffEscalationComment({
     rootDir,
     execFileImpl,
     env,
-    commentTimeoutMs: PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS,
+    commentTimeoutMs: loadAwareTimeoutMs(PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS),
     resolveGhToken: () => ({
       tokenEnvName: 'GITHUB_TOKEN',
       fallbackTokenEnvNames: ['GH_TOKEN'],

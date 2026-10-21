@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -125,7 +126,7 @@ function formatProbeFailure({ label, command, args, err }) {
 async function runProbe(command, args, {
   env = process.env,
   cwd = process.cwd(),
-  timeout = 30_000,
+  timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   layer,
   label,
@@ -154,7 +155,7 @@ async function runProbe(command, args, {
 async function probeClaudeCli({
   env = process.env,
   cwd = process.cwd(),
-  timeout = 30_000,
+  timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
 } = {}) {
   const claudeCli = await resolveCliBinary({ binaryName: 'claude', envVar: 'CLAUDE_CLI', env });
@@ -187,7 +188,7 @@ function validateCodexMcpListOutput(stdout = '', stderr = '') {
 async function probeCodexCli({
   env = process.env,
   cwd = process.cwd(),
-  timeout = 30_000,
+  timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   requireMcpOAuth = false,
 } = {}) {
@@ -239,7 +240,7 @@ async function probeCodexCli({
 async function probeGeminiCli({
   env = process.env,
   cwd = process.cwd(),
-  timeout = 30_000,
+  timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
 } = {}) {
   const geminiCli = await resolveGeminiCliBinary({ env });
@@ -259,7 +260,7 @@ async function probeReviewerCliOAuth({
   model,
   env = process.env,
   cwd = process.cwd(),
-  timeout = 30_000,
+  timeout = loadAwareTimeoutMs(30_000),
   execFileImpl = execFileAsync,
   requireMcpOAuth = false,
 } = {}) {

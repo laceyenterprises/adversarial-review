@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../load-aware-timeout.mjs';
 // Fallback canary (ARC-09, SPEC §3 ARC-09 / Win 1). A fallback that only runs
 // during a real OS outage rots silently — the day it is finally needed is the
 // worst day to discover the local lifeline broke months ago. The canary drives
@@ -98,7 +99,7 @@ function buildCanaryRequest({
     },
     idempotencyKey: `fallback-canary:${domainId}:${at}`,
     budget: { maxTokens: 200_000, maxWallMs: DEFAULT_CANARY_TIMEOUT_MS },
-    timeoutMs: DEFAULT_CANARY_TIMEOUT_MS,
+    timeoutMs: loadAwareTimeoutMs(DEFAULT_CANARY_TIMEOUT_MS),
   };
 }
 

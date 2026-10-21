@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REVIEWGUARD-01: read the repository's generated-index guard as data, never execute it.
 import * as yaml from 'js-yaml';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
@@ -20,7 +21,7 @@ function safePath(value) {
 
 async function resolveGuardBaseRef(repo, baseRef) {
   const { stdout } = await execGhWithRetry({
-    args: ['api', `repos/${repo}/commits/${encodeURIComponent(baseRef)}`, '--jq', '.sha'], timeoutMs: 15_000,
+    args: ['api', `repos/${repo}/commits/${encodeURIComponent(baseRef)}`, '--jq', '.sha'], timeoutMs: loadAwareTimeoutMs(15_000),
   });
   return stdout.trim();
 }

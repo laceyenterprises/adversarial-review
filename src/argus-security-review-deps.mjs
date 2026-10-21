@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 // ARGUSDRAIN-01 — the production I/O behind `reviewArgusJob`.
 //
@@ -76,7 +77,7 @@ export function createDefaultArgusReviewDeps({
           '--json', 'state,headRefOid,baseRefOid,baseRefName,title,author,isDraft,files,statusCheckRollup',
         ],
         env,
-        timeoutMs: 60_000,
+        timeoutMs: loadAwareTimeoutMs(60_000),
         log: logger,
       });
       const parsed = JSON.parse(String(stdout || '{}'));
@@ -163,7 +164,7 @@ export function createDefaultArgusReviewDeps({
       const { stdout } = await execGhWithRetryImpl({
         args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env })],
         env: { ...env, GITHUB_TOKEN: identity.token, GH_TOKEN: identity.token },
-        timeoutMs: 60_000,
+        timeoutMs: loadAwareTimeoutMs(60_000),
         log: logger,
       });
       return { ok: true, url: parseCommentUrl(stdout), identity: identity.tokenEnv };

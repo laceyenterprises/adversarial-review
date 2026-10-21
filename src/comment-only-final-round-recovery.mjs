@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Native-owned, explicitly invoked recovery. No dispatch, re-review, merge,
 // fetch, checkout, terminal rewrite or fabricated worker completion.
 import { execFile } from 'node:child_process';
@@ -22,7 +23,7 @@ export async function recoverTerminalCommentOnlyRound({ rootDir, jobId, workspac
 } = {}) {
   const execute = execFileImpl;
   execFileImpl = (command, args, options = {}) => execute(command, args, {
-    ...options, timeout: Math.min(options.timeout || 15000, 15000),
+    ...options, timeout: Math.min(options.timeout || loadAwareTimeoutMs(15000), loadAwareTimeoutMs(15000)),
   });
   const archive = join(rootDir, 'data', 'follow-up-jobs', 'stopped-archived');
   const archived = existsSync(archive) ? readdirSync(archive, { withFileTypes: true }).filter((entry) => entry.isDirectory())
@@ -73,7 +74,7 @@ export async function recoverTerminalCommentOnlyRound({ rootDir, jobId, workspac
     // Read-only workspace check: unlike the normal completion audit, recovery
     // must never fetch into or otherwise mutate the historical worker tree.
     const audit = async () => {
-      const { stdout } = await execFileImpl('git', ['--no-optional-locks', '--no-replace-objects', '-C', workspaceDir, 'status', '--porcelain'], { timeout: 15000, maxBuffer: 1024 * 1024 });
+      const { stdout } = await execFileImpl('git', ['--no-optional-locks', '--no-replace-objects', '-C', workspaceDir, 'status', '--porcelain'], { timeout: loadAwareTimeoutMs(15000), maxBuffer: 1024 * 1024 });
       return { suspect: String(stdout || '').trim() ? ['dirty-workspace'] : [], error: null };
     };
     const result = await resolveCommentOnlyFinalRoundCompletion({ job, jobPath, reply, workspaceDir,

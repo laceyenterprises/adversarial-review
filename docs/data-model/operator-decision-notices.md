@@ -36,11 +36,18 @@ and uses the shared `launchRequestInFlight` predicate, including retry descendan
 Requested, admitted, leased and running launches hold delivery regardless of age;
 an unreadable retry chain cannot retire ownership. A replacement being admitted
 or a queued re-dispatch also holds delivery and resets the idle interval.
+Unreadable, concurrently removed, or unparseable dispatch files are skipped
+individually; remaining readable records still participate in observation.
 
 With no active ownership, `needsOperator` or owner `page` selects `no-route`;
 recorded retry/lifetime/target suppression or exhausted dispatch retries selects
 `retry-cap`. A recorded non-retryable hammer outcome without an available closer
 route selects `non-retryable: <outcome>`. Worker exit status alone is insufficient.
+Series suppression matches the review row's reviewed SHA, then the current-head
+dispatch's reviewed SHA, then the newest cross-head dispatch with a reviewed SHA
+(by `lastAttemptedAt`, falling back to `dispatchedAt`). Without that evidence it
+matches only the observed head, never an arbitrary earlier series. Lifetime,
+target-head, corrupt-ledger and explicit closer cap evidence retain their scope.
 Retryable outcomes and available hammer routes remain held until the idle
 backstop: nominally 45 minutes, scaled by `loadAwareTimeoutMs` using existing load
 policy, without the command-timeout helper's default one-hour clamp. The page
@@ -48,7 +55,8 @@ text and payload both name the reason; an idle expiry uses `backstop`.
 
 PR closure and review completion are distinct: the GitHub subject adapter sets
 `terminal` only for a non-open PR. Delivery additionally verifies live open PR
-state and the same `headRefOid`. Successful durable enqueue sets the existing
-per-head debounce fields in [cascade state](cascade-state.md); failed enqueue
+state and the same `headRefOid`, and re-checks the per-head alert marker after
+asynchronous lookups immediately before enqueue. Successful durable enqueue sets
+the existing per-head debounce fields in [cascade state](cascade-state.md); failed enqueue
 leaves them unset and retries later. See the
 [operator notice runbook](../follow-up-runbook.md#operator-decision-notices-reviewnotice-01).

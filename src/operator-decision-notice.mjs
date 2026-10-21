@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
-import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
+import { readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './ama/dispatch-record-read.mjs';
 import { operatorNoticeInFlight, operatorNoticeNonRetryableStop,
   operatorNoticePendingRetry, operatorNoticeRetryCapReached } from './ama/operator-notice-route.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -23,6 +23,13 @@ function readState(rootDir, identity) {
 }
 function writeState(rootDir, identity, state) {
   writeFileAtomic(statePath(rootDir, identity), JSON.stringify(state));
+}
+
+function latestDispatchReviewedSha(rootDir, identity) {
+  const attemptedAt = record => Date.parse(record.lastAttemptedAt || record.dispatchedAt) || 0;
+  return readAmaCloserDispatchRecordsForPR(rootDir, identity)
+    .filter(record => record.reviewedSha)
+    .sort((a, b) => attemptedAt(b) - attemptedAt(a))[0]?.reviewedSha;
 }
 
 // Observation only: never alters closer eligibility, ownership, or dispatch.
@@ -64,7 +71,7 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   const lease = readAmaCloserLease(rootDir, identity);
   const outcome = state.closer?.headSha === headSha ? state.closer.result : null;
   const retryCap = operatorNoticeRetryCapReached(rootDir, identity, outcome,
-    reviewRow?.reviewer_head_sha || record?.reviewedSha);
+    reviewRow?.reviewer_head_sha || record?.reviewedSha || latestDispatchReviewedSha(rootDir, identity));
   const operatorNeeded = outcome?.needsOperator || outcome?.closureOwner?.owner === 'page'
     || retryCap;
   const nonRetryable = operatorNoticeNonRetryableStop(record);
@@ -123,6 +130,7 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
       return;
     }
   }
+  if (hasOperatorDecisionRequiredAlerted(rootDir, identity)) return;
   await deliverAlertFn(
     `Adversarial review needs an operator decision for ` +
     `${repo}#${prNumber}: ${decision.state || 'unknown state'} ` +

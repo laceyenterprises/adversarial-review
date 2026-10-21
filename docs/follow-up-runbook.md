@@ -120,6 +120,11 @@ This observation does not change closer eligibility or dispatch.
 
 Before delivery, the watcher reads the live PR and requires it to remain open
 at the observed head, then checks again for a new launch or pending re-dispatch.
+It also re-checks the per-head alert marker immediately before enqueue so a
+marker written during those lookups prevents duplicate delivery. Dispatch scans
+skip individual unreadable or malformed records. Series-cap evidence uses the
+reviewed SHA from the review row, current-head dispatch, or newest cross-head
+dispatch, in that order; absent all three, it matches only the observed head.
 The GitHub subject's `terminal` flag represents PR
 closure, not completion of a review or remediation round. A stopped remediation
 job on an open PR therefore remains eligible for notification. PR closure or a

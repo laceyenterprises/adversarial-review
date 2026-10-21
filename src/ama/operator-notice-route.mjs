@@ -18,7 +18,7 @@ export function operatorNoticeRetryCapReached(rootDir, identity, outcome, review
   if ([outcome?.reason, outcome?.closureOwner?.reason].some(reason => CAP_REASONS.has(reason))) return true;
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   return Boolean(ledger?.__corrupt || ledger?.lifetimeSuppressed
-    || (ledger?.suppressed && (!reviewedSha || ledger.jobKey === reviewedSha))
+    || (ledger?.suppressed && ledger.jobKey === (reviewedSha || identity.headSha))
     || (ledger?.targetSuppressed && ledger.targetRemediationSha === identity.headSha));
 }
 

@@ -35,6 +35,7 @@ import { maybeDeliverOperatorDecisionNotice, recordOperatorNoticeCloserOutcome,
   OPERATOR_DECISION_NOTICE_BACKSTOP_MS } from '../src/operator-decision-notice.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-closer.mjs';
+import { readAmaCloserDispatchRecordsForPR } from '../src/ama/dispatch-record-read.mjs';
 import { markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
 
 const HEAD = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -234,6 +235,95 @@ function noticeFixture(rootDir) {
     deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
     readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-unavailable' }),
     logger: { log: line => logs.push(line) } } };
+}
+
+for (const failure of ['corrupt-json', 'concurrent-unlink']) {
+  test(`dispatch scanning skips ${failure} and retains readable PR records`, async t => {
+    await withRootAsync(async root => {
+      const badPath = amaCloserDispatchFilePath(root, identity);
+      const good = { ...identity, headSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' };
+      fixtureJSON(badPath, identity);
+      fixtureJSON(amaCloserDispatchFilePath(root, good), good);
+      fixtureJSON(amaCloserDispatchFilePath(root, { ...identity, headSha: 'mismatch' }),
+        { ...identity, repo: 'other/repo' });
+      if (failure === 'corrupt-json') writeFileSync(badPath, '{');
+      else {
+        const read = fs.readFileSync;
+        t.mock.method(fs, 'readFileSync', (path, ...args) => {
+          if (path === badPath) rmSync(badPath, { force: true });
+          return read(path, ...args);
+        });
+        syncBuiltinESMExports();
+      }
+      try {
+        assert.deepEqual(readAmaCloserDispatchRecordsForPR(root, identity), [good]);
+        const { alerts, options } = noticeFixture(root);
+        recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+        await maybeDeliverOperatorDecisionNotice(options);
+        assert.equal(alerts.length, 1);
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      }
+    });
+  });
+}
+
+for (const yieldAt of ['launch-status', 'live-pr', 'final-launch-status']) {
+  test(`an alert marked during ${yieldAt} lookup prevents duplicate delivery`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+      fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity,
+        launchRequestId: 'synthetic-stopped', state: 'launch-terminal', lastObservedStatus: 'failed' });
+      let probes = 0;
+      await maybeDeliverOperatorDecisionNotice({ ...options,
+        readLaunchRequestStatusImpl: async () => {
+          probes++;
+          if ((yieldAt === 'launch-status' && probes === 1)
+            || (yieldAt === 'final-launch-status' && probes === 2)) {
+            markOperatorDecisionRequiredAlerted(root, identity);
+          }
+          return { ok: true, row: { status: 'failed' } };
+        },
+        readLivePR: async () => {
+          if (yieldAt === 'live-pr') markOperatorDecisionRequiredAlerted(root, identity);
+          return { state: 'OPEN', headRefOid: HEAD };
+        } });
+      assert.equal(alerts.length, 0);
+      assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), true);
+    });
+  });
+}
+
+for (const source of ['latest-cross-head', 'latest-cross-head-dispatched', 'review-row', 'current-record', 'no-records']) {
+  for (const matches of [false, true]) {
+    test(`${source} reviewed SHA ${matches ? 'matches' : 'ignores'} the series retry cap after a head move`, async () => {
+      await withRootAsync(async root => {
+        const { alerts, options } = noticeFixture(root);
+        const reviewedSha = source === 'no-records' ? HEAD : 'reviewed-current-series';
+        markHammerRetryCapExhausted(root, identity, {
+          jobKey: matches ? reviewedSha : 'reviewed-old-series', headSha: HEAD, attemptCount: 2 });
+        if (source !== 'no-records') {
+          // Neither filename order nor creation order establishes recency.
+          for (const [headSha, series, timestamp] of [
+            ['cccc', source.startsWith('latest-cross-head') ? reviewedSha : 'unrelated-series', '2026-10-21T11:00:00Z'],
+            ['bbbb', 'reviewed-old-series', '2026-10-21T10:00:00Z'],
+          ]) fixtureJSON(amaCloserDispatchFilePath(root, { ...identity, headSha }), {
+            ...identity, headSha, reviewedSha: series,
+            [source === 'latest-cross-head-dispatched' ? 'dispatchedAt' : 'lastAttemptedAt']: timestamp,
+            lastObservedStatus: 'failed', state: 'launch-terminal' });
+        }
+        if (source === 'current-record') fixtureJSON(amaCloserDispatchFilePath(root, identity), {
+          ...identity, reviewedSha, state: 'launch-terminal', lastObservedStatus: 'failed' });
+        recordOperatorNoticeCloserOutcome(root, identity, { closureOwner: { owner: 'hammer' } });
+        await maybeDeliverOperatorDecisionNotice({ ...options,
+          ...(source === 'review-row' ? { reviewRow: { reviewer_head_sha: reviewedSha } } : {}) });
+        assert.equal(alerts.length, matches ? 1 : 0);
+        if (matches) assert.equal(alerts[0].meta.payload.reason, 'retry-cap');
+      });
+    });
+  }
 }
 
 test('held observations use one atomic replacement per changed head and none on repeat polls', async t => {

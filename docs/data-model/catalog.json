@@ -60,7 +60,7 @@
       "path": "docs/data-model/operator-decision-notices.md",
       "store": "<runtime rootDir>/data/operator-decision-notices/",
       "schemaSurface": "src/operator-decision-notice.mjs",
-      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/ama-closure-orchestration.mjs", "src/reviewer-cascade.mjs", "src/ama/operator-notice-route.mjs"],
+      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/ama-closure-orchestration.mjs", "src/reviewer-cascade.mjs", "src/ama/operator-notice-route.mjs", "src/ama/dispatch-record-read.mjs"],
       "owner": "watcher operator-decision notification observation"
     },
     {

@@ -32,7 +32,11 @@ export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber }) {
   return listSettledJsonNames(amaCloserDispatchDir(rootDir))
     .filter(name => name.startsWith(prefix))
     .flatMap(name => {
-      const record = JSON.parse(readFileSync(join(amaCloserDispatchDir(rootDir), name), 'utf8'));
-      return record?.repo === repo && Number(record.prNumber) === Number(prNumber) ? [record] : [];
+      try {
+        const record = JSON.parse(readFileSync(join(amaCloserDispatchDir(rootDir), name), 'utf8'));
+        return record?.repo === repo && Number(record.prNumber) === Number(prNumber) ? [record] : [];
+      } catch {
+        return [];
+      }
     });
 }

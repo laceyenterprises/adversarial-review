@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { readLaunchRequestStatus } from '../src/producer-contracts/launch-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES } from '../src/ama/launch-request-status.mjs';
 import { readDispatchReceipt } from '../src/producer-contracts/dispatch-receipt.mjs';
 import { readBrokerProvider } from '../src/producer-contracts/broker-evidence.mjs';
 import { readAdapterReceipt, readPrCreateReceipt } from '../src/producer-contracts/publication-receipt.mjs';
-import { readReserveFloorWeeklyEvidence, reserveFloorWeeklyMeasurement } from '../src/fleet-quota-status.mjs';
+import { readReserveFloorWeeklyEvidence, reserveFloorWeeklyMeasurement, parseHqFleetQuotaSnapshot } from '../src/fleet-quota-status.mjs';
+import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { selectCodexReviewerAccount, selectCodexWorkerAccount } from '../src/codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from '../src/claude-account-routing.mjs';
 import { afhGroundingSnapshotFromStdout, applyAfhReviewerFallback } from '../src/afh-reviewer-fallback.mjs';
@@ -15,6 +17,21 @@ import { __test__ as adapterTest } from '../src/github-adapter-client.mjs';
 const { parseAdapterJson } = adapterTest;
 
 const capture = path => JSON.parse(readFileSync(new URL(`./fixtures/producer-contracts/${path}.json`, import.meta.url), 'utf8'));
+
+for (const stdout of ['', 'unavailable', 'banner\n{invalid}']) {
+  test(`negative stdout mutation: ${JSON.stringify(stdout)} names producer and transport field`, () => {
+    assert.throws(() => parseHqFleetQuotaSnapshot(stdout), /cwp_dispatch.cli_fleet: \$stdout (empty|invalid JSON)/);
+    assert.throws(() => parseHqDispatchStatus(stdout), /cwp_dispatch.dispatch: \$stdout (empty|invalid JSON)/);
+  });
+}
+
+test('unavailable closer evidence retains hold policy and names producer stdout', async () => {
+  const result = await resolveCloserDispatchHarness({ workerClass: 'hammer', codexAccountPolicy: 'personal-first', env: {},
+    execFileImpl: async () => { throw new Error('fixture transport unavailable'); }, sleepImpl: async () => {} });
+  assert.equal(result.hold, true);
+  assert.equal(result.reason, 'fleet-quota-status-unavailable');
+  assert.match(result.diagnostics.join('; '), /cwp_dispatch.cli_fleet: \$stdout unavailable/);
+});
 
 for (const scenario of ['measured', 'disabled', 'absent', 'five-hour-only', 'expired', 'stale', 'unavailable']) {
   test(`producer weekly capture: ${scenario} preserves independent seven-day evidence`, () => {
@@ -51,6 +68,13 @@ for (const [label, mutate, field] of [
   mutate(floors);
   const evidence = readReserveFloorWeeklyEvidence(floors['openai-oauth-corp'], 'openai-oauth-corp');
   assert.ok(evidence.diagnostics.some(d => d.includes('quota_reserve.snapshot') && d.includes(field)));
+});
+
+test('negative fleet mutation: wrong providerStatuses type preserves the routing exception and names its field', () => {
+  const fleet = capture('quota/fleet-ready');
+  fleet.providerStatuses = {};
+  assert.throws(() => selectClaudeAccountLaneFromSnapshot(fleet, { workerClass: 'claude-reviewer' }),
+    { name: 'TypeError', message: /cwp_dispatch.cli_fleet: \$\.providerStatuses invalid; expected array/ });
 });
 
 for (const scenario of ['ready', 'degraded', 'unavailable', 'disabled']) {
@@ -103,6 +127,8 @@ test('ledger producer rows: terminality and success follow owner vocabulary', ()
   }
   assert.equal(readLaunchRequestStatus('blocked_needs_decision').terminal, true);
   assert.equal(readLaunchRequestStatus('blocked_needs_decision').succeeded, false);
+  assert.equal(AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has('blocked_needs_decision'), false,
+    'producer terminality does not expand closer retry authority');
 });
 
 for (const value of [undefined, null, false, 1, 'completed', 'cancelled', 'future']) {

@@ -43,6 +43,10 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
     [primary, 'oauth', 'claude-code'],
   ]) {
     const cap = harnessCapFromStatuses(statuses, { harness: lane, model, authPath });
+    // Preserve the existing malformed-input exception, with its producer field.
+    if (payload?.providerStatuses != null && typeof payload.providerStatuses.find !== 'function') {
+      throw new TypeError('cwp_dispatch.cli_fleet: $.providerStatuses invalid; expected array');
+    }
     const row = payload?.providerStatuses?.find(entry => String(entry?.provider || '').trim().toLowerCase() === 'anthropic'
       && (entry.authPath || entry.auth_path) === authPath);
     const policy = payload?.reserveFloors?.[`anthropic-${authPath}`];

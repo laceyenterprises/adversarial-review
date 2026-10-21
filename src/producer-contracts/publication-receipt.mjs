@@ -13,7 +13,10 @@ export function readAdapterReceipt(payload) {
     complete: typeof payload?.complete === 'boolean' ? payload.complete : null, diagnostics };
 }
 
-/** Remote acceptance can precede failed local completion; never infer delivery. */
+/**
+ * Remote acceptance can precede failed local completion; never infer delivery.
+ * @returns {{accepted: boolean, url: unknown, output: unknown, diagnostics: string[]}}
+ */
 export function readPrCreateReceipt(payload) {
   const accepted = payload?.ok === true;
   const diagnostics = [];

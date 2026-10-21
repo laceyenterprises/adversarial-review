@@ -488,7 +488,8 @@ export async function resolveReviewerWorkerClassWithFallback({
     nowMs,
   });
   if (quotaStatus.error || quotaStatus.stale) {
-    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage };
+    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage,
+      diagnostics: [`cwp_dispatch.cli_fleet: $stdout ${quotaStatus.stale ? 'stale' : 'unavailable'}`] };
   }
 
   const stdout = quotaStatus.stdout;
@@ -610,7 +611,8 @@ export async function resolveReviewerWorkerClassWithFallback({
     logger?.error?.(
       `[watcher] review-worker-class-fallback quota-status parse failed; failing open: ${message}`
     );
-    return { ...base, reason: 'fleet-quota-status-parse-error', error: message };
+    return { ...base, reason: 'fleet-quota-status-parse-error', error: message,
+      diagnostics: ['cwp_dispatch.cli_fleet: $stdout invalid JSON or payload'] };
   }
 
   return {

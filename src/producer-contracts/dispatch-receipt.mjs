@@ -2,7 +2,7 @@ import { readLaunchRequestStatus } from './launch-status.mjs';
 
 const producer = 'cwp_dispatch.dispatch';
 
-/** @returns {{payload: object, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readLaunchRequestStatus>}} */
+/** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readLaunchRequestStatus>}} */
 export function readDispatchReceipt(value, { identityFields = ['launchRequestId', 'dispatchId', 'lrq'], allowNonObject = false } = {}) {
   if (typeof value === 'string') {
     try { value = JSON.parse(value); }

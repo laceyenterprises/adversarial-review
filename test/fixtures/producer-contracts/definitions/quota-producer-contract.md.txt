@@ -80,7 +80,9 @@ Examples live in [`fixtures/quota_reserve`](../lib/python/tests/fixtures/quota_r
 - `fleet-{ready,unavailable,degraded,disabled}.json`: actual `cmd_status` JSON
   stdout (exit 0, empty stderr), including `_status_payload`, worker outcomes
   and `_json_payload`, over disposable quota files, an empty follow-up log and
-  a migrated empty SQLite ledger. Real file readers, accounting queries and serializers execute.
+  a migrated empty SQLite ledger. The scenario first calls the real
+  `publish_status_inputs(root, now=NOW)`, as the quota-probe loop does after ticks
+  and during idle time. Real file readers, accounting queries and serializers execute.
   External broker observations reuse the broker captures; review-store transport
   returns no review rows. Only temporary-root path prefixes become `<scratch>`.
 - `reserveFloors-capture-2026-10-20.json` remains negative pre-repair reproduction
@@ -107,6 +109,32 @@ tests skipped; rerun without it to verify parity. Snapshot equality covers
 Negative tests explicitly mutate missing/null/wrong-type fields, percentage types and unknown
 statuses. Consumer tests load these same examples. Activation-predicate tests
 invoke jq on the existing plan assertion; runtime never reads projects.
+
+### QUOTAINPUTSTALE-02 capture repair
+
+This is a fixture gap (option b). At `b30df83e45` all four fleet parity cases
+failed without publication: OpenAI measurements and weekly measurements became
+null (`weeklyMeasurementReason: no-weekly-window`), their reserve/pause decisions
+and release timestamps lost evidence, all floors' held counts became null, and
+`brokerAuth` became empty. Accounting/outcome adjuncts reported unavailable inputs.
+The same four cases fail with `cli_fleet.py`, `quota_status_inputs.py` and
+`quota_status_sections.py` restored to `3dd897ce2d^`, before QUOTAINPUTSTALE-01.
+The JSON input requirement originated in QUOTASTATUSFAST-01 (`fd82cbc82e`, PR 8726),
+whose no-external-read contract forbids collecting on a missing cache. The
+production quota-probe loop owns publication; a fresh host before its first
+successful publication must still serialize unavailable evidence safely.
+
+The repaired scenario publishes rather than inventing a cache envelope. Its
+reserve floors (including measured weekly percentages 75/60 for primary/corporate),
+held counts and broker bodies exactly match the prior examples. Recapturing all
+four examples changes only the additive `identityPools: {}` field introduced by
+ITP-08 (PR 8771); the disposable scenario has no configured identity pools.
+No measurement, broker observation or policy field was recaptured to accept nulls.
+The focused cold/corrupt-cache test asserts exit 0, empty stderr, null OpenAI
+measurements with `no-weekly-window`, nullable held counts, empty broker evidence,
+and typed `{available: false, error: <string>}` section errors, without collection.
+Existing stale-cache tests retain Codex windows and recalculate their freshness
+at render time; QUOTAINPUTSTALE-01's bounded broker retention remains unchanged.
 
 ## Deployment
 

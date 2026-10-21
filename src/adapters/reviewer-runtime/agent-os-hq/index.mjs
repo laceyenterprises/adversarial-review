@@ -170,14 +170,17 @@ function resolveWorkerClass(model, explicitWorkerClass) {
 
 function parseJsonObject(text, label) {
   const raw = String(text || '').trim();
-  if (!raw) throw new Error(`${label} produced empty output`);
+  if (!raw) throw new Error(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
   try {
     return JSON.parse(raw);
   } catch {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
-    if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
-    throw new Error(`${label} did not produce JSON: ${tailText(raw, 1000)}`);
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(raw.slice(start, end + 1)); }
+      catch (cause) { throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not produce JSON`, { cause }); }
+    }
+    throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not produce JSON: ${tailText(raw, 1000)}`);
   }
 }
 

@@ -1,10 +1,10 @@
 # Producer evidence in the review consumer
 
-Publication is blocked on the producer's fleet capture harness: its four
-examples predate the published-input JSON path and no longer pass owner parity
-at the provisioned revision. The prepared consumer changes retain them as
-historical producer examples pending owner repair and recapture. See
-[validation and prerequisite](validation/prm-06.md).
+Portable artifacts are pinned to producer revision
+`f54169eb71c6f0b55b51d3025dd435c88652277e`, including its repaired fleet
+capture scenario. The scenario invokes the real quota-input publisher before
+reading status JSON, using disposable state and fake external transport. See
+[validation evidence](validation/prm-06.md).
 
 The review service reads four existing producer boundaries without depending on
 an Agent OS checkout or a Python process at runtime. Routing, holds, retry
@@ -22,6 +22,7 @@ Reader result shapes use JSDoc. Missing, invalid, stale and unfamiliar evidence
 adds producer/field diagnostics to account holds, reviewer transition logs,
 status results, adapter mutation results and the closer's `harnessResolution`
 audit. Stable routing reason codes retain their existing meanings.
+Existing malformed-input exceptions still throw, now naming the producer field.
 
 Weekly percentages still accept the documented old status/confidence shapes
 and numeric-string compatibility. The pre-repair `measurement` fallback remains

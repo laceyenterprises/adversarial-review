@@ -22,5 +22,9 @@ export function readBrokerProvider(payload, provider) {
       diagnostics.push(`${producer}: ${path}.state unrecognized ${JSON.stringify(state.state)}`);
     }
   }
+  if (payload?.providers && Object.hasOwn(payload.providers, provider)) {
+    if (typeof legacyReady !== 'boolean') diagnostics.push(`${producer}: providers.${provider} missing/invalid boolean`);
+    else if (!legacyReady) diagnostics.push(`${producer}: providers.${provider}=false`);
+  }
   return { ready: state?.ready, canServe: state?.can_serve, legacyReady, diagnostics };
 }

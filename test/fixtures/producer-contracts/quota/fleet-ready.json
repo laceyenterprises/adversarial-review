@@ -166,6 +166,7 @@
     "note": "Codex OAuth remaining comes from provider rate-limit used-percent: a fresh reading (status measured) always wins, and an older unreset reading (status stale) wins only when it was observed after the operator anchor (or no anchor is recorded). Anthropic OAuth uses measured weekly and five-hour usage. Without measurement remaining is the operator-anchored or reset-history estimate, inferred from observed cap/reset history; its confidence reflects how much reset-event history backs it. When a reading wins, the estimate moves under estRemaining.estimate.",
     "spendWindowSeconds": 86400
   },
+  "identityPools": {},
   "lastProbeAt": null,
   "probeDaemonHeartbeat": {
     "heartbeatAt": null,

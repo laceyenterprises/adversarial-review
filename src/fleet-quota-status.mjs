@@ -130,7 +130,8 @@ function extractJsonObject(text, label) {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      return JSON.parse(raw.slice(start, end + 1));
+      try { return JSON.parse(raw.slice(start, end + 1)); }
+      catch (cause) { throw new Error(`cwp_dispatch.cli_fleet: $stdout invalid JSON; ${label} did not return JSON`, { cause }); }
     }
     throw new Error(`cwp_dispatch.cli_fleet: $stdout invalid JSON; ${label} did not return JSON`);
   }
@@ -171,14 +172,12 @@ export function parseHqFleetQuotaStatus(stdout) {
 }
 
 // `hq fleet quota status --json` reports each reserve floor's weekly reading in the
-// shape {confidence, inferred, percentRemaining, ...}. For Anthropic floors it is
-// under `weeklyMeasurement`; for OpenAI floors `weeklyMeasurement` is null and the
-// same reading is under `measurement`. Older payloads and fixtures used
-// `weeklyMeasurement: {status, percentRemaining}`. Account routing reads
-// `status === 'measured'`, so normalize every shape to {status, percentRemaining};
-// otherwise every healthy account reads as unknown evidence and holds.
-// Missing/invalid percentages stay NaN, never fabricated zero capacity. A
-// weekly reading without finite measured evidence can use `measurement` instead.
+// shape {status, confidence, inferred, percentRemaining, ...} under
+// `weeklyMeasurement` for both providers, or null plus `weeklyMeasurementReason`.
+// Older payloads used confidence-only weekly objects, status-only objects, or
+// OpenAI's `measurement` field. Normalize these documented compatibility shapes
+// for account routing. Missing/invalid percentages stay NaN. Only pre-repair
+// floors without an explicit weekly reason may fall back to `measurement`.
 function normalizeWeeklyMeasurement(reading) {
   if (!reading || typeof reading !== 'object') return null;
   const percentRemaining = normalizedCount(reading.percentRemaining) ?? NaN;

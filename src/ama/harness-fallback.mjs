@@ -238,7 +238,8 @@ export async function resolveCloserDispatchHarness({
     const cached = recentQuotaSnapshot(rootDir, nowMs());
     if (!cached) {
       return { ...base, hold: autoCodex || primary === 'hammer-claude-corp',
-        reason: failureReason, error: String(err?.message || err) };
+        reason: failureReason, error: String(err?.message || err),
+        diagnostics: [`cwp_dispatch.cli_fleet: $stdout ${failureReason === 'fleet-quota-status-unreadable' ? 'invalid JSON or payload' : 'unavailable'}; no fresh cached snapshot`] };
     }
     snapshot = cached.snapshot;
     evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: cached.ageMs,
@@ -292,6 +293,7 @@ export async function resolveCloserDispatchHarness({
       primaryState: primaryAvailability.state,
       softGrounded: false,
       softGrounding: primarySoft.verdict,
+      ...(!primaryAvailability.available ? { diagnostics: [primaryAvailability.diagnostic, primaryCap.diagnostic, primarySoft.diagnostic].filter(Boolean) } : {}),
     };
   }
 
@@ -306,6 +308,7 @@ export async function resolveCloserDispatchHarness({
     softGrounded,
     softGrounding: primarySoft.verdict,
   };
+  const diagnostics = [...(primaryAccount?.diagnostics || []), primaryAvailability.diagnostic, primaryCap.diagnostic].filter(Boolean);
 
   // Primary is authoritatively grounded (hard, soft, or both). Pick the first
   // fallback whose provider is not ALSO grounded.
@@ -315,7 +318,7 @@ export async function resolveCloserDispatchHarness({
   for (let candidate of fallbacks) {
     if (candidate === primary) continue;
     const account = accountLane(candidate);
-    if (account?.hold) continue;
+    if (account?.hold) { diagnostics.push(...(account.diagnostics || [])); continue; }
     if (account) candidate = account.workerClass;
     const candidateProvider = providerForCloserWorkerClass(candidate);
     if (candidateProvider) {
@@ -327,6 +330,7 @@ export async function resolveCloserDispatchHarness({
         harness: candidateProvider === 'openai' ? (candidate === 'hammer-corp' ? 'codex-corp' : 'codex') : candidate,
         model: modelForWorkerClass(candidate),
       });
+      diagnostics.push(...[candidateAvailability.diagnostic, candidateCap.diagnostic].filter(Boolean));
       if (candidateCap.capped || isGroundedProviderState(candidateAvailability.state)) continue;
       if (candidate === 'hammer-corp' && !candidateCap.available) continue;
       if (screenSoftGroundedFallbacks
@@ -351,6 +355,7 @@ export async function resolveCloserDispatchHarness({
     ...base,
     reason: 'all-fallbacks-grounded',
     hold: true,
+    diagnostics,
     ...groundingFields,
   };
 }

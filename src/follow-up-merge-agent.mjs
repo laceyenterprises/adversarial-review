@@ -2735,7 +2735,6 @@ async function dispatchMergeAgentForPR({
     prompt,
     dispatchId: parsed?.dispatchId || null,
     launchRequestId: receipt.rawIdentity || null,
-    ...(receipt.identityDiagnostic || receipt.status.diagnostic ? { diagnostic: [receipt.identityDiagnostic, receipt.status.diagnostic].filter(Boolean).join('; ') } : {}),
     trigger,
     priority: dispatchPriority,
     priorityFlagSupported,

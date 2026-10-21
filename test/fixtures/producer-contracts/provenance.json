@@ -61,9 +61,9 @@
       "sourceSha256": "2d0c291e12fd84568d579986a1ea169166bd975d24b1290cd9120f1684a05076"
     },
     "definitions/quota-producer-contract.md.txt": {
-      "sha256": "17f1ec24253cb05d5e12998789971ee8505e0cdcc75215140ade41ebf4153e06",
+      "sha256": "2f6afc0d8cebdfa422b64db852361996ed2c21d2ff2fdfda219765d044a6876c",
       "source": "modules/worker-pool/docs/quota-producer-contract.md",
-      "sourceSha256": "17f1ec24253cb05d5e12998789971ee8505e0cdcc75215140ade41ebf4153e06"
+      "sourceSha256": "2f6afc0d8cebdfa422b64db852361996ed2c21d2ff2fdfda219765d044a6876c"
     },
     "definitions/quota_reserve.py.txt": {
       "sha256": "82e721d33223ba17479349bc94429e1c0b1b9a7a353da3eca76ee519a563c002",
@@ -153,19 +153,19 @@
       "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/wrong-head-refused.json"
     },
     "quota/fleet-degraded.json": {
-      "sha256": "9438af214a7d337d00e4d0a83ec5ed4f0cda00911161bb8f813fc217d8bf576c",
+      "sha256": "779d8730de75d3906a6cbf4ec3db1ec2b6a32dd839c42ffe446e8c4716d93f76",
       "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-degraded.json"
     },
     "quota/fleet-disabled.json": {
-      "sha256": "98d1378c3f2311ff28b4edebd86fc5c0ec12066baa0e84c6edfd80683bac578f",
+      "sha256": "b551dc3f67859d79af6fa1b77c728cd9009912adcf2c5d4276d7eea99369adf2",
       "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-disabled.json"
     },
     "quota/fleet-ready.json": {
-      "sha256": "0f906c238e5731f9c8a4eb353c677b3345aa87f0194821f1dca06a9a4120f5ef",
+      "sha256": "901cd705e8c26ef8436db32d58762dfe10eef4e73d06046f1ffdeb9526850584",
       "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-ready.json"
     },
     "quota/fleet-unavailable.json": {
-      "sha256": "c993f3a78cbad47ee79487e82b232f4aa93b85bbcc89f9fdcf525f94f4b29c3f",
+      "sha256": "bd7f868c1f59c730d3a16476f98a683d6b578addeda527602646f9d52e3d077f",
       "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-unavailable.json"
     },
     "quota/repaired-absent.json": {
@@ -199,5 +199,5 @@
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",
   "repository": "agent-os",
-  "revision": "3dd897ce2d5f610967f200cf18d93f9a403f7483"
+  "revision": "f54169eb71c6f0b55b51d3025dd435c88652277e"
 }

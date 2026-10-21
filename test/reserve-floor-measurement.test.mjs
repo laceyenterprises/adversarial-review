@@ -4,8 +4,8 @@ import { reserveFloorWeeklyMeasurement } from '../src/fleet-quota-status.mjs';
 import { selectCodexWorkerAccount, selectCodexReviewerAccount } from '../src/codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from '../src/claude-account-routing.mjs';
 
-// The shape `hq fleet quota status --json` emits today: each reserve floor carries
-// `measurement` with `confidence`, not the legacy `weeklyMeasurement.status`.
+// Legacy compatibility scenarios, not current producer captures. Current
+// producer parity is exercised in producer-contract-readers.test.mjs.
 function floor(percentRemaining, { confidence = 'measured', inferred = false } = {}) {
   return {
     active: false, paused: false, nearCap: false,
@@ -34,7 +34,7 @@ function snapshot() {
   };
 }
 
-test('current measurement shape is read as measured', () => {
+test('legacy confidence measurement shape is read as measured', () => {
   assert.deepEqual(reserveFloorWeeklyMeasurement(floor(12)), { status: 'measured', percentRemaining: 12 });
 });
 
@@ -50,7 +50,7 @@ test('legacy weeklyMeasurement shape is still honoured', () => {
   assert.equal(reserveFloorWeeklyMeasurement({}), null);
 });
 
-test('healthy accounts in the current shape are ready, not unknown', () => {
+test('healthy accounts in the legacy shape remain ready', () => {
   assert.equal(selectCodexWorkerAccount(snapshot()).reason, 'codex-account-ready');
   assert.equal(selectCodexWorkerAccount(snapshot()).provider, 'codex-corp');
   assert.equal(selectCodexReviewerAccount(snapshot()).provider, 'codex-corp');
@@ -58,7 +58,7 @@ test('healthy accounts in the current shape are ready, not unknown', () => {
   assert.equal(claude.hold, false);
 });
 
-test('Anthropic floors carry the current shape under weeklyMeasurement', () => {
+test('legacy Anthropic confidence shape under weeklyMeasurement remains readable', () => {
   const anthropic = { weeklyMeasurement: { confidence: 'measured', inferred: false, percentRemaining: 68 },
     measurement: { confidence: 'measured', inferred: false, percentRemaining: 68 } };
   assert.deepEqual(reserveFloorWeeklyMeasurement(anthropic), { status: 'measured', percentRemaining: 68 });
@@ -66,12 +66,12 @@ test('Anthropic floors carry the current shape under weeklyMeasurement', () => {
   assert.equal(reserveFloorWeeklyMeasurement(stale).status, 'stale');
 });
 
-test('OpenAI floors carry a null weeklyMeasurement and the reading under measurement', () => {
+test('legacy OpenAI null weeklyMeasurement falls back to measurement', () => {
   const openai = { weeklyMeasurement: null, measurement: { confidence: 'measured', inferred: false, percentRemaining: 10 } };
   assert.deepEqual(reserveFloorWeeklyMeasurement(openai), { status: 'measured', percentRemaining: 10 });
 });
 
-test('a measured zero in the current shape still counts as exhausted', () => {
+test('a measured zero in the legacy shape still counts as exhausted', () => {
   const s = snapshot();
   s.reserveFloors['openai-oauth'] = floor(0);
   assert.equal(selectCodexWorkerAccount(s).provider, 'codex-corp');

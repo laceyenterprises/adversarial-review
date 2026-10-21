@@ -55,7 +55,7 @@ function selectCodexAccount(payload, order, { model = null,
 // Only unpinned Codex lanes opt into account substitution. Corporate classes
 // already name an account and retain their existing dispatch/cap behavior.
 export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'corporate-first', ...options } = {}) {
-  if (!isAutomaticCodexAccountPolicy(policy) || !['hammer', 'codex'].includes(workerClass)) return null;
+  if (!isAutomaticCodexAccountPolicy(policy) || !['hammer', 'codex', 'remediator-codex'].includes(workerClass)) return null;
   const account = selectCodexWorkerAccount(payload, { ...options, policy });
   if (account.hold) return { ...account, workerClass };
   const preferred = policy === 'corporate-first' ? 'corporate' : 'personal';

@@ -194,7 +194,7 @@ for (const [personalStatus, corporateStatus, expectedProvider, reason] of [
   const selected = selectCodexWorkerAccount(snapshot);
   assert.equal(selected.hold, expectedProvider === null);
   assert.equal(selected.provider, expectedProvider ?? undefined);
-  for (const workerClass of ['hammer', 'codex']) {
+  for (const workerClass of ['hammer', 'codex', 'remediator-codex']) {
     const lane = codexWorkerLaneFromSnapshot(snapshot, { workerClass });
     assert.equal(lane.reason, reason);
     assert.equal(lane.hold, expectedProvider === null);
@@ -390,4 +390,25 @@ test('worker account policy accepts get-only custom config loaders', () => {
       loaderImpl: () => ({ get: keyRead => keyRead === key ? workerClass : undefined }),
     }), 'corporate-first');
   }
+});
+
+for (const [policy, fixtureOptions, expectedClass] of [
+  ['personal-first', {}, 'remediator-codex'],
+  ['corporate-first', {}, 'remediator-codex-corp'],
+  ['corporate-first', { corp: 'exhausted' }, 'remediator-codex'],
+  ['personal-first', { primary: 'exhausted' }, 'remediator-codex-corp'],
+]) test(`canonical remediator compatibility lane honors ${policy} with ${JSON.stringify(fixtureOptions)}`, async () => {
+  const lane = codexWorkerLaneFromSnapshot(codexAccountFixture(fixtureOptions), {
+    workerClass: 'remediator-codex', policy,
+  });
+  assert.equal(lane.hold, false);
+  assert.equal(lane.workerClass, expectedClass);
+  const routed = await resolveRemediationWorkerClassWithFallback({ primary: 'remediator-codex',
+    env, codexAccountPolicy: policy, modelForClass: () => 'synthetic-model',
+    selectAccountImpl: async () => null, execFileImpl: execFor(codexAccountFixture(fixtureOptions)) });
+  assert.equal(routed.hold, false);
+  assert.equal(routed.workerClass, expectedClass);
+  assert.equal(codexWorkerLaneFromSnapshot(codexAccountFixture(), {
+    workerClass: 'remediator-codex', policy: 'pinned',
+  }), null);
 });

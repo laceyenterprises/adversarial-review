@@ -3342,10 +3342,11 @@ async function consumeNextFollowUpJob({
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     if (remediatorRouting.pooled && remediationMode !== 'os') {
+      const heldAt = now();
       return holdClaimedJobForCappedRemediator({ rootDir, jobPath: claimed.jobPath,
-        heldAt: claimed.job.claimedAt, delayedPendingPaths, log,
+        heldAt, delayedPendingPaths, log,
         routing: { ...remediatorRouting, hold: true, reason: 'pooled-remediation-requires-dispatch',
-          holdUntil: new Date(Date.parse(claimed.job.claimedAt) + 60_000).toISOString() } });
+          holdUntil: new Date(Date.parse(heldAt) + 60_000).toISOString() } });
     }
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,

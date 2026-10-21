@@ -737,7 +737,8 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ITP-14: declared hammer/remediator account pools propose canonical privileged
 roles through the shared selection owner. Unknown evidence retains existing
 pre-launch deferral/claim release without consuming retry budget; unsupported
-local pooled remediation also holds. Fresh pool exhaustion preserves only the
+local pooled remediation also holds for a full 60 seconds from the hold decision,
+regardless of claim age. Fresh pool exhaustion preserves only the
 declared eligible cross-family fallback. Account proposals add audit metadata,
 not merge authority. The dispatcher alone binds/acquires the account lease;
 existing lifecycle states, merge predicates, exact-head leases and smoke promises

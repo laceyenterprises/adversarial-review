@@ -198,6 +198,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   codexAccountPolicy = 'corporate-first',
   selectAccountImpl,
 } = {}) {
+  modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
   let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
     .map((value) => String(value || '').trim().toLowerCase())
@@ -233,7 +234,8 @@ export async function resolveRemediationWorkerClassWithFallback({
     model: statuses ? modelOf(modelForClass, workerClass) : null,
   });
 
-  const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy) && primaryClass === 'codex';
+  const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy)
+    && ['codex', 'remediator-codex'].includes(primaryClass);
   const personalCap = automaticCodex ? capOf('codex') : null;
   const corporateCap = automaticCodex ? capOf('remediator-codex-corp') : null;
   const codexAccount = automaticCodex

@@ -1560,15 +1560,19 @@ running/resumed leases remain dispatcher-owned and unchanged.
 
 Managed remediation bypasses daemon-local OAuth preflight only for pooled
 privileged roles. A local runtime selection holds before workspace preparation;
-it cannot spawn with an unleased proposal. `accountProposal` in existing job and
-AMA audit evidence records non-secret selection metadata, never a bound lease.
+the retry deadline is a full 60 seconds from the hold decision, independent of
+claim age. It cannot spawn with an unleased proposal. `accountProposal` in existing
+job and AMA audit evidence records non-secret selection metadata, never a bound lease.
 The dispatcher's launch/run provenance remains authoritative for the account that
 actually ran. Undeclared pools and explicit legacy corporate requests retain
 compatibility routing/affinity until the separately approved migration/drain.
 The compatibility order accessor now defaults to corporate-first while preserving
 explicit file/env order and class-pin provenance; the legacy strict schema's
 personal-first code default remains readable until policy migration. Declared
-pools always use their own ordered account IDs. No config key is added.
+pools always use their own ordered account IDs. Automatic compatibility routing
+recognizes `remediator-codex` as well as the legacy `codex` class. Direct callers
+of the remediation fallback resolver use the same job-aware model resolution as
+the claim wrapper unless they supply a model callback. No config key is added.
 An existing explicit personal class pin with a newly declared pool holds with
 `legacy-account-pin-requires-migration` for operator resolution; it cannot silently
 become corporate-first or create a new account hard pin. Named legacy corporate

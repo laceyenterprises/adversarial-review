@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
@@ -10,6 +10,8 @@ import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-wo
 import { selectCodexWorkerAccount } from '../src/codex-account-routing.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { buildLegacyHqRemediationDispatchArgs } from '../src/remediation-dispatch-mode.mjs';
+import { resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { resolveConfiguredNonBlockingCodexModel } from '../src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import { remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
 
 const pool = await import('../src/worker-token-pool.mjs').catch(error => {
@@ -205,4 +207,88 @@ test('ITP-14 model/selection failures hold before closer legacy error recovery',
     assert.equal(result.hold, true);
     assert.equal(result.reason, 'evidence-unknown');
   }
+});
+
+for (const primary of ['remediator-codex', 'remediator-claude']) {
+  for (const modelForClass of [undefined, null, () => 'synthetic-model']) {
+    test(`direct pooled ${primary} resolves models with ${typeof modelForClass} callback`, async t => {
+      const hqRoot = mkdtempSync(join(tmpdir(), 'itp14-model-'));
+      t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+      mkdirSync(join(hqRoot, 'registry'));
+      writeFileSync(join(hqRoot, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+        [primary]: { defaultModel: primary.includes('codex') ? 'gpt-6' : 'opus' },
+      } }));
+      const env = { HQ_ROOT: hqRoot, AGENT_OS_CONFIG_PATH: '/dev/null' };
+      const wire = wireFor(primary);
+      const expected = modelForClass?.(primary)
+        ?? resolveRemediationModel(primary, { env, fallbackModel: null }).resolvedModel;
+      assert.ok(expected);
+      for (const account of Object.values(wire.oauth.token_accounts)) {
+        account.allowed_models = [...new Set([...account.allowed_models, expected])];
+      }
+      wire.request.identity_models = wire.request.requested_models = wire.request.snapshot.requested_models = [expected];
+      let ownerCalls = 0;
+      const result = await resolveRemediationWorkerClassWithFallback({ primary, env, modelForClass,
+        selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
+          ownerImpl: async request => {
+            ownerCalls++;
+            assert.equal(request.model, expected);
+            return wire;
+          } }),
+        execFileImpl: () => assert.fail('no legacy fleet read') });
+      assert.equal(ownerCalls, 1);
+      assert.equal(result.hold, false);
+      assert.equal(result.workerClass, primary);
+    });
+  }
+}
+
+test('direct pooled Codex resolver preserves the job non-blocking model', async () => {
+  const env = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+  const expected = resolveConfiguredNonBlockingCodexModel(env).resolvedModel;
+  let selected = false;
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env,
+    job: { nonBlockingOnly: true },
+    selectAccountImpl: async ({ identity, model }) => {
+      selected = true;
+      assert.equal(model, expected);
+      return { pooled: true, workerClass: identity, status: 'selected', hold: false };
+    }, execFileImpl: () => assert.fail('no legacy fleet read') });
+  assert.equal(selected, true);
+  assert.equal(result.hold, false);
+});
+
+test('local pooled remediation defers a full minute after an aged claim without spending a round', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'itp14-local-hold-'));
+  const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
+    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '0' };
+  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  const apply = values => { for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } };
+  apply(overrides);
+  t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
+  createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
+    reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
+    reviewPostedAt: '2026-10-19T00:00:00Z' });
+  let clockMs = Date.parse('2026-10-21T10:00:00Z');
+  const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
+    now: () => new Date(clockMs).toISOString(),
+    resolvePRLifecycleImpl: async () => null,
+    resolveRemediationWorkerClassImpl: async () => {
+      clockMs += 5 * 60_000;
+      return { pooled: true, workerClass: 'remediator-codex', hold: false };
+    },
+    execFileImpl: () => assert.fail('must hold before workspace preparation'),
+    spawnImpl: () => assert.fail('must not spawn an unleased proposal'),
+    log: { info() {}, warn() {}, log() {}, error() {} } });
+  assert.equal(result.consumed, false);
+  assert.equal(result.reason, 'remediator-capped-hold');
+  assert.equal(result.job.status, 'pending');
+  assert.equal(result.job.remediationPlan.currentRound, 0);
+  assert.equal(result.job.remediationPlan.retryAfter, new Date(clockMs + 60_000).toISOString());
+  assert.equal(result.job.pendingAt, new Date(clockMs).toISOString());
+  assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.fallbackReason,
+    'pooled-remediation-requires-dispatch');
 });

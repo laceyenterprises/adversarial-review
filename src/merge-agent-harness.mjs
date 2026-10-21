@@ -1,5 +1,5 @@
 // The worker class a merge-agent dispatch runs on.
-// LANEFAILOVER-01: unpinned Codex hammers use personal-first account selection
+// LANEFAILOVER-01: unpinned Codex hammers use the configured account order
 // before the legacy cross-model fallback described below. Unknown account
 // evidence uses the existing durable deferral. Explicit pins preserve the
 // existing HHR behavior; Codex reviewer ordering remains corporate-first.
@@ -30,6 +30,7 @@
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveCloserDispatchHarness } from './ama/harness-fallback.mjs';
+import { isAutomaticCodexAccountPolicy } from './codex-account-routing.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { MODULE_CONFIG_PATH, resolveDefaultMergeAgentWorkerClass, codexWorkerAccountPolicy } from './role-config.mjs';
@@ -254,7 +255,7 @@ async function resolveHarness({
     );
     return { ...harness, deferred: false };
   }
-  if ((harness?.hold && codexAccountPolicy === 'personal-first'
+  if ((harness?.hold && isAutomaticCodexAccountPolicy(codexAccountPolicy)
     && ['hammer', 'codex'].includes(workerClass)) || harness?.groundedBy) {
     return {
       ...harness,

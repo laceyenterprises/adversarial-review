@@ -47,6 +47,7 @@ const CANONICAL_ENV_BY_KEY = Object.freeze({
   'roles.remediator': 'AGENT_OS_ROLES_REMEDIATOR',
   'roles.remediator_fallback': 'AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
   'roles.merge_agent_worker_class': 'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
+  'roles.codex_worker_account_order': 'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER',
 });
 
 const LEGACY_ENV_BY_KEY = Object.freeze({
@@ -152,6 +153,7 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'AGENT_OS_ROLES_REMEDIATOR',
   'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
   'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
+  'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER',
   'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
   'AGENT_OS_REVIEWER_GEMINI_MODE',
   'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
@@ -525,15 +527,21 @@ export function resolveDefaultMergeAgentWorkerClass({
   return cfg.get('roles.merge_agent_worker_class');
 }
 
+// The schema owns the automatic account order and validates file/env values.
+export function resolveCodexWorkerAccountOrder(options = {}) {
+  const cfg = loadRoleConfig({ ...options, contextKey: 'roles.codex_worker_account_order' });
+  return cfg.get('roles.codex_worker_account_order') || 'personal-first';
+}
+
 // Code defaults and builder routing select a lane; a concrete class in any
 // file/env/CLI layer pins its account, including an explicit personal pin.
 export function codexWorkerAccountPolicy(key, workerClass, options = {}) {
   if (!['hammer', 'codex'].includes(workerClass)) return 'pinned';
   const cfg = loadRoleConfig({ ...options, contextKey: key });
-  if (cfg.get(key) !== workerClass) return 'personal-first';
+  if (cfg.get(key) !== workerClass) return resolveCodexWorkerAccountOrder(options);
   const trace = typeof cfg.resolutionTrace === 'function' ? cfg.resolutionTrace(key) : [];
   const source = trace.at(-1)?.source || 'code-default';
-  return source === 'code-default' ? 'personal-first' : 'pinned';
+  return source === 'code-default' ? resolveCodexWorkerAccountOrder(options) : 'pinned';
 }
 
 // validateStartupRoleConfig — boot-time validator. Daemons (watcher,

@@ -1,8 +1,8 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from '../claude-account-routing.mjs';
-import { codexWorkerLaneFromSnapshot } from '../codex-account-routing.mjs';
-// LANEFAILOVER-01: unpinned Codex hammers first resolve personal -> corporate
+import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from '../codex-account-routing.mjs';
+// LANEFAILOVER-01: unpinned Codex hammers resolve the configured account order
 // using the reviewer account evidence classifier. Unknown evidence holds.
 // Explicit pins and non-Codex classes retain the HHR behavior below.
 // HHR — harness-fallback protection for the AMA closer/hammer.
@@ -147,7 +147,7 @@ function recentQuotaSnapshot(rootDir, nowMs) {
  * @param {string=} args.rootDir — dispatch owner's state root; enables disk snapshots.
  * @param {Function=} args.nowMs — injected clock, evaluated after the live read.
  * @param {Function=} args.sleepImpl — injected retry delay.
- * @param {'personal-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
+ * @param {'personal-first'|'corporate-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @returns {Promise<{
  *   workerClass: string,      // the harness to actually pass to `hq dispatch`
  *   fellBack: boolean,
@@ -189,7 +189,7 @@ export async function resolveCloserDispatchHarness({
   const primary = String(workerClass || '').trim();
   const fallbacks = normalizeFallbackList(fallbackWorkerClasses);
   let base = { workerClass: primary, fellBack: false };
-  const autoCodex = codexAccountPolicy === 'personal-first' && primary === 'hammer';
+  const autoCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy) && primary === 'hammer';
 
   if (!primary || (fallbacks.length === 0 && !probeWithoutFallbacks && !autoCodex)) {
     return { ...base, reason: 'no-fallback-configured' };

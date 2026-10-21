@@ -1,8 +1,8 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
-import { codexWorkerLaneFromSnapshot } from './codex-account-routing.mjs';
-// LANEFAILOVER-01: automatic Codex claims use personal-first account evidence
+import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from './codex-account-routing.mjs';
+// LANEFAILOVER-01: automatic Codex claims use the configured account order
 // and hold on unknown evidence. Pins/non-Codex retain the cross-model fallback
 // contract below, including its job-local evidence and infrastructure repair.
 // Cap-aware remediation worker-class fallback (the remediation-dispatch analogue
@@ -173,7 +173,7 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
  * @param {string[]=} args.reviewerModels — models that may review the PR's next round
  *   (nextRoundReviewerModels); a fallback of one of their families is skipped.
  * @param {Object=} args.env
- * @param {'personal-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
+ * @param {'personal-first'|'corporate-first'|'pinned'=} args.codexAccountPolicy — dispatch wrappers preserve operator pins.
  * @param {string=} args.hqPath
  * @param {Function|null=} args.execFileImpl — DI for `hq fleet quota status --json`;
  *   null skips the fleet read so only job-local evidence applies.
@@ -218,7 +218,7 @@ export async function resolveRemediationWorkerClassWithFallback({
     model: statuses ? modelOf(modelForClass, workerClass) : null,
   });
 
-  const automaticCodex = codexAccountPolicy === 'personal-first' && primaryClass === 'codex';
+  const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy) && primaryClass === 'codex';
   const personalCap = automaticCodex ? capOf('codex') : null;
   const corporateCap = automaticCodex ? capOf('remediator-codex-corp') : null;
   const codexAccount = automaticCodex
@@ -422,7 +422,7 @@ export async function resolveClaimedRemediatorRouting({
     || ((args) => resolveRemediationWorkerClassWithFallback({ ...args, execFileImpl: null }));
   let accountPolicy = resolveImpl
     ? codexWorkerAccountPolicy('roles.remediator', primary, { env, topPath, loaderImpl }) : 'pinned';
-  if (accountPolicy === 'personal-first'
+  if (isAutomaticCodexAccountPolicy(accountPolicy)
     && !['codex', 'claude-code', 'clio-agent'].includes(String(job?.builderTag || '').trim().toLowerCase())) {
     accountPolicy = codexWorkerAccountPolicy('roles.registry.remediator.workerClass', primary, { env, topPath, loaderImpl });
   }

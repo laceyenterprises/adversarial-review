@@ -2437,23 +2437,27 @@ async function dispatchAmaClosureFor({
   // DIRTYOWN-02 (agent-os#7332): a conflicting final-round head cannot go green
   // by waiting. Its CI may never run, or may run red on the unmergeable head,
   // and the hammer has to rebase first either way. So a conflict resumes the
-  // hammer whatever CI says. Red or pending CI alone still does not.
+  // hammer whatever CI says. Non-conflicting heads retain the pending-CI wait;
+  // failed CI is handed to the hammer for repair (HAMREDCI-01).
   // `pr-not-mergeable` alone is not a conflict: with an empty raw `mergeable`
   // it also covers BLOCKED (which a red required check reports), UNSTABLE and
   // BEHIND. So the bypass needs GitHub's raw conflict signal as well.
   const finalRoundConflicting = disabledEligibility.reasons.includes('pr-not-mergeable') &&
     isGithubMergeConflict(mergeabilityForGate || {});
-  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven &&
-    (!finalRoundCiNotGreen || finalRoundConflicting);
   // Waiting for CI on a proven final-round head is progress, not a stall, so it
-  // must not spend the retain-loop cap that parks a PR for the operator. Red CI
-  // is not a wait and still counts. A conflicting head is not waiting on CI
+  // must not spend the retain-loop cap that parks a PR for the operator. Refused
+  // red-CI dispatches still count. A conflicting head is not waiting on CI
   // either (see above), so it never gets the exemption.
   const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen && !finalRoundConflicting
     ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
     : null;
+  // A known rollup without external checks may precede CI registration. It
+  // stays non-green, but shares the bounded wait rather than burning recovery.
   const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
-    finalRoundChecks.failedChecks.length === 0 && finalRoundChecks.pendingChecks.length > 0);
+    finalRoundChecks.failedChecks.length === 0 &&
+    (finalRoundChecks.pendingChecks.length > 0 || finalRoundChecks.totalExternalChecks === 0));
+  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven &&
+    (!finalRoundCiNotGreen || finalRoundConflicting || finalRoundChecks?.failedChecks.length > 0);
   // The wait is bounded: CI still pending past the deadline (a hung or never-
   // scheduled check) counts toward the retain cap again, so the PR reaches the
   // operator instead of being held forever. Measured from the proven push.

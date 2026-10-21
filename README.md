@@ -904,6 +904,13 @@ replacement claim cannot be posted by an older reconciliation.
 The suppressed comment-only final round hands its recorded worker-pushed head
 to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
+HAMREDCI-01 also resumes that proven final-round handoff when CI fails: the
+hammer owns check repair before exact-head green CI and merge, even with zero
+remaining findings or strict non-blocking remediation disabled. Non-conflicting
+heads with only pending CI or a known rollup without external checks keep their
+bounded wait from the proven push; empty rollups remain non-green. Blocking or
+unknown blocking findings, structural blocks, hard-stop labels and merge leases
+retain their gates.
 Ownerless recovery routes settled final rounds and exhausted review cycles to
 the hammer even after head movement, using shared review-admission evidence.
 Transient quota-status (including explicit `holdReason` without an outer reason)
@@ -1071,8 +1078,10 @@ unreadable fresh launch reservations retain fleet capacity.
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
 review claim; no follow-up job and exhausted/no-progress remediation both assign
 the hammer, while the shared merge predicate refuses a merge over red CI.
-The native exhausted unreviewed head also clears wake admission, and a refused
-settled handoff with a reclaimable matching lease leaves the closer's terminal
+The smoke checks proven final-round red-CI reason admission with and without
+non-blocking findings, while blocking or unknown blocking findings and structural
+holds still refuse that route. The native exhausted unreviewed head also clears
+wake admission, and a refused settled handoff with a reclaimable matching lease leaves the closer's terminal
 refusal reason regardless of wake outcome, while a fresh live-PID lease and its
 intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
 `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.

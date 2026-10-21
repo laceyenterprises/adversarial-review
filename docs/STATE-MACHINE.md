@@ -892,6 +892,15 @@ AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads
 request a current-head re-review; unknown findings request one re-review then
 retry the ordinary closer; strict-mode comment-only findings dispatch the hammer
 only after its existing grace, proven final-round resume or exhaustion gates.
+HAMREDCI-01 lets a proven comment-only final-round resume reach the hammer with
+failed CI, including a stale reviewed head with or without remaining non-blocking
+findings or strict non-blocking remediation enabled.
+The hammer repairs checks before the unchanged exact-head merge predicates.
+Pending-only CI on a non-conflicting head retains its bounded wait, including a
+known rollup without external checks while CI registers. Empty rollups stay
+non-green; the proven-push deadline restores retain-loop charging. Blocking or
+unknown blocking findings, structural blocks, hard-stop labels and merge leases
+retain their gates. Existing states, transitions and smoke promises are unchanged.
 Blocking findings and unknown/pending remediation state retain Codex-first
 follow-up ownership without spending recovery attempts or paging. Recovery
 widens worker-class admission only; the ordinary closer proves terminal

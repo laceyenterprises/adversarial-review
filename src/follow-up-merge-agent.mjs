@@ -50,7 +50,7 @@ import {
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
-import { followUpJobFilePrefix } from './follow-up-job-names.mjs';
+import { followUpJobFileFilter } from './follow-up-job-names.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import {
   adapterUnsupportedError,
@@ -492,12 +492,10 @@ function dispatchMatchesFilter(dispatch, { repo = null, prNumber = null } = {}) 
 
 function listMergeAgentDispatches(rootDir, filter = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
-  const prefix = filter.repo && filter.prNumber != null
-    ? followUpJobFilePrefix(filter.repo, filter.prNumber)
-    : null;
+  const matchesJobFile = followUpJobFileFilter(filter);
   try {
     return readdirSync(dir)
-      .filter((name) => name.endsWith('.json') && (prefix === null || name.startsWith(prefix)))
+      .filter(matchesJobFile)
       .map((name) => {
         try {
           return JSON.parse(readFileSync(join(dir, name), 'utf8'));

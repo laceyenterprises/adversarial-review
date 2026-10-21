@@ -7,3 +7,10 @@ export function sanitizeRepo(repo) {
 export function followUpJobFilePrefix(repo, prNumber) {
   return `${sanitizeRepo(repo)}-pr-${Number(prNumber)}-`;
 }
+
+export function followUpJobFileFilter(filter = {}) {
+  const prefix = filter.repo && filter.prNumber != null
+    ? followUpJobFilePrefix(filter.repo, filter.prNumber)
+    : null;
+  return (name) => name.endsWith('.json') && (prefix === null || name.startsWith(prefix));
+}

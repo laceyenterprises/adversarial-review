@@ -247,8 +247,12 @@ function terminalFollowUpJobs(rootDir, repo, prNumber, log) {
 }
 
 function isTerminalFinalRound(status, job) {
-  return job.status === status && job.finalRound === 'comment-only' &&
+  return job?.status === status && job.finalRound === 'comment-only' &&
     job.reReview?.suppressed === 'comment-only-final-round';
+}
+
+export function isCompletedCommentOnlyFinalRoundJob(job) {
+  return isTerminalFinalRound('completed', job);
 }
 
 export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }, log = console) {

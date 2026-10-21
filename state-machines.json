@@ -124,7 +124,7 @@
         {"id": "follow-up-job.08","from": "in_progress","to": "stopped","trigger": "lifecycle or budget stop","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.09","from": "in_progress","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.10","from": "in_progress","to": "pending","trigger": "transient retry","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round","codeSource": "src/follow-up-jobs.mjs"},
+        {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round unless comment-only final hammer handoff","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},

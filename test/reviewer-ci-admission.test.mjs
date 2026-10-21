@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
 
 import {
@@ -58,6 +59,91 @@ test('consecutive failed-CI admissions retain a persisted no-progress hammer han
   // This is an automatic-admission restriction; operator recovery still works.
   const operator = requeueFollowUpJobForNextRound({ rootDir, jobPath: first.jobPath, requestedBy: 'operator' });
   assert.equal(operator.job.status, 'pending');
+});
+
+for (const finalRound of [true, false]) {
+  test(`failed CI ${finalRound ? 'preserves the completed final-round hammer edge' : 'requeues an ordinary completed round'}`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ci-admission-completed-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const repo = 'fixture/repo', prNumber = 42;
+    const reviewedHead = 'a'.repeat(40), pushedHead = 'b'.repeat(40), hammerHead = 'c'.repeat(40);
+    const job = buildFollowUpJob({ repo, prNumber, reviewerModel: 'codex', revisionRef: reviewedHead,
+      reviewBody: '## Verdict\nComment only' });
+    job.status = 'completed';
+    job.completedAt = '2026-01-01T10:00:00.000Z';
+    job.reReview = finalRound
+      ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
+      : { requested: true, status: 'pending' };
+    if (finalRound) job.finalRound = 'comment-only';
+    job.completion = { workerPushedHeadSha: pushedHead };
+    job.remediationPlan.currentRound = 1;
+    job.remediationPlan.maxRounds = 3;
+    const round = { round: 1, state: 'completed', startHeadSha: reviewedHead, resultingHeadSha: pushedHead };
+    job.remediationPlan.rounds = [round];
+    const completedDir = join(rootDir, 'data/follow-up-jobs/completed');
+    mkdirSync(completedDir, { recursive: true });
+    const jobPath = join(completedDir, `${job.jobId}.json`);
+    writeFollowUpJob(jobPath, job);
+    const before = readFileSync(jobPath, 'utf8');
+    const args = { rootDir, repo, prNumber, passKind: 'rereview', reviewerHeadSha: pushedHead,
+      log: silentLog(), now: () => '2026-01-01T11:00:00.000Z',
+      inspectCiImpl: async () => ({ state: 'failed', headSha: pushedHead,
+        failedChecks: [{ name: 'synthetic-ci', state: 'FAILURE' }] }),
+    };
+    const result = await guardRereviewCiBeforeReviewer({ ...args,
+      ...(finalRound ? { requeueImpl: () => assert.fail('final round must bypass requeue') } : {}),
+    });
+    assert.equal(result.proceed, false);
+    if (!finalRound) {
+      assert.equal(result.reason, 'ci-regression-requeued');
+      assert.equal(result.job.status, 'pending');
+      assert.match(result.jobPath, /follow-up-jobs\/pending\//);
+      assert.equal(result.job.remediationPlan.nextAction.requestedBy, 'watcher-ci-admission');
+      assert.equal(result.job.remediationPlan.nextAction.round, 2);
+      assert.equal(existsSync(jobPath), false);
+      return;
+    }
+    assert.equal(result.reason, 'ci-regression-hammer-owned');
+    assert.equal(result.hammerOwner, true);
+    assert.equal(result.parkReview, true);
+    assert.equal(result.parkReviewStatus, REREVIEW_CI_BLOCKED_STATUS);
+    assert.match(result.failureMessage, /completed comment-only final round/);
+    assert.equal(result.jobPath, jobPath);
+    assert.equal(result.job.status, 'completed');
+    assert.deepEqual(result.job.remediationPlan.rounds, [round]);
+    const repeated = await guardRereviewCiBeforeReviewer(args);
+    assert.equal(repeated.reason, 'ci-regression-hammer-owned');
+    assert.equal(readFileSync(jobPath, 'utf8'), before);
+    assert.equal(existsSync(join(rootDir, 'data/follow-up-jobs/stopped', `${job.jobId}.json`)), false);
+    const rounds = await readCompletedRemediationRounds(rootDir, repo, prNumber);
+    assert.deepEqual(rounds, [round]);
+    const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead: hammerHead,
+      hammerBaseHead: pushedHead, remediationRounds: rounds, env: {},
+      get: async (path) => {
+        assert.equal(path, `repos/${repo}/compare/${reviewedHead}...${pushedHead}`);
+        return { status: 'ahead' };
+      },
+    });
+    assert.equal(range.verified, true);
+    assert.equal(range.proof, 'completed-remediation-round-chain');
+    assert.deepEqual(range.commits, [pushedHead, hammerHead]);
+  });
+}
+
+test('suppression alone does not bypass failed-CI requeue', async () => {
+  let requeued = false;
+  const result = await guardRereviewCiBeforeReviewer({
+    rootDir: '/unused', repo: 'fixture/repo', prNumber: 42, passKind: 'rereview',
+    reviewerHeadSha: 'head-red', log: silentLog(),
+    inspectCiImpl: async () => ({ state: 'failed', headSha: 'head-red',
+      failedChecks: [{ name: 'synthetic-ci', state: 'FAILURE' }] }),
+    latestJobFinder: () => ({ jobPath: '/unused/job.json', job: { status: 'completed',
+      reReview: { suppressed: 'comment-only-final-round' } } }),
+    requeueImpl: () => { requeued = true; return { job: { status: 'pending' } }; },
+  });
+  assert.equal(requeued, true);
+  assert.equal(result.reason, 'ci-regression-requeued');
+  assert.notEqual(result.hammerOwner, true);
 });
 
 test('guardRereviewCiBeforeReviewer bypasses first-pass review admission', async () => {

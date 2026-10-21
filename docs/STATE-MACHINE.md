@@ -621,7 +621,10 @@ in-progress
 
 completed
   │
-  ├─ operator requeue
+  ├─ comment-only final-round hammer handoff
+  │    └─ completed (CI admission and requeue preserve the round)
+  │
+  ├─ ordinary round requeue
   │    └─ pending
   │
   └─ max rounds guardrail trips
@@ -653,8 +656,9 @@ checks can establish whether that dispatch is possible.
 It means:
 
 - this remediation round ended successfully
-- the rereview request was durable and accepted
-- the watcher can pick the PR up again
+- the rereview request was durable and accepted, or the comment-only final
+  round intentionally suppressed re-review and handed ownership to the hammer
+- the watcher can pick the PR up again or route the final-round handoff
 
 ---
 
@@ -676,7 +680,12 @@ If that durable flag is absent or false:
 - the queue does **not** fabricate another pass
 - the job stops with `code = "no-progress"`
 
-That conservatism is intentional.
+That conservatism is intentional. A completed comment-only final round with
+`finalRound = "comment-only"` and
+`reReview.suppressed = "comment-only-final-round"` is an intentional hammer handoff, not a no-progress completion. Failed-CI admission returns
+`ci-regression-hammer-owned` without requeueing it. Direct round requeue refuses
+with an error before applying no-progress or round-cap stops. The job stays in
+`completed/` with completed start/result edges for strict hammer provenance.
 
 If the flag is true, reconcile still runs the branch-contamination gate before resetting `reviews.db` back to `pending`. A contaminated branch does **not** produce a synthetic stop; it moves to durable `failed/` with `failure.code = "branch-contamination"` so operators have an audit trail and a retryable terminal record after they clean the branch.
 
@@ -1179,10 +1188,11 @@ matching pending lease whose owner is dead or whose bounded launch reclaim age
 elapsed, regardless of wake outcome; missing leases, receipts and live work
 remain owned. The retired unlaunched prompt is removed only within its generated
 prompt namespace. Early daemon and background pre-dispatch exits do not settle
-closer intents. Rescue projects an exhausted `[ci-regression-stopped]` row to
-the final hammer only with live failed external CI on the candidate head and
-passes those failed checks into its prompt, filtering to configured required
-contexts when present. Actual merges still require green CI and exact-head proof.
+closer intents. Rescue projects a `[ci-regression-stopped]` or
+`[ci-regression-hammer-owned]` row with exhausted remediation or recorded
+final-round evidence to the final hammer only with live failed external CI on
+the candidate head and passes those failed checks into its prompt, filtering to
+configured required contexts when present. Actual merges still require green CI and exact-head proof.
 
 ## 3) Fast-merge skip lane
 

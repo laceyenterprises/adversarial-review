@@ -15,8 +15,8 @@ const { createNoProgressLaneGate } = await import('../../src/posted-review-row.m
 const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.mjs');
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
-const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
-const { consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
+const { buildFollowUpJob, createFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
+const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
@@ -30,8 +30,7 @@ const { prepareMarkRereviewCiBlocked, prepareMarkAttemptStarted, prepareMarkPost
 const { requeuePostedReviewWithoutHead } = await import('../../src/posted-review-head-repair.mjs');
 const { decideClosureOwner } = await import('../../src/ama/closure-owner.mjs');
 const { isEligibleForAmaClosure } = await import('../../src/ama/eligibility.mjs');
-const { fetchHammerHeadRange } = await import('../../src/ama/hammer-head-validation.mjs');
-const { fleetCommitIdentityMatches } = await import('../../src/ama/hammer-head-validation.mjs');
+const { fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } = await import('../../src/ama/hammer-head-validation.mjs');
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
 const quiet = { log() {}, warn() {}, error() {} };
 const refuse = () => { throw new Error('unexpected worker/GitHub/notification boundary'); };
@@ -392,6 +391,36 @@ if (scenario === 'clean') {
       execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
     assert.equal(admission.proceed, false); assert.equal(admission.parkReviewStatus, 'ci-blocked'); assert.equal(admission.hammerOwner, true);
   }
+  const finalJob = buildFollowUpJob({ repo, prNumber, reviewerModel: 'codex', revisionRef: base,
+    reviewBody: '## Verdict\nComment only' });
+  finalJob.status = 'completed';
+  finalJob.finalRound = 'comment-only';
+  finalJob.reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
+  finalJob.remediationPlan.currentRound = 1;
+  finalJob.remediationPlan.maxRounds = 1;
+  finalJob.remediationPlan.rounds = [{ round: 1, state: 'completed', startHeadSha: base, resultingHeadSha: headSha }];
+  const completedDir = join(rootDir, 'data/follow-up-jobs/completed'); mkdirSync(completedDir, { recursive: true });
+  const finalPath = join(completedDir, `${finalJob.jobId}.json`);
+  writeFollowUpJob(finalPath, finalJob);
+  const finalBytes = readFileSync(finalPath, 'utf8');
+  const finalAdmission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview', reviewerHeadSha: headSha,
+    inspectCiImpl: async () => ciGate, requeueImpl: refuse, execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
+  assert.equal(finalAdmission.reason, 'ci-regression-hammer-owned');
+  assert.equal(finalAdmission.hammerOwner, true);
+  assert.throws(() => requeueFollowUpJobForNextRound({ rootDir, jobPath: finalPath }), /completed:comment-only-final-round/);
+  assert.equal(readFileSync(finalPath, 'utf8'), finalBytes);
+  const incompleteAdmission = await guardRereviewCiBeforeReviewer({ ...identity(), passKind: 'rereview',
+    reviewerHeadSha: headSha, inspectCiImpl: async () => ciGate,
+    latestJobFinder: () => ({ jobPath: finalPath, job: { ...finalJob, finalRound: undefined } }),
+    requeueImpl: () => ({ job: { status: 'pending' } }),
+    execFileImpl: refuse, deliverAlertImpl: refuse, log: quiet });
+  assert.equal(incompleteAdmission.reason, 'ci-regression-requeued');
+  const finalProof = await fetchHammerHeadRange({ repo, reviewedHead: base, currentHead: headSha, hammerBaseHead: headSha,
+    remediationRounds: await readCompletedRemediationRounds(rootDir, repo, prNumber), env: {}, get: async path => {
+      assert.equal(path, `repos/${repo}/compare/${base}...${headSha}`);
+      return { status: 'ahead' };
+    } });
+  assert.equal(finalProof.proof, 'completed-remediation-round-chain');
   const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_session_uuid)
     VALUES (?,?,'2026-01-01','gemini','reviewing','synthetic-session')`).run(repo, prNumber);
@@ -447,7 +476,7 @@ if (scenario === 'clean') {
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
-  evidence = { finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+  evidence = { incompleteFinalRoundRequeued: true, finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, completedFinalRoundPreserved: true, finalRoundStartingBaseProven: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,

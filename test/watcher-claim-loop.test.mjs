@@ -149,6 +149,10 @@ export async function load(url, context, nextLoad) {
   if (url === 'fixture:cap-route') return { format: 'module', shortCircuit: true, source: capRouteSource };
   if (url === 'fixture:heldhead') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export function isCompletedCommentOnlyFinalRoundJob(job) {
+        return job?.status === 'completed' && job.finalRound === 'comment-only' &&
+          job.reReview?.suppressed === 'comment-only-final-round';
+      }
       export function hasInProgressCommentOnlyFinalRound() { return false; }
       export function hasCommentOnlyFinalRoundPush() { return false; }
       export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }

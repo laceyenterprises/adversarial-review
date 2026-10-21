@@ -8,7 +8,7 @@ import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contr
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
-const GRAPH_HASH = '502884b6934784c8a4afbe9f9c49581a31f196b0ea2c47e85b07306c7d84b317'; // Independent reviewed snapshot; not generated at test time.
+const GRAPH_HASH = 'efc7aa6486a2fba5df602d10e031a916ab1bb51400059d612f46f72f64d2c423'; // Independent reviewed snapshot; not generated at test time.
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
   assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));

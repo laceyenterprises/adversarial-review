@@ -1,3 +1,6 @@
+import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import { loginsMatch, resolveReviewerBotLoginAliases } from './review-body-capture.mjs';
+import { reviewerAttributionMetadata } from './reviewer-attribution.mjs';
 import { REMEDIATION_COMMENT_MARKER_PREFIX } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
@@ -46,12 +49,13 @@ function closeOwnedReviewDb(db) {
 }
 
 function reviewerLoginForClass(value, row = null) {
-  const reviewerModel = String(row?.reviewer_model || '').trim().toLowerCase();
+  const reviewerModel = normalizeReviewerModel(row?.reviewer_model);
   if (REVIEWER_LOGIN_BY_MODEL.has(reviewerModel)) {
-    return REVIEWER_LOGIN_BY_MODEL.get(reviewerModel);
+    return resolveReviewerBotLoginAliases(reviewerModel);
   }
   const normalized = String(value || '').trim().toLowerCase();
-  return REVIEWER_LOGIN_BY_CLASS.get(normalized) || null;
+  const family = loginFamilyForClass(normalized);
+  return family ? resolveReviewerBotLoginAliases(family) : null;
 }
 
 // Map a GitHub review-state literal directly to the migration's
@@ -67,6 +71,13 @@ const GH_REVIEW_STATE_TO_VERDICT = new Map([
   ['dismissed', 'dismissed'],
 ]);
 
+function loginFamilyForClass(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const login = REVIEWER_LOGIN_BY_CLASS.get(normalized);
+  if (!login) return normalizeReviewerModel(normalized);
+  return login?.startsWith('claude-') ? 'claude' : login?.startsWith('codex-') ? 'codex' : null;
+}
+
 function ghReviewStateToVerdict(state) {
   const normalized = String(state || '').trim().toLowerCase();
   return GH_REVIEW_STATE_TO_VERDICT.get(normalized) ?? null;
@@ -79,6 +90,7 @@ function normalizeReviewArtifact(raw = {}) {
     state: raw.state ?? null,
     body: String(raw.body ?? ''),
     authorLogin: raw?.user?.login ?? raw.authorLogin ?? null,
+    headSha: raw.commit_id ?? raw.headSha ?? null,
   };
 }
 
@@ -100,7 +112,7 @@ async function fetchPullReviews({
       '--paginate',
       `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
       '-q',
-      '.[] | {node_id: .node_id, submitted_at: .submitted_at, state: .state, body: .body, user: {login: .user.login}}',
+      '.[] | {node_id: .node_id, commit_id: .commit_id, submitted_at: .submitted_at, state: .state, body: .body, user: {login: .user.login}}',
     ],
   });
   return parseJsonLines(stdout).map(normalizeReviewArtifact);
@@ -187,7 +199,7 @@ function buildReviewerPassQuery({ repo = null, since = null, limit = null } = {}
   }
   const limitClause = Number.isInteger(limit) ? ` LIMIT ${limit}` : '';
   return {
-    sql: `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, started_at, ended_at, status, reviewer_class, reviewer_model
+    sql: `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, started_at, ended_at, status, reviewer_class, reviewer_model, head_sha, metadata_json
             FROM reviewer_passes
            WHERE ${where.join(' AND ')}
            ORDER BY repo, pr_number, attempt_number, pass_kind${limitClause}`,
@@ -259,7 +271,7 @@ function matchArtifactWithinWindow({ artifacts, login, startedAt, endedAt, timeF
   });
   return {
     windowArtifacts,
-    matches: windowArtifacts.filter((artifact) => artifact.authorLogin === login),
+    matches: windowArtifacts.filter((artifact) => (Array.isArray(login) ? login : [login]).some(alias => loginsMatch(artifact.authorLogin, alias))),
   };
 }
 
@@ -276,7 +288,7 @@ function matchReviewerPassArtifact(row, { reviews, comments }) {
 
   if (row.pass_kind === 'first-pass' || row.pass_kind === 'rereview') {
     const { windowArtifacts, matches } = matchArtifactWithinWindow({
-      artifacts: reviews,
+      artifacts: row.head_sha ? reviews.filter(review => review.headSha === row.head_sha) : reviews,
       login,
       startedAt: row.started_at,
       endedAt: row.ended_at,
@@ -404,8 +416,8 @@ async function backfillReviewerPassBodies(rootDir, {
     const groups = groupPassRows(rows);
     const updateStatement = db.prepare(
       `UPDATE reviewer_passes
-          SET verdict = ?, body_md = ?, gh_comment_id = ?, body_captured_at = ?
-        WHERE pass_id = ?`
+          SET verdict = ?, body_md = ?, gh_comment_id = ?, body_captured_at = ?, metadata_json = ?
+        WHERE pass_id = ? AND body_md IS NULL AND metadata_json IS ?`
     );
     for (const group of groups) {
       let reviews;
@@ -501,13 +513,18 @@ async function backfillReviewerPassBodies(rootDir, {
           continue;
         }
         try {
-          updateStatement.run(
+          const updated = updateStatement.run(
             verdict,
             match.matched.body,
             nodeId,
             capturedAt,
-            row.pass_id
+            row.pass_kind === 'remediation' ? row.metadata_json : JSON.stringify(reviewerAttributionMetadata(
+              JSON.parse(row.metadata_json || '{}'), { reviewerModel: normalizeReviewerModel(row.reviewer_model) || loginFamilyForClass(row.reviewer_class) },
+            )),
+            row.pass_id,
+            row.metadata_json,
           );
+          if (updated.changes !== 1) throw new Error('reviewer pass changed during backfill; retry with fresh evidence');
           summary.populated += 1;
           if (nodeId) claimedNodeIds.add(nodeId);
         } catch (err) {

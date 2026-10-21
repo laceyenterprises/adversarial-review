@@ -298,3 +298,32 @@ The agent-runtime run record carries the same fields in `subjectContext`.
 The pass reaper forwards them into follow-up creation; historical missing
 branches use the bounded live PR lookup and pending branch-resolution hold
 documented in [follow-up jobs](follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+
+## Review execution attribution (ITP-13)
+
+`metadata_json.reviewerAttribution` is the version-1 common read projection
+from `src/reviewer-attribution.mjs`. It contains canonical role `identity`,
+`family`, fixed HCP `reviewerSubject`, nullable `tokenAccountId`, `brokerProvider`,
+`holderRef`, `selectionReason`, `evidenceGeneration`, `attemptRef`, `leaseRef`
+and `leaseGeneration`. Missing historical account evidence is `null`; an old
+holder proves only its holder and review references. Explicit recorded broker
+providers survive without inferring a primary account. It contains no credential
+bytes, paths or email. Original account/holder receipts remain alongside it.
+
+Native spawn persists its projection in the pass before launch. Gemini binds
+its holder in runtime context; body capture, terminal settlement or recovery
+then adds that projection to the matching pass. Body capture carries it alongside execution model/effort and verified artifact
+metadata. Captured-body and pending-post retries keep the original projection,
+never the retrying process's account. Reattach adds the projection only to passes
+with the same repo, PR and `reviewerSessionUuid`; a metadata compare-and-swap
+preserves concurrent writers. It never rewrites run records or historic signatures.
+A recorded same-family builder/reviewer pair becomes `failed-orphan` before
+posted-review recovery; the live process continues to hold its account lease.
+
+Body backfill uses the shared App/PAT aliases, requires a matching commit when
+the pass has a head, and preserves the legacy class-as-builder interpretation
+when `reviewer_model` is absent. It adds only a projection from existing receipt
+metadata, leaving original metadata and review body bytes intact. A concurrent
+body/metadata change refuses the stale update and requires a retry. These are
+local SQLite metadata changes; the companion session-ledger schema and its
+SQLite/Postgres migrations are unchanged.

@@ -365,6 +365,7 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260518_reviewer_passes.sql",
       "relatedSchemaSurfaces": [
+        "src/reviewer-attribution.mjs",
         "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql",
         "src/review-state.mjs",
         "src/review-state-statements.mjs",
@@ -421,6 +422,7 @@
       "store": "data/reviewed-attestations/",
       "schemaSurface": "src/reviewed-attestation.mjs",
       "relatedSchemaSurfaces": [
+        "src/reviewer-attribution.mjs",
         "src/watcher-tick-preflight.mjs",
         "src/kernel/review-findings.mjs",
         "src/reviewer.mjs"
@@ -870,6 +872,7 @@
       "store": "data/reviewer-runs/<sessionUuid>.json",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
       "relatedSchemaSurfaces": [
+        "src/reviewer-attribution.mjs",
         "src/reviewer-token-pool.mjs",
         "src/reviewer-reattach.mjs",
         "src/reviewer-spawn-settle.mjs",

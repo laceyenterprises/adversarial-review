@@ -1270,7 +1270,7 @@ stateDiagram-v2
     s5 --> s2: review-row.09 eligible retry CAS
     s2 --> s4: review-row.10 deliver review with matching session and recorded reviewed head
     s2 --> s5: review-row.11 dispatch or reviewer failure
-    s2 --> s6: review-row.12 startup cannot prove recovery
+    s2 --> s6: review-row.12 startup cannot prove recovery or recorded builder/reviewer family matches
     s2 --> s0: review-row.13 operator reset after confirmed reviewer exit
     s2 --> s1: review-row.14 provider hold
     s0 --> s1: review-row.15 upstream outage
@@ -1707,3 +1707,38 @@ primary reserve refusal to the canonical policy flags, so a generic non-coding
 task exemption cannot silently admit the primary account below its reserve.
 They also run the real `propose` with only registry/evidence/broker boundaries
 injected, verifying the minimal daemon shim and JSON row payload offline.
+
+### Review-family attribution and recovery (ITP-13)
+
+A common `reviewerAttribution` receipt now follows canonical reviewer roles
+through runtime launch, body capture, reviewed-head attestation and restart
+recovery. Every account keeps the existing GitHub actor and HCP subject. Historic
+Gemini OS logins remain holder metadata, with unknown account IDs explicitly null;
+recovery and backfill do not rewrite historic bodies, run records or signatures.
+Same-family exclusion precedes account admission, includes the explicit legacy
+aliases, and refuses recovery of a recorded same-family pair. All seven title
+prefixes and the existing cross-family routes stay the same.
+
+Captured-body retries retain their original account attribution. Backfill shares
+App/PAT matching with capture, pins known heads, and preserves old builder-tag
+interpretation when no native reviewer model was recorded. See the
+[pass data model](docs/data-model/reviewer-passes.md#review-execution-attribution-itp-13)
+and [attestation queue contract](docs/data-model/reviewed-attestations.md).
+There are no new states, credentials, configuration keys, smoke promises or CI
+jobs. Existing sandbox smoke still covers lease ownership and drain; account
+attribution is exercised by the bounded offline tests:
+
+```sh
+node test/run-tests.mjs reviewer-attribution.test.mjs review-body-capture.test.mjs reviewed-attestation.test.mjs backfill-review-bodies.test.mjs watcher-reattach.test.mjs watcher-claim-loop.test.mjs
+```
+
+ITP-19 remains the separately approved operator rollout; this change performs no
+host cutover or alias retirement.
+
+Acceptance replay used pre-change parent `6761b30b94035ca9e4e93f6b2dccae7a5fc65f81`:
+all 10 ITP-13 outcome tests failed there and pass after implementation. The focused
+357-test pass covers capture, restart recovery, native spawn/settle, legacy
+backfill, reviewed signatures, exact-head merge eligibility and fixture ledger
+lookups. The watcher claim-loop suite also passes all 127 tests, and the runtime
+and state/smoke contract suites pass all 100 tests. No companion ledger migrations
+or concurrency algorithm changed.

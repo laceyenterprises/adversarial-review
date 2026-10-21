@@ -58,3 +58,16 @@ are known; an absent or unparseable section yields `null`, never an implicit
 zero. Explicit empty sections yield zero. A `Comment only` verdict can therefore
 carry a positive count. The signed payload and queued retry preserve this same
 value; downstream consumers must not interpret it as a blocking-only count.
+
+## Account attribution (ITP-13)
+
+New reviewed envelopes may carry `payload.reviewer_attribution`, the allowlisted
+version-1 [review execution projection](reviewer-passes.md#review-execution-attribution-itp-13).
+It is signed as ordinary payload metadata and survives durable queue/retry.
+`producer_identity`, `payload.reviewer_identity` and the HCP signature subject
+remain the same canonical reviewer subject across every account/holder. A
+projection naming a different subject refuses before posting/signing. Exact-head
+and returned-envelope validation remain mandatory; account data grants no
+attestation or merge authority. Old envelopes and queued payloads without this
+field retain their original bytes and signing inputs. Backfill/reattach never
+re-sign old attestations. No companion ledger schema or signature format changes.

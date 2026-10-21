@@ -1,3 +1,5 @@
+import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { promisify } from 'node:util';
@@ -59,14 +61,14 @@ function normalizeBotLoginKey(value) {
 function resolveReviewerBotLogin(value) {
   const key = normalizeBotLoginKey(value);
   if (!key) return null;
-  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[key.toLowerCase()];
+  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[normalizeReviewerModel(key) || key.toLowerCase()];
   return aliases?.[0] || null;
 }
 
 function resolveReviewerBotLoginAliases(value) {
   const key = normalizeBotLoginKey(value);
   if (!key) return [];
-  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[key.toLowerCase()];
+  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[normalizeReviewerModel(key) || key.toLowerCase()];
   return aliases ? [...aliases] : [];
 }
 
@@ -353,7 +355,7 @@ function updateReviewerPassBodyCapture(rootDir, {
 }
 
 function findCapturedReviewerBody(rootDir, {
-  repo, prNumber, attemptNumber, passKind, headSha, reviewerModel,
+  repo, prNumber, attemptNumber, passKind, headSha, reviewerModel, includeMetadata = false,
 } = {}) {
   const kind = resolvePassKindForReviewer(passKind, { attemptNumber });
   const normalizedHeadSha = String(headSha ?? '').trim() || null;
@@ -362,7 +364,7 @@ function findCapturedReviewerBody(rootDir, {
     db = openReviewStateDb(rootDir);
     ensureReviewStateSchema(db);
     const row = db.prepare(
-      `SELECT body_md FROM reviewer_passes
+      `SELECT body_md, metadata_json FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND (
@@ -378,7 +380,8 @@ function findCapturedReviewerBody(rootDir, {
         ORDER BY body_captured_at DESC, pass_id DESC
         LIMIT 1`
     ).get(repo, Number(prNumber), normalizedHeadSha, normalizedHeadSha, reviewerModel, kind);
-    return typeof row?.body_md === 'string' ? row.body_md : null;
+    if (typeof row?.body_md !== 'string') return null;
+    return includeMetadata ? { bodyMd: row.body_md, metadata: parseMetadataJson(row.metadata_json) } : row.body_md;
   } finally {
     db?.close();
   }
@@ -496,6 +499,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   reviewBody,
   execution = null,
   singleReview = null,
+  reviewerAttribution = null,
   verdict,
   passKind,
   postedAt = new Date().toISOString(),
@@ -509,8 +513,11 @@ async function captureReviewerBodyAfterPost(rootDir, {
   allowExistingBodyUpdate = false,
 } = {}) {
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir, env });
-  const singleReviewPatch = singleReview?.applied === true
-    ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {};
+  const singleReviewPatch = {
+    ...(reviewerAttribution ? { reviewerAttribution: validateReviewerAttribution(reviewerAttribution) } : {}),
+    ...(singleReview?.applied === true
+      ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {}),
+  };
   let ghCommentId = null;
   try {
     if (knownGitHubArtifact) {

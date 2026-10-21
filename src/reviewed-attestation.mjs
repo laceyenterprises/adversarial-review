@@ -1,3 +1,4 @@
+import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -93,6 +94,7 @@ function buildReviewedAttestationPayload({
   prNumber,
   headSha,
   reviewerIdentity,
+  reviewerAttribution = null,
   verdict,
   findingsCount,
   packLockhash = null,
@@ -112,6 +114,7 @@ function buildReviewedAttestationPayload({
   if (!normalizedVerdict) throw new TypeError('verdict is required');
 
   const payload = { reviewer_identity: normalizedReviewerIdentity };
+  if (reviewerAttribution) payload.reviewer_attribution = validateReviewerAttribution(reviewerAttribution, normalizedReviewerIdentity);
   if (packLockhash) {
     const lockhash = String(packLockhash.lockhash || packLockhash).trim();
     if (!/^[0-9a-f]{12}$/.test(lockhash)) {
@@ -277,6 +280,7 @@ async function emitReviewedAttestation({
   prNumber,
   headSha,
   reviewerIdentity,
+  reviewerAttribution = null,
   verdict,
   reviewBody,
   findingsCount = normalizeFindingsCount(reviewBody),
@@ -291,6 +295,7 @@ async function emitReviewedAttestation({
     prNumber,
     headSha,
     reviewerIdentity,
+    reviewerAttribution,
     verdict,
     findingsCount,
     packLockhash,
@@ -395,6 +400,7 @@ function pendingReviewedAttestationEntry(args = {}, err = null) {
     prNumber: args.prNumber,
     headSha: args.headSha,
     reviewerIdentity: args.reviewerIdentity,
+    reviewerAttribution: args.reviewerAttribution,
     verdict: args.verdict,
     findingsCount: args.findingsCount,
     packLockhash: args.packLockhash,

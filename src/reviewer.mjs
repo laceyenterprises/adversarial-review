@@ -1,3 +1,4 @@
+import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
@@ -1649,6 +1650,7 @@ async function postGitHubReviewWithCapture({
   reviewBody,
   execution = null,
   singleReview = null,
+  reviewerAttribution = null,
   botTokenEnv,
   passKind,
   postedAt = null,
@@ -1689,6 +1691,8 @@ async function postGitHubReviewWithCapture({
     err.failureClass = 'stale-review-head';
     throw err;
   }
+  if (reviewerAttribution) validateReviewerAttribution(reviewerAttribution,
+    resolveReviewerIdentityForBotTokenEnv(botTokenEnv, reviewerIdentity || reviewerModel));
   const lookupRetry = {
     delaysMs: sqliteBusyRetryDelaysMs,
     sleepImpl: sqliteBusySleepImpl ?? sqliteBusyRetrySleepImpl,
@@ -1701,11 +1705,12 @@ async function postGitHubReviewWithCapture({
     passKind,
     reviewerModel,
   };
-  const capturedReviewBody = findCapturedReviewerBodyForPost(
+  const capturedReview = findCapturedReviewerBodyForPost(
     rootDir,
-    { ...lookupArgs, headSha: normalizedHeadSha || null },
+    { ...lookupArgs, headSha: normalizedHeadSha || null, includeMetadata: true },
     { ...lookupRetry, findImpl: findCapturedReviewerBodyImpl },
   );
+  const capturedReviewBody = typeof capturedReview === 'string' ? capturedReview : capturedReview?.bodyMd ?? null;
   let pendingCapture = null;
   if (!capturedReviewBody && normalizedHeadSha) {
     pendingCapture = findPendingReviewerBodyCaptureForPost(
@@ -1713,6 +1718,14 @@ async function postGitHubReviewWithCapture({
       { ...lookupArgs, headSha: normalizedHeadSha },
       { ...lookupRetry, findImpl: findPendingReviewerBodyCaptureImpl },
     );
+  }
+  // Reused bodies keep their original execution attribution, including an
+  // explicit unknown for old captures. A retry's token cannot claim that work.
+  if (capturedReviewBody !== null || pendingCapture !== null) {
+    reviewerAttribution = capturedReview?.metadata?.reviewerAttribution
+      || pendingCapture?.metadata?.reviewerAttribution || null;
+    if (reviewerAttribution) validateReviewerAttribution(reviewerAttribution,
+      resolveReviewerIdentityForBotTokenEnv(botTokenEnv, reviewerIdentity || reviewerModel));
   }
   const alreadyCaptured = capturedReviewBody !== null;
   const recoveringPendingCapture = pendingCapture !== null;
@@ -1760,7 +1773,7 @@ async function postGitHubReviewWithCapture({
       reviewerHeadSha: normalizedHeadSha,
       botTokenEnv,
       reviewBody: effectiveReviewBody,
-      execution, singleReview,
+      execution, singleReview, reviewerAttribution,
       verdict: persistedVerdict,
       passKind,
       postedAt: effectivePostedAt,
@@ -1784,6 +1797,7 @@ async function postGitHubReviewWithCapture({
     repo,
     prNumber,
     headSha: normalizedHeadSha,
+    reviewerAttribution,
     reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(botTokenEnv, reviewerIdentity || reviewerModel),
     verdict: normalizedVerdict,
     reviewBody: effectiveReviewBody,
@@ -1848,6 +1862,7 @@ async function main() {
     passKind,
     reviewerSessionUuid,
     reviewerSpawnToken,
+    reviewerAttribution = null,
     labels = [],
     ticketPipelinePaused = false,
     advisoryFindings = [],
@@ -2355,6 +2370,7 @@ async function main() {
       reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
       execution: reviewerExecution, singleReview: reviewModeDecision.singleReview,
+      reviewerAttribution: reviewerAttribution?.family === effectiveModel ? validateReviewerAttribution(reviewerAttribution) : null,
       botTokenEnv: effectiveBotTokenEnv,
       passKind,
       reviewerSpawnToken,

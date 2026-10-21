@@ -539,16 +539,19 @@ export function resolveDefaultMergeAgentWorkerClass({
   return cfg.get('roles.merge_agent_worker_class');
 }
 
-// The schema owns the automatic account order and validates file/env values.
+// The legacy schema validates file/env values. ITP-14 supersedes only its
+// personal-first code default; explicit compatibility overrides retain source.
 export function resolveCodexWorkerAccountOrder(options = {}) {
   const cfg = loadRoleConfig({ ...options, contextKey: 'roles.codex_worker_account_order' });
-  return cfg.get('roles.codex_worker_account_order') || 'personal-first';
+  const trace = typeof cfg.resolutionTrace === 'function' ? cfg.resolutionTrace('roles.codex_worker_account_order') : [];
+  return trace.at(-1)?.source === 'code-default'
+    ? 'corporate-first' : cfg.get('roles.codex_worker_account_order') || 'corporate-first';
 }
 
 // Code defaults and builder routing select a lane; a concrete class in any
 // file/env/CLI layer pins its account, including an explicit personal pin.
 export function codexWorkerAccountPolicy(key, workerClass, options = {}) {
-  if (!['hammer', 'codex'].includes(workerClass)) return 'pinned';
+  if (!['hammer', 'codex', 'remediator-codex'].includes(workerClass)) return 'pinned';
   const cfg = loadRoleConfig({ ...options, contextKey: key });
   if (cfg.get(key) !== workerClass) return resolveCodexWorkerAccountOrder(options);
   const trace = typeof cfg.resolutionTrace === 'function' ? cfg.resolutionTrace(key) : [];

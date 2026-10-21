@@ -608,6 +608,21 @@ handoff, see [Automation Merge Actions](data-model/automation-merge-actions.md).
 
 ### 2a. HHR harness-fallback (codex-capped hammer → available harness)
 
+ITP-14: when `oauth.identity_token_pools.hammer` or `hammer-claude` is declared,
+resolve the canonical role through the shared account-selection owner before
+legacy fleet routing. Declare corporate then primary under the current static
+policy. Fresh account refusal advances inside that role's pool; unknown evidence
+holds. Fresh pool exhaustion can use only a declared eligible cross-family hammer
+role. Legacy `hammer-corp` fallback entries represent same-role overflow and are
+ignored on this path; the existing `hammer-claude` edge remains. Never substitute a
+builder for a hammer. `harnessResolution.accountProposal` is diagnostic evidence;
+`hq dispatch` revalidates and acquires the actual account lease, keeping registry
+entitlement/tools/budgets and every exact-head merge gate unchanged. Failed owner
+reads hold without using the legacy cached fleet snapshot. Undeclared roles and
+explicit legacy corporate requests retain the compatibility behavior below.
+Enrollment, deployment and service changes require the ITP-19 operator step.
+
+
 The default closer `worker_class: hammer` runs on the **codex** (OpenAI OAuth)
 harness. When the codex OAuth quota is grounded (LAC-1463: the re-hammer loop
 burned the weekly cap), the hammer cannot spawn at all — `hq dispatch

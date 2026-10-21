@@ -194,8 +194,10 @@
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",
       "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",
+      "accountProposalField": "harnessResolution.accountProposal and attempts[].harnessResolution.accountProposal; diagnostic only, dispatcher binding is authoritative",
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
+        "src/worker-token-pool.mjs",
         "bin/ama-audit.mjs",
         "bin/hammer-publish.sh",
         "bin/hammer-pending-attestation.mjs",
@@ -241,8 +243,10 @@
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",
       "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids,missing-label-events}/*.json",
+      "accountProposalField": "remediationWorker.accountProposal; diagnostic only, dispatcher binding is authoritative",
       "schemaSurface": "src/follow-up-jobs.mjs",
       "relatedSchemaSurfaces": [
+        "src/worker-token-pool.mjs",
         "src/follow-up-remediation.mjs",
         "src/follow-up-retrigger-review-label.mjs",
         "src/remediation-conflicted-base.mjs",

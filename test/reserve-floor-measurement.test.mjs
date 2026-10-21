@@ -52,7 +52,7 @@ test('legacy weeklyMeasurement shape is still honoured', () => {
 
 test('healthy accounts in the current shape are ready, not unknown', () => {
   assert.equal(selectCodexWorkerAccount(snapshot()).reason, 'codex-account-ready');
-  assert.equal(selectCodexWorkerAccount(snapshot()).provider, 'codex');
+  assert.equal(selectCodexWorkerAccount(snapshot()).provider, 'codex-corp');
   assert.equal(selectCodexReviewerAccount(snapshot()).provider, 'codex-corp');
   const claude = selectClaudeAccountLaneFromSnapshot(snapshot(), { workerClass: 'hammer-claude' });
   assert.equal(claude.hold, false);
@@ -119,7 +119,7 @@ test('unusable weekly readings fall back to the measured provider reading', () =
     for (const policy of Object.values(s.reserveFloors)) policy.weeklyMeasurement = weeklyMeasurement;
     assert.deepEqual(reserveFloorWeeklyMeasurement(s.reserveFloors['openai-oauth']),
       { status: 'measured', percentRemaining: 40 });
-    assert.equal(selectCodexWorkerAccount(s).provider, 'codex');
+    assert.equal(selectCodexWorkerAccount(s).provider, 'codex-corp');
     assert.equal(selectCodexReviewerAccount(s).provider, 'codex-corp');
     assert.equal(selectClaudeAccountLaneFromSnapshot(s, { workerClass: 'hammer-claude' }).provider, 'claude-code-corp');
   }

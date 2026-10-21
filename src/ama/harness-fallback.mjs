@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { resolvePooledWorkerRouting } from '../worker-token-pool.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from '../fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from '../claude-account-routing.mjs';
 import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from '../codex-account-routing.mjs';
@@ -175,7 +176,8 @@ export async function resolveCloserDispatchHarness({
   rootDir = null,
   nowMs = Date.now,
   sleepImpl,
-  codexAccountPolicy = 'personal-first',
+  codexAccountPolicy = 'corporate-first',
+  selectAccountImpl,
   modelForWorkerClass = (className) => resolveRemediationModel(className, { env, fallbackModel: null }).resolvedModel,
   // CLOSERREUSE-01: the merge-agent needs the primary's grounding even with no
   // fallback configured, because it defers rather than dispatch a grounded
@@ -188,6 +190,10 @@ export async function resolveCloserDispatchHarness({
 } = {}) {
   const primary = String(workerClass || '').trim();
   const fallbacks = normalizeFallbackList(fallbackWorkerClasses);
+  const pooled = await resolvePooledWorkerRouting({ primary, fallbackWorkerClasses: fallbacks,
+    kind: 'hammer', env, modelForClass: modelForWorkerClass, selectAccountImpl,
+    legacyAccountPinned: primary === 'hammer' && codexAccountPolicy === 'pinned' });
+  if (pooled) return pooled;
   let base = { workerClass: primary, fellBack: false };
   const autoCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy) && primary === 'hammer';
 

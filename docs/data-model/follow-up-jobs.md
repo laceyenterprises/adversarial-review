@@ -430,6 +430,20 @@ reviewed SHA or no body is not de-duplicated.
 
 ## Remediator quota holds and fallback (REMFALLBACK-01)
 
+ITP-14 adds optional `remediationWorker.accountProposal` for declared privileged
+remediator pools: `{ identity, tokenAccountId, brokerProvider, reason,
+evidenceGeneration }`. IDs/provider/generation may be null on holds. This is
+pre-dispatch selection evidence; the dispatcher revalidates and records the
+actual bound account/lease in launch/run provenance. Never infer a historical
+account from the canonical worker class or promote a proposal to a receipt.
+Canonical `remediator-codex`/`remediator-claude` remains the worker class on both
+accounts. `fallbackFrom`/`fallbackResolution` apply only to a cross-family role
+change, including the existing typed infrastructure repair. Unknown evidence and
+unsupported local pooled dispatch use the existing budget-neutral claim hold;
+no new durable job status is introduced. Undeclared pools keep the legacy
+class-based evidence below. Pool selection uses shared account evidence and
+does not turn historical class-only cap records into an account-wide cap.
+
 A quota hold is a job whose latest `remediationPlan.retryHistory[]` entry has
 `retryMetadata.code: "quota-exhausted"` (a legacy job with no history is read
 from `remediationPlan.lastRetryMetadata`). Two writers produce it.

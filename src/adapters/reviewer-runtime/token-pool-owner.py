@@ -19,13 +19,10 @@ def execute(value):
     if operation in {"renew", "release"}:
         result = getattr(client, operation)(value["lease"])
         # Broker renew returns {lease: ...}; release returns {released: true}.
-        positive = (
-            isinstance(result, dict)
-            and (
-                result.get("released") is True
-                if operation == "release"
-                else bool(result.get("lease"))
-            )
+        positive = isinstance(result, dict) and (
+            result.get("released") is True
+            if operation == "release"
+            else bool(result.get("lease"))
         )
         if not positive:
             raise RuntimeError("lease operation failed")
@@ -51,7 +48,7 @@ def execute(value):
     row = {
         "worker_class": value["identity"],
         "launch_request_id": value["requestId"],
-        "task_type": "review",
+        "task_type": value.get("taskKind", "review"),
         "request_payload_json": json.dumps({"workerModel": value["model"]}),
     }
     reserve_state = snapshot(daemon.hq_root)
@@ -59,7 +56,7 @@ def execute(value):
         daemon, row, reserve_state, declarations=declarations, client=client
     )
     reviewer_reserve_refused = False
-    if value["family"] == "claude":
+    if value["family"] == "claude" and value.get("taskKind", "review") == "review":
         # Preserve CLC's primary reviewer reserve refusal. The general worker
         # collector exempts non-coding tasks from builder floors; the existing
         # Claude reviewer account selector additionally checks these canonical

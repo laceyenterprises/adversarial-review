@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { resolvePooledWorkerRouting } from './worker-token-pool.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './fleet-quota-status.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 import { codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy } from './codex-account-routing.mjs';
@@ -56,6 +57,7 @@ import {
   resolveClaudeRemediationModel,
   resolveCodexRemediationModel,
   resolveGeminiRemediationModel,
+  resolveRemediationModel,
 } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import {
@@ -68,6 +70,7 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
   const workerClass = String(workerClassInput || '').trim().toLowerCase();
   if (!workerClass) return null;
   switch (workerClass) {
+    case 'remediator-codex':
     case 'remediator-codex-corp':
     case 'remediator-claude':
     case 'remediator-claude-corp':
@@ -192,13 +195,26 @@ export async function resolveRemediationWorkerClassWithFallback({
   env = process.env,
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
-  codexAccountPolicy = 'personal-first',
+  codexAccountPolicy = 'corporate-first',
+  selectAccountImpl,
 } = {}) {
+  modelForClass ??= (workerClass) => remediatorModelForClass(workerClass, { job, env });
   let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean))];
   const base = { workerClass: primaryClass, fellBack: false, hold: false };
+  const lastInfrastructureRetry = job?.remediationPlan?.retryHistory?.findLast(entry =>
+    entry.round === job.remediationPlan.currentRound && entry.retryMetadata?.code === 'infrastructure-refund');
+  const preferCrossFamily = Boolean(lastInfrastructureRetry?.retryMetadata?.harnessSpecific
+    && (lastInfrastructureRetry.retryMetadata.workerClass === primaryClass
+      || (lastInfrastructureRetry.retryMetadata.reason === 'codex-tool-host-unavailable'
+        && ['codex', 'remediator-codex'].includes(primaryClass))));
+  const pooled = await resolvePooledWorkerRouting({ primary: primaryClass, fallbackWorkerClasses: fallbacks,
+    kind: 'remediator', env, modelForClass, reviewerModels, selectAccountImpl, preferCrossFamily,
+    infrastructureReason: lastInfrastructureRetry?.retryMetadata?.reason,
+    legacyAccountPinned: primaryClass === 'codex' && codexAccountPolicy === 'pinned' });
+  if (pooled) return { ...pooled, ...(pooled.hold ? { holdUntil: holdUntilFor(null, nowMs) } : {}) };
 
   if (!primaryClass) {
     return { ...base, reason: 'no-fallback-configured' };
@@ -218,7 +234,8 @@ export async function resolveRemediationWorkerClassWithFallback({
     model: statuses ? modelOf(modelForClass, workerClass) : null,
   });
 
-  const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy) && primaryClass === 'codex';
+  const automaticCodex = isAutomaticCodexAccountPolicy(codexAccountPolicy)
+    && ['codex', 'remediator-codex'].includes(primaryClass);
   const personalCap = automaticCodex ? capOf('codex') : null;
   const corporateCap = automaticCodex ? capOf('remediator-codex-corp') : null;
   const codexAccount = automaticCodex
@@ -394,12 +411,15 @@ export function nextRoundReviewerModels(job, { env = process.env, topPath, loade
 
 // The model each remediator class would spawn with, for model-level caps.
 function remediatorModelForClass(workerClass, { job, env }) {
-  if (['codex', 'remediator-codex-corp'].includes(workerClass)) {
+  if (['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
     return job?.nonBlockingOnly === true
       ? resolveConfiguredNonBlockingCodexModel(env).resolvedModel
-      : resolveCodexRemediationModel(env);
+      : workerClass === 'remediator-codex'
+        ? resolveRemediationModel(workerClass, { env, fallbackModel: null }).resolvedModel
+        : resolveCodexRemediationModel(env);
   }
-  if (['claude-code', 'remediator-claude', 'remediator-claude-corp'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
+  if (workerClass === 'remediator-claude') return resolveRemediationModel(workerClass, { env, fallbackModel: null }).resolvedModel;
+  if (['claude-code', 'remediator-claude-corp'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
   if (workerClass === 'gemini') return resolveGeminiRemediationModel(env);
   return null;
 }
@@ -449,10 +469,17 @@ export async function resolveClaimedRemediatorRouting({
 }
 
 // `remediationWorker` audit for a fallback spawn: the class it replaced, why,
-// and the candidates passed over. Empty when the routed class runs.
+// and the candidates passed over. Pooled proposals are diagnostic only; the
+// dispatcher's account receipt, rather than this preflight, identifies the run.
 export function remediatorFallbackAudit(routing) {
-  if (!routing?.fellBack) return {};
+  const proposal = routing?.pooled ? { accountProposal: {
+    identity: routing.identity, tokenAccountId: routing.tokenAccountId || null,
+    brokerProvider: routing.brokerProvider || null, reason: routing.reason,
+    evidenceGeneration: routing.evidenceGeneration || null,
+  } } : {};
+  if (!routing?.fellBack) return proposal;
   return {
+    ...proposal,
     fallbackFrom: routing.from,
     fallbackReason: routing.capSource || routing.reason,
     fallbackResolution: {

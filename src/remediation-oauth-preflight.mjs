@@ -725,7 +725,10 @@ async function assertGeminiOAuth() {
   }
 }
 
-async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env } = {}) {
+async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env, delegatedPool = false } = {}) {
+  // Canonical privileged workers get their account only at managed admission.
+  // A daemon-local primary credential probe cannot validate that account.
+  if (delegatedPool && ['remediator-codex', 'remediator-claude'].includes(workerClass)) return;
   switch (workerClass) {
     case 'remediator-codex-corp': return; // broker-vended at spawn (local or hq), no primary auth-file dependency
     case 'codex':       return assertCodexOAuth();

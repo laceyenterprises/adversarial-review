@@ -438,7 +438,7 @@ function createRemediationRuntime({
         replyPath: request.replyPath,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
-        modelResolution: ['codex', 'remediator-codex-corp'].includes(workerClass) ? request.modelResolution : null,
+        modelResolution: ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass) ? request.modelResolution : null,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         allowConflictedBase: Boolean(request.allowConflictedBase),
         execFileImpl,
@@ -3324,14 +3324,16 @@ async function consumeNextFollowUpJob({
       log,
     });
     workerClass = remediatorRouting.workerClass;
-    jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
+    if (!remediatorRouting.pooled) {
+      jobEnv.CODEX_BROKER_PROVIDER = workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex';
+    }
     if (remediatorRouting.hold) {
       return holdClaimedJobForCappedRemediator({
         rootDir, jobPath: claimed.jobPath, heldAt: claimed.job.claimedAt,
         routing: remediatorRouting, delayedPendingPaths, log,
       });
     }
-    if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex-corp'].includes(workerClass)) {
+    if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
@@ -3339,6 +3341,13 @@ async function consumeNextFollowUpJob({
       env: jobEnv,
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
+    if (remediatorRouting.pooled && remediationMode !== 'os') {
+      const heldAt = now();
+      return holdClaimedJobForCappedRemediator({ rootDir, jobPath: claimed.jobPath,
+        heldAt, delayedPendingPaths, log,
+        routing: { ...remediatorRouting, hold: true, reason: 'pooled-remediation-requires-dispatch',
+          holdUntil: new Date(Date.parse(heldAt) + 60_000).toISOString() } });
+    }
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -3441,7 +3450,8 @@ async function consumeNextFollowUpJob({
       throw new Error('corporate Claude remediation requires account-bound HQ dispatch');
     }
     if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp'].includes(workerClass))) {
-      await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
+      await assertRemediationWorkerOAuth(workerClass, { execFileImpl,
+        delegatedPool: hqDispatchEnabled && remediatorRouting.pooled });
     }
 
     // Bare-mode claude-code remediators authenticate with a broker-vended

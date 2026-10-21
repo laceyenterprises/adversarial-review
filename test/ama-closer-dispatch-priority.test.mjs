@@ -183,7 +183,7 @@ for (const account of ['personal', 'corporate', 'pinned-personal']) test(`LANEFA
     writeFileSync(env.AGENT_OS_CONFIG_PATH, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class: hammer\n');
   }
   const deps = testDeps(); const logs = []; const resolutions = [];
-  const snapshot = codexAccountFixture({ primary: account === 'corporate' ? 'exhausted' : 'ok' });
+  const snapshot = codexAccountFixture({ corp: account === 'personal' ? 'exhausted' : 'ok' });
   const result = await maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, { dispatchContext: {
       repo: 'sample/project', prUrl: 'https://github.com/sample/project/pull/404', reviewedBy: 'synthetic-reviewer',
@@ -201,7 +201,7 @@ for (const account of ['personal', 'corporate', 'pinned-personal']) test(`LANEFA
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(resolutions.length, 1);
   assert.equal(resolutions[0].env, env);
-  assert.equal(resolutions[0].codexAccountPolicy, account === 'pinned-personal' ? 'pinned' : 'personal-first');
+  assert.equal(resolutions[0].codexAccountPolicy, account === 'pinned-personal' ? 'pinned' : 'corporate-first');
   const dispatch = deps.calls.find(call => call.args[0] === 'dispatch');
   assert.equal(flagValue(dispatch.args, '--worker-class'), account === 'corporate' ? 'hammer-corp' : 'hammer');
   const choices = logs.filter(line => line.includes('codex_account='));

@@ -1763,7 +1763,12 @@ uses (`src/hammer-owner-route.mjs`).
   reviewer dispatch until active remediation settles. Closer-head suppression
   applies to reviewer dispatch, so it cannot hide a hammer's own reconciliation.
   Automatic failed-CI admission never requeues a stopped `no-progress`
-  hand-off; explicit operator remediation retriggers remain available.
+  hand-off; explicit operator remediation retriggers remain available for
+  allowlisted stopped jobs. HAMPROVCI-01: a completed comment-only final-round
+  handoff (`reReview.suppressed: "comment-only-final-round"`) returns
+  `ci-regression-hammer-owned` directly. Round requeue also refuses that handoff
+  without mutation, even at the round cap. The completed round remains available
+  as a strict starting-base edge for the hammer's later CI repair.
 - The closer admits the red, unreviewed head as a final-hammer close and adds a
   "CIBLOCKHAM-01 — failed CI with no remediation job left: you are the owner"
   prompt section with the failing checks. Codex-first, the lease and every

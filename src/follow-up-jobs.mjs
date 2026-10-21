@@ -3365,6 +3365,11 @@ function requeueFollowUpJobForNextRound({
   stopMetadata = null,
 }) {
   const currentJob = readFollowUpJob(jobPath);
+  // This terminal handoff is progress. Keep its completed provenance even at
+  // the round cap; callers already handle a refused requeue through this error.
+  if (currentJob.status === 'completed' && currentJob.reReview?.suppressed === 'comment-only-final-round') {
+    throw new Error(`Cannot requeue follow-up job ${currentJob.jobId} from completed:comment-only-final-round; ownership belongs to the hammer`);
+  }
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
   // A pushed round waiting only on CI made progress without needing re-review.

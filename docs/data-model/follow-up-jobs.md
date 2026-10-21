@@ -266,7 +266,12 @@ re-review or grant merge authority.
 
 Automatic failed-CI admission leaves a stopped `no-progress` job stopped and
 hands ownership to the hammer; it cannot reopen that job on a later CI probe.
-Explicit operator remediation retriggers retain their existing allowlist.
+Explicit operator remediation retriggers retain their existing stopped-job allowlist.
+A completed job with `reReview.suppressed: "comment-only-final-round"` is already
+handed to the hammer. Failed-CI admission returns `ci-regression-hammer-owned`
+without mutating it, and direct round requeue throws before either no-progress
+or round-cap handling. Its job and round remain completed, preserving the
+start/result edge read by strict hammer starting-base validation.
 
 ## Conflicted-base probe retries (REMCONFLICT-01)
 

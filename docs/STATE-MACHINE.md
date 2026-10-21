@@ -621,7 +621,10 @@ in-progress
 
 completed
   │
-  ├─ operator requeue
+  ├─ comment-only final-round hammer handoff
+  │    └─ completed (CI admission and requeue preserve the round)
+  │
+  ├─ ordinary round requeue
   │    └─ pending
   │
   └─ max rounds guardrail trips
@@ -653,8 +656,9 @@ checks can establish whether that dispatch is possible.
 It means:
 
 - this remediation round ended successfully
-- the rereview request was durable and accepted
-- the watcher can pick the PR up again
+- the rereview request was durable and accepted, or the comment-only final
+  round intentionally suppressed re-review and handed ownership to the hammer
+- the watcher can pick the PR up again or route the final-round handoff
 
 ---
 
@@ -676,7 +680,12 @@ If that durable flag is absent or false:
 - the queue does **not** fabricate another pass
 - the job stops with `code = "no-progress"`
 
-That conservatism is intentional.
+That conservatism is intentional. A completed comment-only final round with
+`reReview.suppressed = "comment-only-final-round"` is an intentional hammer
+handoff, not a no-progress completion. Failed-CI admission returns
+`ci-regression-hammer-owned` without requeueing it. Direct round requeue refuses
+with an error before applying no-progress or round-cap stops. The job stays in
+`completed/` with completed start/result edges for strict hammer provenance.
 
 If the flag is true, reconcile still runs the branch-contamination gate before resetting `reviews.db` back to `pending`. A contaminated branch does **not** produce a synthetic stop; it moves to durable `failed/` with `failure.code = "branch-contamination"` so operators have an audit trail and a retryable terminal record after they clean the branch.
 

@@ -4425,6 +4425,30 @@ test('requeueFollowUpJobForNextRound moves a completed job back to pending for t
   assert.equal(requeued.job.remediationPlan.nextAction.requestedBy, 'operator');
 });
 
+for (const maxRounds of [1, 3]) {
+  test(`requeue refuses a completed comment-only final handoff without mutation (budget ${maxRounds})`, (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'final-round-requeue-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 42, reviewerModel: 'codex',
+      revisionRef: 'a'.repeat(40), reviewBody: '## Verdict\nComment only', maxRemediationRounds: maxRounds });
+    const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-01T10:00:00.000Z' });
+    const completed = markFollowUpJobCompleted({ rootDir, jobPath: claimed.jobPath,
+      finishedAt: '2026-01-01T10:05:00.000Z', resultingHeadSha: 'b'.repeat(40),
+      reReview: { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' },
+      jobUpdates: { finalRound: 'comment-only' },
+    });
+    const before = readFileSync(completed.jobPath, 'utf8');
+    for (const requestedBy of ['watcher-ci-admission', 'operator']) {
+      assert.throws(() => requeueFollowUpJobForNextRound({ rootDir, jobPath: completed.jobPath, requestedBy }),
+        /Cannot requeue .*completed:comment-only-final-round/);
+      assert.equal(readFileSync(completed.jobPath, 'utf8'), before);
+      assert.equal(readFollowUpJob(completed.jobPath).remediationPlan.rounds[0].state, 'completed');
+      assert.equal(readFollowUpJob(completed.jobPath).remediationPlan.rounds[0].resultingHeadSha, 'b'.repeat(40));
+      assert.equal(existsSync(path.join(rootDir, 'data/follow-up-jobs/stopped', `${completed.job.jobId}.json`)), false);
+    }
+  });
+}
+
 test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({

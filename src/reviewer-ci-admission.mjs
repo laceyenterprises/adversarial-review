@@ -17,6 +17,7 @@ function buildRereviewCiRegressionReason({ repo, prNumber, ciGate }) {
 // external CI); the watcher routes the PR to the hammer for final adjudication.
 const CI_BLOCKED_PARK_CAUSES = Object.freeze({
   'ci-regression-no-job': 'no follow-up job exists to requeue',
+  'ci-regression-hammer-owned': 'the completed comment-only final round handed ownership to the hammer',
   // The requeue re-stops a job at its round cap (or a no-progress round).
   'ci-regression-stopped': 'no remediation round is left to requeue',
 });
@@ -156,6 +157,14 @@ async function guardRereviewCiBeforeReviewer({
           `(${formatCiCheckList(ciGate.failedChecks)}) but no follow-up job exists to requeue.`
       );
       return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
+    }
+
+    // Preserve the completed round's start/result edge for the hammer's proof.
+    if (latest.job?.status === 'completed' && latest.job?.reReview?.suppressed === 'comment-only-final-round') {
+      return ciBlockedHammerOwnerResult({
+        repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
+        jobPath: latest.jobPath, job: latest.job,
+      });
     }
 
     // Automatic CI admission must not reopen a no-progress hand-off. Explicit

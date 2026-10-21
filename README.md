@@ -1080,8 +1080,11 @@ review claim; no follow-up job and exhausted/no-progress remediation both assign
 the hammer, while the shared merge predicate refuses a merge over red CI.
 The smoke checks proven final-round red-CI reason admission with and without
 non-blocking findings, while blocking or unknown blocking findings and structural
-holds still refuse that route. The native exhausted unreviewed head also clears
-wake admission, and a refused settled handoff with a reclaimable matching lease leaves the closer's terminal
+holds still refuse that route. A completed comment-only final-round handoff stays
+completed under failed-CI admission and direct requeue refusal, including at the
+round cap; its start/result edge still proves the hammer's starting base.
+The native exhausted unreviewed head also clears wake admission, and a refused
+settled handoff with a reclaimable matching lease leaves the closer's terminal
 refusal reason regardless of wake outcome, while a fresh live-PID lease and its
 intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
 `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
@@ -1225,7 +1228,7 @@ stateDiagram-v2
     s1 --> s4: follow-up-job.08 lifecycle or budget stop
     s1 --> s5: follow-up-job.09 operator cancellation
     s1 --> s0: follow-up-job.10 transient retry
-    s2 --> s0: follow-up-job.11 next round
+    s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget

@@ -395,6 +395,42 @@ function firstSupersedingReview(review, reviews) {
   });
 }
 
+// HAMLINES-01: legacy Lines fields mix ranges with symbols and prose. The
+// harness's diff-line index is metadata, never a file-line citation. Approximate
+// (~) ranges use their exact endpoints: tolerance must not waive uncited code.
+function findingLineRanges(text, file) {
+  // Refuse oversized input before regex work; truncation could authorize a
+  // valid prefix while silently dropping an invalid range at the end.
+  if (String(text || '').length > 512) return [];
+  let fileLines = String(text || '').replace(/`/g, '').trim();
+  const pathPrefix = `${String(file || '').replace(/`/g, '')}:`;
+  if (fileLines.startsWith(pathPrefix)) fileLines = fileLines.slice(pathPrefix.length);
+  const readList = (value) => {
+    const ranges = [];
+    let rest = value;
+    while (true) {
+      const match = /^\s*(?:lines?\s+)?~?(?:#?L)?(-?\d+)(?:\s*(?:[-–]|\.\.)\s*(?:L)?(-?\d+))?(?=$|[\s;,():])/i.exec(rest);
+      if (!match) break;
+      ranges.push({ start: Number(match[1]), end: Number(match[2] || match[1]) });
+      rest = rest.slice(match[0].length);
+      const separator = /^\s*[;,]\s*/.exec(rest);
+      if (!separator) break;
+      rest = rest.slice(separator[0].length);
+    }
+    return { ranges, rest };
+  };
+  // Modern citations start with a list. Everything after it is a note, even
+  // when the note contains parentheses, identifiers, dates or diff indices.
+  const leading = readList(fileLines);
+  if (leading.ranges.length) return leading.ranges;
+  // Legacy symbol-qualified citations put the entire list in parentheses.
+  // Require a complete numeric list, rather than searching prose for numbers.
+  return [...fileLines.matchAll(/(?:^|[;,])\s*[\w.][^();,]*\((?:post-diff\s+)?([^()]*)\)\s*(?=[;,]|$)/g)].flatMap((match) => {
+    const { ranges, rest } = readList(match[1]);
+    return rest.trim() ? [] : ranges;
+  });
+}
+
 function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     let citation;
@@ -435,10 +471,12 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           : parsedReview.verdict !== 'request-changes') return reject('finding-kind-not-authorizing');
         const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
         if (!finding) return reject('finding-not-found');
-        const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
-        if (!lines) return reject('finding-lines-unreadable');
-        const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
-        if (cited.start < 1 || cited.end < cited.start) return reject('finding-lines-invalid');
+        const ranges = finding.citedRanges ??= findingLineRanges(finding.lines, finding.file);
+        if (ranges.length === 0) {
+          return reject(`finding-lines-unreadable: ${JSON.stringify(String(finding.lines || '').slice(0, 200))}`);
+        }
+        if (ranges.some(({ start, end }) => !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+          || start < 1 || end < start)) return reject('finding-lines-invalid');
         const reviewed = rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
@@ -449,7 +487,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         // HAM repairs may change the segment; whole-segment equality cannot
         // attribute those changes to the author. Retain finding coverage and
         // the authorizing HAM patch's parent-state content proof below.
-        if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) {
+        const sameFile = (finding.file || '').replace(/^`|`$/g, '') === reviewed.filename;
+        if (!sameFile || !ranges.some(cited => cited.start <= reviewed.start && cited.end >= reviewed.end)) {
           return reject('not-covered-by-cited-finding');
         }
         if (authorization.originalAuthorization) {

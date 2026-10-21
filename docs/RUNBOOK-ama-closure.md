@@ -2419,6 +2419,28 @@ The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates
 are projected into the reviewed and commit-parent heads, accounting for line shifts.
+HAMLINES-01: `Lines:` accepts single lines, hyphen/en-dash ranges, approximate
+`~N-M` ranges, several ranges separated by `;` or `,`, and symbol-qualified ranges
+in parentheses. Any one range must cover the complete projected span; gaps between
+ranges confer no coverage. Approximate endpoints are treated as exact, without
+extra tolerance, to avoid waiving uncited code. A leading range list ends at the
+first explanatory note; numbers in later prose, symbols or parentheses supply
+no coverage and cannot invalidate that list. Legacy symbol-qualified entries
+must end with a parenthesized numeric list (optionally prefixed by `post-diff`)
+and may be separated by semicolons or commas. A colon may directly follow a
+leading line or range to introduce a note (`10-15: description`).
+In harness output `N (RIGHT side, diff line M)`, only `N` cites a file line;
+`M` is metadata, including when the annotation omits `RIGHT side,` or uses
+`RIGHT,` instead.
+New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
+Unreadable, missing or `unknown` coordinates refuse reversal authority; there is
+no file-level fallback. Precise `L10-L11`, `line 10`, `lines 10-11`, `#L10`,
+`10..11` and matching `File:` path-prefixed ranges retain line-level coverage.
+Inputs over 512 characters are refused before parsing, rather than truncated
+into a potentially authorizing prefix. Invalid numeric ranges also refuse
+authorization. The refusal includes the unreadable `Lines:` text (bounded).
+All identity, ancestry, reviewed-head, worker-ticket,
+original-authorization and segment/content proofs remain required.
 API-published HAM commits with GitHub's `web-flow` committer retain the shared
 identity requirement: a linked HAM author and `verified: true` / `reason: valid`.
 The bounded history reader fetches compact verification separately for rename,

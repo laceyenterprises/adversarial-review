@@ -395,6 +395,15 @@ function firstSupersedingReview(review, reviews) {
   });
 }
 
+// HAMLINES-01: legacy Lines fields mix ranges with symbols and prose. The
+// harness's diff-line index is metadata, never a file-line citation. Approximate
+// (~) ranges use their exact endpoints: tolerance must not waive uncited code.
+function findingLineRanges(text) {
+  const fileLines = String(text || '').replace(/\([^()]*\bside,\s*diff line\s+\d+\s*\)/gi, '');
+  return [...fileLines.matchAll(/(?<![\w.])~?(-?\d+)(?:\s*[-–]\s*(-?\d+))?(?![\w.])/g)]
+    .map(match => ({ start: Number(match[1]), end: Number(match[2] || match[1]) }));
+}
+
 function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     let citation;
@@ -435,10 +444,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           : parsedReview.verdict !== 'request-changes') return reject('finding-kind-not-authorizing');
         const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
         if (!finding) return reject('finding-not-found');
-        const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
-        if (!lines) return reject('finding-lines-unreadable');
-        const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
-        if (cited.start < 1 || cited.end < cited.start) return reject('finding-lines-invalid');
+        const ranges = finding.citedRanges ??= findingLineRanges(finding.lines);
+        if (ranges.some(({ start, end }) => !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+          || start < 1 || end < start)) return reject('finding-lines-invalid');
         const reviewed = rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
@@ -449,7 +457,17 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         // HAM repairs may change the segment; whole-segment equality cannot
         // attribute those changes to the author. Retain finding coverage and
         // the authorizing HAM patch's parent-state content proof below.
-        if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) {
+        const sameFile = (finding.file || '').replace(/^`|`$/g, '') === reviewed.filename;
+        if (ranges.length === 0) {
+          // With no coordinates, file-level coverage is limited to the finding's
+          // own reviewed changed code. The HAM patch/content proof below still
+          // has to cover this exact region; unrelated file content gets no waiver.
+          const reviewedRegion = rebased
+            ? rebasedRegion(parentFiles, reviewedFiles, path, region, cache) : region;
+          if (!sameFile || !protectedSegment(reviewedFiles, path, reviewedRegion, cache)) {
+            return reject(`finding-lines-unreadable: ${JSON.stringify(String(finding.lines || '').slice(0, 200))}`);
+          }
+        } else if (!sameFile || !ranges.some(cited => cited.start <= reviewed.start && cited.end >= reviewed.end)) {
           return reject('not-covered-by-cited-finding');
         }
         if (authorization.originalAuthorization) {

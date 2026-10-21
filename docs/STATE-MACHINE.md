@@ -1096,7 +1096,13 @@ Key control points:
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
-  base line. All three evaluators receive the effective policy: closure eligibility
+  base line. HAMLINES-01 reads all cited ranges, including legacy approximate,
+  multi-range and symbol-qualified forms; approximate endpoints stay exact.
+  Harness diff-line indices supply no file-line coverage. Unreadable coordinates
+  allow file-level coverage only for the matching file's reviewed changed segment,
+  with the same HAM patch/content and provenance proofs. Other unreadable text
+  remains a refusal with that text in the reason.
+  All three evaluators receive the effective policy: closure eligibility
   (`bin/ama-check.mjs`), daemon pre-lease and in-lease merge checks, and the hammer's
   in-lease GitHub gate (`bin/hammer-merge.sh`). The hammer gate reloads the same
   merge-authority config as `ama-check`; strict remediation defaults to enabled.

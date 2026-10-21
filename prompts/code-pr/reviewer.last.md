@@ -39,6 +39,7 @@ Output requirements:
   - `- **<Title>**` — top-level bullet whose entire label is bold and names the issue. The title must be a short, stable noun phrase (roughly 3-8 words) that uniquely names the issue. Do not use generic titles like "Finding", "Issue", or "Problem". Do not write a `Title:` prefix; the bold span itself is the title.
   - `  - **File:** \`<path>\`` — nested sub-bullet (2-space indent), bold label with inline value.
   - `  - **Lines:** \`<range>\`` — nested sub-bullet, bold label with inline value.
+  - Start `Lines:` with at least one plain inclusive file-line range `N-M` (use `N-N` for a single line), in the reviewed head. Separate additional ranges with `;` or `,`; put symbol names or explanatory notes after the ranges. Diff-line indices are metadata, not file-line ranges. Use `unknown` only when file lines cannot be determined.
   - `  - **Problem:** <one paragraph>` — nested sub-bullet, bold label with inline value on the same line.
   - `  - **Why it matters:** <one paragraph>` — same shape.
   - `  - **Recommended fix:** <one paragraph>` — same shape.

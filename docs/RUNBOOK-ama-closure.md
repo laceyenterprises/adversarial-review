@@ -2419,6 +2419,19 @@ The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates
 are projected into the reviewed and commit-parent heads, accounting for line shifts.
+HAMLINES-01: `Lines:` accepts single lines, hyphen/en-dash ranges, approximate
+`~N-M` ranges, several ranges separated by `;` or `,`, and symbol-qualified ranges
+in parentheses. Any one range must cover the complete projected span; gaps between
+ranges confer no coverage. Approximate endpoints are treated as exact, without
+extra tolerance, to avoid waiving uncited code. In harness output
+`N (RIGHT side, diff line M)`, only `N` cites a file line; `M` is metadata.
+New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
+If no file-line number is readable, file-level coverage requires a matching
+finding file and a region inside that file's reviewed changed segment. The HAM
+patch must still prove coverage of that region's parent-state content. Otherwise
+the refusal names the unreadable `Lines:` text. Invalid numeric ranges still
+refuse authorization. All identity, ancestry, reviewed-head, worker-ticket,
+original-authorization and segment/content proofs remain required.
 API-published HAM commits with GitHub's `web-flow` committer retain the shared
 identity requirement: a linked HAM author and `verified: true` / `reason: valid`.
 The bounded history reader fetches compact verification separately for rename,

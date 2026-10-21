@@ -30,6 +30,7 @@ Output requirements:
   - `- **<Title>**` — bold title naming the vuln class and location (3-8 words, not generic).
   - `  - **File:** \`<path>\``
   - `  - **Lines:** \`<range>\``
+  - Start `Lines:` with at least one plain inclusive file-line range `N-M` (use `N-N` for a single line), in the reviewed head. Separate additional ranges with `;` or `,`; put symbol names or explanatory notes after the ranges. Diff-line indices are metadata, not file-line ranges. Use `unknown` only when file lines cannot be determined.
   - `  - **Problem:** <one paragraph>`
   - `  - **Why it matters:** <one paragraph>`
   - `  - **Recommended fix:** <one paragraph>`

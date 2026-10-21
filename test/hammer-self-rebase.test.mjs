@@ -9,7 +9,7 @@ import { recordPendingAttestation } from '../src/ama/hammer-pending-attestation.
 
 const root = resolve(import.meta.dirname, '..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
-const realGit = execFileSync('/usr/bin/which', ['git'], { encoding: 'utf8' }).trim();
+const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 
 function fixture(t, scenario) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-self-rebase-'));

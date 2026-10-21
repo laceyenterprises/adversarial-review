@@ -169,6 +169,8 @@ ham_prove_audit_range() {
 if ! ham_is_full_sha "${HAM_BASE_HEAD:-}" || ! ham_prove_audit_range; then
   if ! ham_is_full_sha "<<REVIEWED_SHA>>"; then
     HAM_PHASE_OUTCOME=reviewed-head-unavailable
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass."
+    ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
     ham_publish_abort 20; return 20
   fi
   export HAM_BASE_HEAD=<<REVIEWED_SHA>>

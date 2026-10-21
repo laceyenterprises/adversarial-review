@@ -340,6 +340,21 @@ for (const startingBase of ['', 'invalid', other]) {
   });
 }
 
+for (const reviewedHead of ['invalid', 'a'.repeat(39), 'z'.repeat(40)]) {
+  test(`HAMNOREREVIEW-01 unavailable reviewed head ${reviewedHead} releases with retryable attribution`, t => {
+    const f = fixture(t);
+    const result = f.run({ HAM_BASE_HEAD: '', REVIEWED_HEAD: reviewedHead });
+    assert.equal(result.status, 20, result.stderr);
+    assert.match(result.stdout, /outcome=reviewed-head-unavailable held=0/);
+    assert.match(result.stdout, /release-retryable=reviewed-head-unavailable/);
+    assert.match(result.stdout, /note=HAM closing status — no merge\. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass\./);
+    assert.deepEqual(f.comments(), []);
+    assert.equal(f.audit(), null);
+    assert.equal(existsSync(join(f.dir, 'range.json')), false);
+    assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
+  });
+}
+
 test('HAMNOREREVIEW-01 provable remediation base retains its existing audit range', t => {
   const f = fixture(t);
   const result = f.run({ HAM_BASE_HEAD: other, PROVABLE_ROUND: '1' });

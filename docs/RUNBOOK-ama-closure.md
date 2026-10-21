@@ -4023,6 +4023,8 @@ captured starting-base proof; if it cannot prove that base, the hammer assumes
 responsibility from the last reviewed SHA, sets `HAM_BASE_HEAD` to that SHA and
 publishes that full range before the merge predicate. It reuses the published
 range rather than running a second probe that could discard responsibility.
+If the fallback reviewed SHA is invalid or unavailable, publication returns 20
+with a no-merge note and a `reviewed-head-unavailable` retryable lease-abort reason.
 Head changes, failed validation and unreadable pending attestations release for
 another hammer pass. They never request a review. Lease/CAS, required checks,
 HAMINTENT and head-bound authenticated evidence remain mandatory.

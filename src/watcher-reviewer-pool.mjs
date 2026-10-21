@@ -1140,7 +1140,7 @@ function persistedSpawnReservationSource({
       } catch {
         return false;
       }
-      const lease = run?.subjectContext?.agyIdentityLease;
+      const lease = run?.subjectContext?.agyHolderLease || run?.subjectContext?.agyIdentityLease;
       return Boolean(lease?.user && lease?.reviewId);
     },
   };

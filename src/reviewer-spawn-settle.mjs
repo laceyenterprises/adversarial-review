@@ -1007,7 +1007,7 @@ async function spawnReviewerOnceWithAccount({
           ...(agyIdentity ? { agyIdentity } : {}),
           // Persisted in the run record so a restarted watcher keeps this
           // identity out while this review still runs.
-          ...(agyIdentityLease ? { agyIdentityLease } : {}),
+          ...(agyIdentityLease ? { agyHolderLease: agyIdentityLease, agyIdentityLease } : {}),
         },
         timeoutMs: effectiveReviewerTimeoutMs,
         sessionUuid: reviewerSessionUuid,

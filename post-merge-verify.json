@@ -36,7 +36,7 @@
   "steps": [
     {
       "id": "clean",
-      "description": "Synthetic broker receipt recovery survives a lost acquire response without a delivery row or run record; live processes renew, failed releases retain the journal, and confirmed drain retries release with a positive acknowledgement. No live broker or enrollment.",
+      "description": "Synthetic broker receipt recovery survives a lost acquire response without a delivery row or run record; live processes renew, failed releases retain the journal, and confirmed drain retries release with a positive acknowledgement. ITP-11 also verifies two synthetic ready OS holders carry one canonical gemini-reviewer identity; independent pools cannot acquire a third lease and release restores capacity. No credentials, live broker, enrollment or live provider calls.",
       "promise": "smv-clean",
       "edges": [
         "review-row.23",

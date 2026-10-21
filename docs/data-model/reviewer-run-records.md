@@ -24,9 +24,14 @@ The run-state machine (`launching`, `heartbeating`, `spawned`, `completed`,
 `spawnedAt`, `lastHeartbeatAt`, `reattachToken`, `adoptedAfterBounce`, and a
 free-form `subjectContext`.
 
-CCX-08 adds `subjectContext.agyIdentityLease: { user, reviewId }` to a Gemini
-review that holds a lease on an agy reviewer identity (the HQ owner included).
-It is absent on every other review.
+ITP-11 adds `subjectContext.agyHolderLease` to leased Gemini reviews. It
+contains the canonical `identity: gemini-reviewer`, `tokenAccountId`, holder
+`user`, `hqOwner`, `reviewId`, unique lease `generation`, declaration
+`evidenceGeneration`, `selectionReason` and `ownerPid`. The same receipt is mirrored into the
+legacy `agyIdentityLease` field during rolling deployment. Historical
+`agyIdentityLease: { user, reviewId }` records remain readable. The added-user
+`agyIdentity` field remains a private runtime transport, never a GitHub or HCP
+identity. Other review families do not receive these fields.
 
 ITP-12 adds `subjectContext.reviewerAccountReceipt` for declared Claude/Codex
 reviewer pools. It contains canonical `identity`, opaque `tokenAccountId`,
@@ -50,12 +55,17 @@ before releasing. Unknown process evidence retains the journal for retry.
 See [reviewer token leases](reviewer-token-leases.md).
 This adds metadata to the existing states, without a new state or SQL migration.
 
-## Lease recovery contract (CCX-08)
+## Lease recovery contract (ITP-11)
 
-The identity pool keeps leases in watcher memory. On each readiness pass it
-also scans the active run records, and an identity named by
-`agyIdentityLease` in a record whose process group is alive (or which is
-`launching` without one) stays unleased until that review ends.
+The holder pool keeps a durable claim before spawn, described in
+[agy execution holder leases](agy-holder-leases.md). Each readiness pass also
+reads run records, preferring `agyHolderLease` and falling back to
+`agyIdentityLease`. A live process group retains the holder even with an old
+heartbeat or terminal run state. A launching record without a PGID is ambiguous
+and holds too. Neither heartbeat expiry nor a terminal status proves exit.
+The strict scanner's `includeTerminalAgyLeases` option includes these terminal
+holder records; its default and the other runtime recovery readers retain
+their existing active-state filtering.
 
 The Gemini reservation reader for persisted spawn records reads the same field.
 A surviving Gemini stage stops reserving its own seat only when its run record

@@ -9,15 +9,16 @@
 
 The file lives under `resolveAdversarialReviewStateDir(rootDir, env)`: by default
 `<rootDir>/data/gemini-quota-cooldown.json`, or directly under
-`ADVERSARIAL_REVIEW_STATE_DIR` when configured. It contains one field:
+`ADVERSARIAL_REVIEW_STATE_DIR` when configured. Current records contain holder-scoped entries; legacy singleton records are still read:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `resetAt` | ISO-8601 string | Exclusive end of the provider-wide Gemini routing hold. |
+| `identities` | map of OS holder username to `{ resetAt }` | Exclusive end of each holder’s quota hold; field name retained for compatibility. |
+| `resetAt` | ISO-8601 string, legacy only | Hold for the HQ owner only; never inferred to cover added holders. |
 
 `writeFileAtomic` writes the record using a unique temporary file, fsync and
-rename. It contains no credentials or review text. This is provider routing
-state, separate from per-PR quota/backoff and per-model OAuth outage state.
+rename. It contains no credentials or review text. This is holder routing
+state for one canonical Gemini role, separate from per-PR quota/backoff and per-model OAuth outage state.
 
 ## Lifecycle and routing
 
@@ -32,7 +33,7 @@ Absent, invalid or past resets use a 30-minute default;
 for that default window. The override is also capped at seven days. Clamping
 emits a warning; hold creation and expiry emit informational logs.
 
-The watcher temporarily resolves Gemini mode to `off` during the hold and logs
+The watcher temporarily resolves Gemini mode to `off` only when every configured runtime holder is cooled and logs
 `source=quota-cooldown resetAt=...`. The spawn wrapper also reads the store,
 so an already-admitted Gemini route skips its checkout and uses its base route.
 A quota failure may immediately try the base route using a new ledger attempt
@@ -47,8 +48,8 @@ ineffective, and a watcher restart preserves an unexpired hold.
 
 ## Operator recovery
 
-After verifying Gemini quota is available, remove the resolved
-`gemini-quota-cooldown.json` file to clear the provider routing hold manually.
+After verifying Gemini quota is available, clear the affected holder entry in the resolved
+`gemini-quota-cooldown.json` file under attended operator recovery.
 The next routing read resumes configured Gemini selection without a restart.
 This does not reset per-PR quota holds or OAuth outage files; those retain their
 own recovery procedures. See the [Gemini runtime runbook](../RUNBOOK-antigravity-gemini-reviewer.md#provider-wide-quota-cooldown).

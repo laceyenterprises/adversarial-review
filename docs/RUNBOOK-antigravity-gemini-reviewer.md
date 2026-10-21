@@ -148,7 +148,7 @@ The historical `reviewer.gemini.antigravity.accounts[]` config remains parsed
 for compatibility with older modules, but the live `agy` runtime does not use
 it for reviewer dispatch.
 
-### Multiple Reviewer OS Identities (CCX-08)
+### Gemini reviewer token holders (ITP-11; CCX-08 compatibility)
 
 With `runtime: antigravity`, `reviewer.gemini.identities` lists the OS users
 that `agy` reviews may run as, in lease order:
@@ -160,10 +160,11 @@ reviewer:
     identities: [<hq-owner>, agentos-reviewer, agentos-reviewer2]
 ```
 
-If the key is unset, or lists only the HQ owner (the user the watcher runs
-as), behavior is unchanged: agy runs directly as the HQ owner, and the Gemini
-dispatch cap is the broker credential count. Every other entry is an "added"
-identity. The watcher reaches it only through `sudo -n -H -u <user>` and the
+All logins power one role, `gemini-reviewer`, with the existing Gemini GitHub
+actor, HCP subject and review family. The OS username is a credential holder,
+never routing authority. If the key is unset, or lists only the HQ owner,
+Antigravity runs directly as that user with one leased execution slot. Every
+other entry is an added holder. The watcher reaches it only through `sudo -n -H -u <user>` and the
 root-owned pinned commands CCX-07 installs under
 `/usr/local/libexec/agent-os/`. A Gemini review then leases one ready identity
 for its whole run. On an added identity, the snapshot is streamed into that
@@ -190,13 +191,44 @@ A Gemini candidate is one whose reviewer is Gemini, or, on a pipeline-enabled
 domain, one with a stage seat whose role runs Gemini. Pipeline stages lease an
 identity too, so they count against the cap the same way.
 
-- No added identities, or no Gemini candidate on a leasing runtime: the broker
-  credential count, as before.
+- No Gemini candidate on a leasing runtime, or a non-Antigravity runtime:
+  the existing broker credential cap. A capable Antigravity runtime uses holder
+  capacity even with only the HQ owner.
 - Every Gemini candidate on a leasing runtime: the number of *ready*
   identities. The broker is not consulted. An identity this watcher has leased
   stays ready, so the ready count is total capacity; the queue subtracts the
   watcher's in-flight Gemini reviews from it once.
 - A mix of both: the lower of the ready count and the broker count.
+
+**Account declarations and fences.** The ITP-10 reader supplies the ordered
+`oauth.identity_token_pools.gemini-reviewer` members and their existing agy
+holder bindings when declared. Otherwise the existing ordered login list is
+imported with stable opaque account IDs. Conflicting legacy/new declarations,
+duplicate holder aliases or invalid descriptors hold admission. A validated
+holder/model fingerprint fences readiness; a changed declaration needs a new
+pass. Existing reviews retain their original lease. Explicit descriptors must
+authorize the configured agy model exactly; no CLI-slug/display-name equivalence
+is inferred. The current shared model-ID vocabulary cannot represent agy display
+names containing spaces/parentheses, so those explicit declarations remain held
+until that owner contract is reconciled before cutover. Legacy imported holders
+retain the existing runtime/model policy. This change emits no configuration.
+
+Every holder claim is durable before spawn. An OS-user-scoped flock prevents
+independent watchers from granting the same slot. Release compares a unique
+lease generation. A live owner PID, a live reviewer process group (even in a
+terminal run record), unknown process evidence, or an undrained added-user
+process retains the slot. Heartbeat age never frees it. See
+[holder lease data model](data-model/agy-holder-leases.md). Existing drain logs
+also emit `[agy-holders]` with canonical identity, per-account holder references,
+capacity/active/free/held and generation; host and reviewer-pool caps still apply.
+Adopted seats remain excluded from this watcher's dispatch capacity to avoid
+counting inherited work twice.
+
+Failed authentication recovery probes persist exponential backoff: 1, 2, 4,
+8, then 15 minutes, capped at 15 minutes, across watcher restarts. The initial
+recovery probe may run immediately. Sibling holders remain usable. Only a
+successful authenticated probe clears the hold. Quota cooldown stays in the
+existing username-keyed store and does not change role or signing identity.
 
 **Readiness and isolation.** Each drain that has a leasing Gemini candidate
 runs `status` and `settings` on the keychain helper for every added identity.
@@ -204,7 +236,8 @@ A lease does not depend on that drain: before leasing, the pool runs the same
 pass itself when none has run yet, when an added identity has never been
 checked, or when the last pass is more than 60s old. The pool-disabled watcher
 path (`ADVERSARIAL_REVIEWER_POOL_ENABLED=false`) and pipeline stages lease this
-way. The HQ owner is leasable without a pass, as it always was.
+way. The owner needs no sudo helper; acquisition still checks durable claims and
+surviving run records before admission.
 
 An identity is isolated when:
 
@@ -301,9 +334,9 @@ exits or the wrapper is signalled.
 
 **Watcher restarts.** `cli-direct` reviewer children survive a watcher bounce.
 Every lease is therefore also written into the reviewer run record
-(`data/reviewer-runs/<session>.json`, `subjectContext.agyIdentityLease`,
-written before the reviewer child is spawned). Every readiness pass reads the
-active run records. It keeps an identity out while a review that this watcher
+(`data/reviewer-runs/<session>.json`, `subjectContext.agyHolderLease`, mirrored into `agyIdentityLease` for rolling
+readers and written before the reviewer child is spawned). Every readiness pass reads the
+run records, including terminal holder records with live process groups. It keeps a holder out while a review that this watcher
 does not hold in memory still runs on it: the record is `launching` with no
 process group yet, or its process group is alive. For example, a review
 leased by the watcher before a restart:
@@ -513,10 +546,10 @@ CCX-08 final closeout notes:
 ## Provider-wide quota cooldown
 
 An unsuccessful Gemini review classified by the runtime as `quota-exhausted`
-starts a durable routing hold in `data/gemini-quota-cooldown.json` (or directly
+starts a durable hold for the selected holder in `data/gemini-quota-cooldown.json` (or directly
 under `ADVERSARIAL_REVIEW_STATE_DIR`). The watcher logs
-`source=quota-cooldown resetAt=...` and routes around Gemini across PRs and
-restarts until that timestamp. GitHub posting failures and stale-head review
+`source=quota-cooldown resetAt=...` when every runtime holder is cooled;
+an uncooled sibling keeps Gemini available across PRs and restarts. GitHub posting failures and stale-head review
 prose do not trigger this hold.
 
 If an eligible base route exists, the triggering review immediately falls back
@@ -531,8 +564,8 @@ invalid or past reset times use `AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS` when positiv
 or 30 minutes otherwise. Both provider reset and override durations are capped
 at seven days; a clamp emits a warning. Expired records are removed on read.
 
-To clear the provider hold manually, first verify quota is available, then
-remove the resolved `gemini-quota-cooldown.json` file. No restart is required.
+To clear a holder hold manually, first verify its quota is available, then
+clear that entry in the resolved `gemini-quota-cooldown.json` file. No restart is required.
 Per-PR quota and OAuth holds are independent and may still defer dispatch.
 See [the store contract](data-model/gemini-quota-cooldown.md) for path and schema.
 

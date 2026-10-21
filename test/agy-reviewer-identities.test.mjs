@@ -8,7 +8,7 @@
 // fake sudo forks the command, as real sudo does, and the fake agy stands in
 // for a process the HQ owner cannot signal by putting it in its own process
 // group (`set -m`), out of reach of the reviewer child's group kill.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   chmodSync,
@@ -242,6 +242,9 @@ function quietLog() {
   return { lines, log: push('log'), info: push('info'), warn: push('warn'), error: push('error') };
 }
 
+const poolRoots = [];
+after(() => { for (const root of poolRoots) rmSync(root, { recursive: true, force: true }); });
+
 function makePool(fake, {
   identities = [HQ_OWNER, REVIEWER_A, REVIEWER_B],
   env = {},
@@ -261,7 +264,11 @@ function makePool(fake, {
   leaseWaitMs = 0,
   now,
 } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'agy-pool-'));
+  poolRoots.push(root);
   return createAgyReviewerIdentityPool({
+    runStateRootDir: root,
+    loadTokenPools: () => ({}),
     env,
     log,
     hqOwner: HQ_OWNER,
@@ -324,7 +331,7 @@ function makeSnapshot(root) {
 
 // ── Identity plan ───────────────────────────────────────────────────────────
 
-test('CCX-08: an unset identities key means the HQ owner only, with no sudo and the broker cap', async () => {
+test('ITP-11: an unset identities key leases the HQ owner without sudo on a capable runtime', async () => {
   for (const identities of [[], null, [HQ_OWNER]]) {
     const plan = resolveAgyReviewerIdentityPlan({ identities, hqOwner: HQ_OWNER, env: {} });
     assert.equal(plan.multi, false);
@@ -332,16 +339,16 @@ test('CCX-08: an unset identities key means the HQ owner only, with no sudo and 
   }
   let pinnedCalls = 0;
   const pool = makePool(null, { identities: [], runPinnedImpl: async () => { pinnedCalls += 1; return { code: 0, stdout: '' }; } });
-  assert.equal(await pool.refreshReadiness(), null);
+  assert.equal(await pool.refreshReadiness(), 1);
   let brokerFetches = 0;
-  const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini' }], {
+  const cap = await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER }], {
     env: { CQP_BROKER_URL: 'http://broker.local' },
     readSharedSecret: async () => 'secret',
     fetchCredentialConcurrency: async () => { brokerFetches += 1; return 3; },
     identityPool: pool,
   });
-  assert.equal(cap, 3, 'the broker credential count stays the cap');
-  assert.equal(brokerFetches, 1);
+  assert.equal(cap, 1, 'one owner holder has one execution slot');
+  assert.equal(brokerFetches, 0);
   assert.equal(pinnedCalls, 0, 'no sudo with a single identity');
   assert.deepEqual(await pool.sweepAll(), []);
 });
@@ -807,7 +814,8 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
   const fake = makeFakeInstall();
   try {
     const log = quietLog();
-    const pool = makePool(fake, { log });
+    let at = Date.now();
+    const pool = makePool(fake, { log, now: () => at });
     assert.equal(await pool.refreshReadiness(), 3);
     const failing = { ok: false, failureClass: 'reviewer-exit', error: 'agy exited 1' };
     const adapter = { describe: () => ({ capabilities: { agyReviewerIdentity: true } }) };
@@ -840,6 +848,7 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
 
     // The next successful readiness check re-admits it, with no operator step.
     rmSync(join(fake.home(REVIEWER_A), '.probe-fails'));
+    at += 60_001;
     await pool.refreshReadiness();
     await pool.settleProbes();
     assert.equal(pool.readyCount(), 3);
@@ -866,7 +875,8 @@ test('CCX-08: a keychain-bootstrap isolation record isolates the identity until 
   const fake = makeFakeInstall({ users: [REVIEWER_A] });
   try {
     let record = null;
-    const pool = makePool(fake, { identities: [HQ_OWNER, REVIEWER_A], readBootstrapRecordImpl: () => record });
+    let at = Date.now();
+    const pool = makePool(fake, { identities: [HQ_OWNER, REVIEWER_A], readBootstrapRecordImpl: () => record, now: () => at });
     assert.equal(await pool.refreshReadiness(), 2);
     record = { schema: 1, source: 'agy-keychain-bootstrap', user: REVIEWER_A, ready: false, reasons: ['agy models failed'], transition: 'isolated', checkedAt: '2026-09-29T10:00:00Z' };
     writeFileSync(join(fake.home(REVIEWER_A), '.probe-fails'), '');
@@ -874,6 +884,7 @@ test('CCX-08: a keychain-bootstrap isolation record isolates the identity until 
     await pool.settleProbes();
     assert.match(pool.snapshot().find((state) => state.user === REVIEWER_A).reasons[0], /readiness probe|probe/);
     rmSync(join(fake.home(REVIEWER_A), '.probe-fails'));
+    at += 60_001;
     await pool.refreshReadiness();
     await pool.settleProbes();
     assert.equal(pool.readyCount(), 2, 'the same record does not isolate it again once a probe passed');

@@ -82,7 +82,27 @@ if (scenario === 'clean') {
   await leaseSweep();
   assert.equal(readReviewerTokenLeases(rootDir).length, 0);
   assert.deepEqual(leaseOps, ['renew', 'release', 'release']);
-  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true, leaseRecoveryRetried: true };
+  const { createAgyReviewerIdentityPool } = await import('../../src/agy-reviewer-identities.mjs');
+  const makeHolderPool = () => createAgyReviewerIdentityPool({
+    env: {}, runStateRootDir: rootDir, log: quiet, leaseWaitMs: 0, hqOwner: 'fixture-owner',
+    resolveRuntime: () => 'antigravity', resolveModel: () => 'synthetic-model',
+    loadTokenPools: () => ({}), loadIdentities: () => ['fixture-login-a', 'fixture-login-b'],
+    referenceSettings: () => [], readBootstrapRecordImpl: () => null,
+    readQuotaCooldownImpl: () => null, readActiveRunRecordsImpl: () => [],
+    listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
+    deliverAlertImpl: async () => { throw new Error('unexpected holder alert'); },
+    runPinnedImpl: async ({ args }) => ({ code: 0, stdout: args[0] === 'status'
+      ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' }),
+  });
+  const holders = makeHolderPool(), independent = makeHolderPool();
+  const first = await holders.acquire(), second = await holders.acquire();
+  assert.equal(first.identity, 'gemini-reviewer'); assert.equal(second.identity, first.identity);
+  assert.notEqual(first.user, second.user);
+  assert.equal(await independent.acquire(), null);
+  await holders.release(first); await holders.release(second);
+  assert.equal(await independent.refreshReadiness(), 2);
+  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
+    leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true };
 } else if (scenario === 'handoff') {
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');

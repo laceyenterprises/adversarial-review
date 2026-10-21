@@ -873,6 +873,14 @@ hold delivery at any age; the idle backstop scales from 45 minutes with host loa
 Pages name `no-route`, `retry-cap`, `non-retryable: <outcome>` or `backstop`.
 See [operator decision notices](docs/follow-up-runbook.md#operator-decision-notices-reviewnotice-01).
 
+ITP-11: Gemini logins are token holders for `gemini-reviewer`. Durable holder
+claims fence independent watcher admission, retain live processes across
+restart and terminal run states, and preserve auth-probe backoff. The clean
+smoke exercises two synthetic holders under one identity and refuses a third
+lease from an independent pool. Operator cutover still requires ITP-19 approval;
+model-ID/display-name declaration compatibility must be resolved first. See the
+[Gemini holder runbook](docs/RUNBOOK-antigravity-gemini-reviewer.md#gemini-reviewer-token-holders-itp-11-ccx-08-compatibility).
+
 HAMMERQUOTAREAD-01: quota status retries may use a snapshot under ten minutes old.
 Missing usable evidence defers before launch with the resolver's hold reason in
 AMA audits; no new launch state is introduced. After deployment, inspect

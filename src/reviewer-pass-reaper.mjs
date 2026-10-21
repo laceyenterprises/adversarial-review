@@ -162,6 +162,8 @@ function queueFollowUpForRecoveredPostedReview({
       defaultBaseBranch,
       defaultBaseBranchByRepo,
     }),
+    branch: parseMetadataJson(row.metadata_json).branch
+      || parseMetadataJson(row.metadata_json).subjectContext?.branch || null,
     revisionRef,
     reviewerModel: row.reviewer_model || row.reviewer_class || reviewRow?.reviewer || null,
     builderTag: builderTagFromRecoveredPass(row),

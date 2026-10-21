@@ -1003,9 +1003,21 @@ function pickAdversarialGateStatus({
     return decide('pending', 'Posted review is waiting for follow-up ledger reconciliation.', 'awaiting-ledger');
   }
 
+  if (latestJob?.remediationPlan?.stop?.code === 'committed-unpublished') {
+    const commit = latestJob.unpublishedWork?.commitSha || 'unknown';
+    if (headSha && commit === headSha) {
+      return decide('pending', `Remediation job ${latestJob.jobId} commit is published; re-review of the current head is pending.`,
+        'remediation-published-awaiting-review');
+    }
+    return decide('failure', `Remediation job ${latestJob.jobId} committed ${commit} locally; publication is pending.`,
+      'remediation-committed-unpublished');
+  }
   if (latestJobStatus === 'pending') {
     if (isSettledReviewJob(latestJob)) {
       return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+    }
+    if (latestJob.branchResolution?.state === 'blocked') {
+      return decide('pending', 'Remediation is blocked while resolving the PR head branch; resolution will retry.', 'branch-unresolved');
     }
     return decide('pending', 'Remediation is queued.', 'remediation-queued');
   }

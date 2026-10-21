@@ -205,7 +205,7 @@ test('WFDRIFT-01: daemon persists update proof and resumes verification on the n
     ...Array.from({ length: 3 }, () => new Error('TLS handshake timeout'))] });
   const rootDir = env.HQ_REPO_ROOT;
   const stamp = new Date().toISOString();
-  createFollowUpJob({ rootDir, repo: args.repo, prNumber: args.prNumber, reviewerModel: 'claude',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: args.repo, prNumber: args.prNumber, reviewerModel: 'claude',
     reviewBody: '## Blocking Issues\n- None.\n\n## Verdict\nRequest changes', reviewPostedAt: stamp });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: stamp, launcherPid: process.pid });
   const workspaceDir = join(rootDir, 'data/follow-up-jobs/workspaces', claimed.job.jobId);

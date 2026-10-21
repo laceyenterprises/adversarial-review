@@ -135,7 +135,7 @@ recover by replaying **only your remediation patch** onto the fresh PR head:
 5. Re-run the contamination audit and the relevant validation.
 6. Retry the guarded publisher with `--expected-remote-sha <fresh-remote-sha>`;
    retain its original `--previous-head` value. A diff-guard refusal is terminal:
-   report outcome `failed` and never retry through a direct push.
+   report outcome `blocked` with the refusal reason and local `commitSha` in `operationalBlockers[]` and never retry through a direct push.
 
 Retry that stale-head replay at most three times. If the patch is already
 present on the fresh remote head, treat that as success and request re-review.

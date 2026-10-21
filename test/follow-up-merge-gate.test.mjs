@@ -25,7 +25,7 @@ import {
 // Small factory so each test has an isolated rootDir + a freshly-
 // claimable pending job.
 function setupPendingJob(rootDir, overrides = {}) {
-  return createFollowUpJob({
+  return createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: overrides.repo || 'laceyenterprises/clio',
     prNumber: overrides.prNumber || 42,

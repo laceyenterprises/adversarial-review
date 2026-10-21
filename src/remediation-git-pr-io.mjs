@@ -227,6 +227,7 @@ async function fetchPRBranchMetadata({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
+  env = process.env,
 } = {}) {
   // Resolve PR branch metadata via the REST pulls endpoint instead of
   // `gh pr view --json` (which goes through GraphQL). GraphQL and REST have
@@ -245,7 +246,7 @@ async function fetchPRBranchMetadata({
     execFileImpl,
     command: 'gh',
     args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
-    options: { maxBuffer: 2 * 1024 * 1024 },
+    options: { env, timeout: 8000, maxBuffer: 2 * 1024 * 1024 },
   });
   const parsed = JSON.parse(String(stdout || '{}'));
   const baseBranch = normalizeBaseBranch(parsed?.base?.ref);

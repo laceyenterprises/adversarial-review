@@ -612,6 +612,23 @@ data/follow-up-jobs/
 
 Directory = state.
 
+REMEDBRANCH-01: `pending` jobs can carry the explicit `branch-unresolved`
+hold in `branchResolution`. Creation attempts one bounded PR-head lookup; the
+claim owner retries after 60 seconds without incrementing the round or spawning
+a worker. Three failed lookups including creation transition to `stopped` with
+`branch-unresolved`; only explicit operator requeue resets the attempt budget.
+Legacy holds count as one prior failure. Settled clean reviews bypass these
+holds entirely. A resolved branch releases the hold. Both local and HQ worker
+paths require a branch, and the guarded publisher can hydrate historical branchless
+metadata from PR identity.
+
+An exited worker reporting a retained commit that could not publish transitions
+to `stopped` with `committed-unpublished`, retaining `unpublishedWork` and the
+workspace beyond terminal TTL. The PR comment names job/commit and the gate
+reports publication failure, without asking for an operator verdict on findings.
+A live head matching the retained commit changes that gate to pending review;
+it does not settle the review or remove retained work.
+
 ### Main states
 
 | Queue state | Meaning |

@@ -19,7 +19,7 @@ function makeCaptureStream() {
 }
 
 function makeJob(rootDir, overrides = {}) {
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,

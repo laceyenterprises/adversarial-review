@@ -121,7 +121,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
   } };
   apply(overrides);
   t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: family === 'codex' ? 'claude-code' : 'codex',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: family === 'codex' ? 'claude-code' : 'codex',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   const dispatches = [];
@@ -269,7 +269,7 @@ test('local pooled remediation defers a full minute after an aged claim without 
   } };
   apply(overrides);
   t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   let clockMs = Date.parse('2026-10-21T10:00:00Z');

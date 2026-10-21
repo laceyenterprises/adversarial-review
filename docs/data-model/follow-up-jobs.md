@@ -2,8 +2,58 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
+
+## Branch and publication contract (REMEDBRANCH-01)
+
+Every reviewer runtime carries the subject's PR head `branch` and title-prefix
+`builderTag` in its run context. Watcher pass metadata retains both fields so
+recovered agent-runtime posts enqueue the same contract as cli-direct posts.
+For jobs requiring remediation, `createFollowUpJob` resolves an omitted/blank
+branch through one bounded REST PR read (8 seconds). Duplicate review claims
+return before that read. Resolution can also recover the builder tag from the
+title when absent.
+
+If resolution fails or returns no head ref, the job stays in `pending` with
+`branch: null` and `branchResolution: { state: "blocked", reason:
+"branch-unresolved", attempts: <integer>, retryAfter: <ISO timestamp> }`. This is a
+hold, not a ready worker job. The claim loop retries after 60 seconds under the
+atomic queue claim, returning unresolved jobs to pending until three failed
+lookups (including creation) stop the job with `branch-unresolved`. No worker
+spawns or remediation round is charged. Legacy holds without `attempts` count
+as one prior failure. Explicit operator requeue resets attempts to zero and
+makes the next lookup immediately eligible. Successful resolution stores the
+branch and clears `branchResolution`.
+Legacy branchless jobs must resolve the branch before either local or HQ spawn.
+Settled clean reviews bypass branch resolution at creation and claim. Legacy
+clean jobs carrying a branch hold settle immediately without a lookup, worker,
+or round charge, even before `retryAfter`; their gate reports `review-settled`.
+The shared settled predicate still honors operator retriggers and strict-mode
+non-blocking findings, which continue to require remediation branch evidence.
+
+The prompt never emits an empty `--branch`. It supplies `--repo` and `--pr` so
+the guarded publisher can resolve a missing branch from the live PR. Publication
+still requires the original reviewed head, exact remote lease, and diff checks.
+Publisher refusal artifacts also retain `localCommit` when available. Workers
+report publication refusals as the valid reply outcome `blocked`, including a
+local `commitSha` in `operationalBlockers[]`.
+
+An exited worker reporting committed-but-unpublished work stops with
+`remediationPlan.stop.code: "committed-unpublished"`, even at the round cap.
+`unpublishedWork` records `jobId`, `commitSha`, `workspaceDir`, and `reported`.
+When the workspace HEAD can be inspected, it overrides reply hashes: an unchanged
+HEAD at `revisionRef` produces no publication debt. Explicit worker-reported
+commit evidence remains a fallback when the workspace is unavailable.
+The stop reason and PR comment name the job and commit; the gate remains failed
+with reason `remediation-committed-unpublished`, without an operator-decision
+notice. If the live head exactly matches the retained commit, the gate reports
+pending review (`remediation-published-awaiting-review`, or the existing
+`stale-review-head` when the prior reviewed head is known). Publication alone
+never settles the review or deletes the retained evidence. Workspace retention
+skips this publication debt, including past the normal terminal TTL. Recover by inspecting that workspace and running the same
+guarded publisher with the original previous head and remote lease; the record
+is diagnostic evidence and does not authorize a merge or an unguarded push.
 
 ## Job filenames and per-PR reads (LEDGERSCAN-01)
 

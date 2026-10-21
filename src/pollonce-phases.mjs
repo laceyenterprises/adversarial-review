@@ -3875,6 +3875,7 @@ export async function processReviewSubject(entry, ctx) {
               // Share the refreshed account with both fallback selection stages.
               afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
+                branch: subject.headRefName || subject.branch || null,
                 claudeAccountSelection: selectedClaudeAccount || null,
                 repo: repoPath,
                 prNumber,

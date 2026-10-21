@@ -38,7 +38,7 @@ function makeHaltedJob(rootDir, {
   reviewBody = '## Summary\nsummary',
   revisionRef = null,
 } = {}) {
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,
@@ -66,7 +66,7 @@ function makeHaltedJob(rootDir, {
 }
 
 function makeActiveJob(rootDir) {
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,

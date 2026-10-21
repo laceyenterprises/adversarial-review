@@ -53,7 +53,7 @@ function makeJobInput(rootDir) {
 // `logText`, with no output artifact and no reply — i.e. it exited early. Then
 // reconcile it as a dead worker.
 async function reconcileDeadWorkerWithLog(rootDir, logText) {
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-06-16T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');

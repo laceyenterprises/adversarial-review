@@ -15,7 +15,7 @@ const { createNoProgressLaneGate } = await import('../../src/posted-review-row.m
 const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.mjs');
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
-const { buildFollowUpJob, createFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
+const { buildFollowUpJob, createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
@@ -146,6 +146,60 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  // REMEDBRANCH-01: unresolved creation cannot hand a branchless job to a worker.
+  const branchRoot = join(rootDir, 'branch-contract');
+  const blocked = createFollowUpJob({ rootDir: branchRoot, repo, prNumber,
+    reviewerModel: 'gemini', builderTag: 'codex', reviewBody: '## Verdict\nRequest changes',
+    readPRHeadImpl: () => ({ branch: null }) });
+  assert.equal(blocked.job.branchResolution.reason, 'branch-unresolved');
+  assert.equal(claimNextFollowUpJob({ rootDir: branchRoot,
+    claimedAt: blocked.job.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) }), null);
+  const branchHeld = readFollowUpJob(blocked.jobPath);
+  assert.equal(branchHeld.remediationPlan.currentRound, 0);
+  const branchReady = claimNextFollowUpJob({ rootDir: branchRoot,
+    claimedAt: branchHeld.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: 'fixture/head' }) });
+  assert.equal(branchReady.job.branch, 'fixture/head');
+
+  const exhaustedRoot = join(rootDir, 'exhausted-branch-contract');
+  const unresolved = createFollowUpJob({ rootDir: exhaustedRoot, repo, prNumber,
+    reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes',
+    readPRHeadImpl: () => ({ branch: null }) });
+  claimNextFollowUpJob({ rootDir: exhaustedRoot,
+    claimedAt: unresolved.job.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) });
+  const retried = readFollowUpJob(unresolved.jobPath);
+  const exhausted = claimNextFollowUpJob({ rootDir: exhaustedRoot, returnStopped: true,
+    claimedAt: retried.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) });
+  assert.equal(exhausted.job.remediationPlan.stop.code, 'branch-unresolved');
+  assert.equal(exhausted.job.branchResolution.attempts, 3);
+  assert.equal(exhausted.job.remediationPlan.currentRound, 0);
+  assert.equal(claimNextFollowUpJob({ rootDir: exhaustedRoot, claimedAt: '2099-01-01T00:00:00Z',
+    readPRHeadImpl: refuse }), null);
+
+  const cleanRoot = join(rootDir, 'clean-branch-contract');
+  const clean = createFollowUpJob({ rootDir: cleanRoot, repo, prNumber,
+    reviewerModel: 'gemini', reviewBody: cleanBody, readPRHeadImpl: refuse });
+  assert.equal(clean.job.branchResolution?.state, undefined);
+  // Previously persisted clean jobs may still carry a future branch hold.
+  const cleanHeld = { ...clean.job, branchResolution: { state: 'blocked', reason: 'branch-unresolved',
+    retryAfter: '2099-01-01T00:00:00Z' } };
+  writeFollowUpJob(clean.jobPath, cleanHeld);
+  const { pickAdversarialGateStatus } = await import('../../src/adversarial-gate-status.mjs');
+  const publishedGate = pickAdversarialGateStatus({ headSha,
+    reviewRow: { review_status: 'posted', pr_state: 'open' },
+    latestJob: { jobId: 'published-smoke', status: 'stopped',
+      remediationPlan: { stop: { code: 'committed-unpublished' } }, unpublishedWork: { commitSha: headSha } } });
+  assert.equal(publishedGate.reason, 'remediation-published-awaiting-review');
+  assert.equal(publishedGate.state, 'pending');
+  assert.equal(pickAdversarialGateStatus({ repo, prNumber,
+    reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: cleanHeld }).reason, 'review-settled');
+  const settled = claimNextFollowUpJob({ rootDir: cleanRoot, returnStopped: true, readPRHeadImpl: refuse });
+  assert.equal(settled.job.remediationPlan.stop.code, 'no-remediation-required');
+  assert.equal(settled.job.remediationPlan.currentRound, 0);
+  const { findCommittedUnpublishedWork } = await import('../../src/remediation-unpublished.mjs');
+  assert.equal(await findCommittedUnpublishedWork({ job: { jobId: 'unchanged-smoke', revisionRef: headSha },
+    workspaceDir: gitDir, reply: { summary: `Publisher failed while inspecting upstream commit ${base}.` },
+    execFileImpl: async (command, args, options) => ({ stdout: execFileSync(command, args, options) }) }), null);
+
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');
   const leaseClock = Date.parse('2026-10-01T12:00:00Z');
@@ -416,7 +470,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, merged: true, remoteHeadMatches: true };
@@ -673,12 +727,12 @@ if (scenario === 'clean') {
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);
-  const created = createFollowUpJob({ ...identity(), revisionRef: headSha, reviewerModel: 'gemini', reviewBody: cleanBody.replace('Approved', 'Request changes'), changedFiles: ['fixture.txt'] });
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...identity(), revisionRef: headSha, reviewerModel: 'gemini', reviewBody: cleanBody.replace('Approved', 'Request changes'), changedFiles: ['fixture.txt'] });
   created.job.singleReview = { applied: true }; created.job.remediationPlan.currentRound = created.job.remediationPlan.maxRounds;
   writeFollowUpJob(created.jobPath, created.job);
   const result = await consumeNextFollowUpJob(drain);
   assert.equal(result.reason, 'max-rounds-reached'); assert.equal(result.job.status, 'stopped');
-  createFollowUpJob({ ...identity(), prNumber: prNumber + 1, revisionRef: headSha, reviewerModel: 'gemini',
+  createFollowUpJob({ branch: 'fixture/remediation', ...identity(), prNumber: prNumber + 1, revisionRef: headSha, reviewerModel: 'gemini',
     reviewBody: '## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Verdict\nRequest changes' });
   let holdPages = 0, holdComments = 0;
   const held = await consumeNextFollowUpJob({ ...drain,

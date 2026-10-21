@@ -163,7 +163,7 @@ function insertReviewerPass(rootDir, overrides = {}) {
 }
 
 function makeJob(rootDir, overrides = {}) {
-  const result = createFollowUpJob({
+  const result = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 238,

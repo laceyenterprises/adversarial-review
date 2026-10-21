@@ -66,7 +66,7 @@ test('router local mode routes consume through the local self-spawn runtime', as
   delete process.env.ADV_WITH_HQ_INTEGRATION;
 
   try {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 501,
@@ -155,7 +155,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
   delete process.env.ADV_WITH_HQ_INTEGRATION;
 
   try {
-    const { job: created } = createFollowUpJob({
+    const { job: created } = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 502,
@@ -245,7 +245,7 @@ test('round-budget exhaustion stops the job before any port dispatch (v1 parity)
   delete process.env.ADV_WITH_HQ_INTEGRATION;
 
   try {
-    const { jobPath } = createFollowUpJob({
+    const { jobPath } = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 503,

@@ -73,7 +73,7 @@ for (const terminal of [
   test(`HQ ${terminal.status} with stale infrastructure fields and an unchanged head is not refunded`, async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-terminal-'));
     try {
-      createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
+      createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
         reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
       const claimed = claimNextFollowUpJob({ rootDir });
       const replyPath = join(fixtureHqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json');
@@ -118,7 +118,7 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
   test(`reconcile refunds ${reason} once and publishes its marker`, async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-'));
     try {
-      createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
+      createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
         reviewerModel: 'claude', reviewBody: 'Fix the bug.', reviewPostedAt: '2026-10-11T00:00:00Z', critical: true });
       let claimed = claimNextFollowUpJob({ rootDir });
       const spawn = () => markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
@@ -230,7 +230,7 @@ test('failed infrastructure terminal events confirm HQ status before settling, i
 test('operator SIGTERM cancellation receipt and recorded 143 do not refund or requeue', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-cancel-'));
   try {
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
       reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
     const claimed = claimNextFollowUpJob({ rootDir });
     const child = new EventEmitter();
@@ -259,7 +259,7 @@ for (const declined of ['cap-used', 'already-refunded', 'unknown-live-head']) {
   test(`declined infrastructure refund (${declined}) keeps HQ daemon-bounce transient retry`, async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-transient-'));
     try {
-      createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
+      createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
         reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
       const claimed = claimNextFollowUpJob({ rootDir });
       const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
@@ -293,7 +293,7 @@ for (const declined of ['cap-used', 'already-refunded', 'unknown-live-head']) {
 test('local boot and signal events are durable and cannot recreate a settled job', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-local-'));
   try {
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, reviewerModel: 'claude',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, reviewerModel: 'claude',
       revisionRef: 'a', critical: true, reviewBody: 'Fix.', reviewPostedAt: '2026-10-11T00:00:00Z' });
     const claimed = claimNextFollowUpJob({ rootDir });
     const child = new EventEmitter();
@@ -322,7 +322,7 @@ test('errors after a successful spawn are not classified as boot failures', () =
 test('settlement preserves concurrent disk updates and skips a missing job', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-fresh-'));
   try {
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
       reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
     const claimed = claimNextFollowUpJob({ rootDir });
     const current = readFollowUpJob(claimed.jobPath);
@@ -343,7 +343,7 @@ test('settlement preserves concurrent disk updates and skips a missing job', asy
 test('refund marker does not stamp or overwrite an immediately claimed pending job', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-marker-'));
   try {
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
       reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
     const claimed = claimNextFollowUpJob({ rootDir });
     const result = await settleInfrastructureRemediationRound({ rootDir, job: claimed.job,
@@ -368,7 +368,7 @@ test('contention defers settlement and retries local boot outcome writes', async
   const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-lock-'));
   let fd;
   try {
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
       reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
     const claimed = claimNextFollowUpJob({ rootDir });
     const child = new EventEmitter();

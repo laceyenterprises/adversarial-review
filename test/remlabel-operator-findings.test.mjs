@@ -27,7 +27,7 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   });
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  createFollowUpJob({ rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
     reviewerModel: 'claude', reviewBody: gatedBody, reviewPostedAt: '2026-10-16T12:00:00Z' });
   const comments = [];
   const pages = [];
@@ -87,7 +87,7 @@ for (const [prState, headSha, expected] of [
   test(`operator-only review respects lifecycle before paging: ${expected}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-lifecycle-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    createFollowUpJob({ rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
       reviewerModel: 'claude', reviewBody: gatedBody, reviewPostedAt: '2026-10-16T12:00:00Z' });
     let lifecycleReads = 0;
     const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Remediate', log,

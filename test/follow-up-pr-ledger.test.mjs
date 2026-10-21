@@ -147,10 +147,10 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (do
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Different PR — must not be counted
-  const otherPr = createFollowUpJob(makeJobInput(rootDir, {
+  const otherPr = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     prNumber: 99,
     reviewPostedAt: '2026-04-21T07:00:00.000Z',
-  }));
+  }) });
   const otherClaimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T07:30:00.000Z' });
   markFollowUpJobCompleted({
     rootDir,
@@ -162,11 +162,11 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (do
   assert.equal(otherPr.job.prNumber, 99);
 
   // Pending — must NOT count toward completedRoundsForPR
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     prNumber: 7,
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
     revisionRef: 'reviewed-head-1',
-  }));
+  }) });
 
   const ledgerWithPending = summarizePRRemediationLedger(rootDir, {
     repo: 'laceyenterprises/clio',
@@ -206,11 +206,11 @@ test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs 
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   for (let i = 1; i <= 3; i += 1) {
-    createFollowUpJob(makeJobInput(rootDir, {
+    createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
       reviewPostedAt: `2026-04-21T0${i}:00:00.000Z`,
       priorCompletedRounds: i - 1,
       maxRemediationRounds: 3,
-    }));
+    }) });
     runOneRound(
       rootDir,
       `2026-04-21T0${i}:30:00.000Z`,
@@ -239,11 +239,11 @@ test('after 2 completed rounds on a 3-round cap, the next attempt is 3 and a thi
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Round 1
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T01:00:00.000Z',
     priorCompletedRounds: 0,
     maxRemediationRounds: 3,
-  }));
+  }) });
   runOneRound(rootDir, '2026-04-21T01:30:00.000Z', '2026-04-21T01:35:00.000Z');
 
   // Round 2 — seeded from the now-correctly-reported PR ledger.
@@ -251,11 +251,11 @@ test('after 2 completed rounds on a 3-round cap, the next attempt is 3 and a thi
     repo: 'laceyenterprises/clio',
     prNumber: 7,
   });
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T02:00:00.000Z',
     priorCompletedRounds: ledgerAfter1.completedRoundsForPR,
     maxRemediationRounds: 3,
-  }));
+  }) });
   runOneRound(rootDir, '2026-04-21T02:30:00.000Z', '2026-04-21T02:35:00.000Z');
 
   // After 2 rounds the ledger must report exactly 2 — not 1+2=3.
@@ -273,11 +273,11 @@ test('after 2 completed rounds on a 3-round cap, the next attempt is 3 and a thi
 
   // Reviewer creates the round-3 follow-up job, seeded with the PR's
   // correct prior count.
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T03:00:00.000Z',
     priorCompletedRounds: ledgerAfter2.completedRoundsForPR,
     maxRemediationRounds: 3,
-  }));
+  }) });
 
   // The third worker MUST be able to claim — the buggy accounting
   // would have tripped max-rounds-reached and stopped the job here.
@@ -307,11 +307,11 @@ test('legacy maxRounds=6 PR runs all six actual remediation cycles, not three', 
       repo: 'laceyenterprises/clio',
       prNumber: 7,
     });
-    createFollowUpJob(makeJobInput(rootDir, {
+    createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
       reviewPostedAt: `2026-04-21T${String(i).padStart(2, '0')}:00:00.000Z`,
       priorCompletedRounds: ledger.completedRoundsForPR,
       maxRemediationRounds: 6,
-    }));
+    }) });
     const claimed = claimNextFollowUpJob({
       rootDir,
       claimedAt: `2026-04-21T${String(i).padStart(2, '0')}:30:00.000Z`,
@@ -367,11 +367,11 @@ test('legacy maxRounds=6 PR runs all six actual remediation cycles, not three', 
 
   // Round 7 must be blocked because the legacy 6-round cap is now
   // genuinely exhausted (not falsely exhausted at round 4).
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T07:00:00.000Z',
     priorCompletedRounds: finalLedger.completedRoundsForPR,
     maxRemediationRounds: 6,
-  }));
+  }) });
   const blockedClaim = claimNextFollowUpJob({
     rootDir,
     claimedAt: '2026-04-21T07:30:00.000Z',
@@ -394,11 +394,11 @@ test('summarizePRRemediationLedger fails soft on a single corrupt JSON record wi
 
   // Three completed rounds for the target PR.
   for (let i = 1; i <= 3; i += 1) {
-    createFollowUpJob(makeJobInput(rootDir, {
+    createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
       reviewPostedAt: `2026-04-21T0${i}:00:00.000Z`,
       priorCompletedRounds: i - 1,
       maxRemediationRounds: 6,
-    }));
+    }) });
     runOneRound(
       rootDir,
       `2026-04-21T0${i}:30:00.000Z`,
@@ -459,10 +459,10 @@ test('summarizePRRemediationLedger picks latestMaxRounds from the most recent te
   // forward into the next adversarial review pass.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
-  const legacy = createFollowUpJob(makeJobInput(rootDir, {
+  const legacy = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
     maxRemediationRounds: 6,
-  }));
+  }) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });
   markFollowUpJobCompleted({
     rootDir,
@@ -485,7 +485,7 @@ test('summarizePRRemediationLedger does not double-count failed and stopped inte
   // PR-wide consumed round (the worker spent the cycle), and under
   // max(currentRound) semantics the failed job alone reports 1.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });
   const spawned = markFollowUpJobSpawned({
     jobPath: claimed.jobPath,
@@ -530,7 +530,7 @@ test('summarizePRRemediationLedger excludes never-spawned terminal jobs from the
   // excludes them so the PR-wide count reflects only rounds that
   // actually ran a worker.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T08:30:00.000Z' });
 
   // Simulate a consume-time stop (lifecycle gate or round-budget gate
@@ -616,11 +616,11 @@ test('claimNextFollowUpJob stops a freshly created job whose seeded currentRound
   // the PR already consumed all 3 of its remediation rounds. The new
   // job's currentRound is seeded to 3, so claim must stop it
   // immediately with max-rounds-reached.
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T11:00:00.000Z',
     priorCompletedRounds: 3,
     maxRemediationRounds: 3,
-  }));
+  }) });
 
   const claimResult = claimNextFollowUpJob({
     rootDir,
@@ -650,11 +650,11 @@ test('legacy maxRounds=6 PRs run all six rounds after default-cap changes', () =
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Round 1: legacy job with maxRounds=6
-  createFollowUpJob(makeJobInput(rootDir, {
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir, {
     reviewPostedAt: '2026-04-21T01:00:00.000Z',
     maxRemediationRounds: 6,
     priorCompletedRounds: 0,
-  }));
+  }) });
   runOneRound(rootDir, '2026-04-21T01:30:00.000Z', '2026-04-21T01:35:00.000Z');
 
   // The watcher would now read the ledger before re-spawning. After

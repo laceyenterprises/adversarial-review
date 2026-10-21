@@ -13,7 +13,7 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
-import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 
 const repo = 'example/widget';
 function fixture(t, { base = 'feature/parent', merged = true, fork = false, defaultBranch = 'trunk' } = {}) {
@@ -341,12 +341,15 @@ for (const { mode, branch } of [
       ? { stdout: JSON.stringify({ base: { ref: 'main', repo: { default_branch: 'main' } } }) }
       : f.execFileImpl(cmd, args);
     assert.equal((await inspectStackedBase({ repo, prNumber: 42, execFileImpl })).ok, true);
-    createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
-      baseBranch: 'main', branch, reviewerModel: 'claude',
+    const created = createFollowUpJob({ rootDir: f.rootDir, jobId: `recovered-${mode}`, repo, prNumber: 41,
+      baseBranch: 'main', branch: branch || 'feature/child', reviewerModel: 'claude',
       createdAt: '2026-10-16T10:00:00Z', reviewBody: '## Verdict\nRequest changes',
       changedFiles: ['src/widget.mjs'], remediationPlan: { maxRounds: 2, currentRound: 0, rounds: [] } });
+    // Model recovered legacy records directly: new branchless jobs now hold
+    // before claim, while these historical records hydrate at the spawn boundary.
+    if (!branch) writeFollowUpJob(created.jobPath, { ...created.job, branch: null });
     let guardCalls = 0;
-    const hydrated = mode === 'os' && !branch;
+    const hydrated = !branch;
     const result = await consumeNextFollowUpJob({ ...f, execFileImpl,
       healthRouter: { getMode: () => mode }, promptTemplate: 'synthetic prompt',
       resolvePRLifecycleImpl: async () => ({ state: 'OPEN', source: 'live' }),

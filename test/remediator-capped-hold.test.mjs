@@ -34,7 +34,7 @@ function makeJobInput(rootDir) {
 }
 
 function claimFresh(rootDir, claimedAt = '2026-09-29T01:42:11.343Z') {
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   return claimNextFollowUpJob({ rootDir, claimedAt });
 }
 

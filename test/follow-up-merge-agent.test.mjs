@@ -531,7 +531,7 @@ test('ARP-06: Request changes before budget exhaustion does not launch merge-age
 
 test('ARP-06: stale-head clean review is not used to dispatch merge-agent for the moved branch', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,
@@ -2064,7 +2064,7 @@ test('pickMergeAgentDispatch uses durable repo/pr/sha idempotency instead of a t
 
 test('buildMergeAgentDispatchJob carries verdict and remediation state from the latest follow-up job', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,
@@ -2116,7 +2116,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
 test('non-blocking-only cap exposes final-round exhaustion to the closer', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-closer-'));
   try {
-    const created = createFollowUpJob({
+    const created = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir, repo: 'example/repo', prNumber: 401, reviewerModel: 'codex',
       revisionRef: 'abc123',
       reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Minor cleanup**\n  - **File:** `x.mjs`\n  - **Lines:** `1`\n  - **Problem:** unused code.\n  - **Why it matters:** waste.\n  - **Recommended fix:** remove it.\n\n## Verdict\nComment only',
@@ -2144,7 +2144,7 @@ test('non-blocking-only cap exposes final-round exhaustion to the closer', () =>
 
 test('buildMergeAgentDispatchJob dispatches clean Comment only reviews with explicit no blockers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 405,
@@ -2221,7 +2221,7 @@ test('buildMergeAgentDispatchJob derives reviewer-timeout exhaustion from a real
         failureClass: 'reviewer-timeout',
       });
     }
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 401,
@@ -2285,7 +2285,7 @@ test('buildMergeAgentDispatchJob refuses to carry timeout exhaustion across PR h
         failureClass: 'reviewer-timeout',
       });
     }
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 401,
@@ -2349,7 +2349,7 @@ test('buildMergeAgentDispatchJob treats timeout-exhausted post-remediation block
         failureClass: 'reviewer-timeout',
       });
     }
-    const { jobPath } = createFollowUpJob({
+    const { jobPath } = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/agent-os',
       prNumber: 401,
@@ -2405,7 +2405,7 @@ test('buildMergeAgentDispatchJob treats timeout-exhausted post-remediation block
 
 test('buildMergeAgentDispatchJob treats None sentinel with prose and wrapped continuation as zero blockers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 1020,
@@ -2448,7 +2448,7 @@ test('buildMergeAgentDispatchJob treats None sentinel with prose and wrapped con
 
 test('buildMergeAgentDispatchJob marks legacy Request changes bodies without issue sections as unknown blocker state', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 404,
@@ -2490,7 +2490,7 @@ test('buildMergeAgentDispatchJob marks legacy Request changes bodies without iss
 
 test('buildMergeAgentDispatchJob counts standing blocking findings from the latest review', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 402,
@@ -2567,7 +2567,7 @@ test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking secti
   // card the structured parser cannot itemize, we must NOT treat the section as
   // empty and auto-merge. Any non-`None` Blocking issues content floors to 1.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 403,
@@ -2610,7 +2610,7 @@ test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking secti
 
 test('buildMergeAgentDispatchJob fails closed on flush-left prose after None sentinel', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 404,
@@ -2654,7 +2654,7 @@ test('buildMergeAgentDispatchJob fails closed on flush-left prose after None sen
 
 test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,
@@ -2691,7 +2691,7 @@ test('buildMergeAgentDispatchJob normalizes real claimed follow-up job status', 
 
 test('buildMergeAgentDispatchJob ignores stale active remediation on an older head', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,
@@ -2708,7 +2708,7 @@ test('buildMergeAgentDispatchJob ignores stale active remediation on an older he
     launcherPid: 4242,
     returnStopped: true,
   });
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,
@@ -2767,7 +2767,7 @@ test('pickMergeAgentDispatch skips when the rollup contains only the adversarial
 
 test('operator-approved remains scoped when review posts update the PR after labeling', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 401,

@@ -917,7 +917,7 @@ the HQ or GitHub label-write failure clears.
 
 - `retrigger-review` resets the watcher row back to `review_status='pending'`. Its exit-code contract is stable: `0=triggered/already-pending`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
 - `retrigger-review --exact-head-now` is the audited operator recovery surface for "review this exact head now." It keeps the same exit-code contract, but adds two guarded recoveries that previously required multiple manual surfaces: if the latest active follow-up job is provably stale for an older head (`job.revisionRef != reviewed_prs.revision_ref`), the command stops that stale job before re-arming review; and if the watcher row is still `reviewing`, the command still refuses by default, but can either cancel the reviewer and wait for it to exit (`--cancel-active-review`) or, when the operator has already verified the process is gone, force-reset the stale `reviewing` row (`--allow-active-review-reset`). Both paths append the same operator mutation ledger row and preserve the explicit operator re-review marker that lets the next watcher tick spend one intentional hard-review-ceiling bypass on the current head.
-- `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It starts with a remediation worker responding to the last posted review; it does not reset `reviews.db` for another review first. If the watcher row is already `review_status='pending'`, reviewer dispatch is still deferred while the latest follow-up job is `pending` or `inProgress`, so the worker cannot race a fresh review verdict. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted,daemon-bounce-safety,review-settled,no-remediation-required,no-progress,stale-review-head,revision-superseded,newer-review-pending,stale-heartbeat,hq-conflicted-base-unsupported}`. `stopped:review-settled` and `stopped:no-remediation-required` are accepted because the automatic loop stops on settled clean reviews, while an explicit operator flag means "run remediation anyway." The requeue records that one-shot operator override on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; the next `claimNextFollowUpJob` must honor it by skipping the settled-review early-stop once, then consume it by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate remains pending even if the stored review body is still Comment-only. It still refuses `stopped:operator-stop` and `stopped:rereview-blocked` so explicit operator halts and watcher refusals do not silently spawn another worker. If the worker fails or is stopped before leaving a durable `reReview.requested=true` reply, no fresh adversarial review is queued; apply `retrigger-review` separately when an operator wants a review without another worker pass. If a launch crash happens after claim but before spawn, let reconcile mark the in-progress job `failed` (or use the documented operator stop/reset path), then apply `retrigger-remediation` again; active jobs intentionally refuse duplicate retriggers. Its exit-code contract is also stable: `0=success`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
+- `retrigger-remediation` requeues the latest terminal follow-up job and optionally bumps `remediationPlan.maxRounds`. It starts with a remediation worker responding to the last posted review; it does not reset `reviews.db` for another review first. If the watcher row is already `review_status='pending'`, reviewer dispatch is still deferred while the latest follow-up job is `pending` or `inProgress`, so the worker cannot race a fresh review verdict. It only accepts terminal jobs in `failed`, `completed` with `reReview.requested=true`, or `stopped:{max-rounds-reached,round-budget-exhausted,daemon-bounce-safety,review-settled,no-remediation-required,no-progress,stale-review-head,revision-superseded,newer-review-pending,stale-heartbeat,hq-conflicted-base-unsupported,branch-unresolved}`. For `stopped:branch-unresolved`, inspect PR metadata and credentials before requeueing; requeue clears the exhausted lookup attempts and retries immediately. `stopped:review-settled` and `stopped:no-remediation-required` are accepted because the automatic loop stops on settled clean reviews, while an explicit operator flag means "run remediation anyway." The requeue records that one-shot operator override on `remediationPlan.nextAction={type:'consume-pending-round', operatorOverride:true, requestedAt, requestedBy, operatorVisibility:'explicit'}`; the next `claimNextFollowUpJob` must honor it by skipping the settled-review early-stop once, then consume it by rewriting `nextAction` to `worker-spawn`. While the requeued job is `pending` or `inProgress`, the adversarial gate remains pending even if the stored review body is still Comment-only. It still refuses `stopped:operator-stop` and `stopped:rereview-blocked` so explicit operator halts and watcher refusals do not silently spawn another worker. If the worker fails or is stopped before leaving a durable `reReview.requested=true` reply, no fresh adversarial review is queued; apply `retrigger-review` separately when an operator wants a review without another worker pass. If a launch crash happens after claim but before spawn, let reconcile mark the in-progress job `failed` (or use the documented operator stop/reset path), then apply `retrigger-remediation` again; active jobs intentionally refuse duplicate retriggers. Its exit-code contract is also stable: `0=success`, `1=blocked`, `2=usage`, `3=reason input`, `4=runtime`.
 - `diagnose-stuck-rereview --apply` is an automation watchdog, not an operator retrigger surface. It scans pending rows with aged `rereview_requested_at`, then preserves that original FIFO/latency timestamp and the existing `rereview_reason` marker byte-for-byte while writing a `stuck-rereview-watchdog` watcher wake for the affected repo/PR/head. It does not clear `review_attempts`, `last_attempted_at`, `failed_at`, `failure_message`, `reviewer_head_sha`, or retry counters, and rows carrying `failed_at` stay visible in read-only diagnostics while the apply path skips them for terminal-failure retry/finalization. Re-arms are tracked in `data/follow-up-jobs/stuck-rereview-watchdog.json` by `(repo, pr, head)`, use exponential backoff from the stuck threshold, record the original request time, prune entries whose last successful apply is older than seven days whenever the state file is rewritten, and stop after three attempts; cap exhaustion is reported as a skipped row rather than an apply failure so a capped row cannot consume the window forever. If the row eligibility check succeeds but writing the wake fails, the same state entry/backoff is still recorded so a persistent wake-file failure cannot bypass the cap. Its `--apply` exit-code contract is `0=apply pass completed (including skipped/capped/benign-race rows)` and `5=at least one non-benign apply failure`; the read-only contract (`0`/`4`) is unchanged, and rows carrying `failed_at` stay visible to read-only exit-4 alerting.
 - The watchdog reads the locally cached `reviewed_prs.pr_state` as a candidate pre-filter only. It deliberately does not make the merged/closed call — that decision is owned by the watcher's claim guard, which derives it authoritative-live before spawning. A locally stale `open` row therefore costs at most the per-`(repo, pr, head)` cap in watcher wakes and never mutates the review row.
 - The follow-up job buckets are listed once per `diagnose-stuck-rereview` invocation and indexed by the exact candidate `(repo, pr)` filename prefixes, not re-scanned per candidate row. `main()` is synchronous and runs inside the daemon tick, so the directory cost must stay independent of candidate count; the `completed` bucket grows monotonically.
@@ -985,6 +985,7 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 - `stale-heartbeat`
 - `stale-review-head`
 - `hq-conflicted-base-unsupported`
+- `branch-unresolved`
 
 `no-progress` means the latest remediation round finished without a durable re-review request. This is deliberate: the system stops instead of silently pretending forward progress exists.
 
@@ -1086,7 +1087,7 @@ Guardrails:
 - if the source job is `stopped/`, only retriggerable stop codes are accepted:
   `max-rounds-reached`, `round-budget-exhausted`, `daemon-bounce-safety`,
   `review-settled`, `no-progress`, `revision-superseded`, `stale-review-head`,
-  `stale-heartbeat`, and `hq-conflicted-base-unsupported`
+  `stale-heartbeat`, `hq-conflicted-base-unsupported`, and `branch-unresolved`
 - `stopped:review-settled` is accepted for an explicit operator pass over
   remaining non-blocking findings; `operator-stop`, `rereview-blocked`,
   `stale-drift`, `operator-merged-pr`, `operator-closed-pr`, and other
@@ -1566,3 +1567,32 @@ The Node config mirror accepts `worker_pool.quota.fallback_reroute_horizon_secon
 (default 21600, nonnegative integer), owned by the Agent OS admission quota gate.
 This allows the shared checked-in configuration to declare the horizon without
 a strict-schema watcher startup failure. See Agent OS PR #7346.
+
+## Missing branches and unpublished commits (REMEDBRANCH-01)
+
+A pending job with `branchResolution.reason = branch-unresolved` waits for its
+60-second branch retry; no remediation worker or round is charged. After three
+failed lookups including creation, it stops with `branch-unresolved` and no more
+automatic PR reads. Inspect the PR metadata/credentials, then explicitly requeue
+the job to reset the attempt count and retry immediately. Legacy holds without
+an attempt count receive two more attempts. Both reviewer runtimes preserve the
+head branch and builder tag through pass recovery.
+Settled clean reviews skip branch resolution and settle without a worker or
+round charge, including legacy jobs with a future branch retry. Their gate
+reports `review-settled`; an operator retrigger still requires a branch.
+
+A stopped `committed-unpublished` job has publication debt. Its `unpublishedWork`
+record and PR comment identify the job and local commit; the workspace survives
+the terminal TTL. Inspect the retained work and publish through
+`bin/remediation-publish.mjs` with its original previous head, base, PR identity
+and exact remote lease. Missing branch metadata is resolved from the live PR;
+never substitute an empty branch or bypass the publisher's diff/lease checks.
+The gate reports failed publication without an operator-decision-required notice.
+Once the live head exactly matches the retained commit, it reports pending review
+instead (`remediation-published-awaiting-review`, or `stale-review-head` when the
+prior reviewed head is known); publication alone cannot satisfy the review gate.
+An inspected workspace HEAD overrides reply hashes: when it still equals the
+job's `revisionRef`, external SHAs in worker commentary cannot create publication
+debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.
+Publisher branch hydration uses the caller's environment, including scoped
+GitHub credentials, for the PR metadata read as well as Git commands.

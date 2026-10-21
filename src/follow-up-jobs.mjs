@@ -1,3 +1,4 @@
+import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
@@ -109,6 +110,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 });
 const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
 const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'branch-unresolved',
   'max-rounds-reached',
   'round-budget-exhausted',
   'daemon-bounce-safety',
@@ -1553,6 +1555,7 @@ function reapTerminalFollowUpWorkspaces({
         }
         if (decision?.veto) { skipped += 1; return; }
         const { terminalJob } = lookup;
+        if (terminalJob?.unpublishedWork?.commitSha) { skipped += 1; return; }
         if (!terminalJob && !decision?.reap) {
           skipped += 1;
           missingTerminalJob += 1;
@@ -2243,7 +2246,7 @@ function isSingleReviewStop(job) {
     && job?.remediationPlan?.stop?.code === 'max-rounds-reached';
 }
 
-function createFollowUpJob({ rootDir, ...jobInput }) {
+function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
   // COMMENTCLOSE-01: the reviewer and the reviewer-pass reaper can both queue a
   // follow-up for the same posted review; only the first creates a job. A
@@ -2257,7 +2260,9 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
     return { job: null, jobPath: null, duplicateOf: reviewClaim.duplicateOf };
   }
   try {
-    return writeNewFollowUpJob(rootDir, baseJob, jobInput);
+    // Clean reviews never publish remediation, so branch evidence cannot hold settlement.
+    const job = isSettledReviewJob(baseJob) ? baseJob : resolveFollowUpBranch(baseJob, { readPRHeadImpl });
+    return writeNewFollowUpJob(rootDir, job, jobInput);
   } finally {
     reviewClaim.release();
   }
@@ -2488,6 +2493,7 @@ function claimNextFollowUpJob({
   onDelayedPendingJob = null,
   quotaHoldRevalidator = null,
   closerReconciliationOptions = {},
+  readPRHeadImpl,
 } = {}) {
   const reconciliation = { probed: new Set(), options: closerReconciliationOptions };
   ensureFollowUpJobDirs(rootDir);
@@ -2539,6 +2545,10 @@ function claimNextFollowUpJob({
       continue;
     }
 
+    const branchBlocked = pendingJob.branchResolution?.state === 'blocked' && !isSettledReviewJob(pendingJob);
+    if (branchBlocked
+      && Date.parse(pendingJob.branchResolution.retryAfter) > Date.parse(claimedAt)) continue;
+
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 
     try {
@@ -2556,6 +2566,30 @@ function claimNextFollowUpJob({
       continue;
     }
 
+    // Resolve under the atomic queue claim, before charging any remediation round.
+    if (branchBlocked) {
+      pendingJob = resolveFollowUpBranch(pendingJob, { readPRHeadImpl, now: claimedAt });
+      writeFollowUpJob(inProgressPath, pendingJob);
+      if (pendingJob.branchResolution?.state === 'blocked') {
+        if (pendingJob.branchResolution.attempts >= MAX_BRANCH_RESOLUTION_ATTEMPTS) {
+          let stopped = null;
+          try {
+            stopped = markStoppedImpl({ rootDir, jobPath: inProgressPath, stoppedAt: claimedAt,
+              commentDeliveryExemption: 'no-remediation-started', sourceStatus: pendingJob.status,
+              stopCode: 'branch-unresolved',
+              stopReason: 'PR head branch could not be resolved after three attempts; operator must verify PR metadata and requeue.',
+            });
+          } catch (err) {
+            handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode: 'branch-unresolved', err });
+          }
+          if (returnStopped && stopped) return { job: stopped.job, jobPath: stopped.jobPath,
+            stopped: true, reason: 'branch-unresolved' };
+          continue;
+        }
+        renameSync(inProgressPath, pendingPath);
+        continue;
+      }
+    }
     const job = pendingJob;
     const budgetResolution = resolveRoundBudgetForJob(job, { rootDir, preferPersisted: true });
     if (Number(job?.remediationPlan?.maxRounds) < budgetResolution.roundBudget) {
@@ -3453,6 +3487,9 @@ function requeueFollowUpJobForNextRound({
   const nextJob = {
     ...currentJob,
     revisionRef: nextRevisionRef,
+    ...(previousStopCode === 'branch-unresolved' ? {
+      branchResolution: { ...currentJob.branchResolution, attempts: 0, retryAfter: requestedAt },
+    } : {}),
     status: 'pending',
     pendingAt: requestedAt,
     claimedAt: null,

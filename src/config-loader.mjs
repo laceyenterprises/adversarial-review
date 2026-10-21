@@ -298,6 +298,8 @@ function buildRoleFallbackEnvAliases() {
   );
 }
 
+const OSG_SCHEMA = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8'));
+
 function schemaV1() {
   const workerClassVaultSchema = {
     __type: TYPE_DICT,
@@ -1888,6 +1890,7 @@ function schemaV1() {
         __strict: false,
         __keys: {},
       },
+      osg: OSG_SCHEMA,
       roles: {
         __type: TYPE_DICT,
         __strict: true,
@@ -4976,6 +4979,7 @@ function validateSchemaLayer(
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
+  if (Object.hasOwn(doc, 'osg')) validateOsgShape(doc.osg, source);
   const knownTop = schema.__keys || {};
   const filtered = filterForeignTopLevelSections(doc, knownTop, {
     source,
@@ -5233,6 +5237,7 @@ function validateModuleDoc(
     setLeaf(canonicalBody, dotted, value);
   }
 
+  if (Object.hasOwn(canonicalBody, 'osg')) validateOsgShape(canonicalBody.osg, source);
   const moduleSchema = {
     __type: TYPE_DICT,
     __strict: schema.__strict,
@@ -6047,6 +6052,7 @@ function loadConfigImpl({
   enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
   validateOAuthDeclarations(merged.oauth, trace);
+  validateOsgShape(merged.osg);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {
@@ -6060,6 +6066,20 @@ function loadConfigImpl({
     schema,
     runtimeDroppedUnknownKeys,
   });
+}
+
+function validateOsgShape(value, source = null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentOSConfigError('osg: expected mapping', { key: 'osg', source });
+  }
+  if (Array.isArray(value.arms)) {
+    const fields = OSG_SCHEMA.__keys.arms.__item.__keys;
+    for (const arm of value.arms) {
+      if (!arm || Object.keys(fields).some(key => !Object.hasOwn(arm, key))) {
+        throw new AgentOSConfigError('osg.arms: incomplete arm', { key: 'osg.arms', source });
+      }
+    }
+  }
 }
 
 function validateOAuthDeclarations(oauth, trace = null, source = null) {

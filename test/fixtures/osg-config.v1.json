@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty",
+      "config": {},
+      "valid": true
+    },
+    {
+      "name": "off",
+      "config": {
+        "mode": "off",
+        "version": 1,
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "low",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "shadow",
+      "config": {
+        "mode": "shadow",
+        "version": 1,
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "low",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "apply",
+      "config": {
+        "mode": "apply",
+        "version": 1,
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "ultra",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "unknown",
+      "config": {
+        "enabled": true
+      },
+      "valid": false
+    },
+    {
+      "name": "bad-mode",
+      "config": {
+        "mode": "on"
+      },
+      "valid": false
+    },
+    {
+      "name": "bool-mode",
+      "config": {
+        "mode": false
+      },
+      "valid": false
+    },
+    {
+      "name": "version",
+      "config": {
+        "version": 2
+      },
+      "valid": false
+    },
+    {
+      "name": "bool-version",
+      "config": {
+        "version": true
+      },
+      "valid": false
+    },
+    {
+      "name": "null",
+      "config": null,
+      "valid": false
+    },
+    {
+      "name": "scalar",
+      "config": "off",
+      "valid": false
+    },
+    {
+      "name": "arms-map",
+      "config": {
+        "arms": {}
+      },
+      "valid": false
+    },
+    {
+      "name": "missing-arm",
+      "config": {
+        "arms": [
+          {}
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bad-role",
+      "config": {
+        "arms": [
+          {
+            "role": "closer",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "low",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown-arm",
+      "config": {
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "low",
+            "account": "fixture-account",
+            "token": "synthetic"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "empty-model",
+      "config": {
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "",
+            "effort": "low",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bad-effort",
+      "config": {
+        "arms": [
+          {
+            "role": "builder",
+            "harness": "synthetic",
+            "worker_class": "fixture-worker",
+            "model": "fixture-model",
+            "effort": "extreme",
+            "account": "fixture-account"
+          }
+        ]
+      },
+      "valid": false
+    }
+  ]
+}

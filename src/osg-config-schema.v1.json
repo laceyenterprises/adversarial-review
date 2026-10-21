@@ -1,0 +1,80 @@
+{
+  "__type": "dict",
+  "__strict": true,
+  "__keys": {
+    "version": {
+      "__type": "int",
+      "__enum": [
+        1
+      ],
+      "__default": 1
+    },
+    "mode": {
+      "__type": "string",
+      "__enum": [
+        "off",
+        "shadow",
+        "apply"
+      ],
+      "__default": "off"
+    },
+    "arms": {
+      "__type": "list",
+      "__default": [],
+      "__item": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "role": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$",
+            "__enum": [
+              "builder",
+              "reviewer",
+              "remediator",
+              "judge",
+              "classifier"
+            ]
+          },
+          "harness": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$"
+          },
+          "worker_class": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$"
+          },
+          "model": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$"
+          },
+          "effort": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$",
+            "__enum": [
+              "default",
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ]
+          },
+          "account": {
+            "__type": "string",
+            "__required": true,
+            "__pattern": "^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,127}$"
+          }
+        }
+      }
+    }
+  }
+}

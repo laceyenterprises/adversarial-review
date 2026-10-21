@@ -922,6 +922,12 @@ permission to merge. Semantic source fingerprints track state writers, guards an
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
 
+Producer contract readers preserve each caller’s literal terminal policy and fail
+loudly if its canonical members drift from the producer vocabulary. Legacy aliases
+remain local compatibility policy. Dispatch-status probes have a separate vocabulary;
+parser diagnostics add no lifecycle states or retry authority. The reviewer-run and
+hammer-dispatch state/edge inventory and smoke promises are unchanged.
+
 LEASEDEADPID-01: ownership ignores pending leases whose local watcher is dead or
 whose pending reclaim window expired, using the same predicates as closer dispatch.
 PID probes require a matching `holderHost` or a legacy hostless lease; foreign

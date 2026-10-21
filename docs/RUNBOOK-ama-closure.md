@@ -2347,14 +2347,28 @@ read failures before a worker can publish a private `0600` record in the daemon
 tree. No automatic ownership changes occur; pre-existing wrong-owner cache
 files require operator cleanup before retrying under the canonical owner.
 
-The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
-`execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures
-get at most three attempts with 500/1000ms backoff and a 15-second timeout per
-attempt. Permanent permission errors are not retried; rejected credentials use
+The hammer's `bin/primary-change-context.mjs` and `bin/hammer-context.mjs` read
+primary-change GitHub evidence through `createHistoryReader` and `execGhWithRetry`.
+Transport failures (including DNS, connection, proxy and TLS errors), timeouts
+and HTTP 5xx receive at most three attempts. The nominal 500/1000ms backoff and
+15-second per-attempt timeout scale through `src/load-aware-timeout.mjs`.
+Secondary rate limits require a valid `Retry-After` header; the reader includes
+response headers and waits at least that long. Reads, retry waits and local
+diffs share the existing 90-second context budget; attempts use only the
+remaining time, and a retry whose delay cannot fit fails with the original error.
+An exhausted shared GitHub quota defers instead of entering an unbounded throttle
+sleep. Permanent 404, non-rate-limit 403 and 422 errors, malformed data and
+process-output buffer overflows (`ERR_CHILD_PROCESS_STDIO_MAXBUFFER` / `ENOBUFS`)
+are not retried, including overflows that terminate the process with SIGTERM.
+Transport classification also accepts raw string rejections from wrappers.
+Rejected credentials use
 the helper's single forced token-refresh attempt. Exhausted reads and malformed
 JSON emit head-scoped `historyReadFailed: true` evidence and a non-zero helper
 exit, which the predicate treats as `history-read-failed` rather than a proven reversal. The hammer prompt's
-90-second process limit still bounds the complete collection.
+90-second process limit still bounds the complete collection. History errors
+retain underlying command stderr up to 2,000 characters in full evidence, the
+bounded snapshot reason, audit `historyReadError` and closing-status summaries.
+These internal read retries do not change the per-PR hammer retry cap.
 
 A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy

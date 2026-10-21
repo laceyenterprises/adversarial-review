@@ -2,6 +2,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -205,17 +206,23 @@ async function execGhWithRetry({
   timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
   retries = 2,
   backoffMs = 500,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  retryDelayMs = (err, attempt) => isTransientGhError(err) ? backoffMs * (2 ** attempt) : null,
+  totalTimeoutMs = Infinity,
+  nowMs = () => performance.now(),
+  sleep = (ms) => delay(ms, undefined, { signal }),
   refreshGhAuthImpl = defaultRefreshGhAuth,
   log = console,
 } = {}) {
   let attempt = 0;
   let lastErr = null;
+  const deadline = nowMs() + totalTimeoutMs;
   // Exactly one forced re-mint per call, no matter how many transient retries
   // the loop also burns.
   let authRemintAttempted = false;
   while (attempt <= retries) {
     signal?.throwIfAborted();
+    const remainingMs = Math.floor(deadline - nowMs());
+    if (remainingMs <= 0) throw lastErr || new Error('GitHub read time budget exhausted');
     try {
       return await meteredExecFile(execFileImpl,
         'gh',
@@ -223,7 +230,7 @@ async function execGhWithRetry({
         {
           env: buildAllowlistedGhEnv(env),
           maxBuffer: GH_LOOKUP_MAX_BUFFER,
-          timeout: timeoutMs,
+          timeout: Math.min(timeoutMs, remainingMs),
           killSignal: 'SIGTERM',
           ...(signal ? { signal } : {}),
         }
@@ -256,8 +263,13 @@ async function execGhWithRetry({
         // and an expired token has not used any of it.
         continue;
       }
-      if (!isTransientGhError(err) || attempt === retries) throw err;
-      await sleep(backoffMs * (2 ** attempt));
+      if (attempt === retries) throw err;
+      const waitMs = retryDelayMs(err, attempt);
+      // Never shorten Retry-After to squeeze in another request. Keep the
+      // original failure when the caller's remaining budget cannot cover it.
+      if (waitMs === null || !Number.isFinite(waitMs) || waitMs < 0
+        || waitMs >= deadline - nowMs()) throw err;
+      await sleep(waitMs);
       attempt += 1;
     }
   }

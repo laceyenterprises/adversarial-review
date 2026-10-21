@@ -399,7 +399,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   chmodSync(gh, 0o755);
   const state = join(dir, 'state.json');
   writeFileSync(state, JSON.stringify({ activeRemediation: { jobId: 'job-1' }, activeLease: { leaseId: 'lease-1' } }));
-  const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42', '--state-file', state], { PATH: `${bin}:${process.env.PATH}` });
+  const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42', '--state-file', state], { PATH: `${bin}:${process.env.PATH}`, HAM_ROOT_DIR: dir });
   assert.equal(result.status, 0, result.stderr);
   const calls = readFileSync(callsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const beforeProtection = calls.slice(0, calls.findIndex(args => args[1].endsWith('/protection')));
@@ -440,7 +440,7 @@ test('context bounds real primary patches and survives a failed compare', (t) =>
   writeFileSync(gh, `#!${process.execPath}
 const a = process.argv.join(' ');
 if (a.includes('/compare/')) {
-  if (require('node:fs').existsSync('${dir}/fail-compare')) { process.stderr.write('HTTP 502'); process.exit(1); }
+  if (require('node:fs').existsSync('${dir}/fail-compare')) { process.stderr.write('HTTP 502: '+'synthetic request detail '.repeat(25)+'egress-proxy: upstream connect failed'); process.exit(1); }
   if (a.includes('${base}...${head}')) console.log(JSON.stringify({total_commits:1,commits:[{sha:'${head}',parents:[{sha:'${primary}'}],commit:{message:'Worker-Class: hammer'}}], merge_base_commit:{sha:'${base}'},files:[]}));
   else console.log(JSON.stringify({total_commits:0,commits:[],merge_base_commit:{sha:'${base}'}}));
 } else if (a.includes('/git/trees/')) console.log(JSON.stringify({tree:a.includes('${base}')?[]:Array.from({length:20},(_,i)=>({path:'file'+i,type:'blob',mode:'100644',sha:String(i).padStart(40,'0')})),truncated:false}));
@@ -454,12 +454,17 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
 `); chmodSync(gh, 0o755);
   for (const failed of [false, true]) {
     if (failed) writeFileSync(join(dir, 'fail-compare'), '');
-    const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42'], {PATH: `${bin}:${process.env.PATH}`, ...(failed ? {FAIL_COMPARE:'1'} : {})});
+    const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42'], {PATH: `${bin}:${process.env.PATH}`, HAM_ROOT_DIR: dir, ...(failed ? {FAIL_COMPARE:'1'} : {})});
     assert.equal(result.status, 0, result.stderr);
     assert.ok(Buffer.byteLength(result.stdout) < 8192);
     const snapshot = JSON.parse(result.stdout);
     assert.equal(snapshot.head, head);
     assert.equal(snapshot.primaryChange.status, failed ? 'history-read-failed' : 'available');
+    if (failed) {
+      assert.ok(snapshot.primaryChange.reason.length > 300);
+      assert.ok(snapshot.primaryChange.reason.length <= 2000);
+      assert.match(snapshot.primaryChange.reason, /egress-proxy: upstream connect failed/);
+    }
     assert.doesNotMatch(result.stdout, /x{100}/);
   }
 });

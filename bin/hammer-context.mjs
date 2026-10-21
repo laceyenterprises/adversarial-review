@@ -5,6 +5,7 @@ import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
+import { HISTORY_READ_ERROR_LIMIT, historyReadErrorDetail } from '../src/ama/history-read-policy.mjs';
 import { GH_LOOKUP_MAX_BUFFER } from '../src/gh-cli.mjs';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -87,7 +88,7 @@ try {
     }
     primaryChange = {
       status: evidence.historyReadFailed ? 'history-read-failed' : evidence.readFailed ? 'read-failed' : evidence.hasHammerCommits === null ? 'unknown' : 'available',
-      reason: evidence.reason ? compact(evidence.reason, 300) : undefined, primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
+      reason: evidence.reason ? compact(evidence.reason, HISTORY_READ_ERROR_LIMIT) : undefined, primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
       fullEvidenceCommand: `node bin/primary-change-context.mjs ${repo} ${number} ${head}`,
       files: [], truncated: false,
     };
@@ -99,7 +100,7 @@ try {
       }
       primaryChange.files.push(item);
     }
-  } catch (error) { primaryChange = { status: 'history-read-failed', reason: compact(String(error.message || error), 300) }; }
+  } catch (error) { primaryChange = { status: 'history-read-failed', reason: compact(historyReadErrorDetail(error), HISTORY_READ_ERROR_LIMIT) }; }
   const output = {
     primaryChange,
     statedIntent: compact(pr.body, 800),

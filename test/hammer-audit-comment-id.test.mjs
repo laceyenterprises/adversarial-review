@@ -70,7 +70,7 @@ process.stdout.write(fs.readFileSync(process.env.PAGES_PATH));
   const result = spawnSync('/bin/bash', ['-c', `${script}\nham_existing_terminal_audit_comment_id`], {
     encoding: 'utf8', timeout: 5000,
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ARGS_PATH: argsPath, PAGES_PATH: pagesPath,
-      HAM_NODE_BIN: process.execPath, HAM_GH_TOKEN: 'fixture', HAM_BASE_HEAD: base,
+      HAM_NODE_BIN: process.execPath, HAM_GH_TOKEN: 'fixture', HAM_AUDIT_BASE_HEAD: base,
       POST_REMEDIATION_SHA: head, HAM_AUDIT_COMMENT_MARKER: marker,
       HAM_AUDIT_COMMENT_LOOKUP_STDERR: join(dir, 'lookup-stderr') },
   });

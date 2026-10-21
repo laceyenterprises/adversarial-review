@@ -57,6 +57,17 @@ test('stale head requeues current head via CAS, never hammer or operator', async
   assert.equal(calls.hammer, 0);
 });
 
+for (const factHead of ['head', 'prior-head']) {
+  test(`HAMNOREREVIEW-01 automated recovery binds hammer responsibility to ${factHead}`, async t => {
+    const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['stale-review-head'],
+      ownerProofFacts: { headSha: factHead, liveHeadCloserAuthored: true } });
+    const result = await recoverAmaAutomation(args);
+    assert.equal(result.recovery.action, factHead === 'head' ? 'hammer' : 'rereview');
+    assert.equal(calls.hammer, factHead === 'head' ? 1 : 0);
+    assert.equal(calls.rereview.length, factHead === 'head' ? 0 : 1);
+  });
+}
+
 test('unknown findings rereview once, pending pass owns row, then hammer', async (t) => {
   const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['blocking-findings-unknown', 'verdict-not-settled-success'] });
   assert.equal((await recoverAmaAutomation(args)).recovery.action, 'rereview');

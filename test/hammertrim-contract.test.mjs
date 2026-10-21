@@ -206,7 +206,7 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   rmSync(bodyPath);
   for (const refusal of [{ FAIL_PROOF: '1' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...refusal });
-    assert.match(refused.stdout, /STATUS=20 HELD=0 PUBLISHED=$/m);
+    assert.match(refused.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
     assert.equal(existsSync(bodyPath), false, 'failed proof must not post a validation audit');
   }
   const gitPublished = run('/bin/bash', ['-c', shell, '_', script], { ...env, HAM_API_PUBLISH_FALLBACK: '1' });
@@ -464,14 +464,14 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
   }
 });
 
-for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
+for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'widened-reviewed-range merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
   'superseded head', 'gate read failed', 'gate timeout', 'red CI after pending', 'permanent merge rejection']) {
   test(`rendered hammer receipt classification: ${scenario}`, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const head = 'a'.repeat(40);
     const reviewedHead = 'd'.repeat(40);
-    const successfulMerge = ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge'].includes(scenario);
+    const successfulMerge = ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'widened-reviewed-range merge'].includes(scenario);
     const verdict = join(dir, 'verdict.json');
     writeFileSync(verdict, JSON.stringify({ eligible: true, trace: {
       headMatch: { current: head }, branchProtection: { required: false },
@@ -482,6 +482,7 @@ for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-
       const comments = [{ author: 'hammer-worker', body },
         { author: 'hammer-worker', body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${'c'.repeat(40)}` }];
       const range = await fetchHammerHeadRange({ reviewedHead, currentHead: head, comments,
+        ...(scenario === 'widened-reviewed-range merge' ? { hammerBaseHead: reviewedHead } : {}),
         get() { throw new Error('App proof requires no commit signatures'); } });
       const primaryChange = { headSha: head, hasHammerCommits: false };
       const result = isEligibleForAmaClosure({ headSha: reviewedHead, verdict: 'request-changes', riskClass: 'low',

@@ -3410,8 +3410,7 @@ for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a f
         completion: { workerPushedHeadSha: identity.headSha },
       }));
       db.prepare("UPDATE reviewed_prs SET review_status='posted', reviewer_head_sha=? WHERE pr_number=101").run('a'.repeat(40));
-      const { acquireAmaCloserLease } = await import(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))});
-      const { handoffHammerReview } = await import(${JSON.stringify(fileUrl('bin', 'hammer-review-handoff.mjs'))});
+      const { acquireAmaCloserLease, updateAmaCloserLease } = await import(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))});
       const { requestReviewRereview } = await import(${JSON.stringify(fileUrl('src', 'review-state.mjs') + '?actual')});
       assert.equal(requestReviewRereview({ ...identity, db, targetRevisionRef: identity.headSha }).reason, 'comment-only-final-round-completed');
       const { requestBoundedOrphanReview } = await import(${JSON.stringify(fileUrl('src', 'ama', 'orphan-review-request.mjs'))});
@@ -3420,7 +3419,8 @@ for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a f
       });
       if (${stranded}) await boundedRequest(identity);
       acquireAmaCloserLease(identity);
-      await handoffHammerReview({ ...identity, requestBoundedReviewImpl: boundedRequest });
+      updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
+      await boundedRequest(identity);
       if (${stranded}) db.prepare("UPDATE reviewed_prs SET review_status='pending', revision_ref=?, rereview_reason='auto-refresh: PR head moved', rereview_requested_at=? WHERE pr_number=101").run(identity.headSha, new Date().toISOString());
       db.prepare(\`INSERT INTO review_cycle_verdicts(pr_url,head_sha,verdict_count,verdict_at)
         VALUES (?, ?, 6, ?)\`).run('https://github.com/' + repo + '/pull/101', 'a'.repeat(40), new Date().toISOString());

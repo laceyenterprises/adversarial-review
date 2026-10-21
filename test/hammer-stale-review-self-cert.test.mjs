@@ -404,7 +404,7 @@ test('watcher orchestration: merge-agent rebase of worker-authored head stays re
 });
 
 for (const recoverable of [true, false]) {
-  test(`orchestration: primary-change refusal ${recoverable ? 'requests exact-head review before paging' : 'pages when exact-head recovery refuses'}`, async t => {
+  test(`orchestration: primary-change refusal retains safety hold (exactHeadReview=${recoverable})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'primary-recovery-orchestration-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     let requests = 0, pages = 0, recoveryCalls = 0;
@@ -425,9 +425,9 @@ for (const recoverable of [true, false]) {
       observeClosureWaitImpl: async () => { pages++; return {}; },
     });
     assert.equal(recoveryCalls, 1);
-    assert.equal(requests, recoverable ? 1 : 0);
-    assert.equal(pages, recoverable ? 0 : 1);
-    assert.equal(orchestrationResult.reason, recoverable ? 'closer-head-exact-review-requested' : 'primary-change-repair-required');
-    assert.equal(orchestrationResult.needsOperator, !recoverable);
+    assert.equal(requests, 0);
+    assert.equal(pages, 1);
+    assert.equal(orchestrationResult.reason, 'primary-change-repair-required');
+    assert.equal(orchestrationResult.needsOperator, true);
   });
 }

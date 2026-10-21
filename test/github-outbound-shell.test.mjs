@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const expected = { 'bin/hammer-publish.sh': 3, 'bin/hammer-verify-head.sh': 2, 'bin/hammer-merge.sh': 1, 'templates/hammer-prompt.md': 1 };
+const expected = { 'bin/hammer-publish.sh': 3, 'bin/hammer-verify-head.sh': 2, 'bin/hammer-merge.sh': 1 };
 test('shell and hammer prompt body writes route through the shared filter bridge', () => {
   const actual = {};
   for (const folder of ['bin', 'templates']) {

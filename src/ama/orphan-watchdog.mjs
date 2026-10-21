@@ -301,7 +301,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       || reviewStateRow?.review_status === REREVIEW_CI_BLOCKED_STATUS
       || (external && (external.conclusion !== 'SUCCESS'
         || external.failedChecks.length > 0 || external.pendingChecks.length > 0));
-    const action = hasReview || reviewerRefused || await rereviewClosed({
+    const hammerHead = facts?.headSha === headSha && facts.liveHeadCloserAuthored === true;
+    const action = hammerHead || hasReview || reviewerRefused || await rereviewClosed({
       rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger,
     }) ? 'hammer' : 'review';
     const attempt = { action, reason: 'outcome-unknown', at: now };

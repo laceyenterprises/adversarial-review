@@ -8,6 +8,7 @@ import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { hammerAttestationChain } from '../src/ama/hammer-head-validation.mjs';
 import { isTransientGhError } from '../src/gh-cli.mjs';
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { recordPendingAttestation } from '../src/ama/hammer-pending-attestation.mjs';
 
 const root = resolve(import.meta.dirname, '..');
@@ -25,7 +26,7 @@ function fixture(t) {
   writeFileSync(commentsPath, '[]');
   writeFileSync(join(dir, 'details.md'), '- **Repair validation** (blocking): src/example.mjs: repaired\n');
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
-  executable('git', '#!/bin/sh\nprintf "%s\\n" "$CURRENT_HEAD"\n');
+  executable('git', '#!/bin/sh\nprintf "%s\\n" "${BUILT_HEAD:-$CURRENT_HEAD}"\n');
   executable('gh', `#!${process.execPath}
 import fs from 'node:fs';
 const args = process.argv.slice(2), dir = process.env.FIXTURE_DIR;
@@ -69,6 +70,9 @@ case "$1" in
     if [ -f "$FIXTURE_DIR/lease-lost" ]; then echo '{"holder":null}'; else
       echo '{"holder":{"leaseId":"test-lease","holderPr":42,"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
     fi ;;
+  */bin/hammer-pending-attestation.mjs)
+    if [ "$2" = read ] && [ "\${FAIL_PENDING_READ:-0}" = 1 ]; then exit 1; fi
+    exec "$REAL_NODE" "$@" ;;
   */bin/hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_DIR/proof.mjs" ;;
   *) exec "$REAL_NODE" "$@" ;;
 esac
@@ -79,12 +83,15 @@ import { fetchHammerHeadRange } from ${JSON.stringify(join(root, 'src/ama/hammer
 const env = process.env;
 const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: env.REVIEWED_HEAD,
   currentHead: env.CURRENT_HEAD, hammerBaseHead: env.HAM_BASE_HEAD,
-  comments: JSON.parse(readFileSync(env.COMMENTS_PATH, 'utf8')), get: async () => ({}) });
+  comments: JSON.parse(readFileSync(env.COMMENTS_PATH, 'utf8')),
+  remediationRounds: env.PROVABLE_ROUND ? [{ state: 'completed', startHeadSha: env.REVIEWED_HEAD, resultingHeadSha: env.HAM_BASE_HEAD }] : [],
+  get: async () => { if (env.RANGE_READ_FAILURE) throw new Error('synthetic history unavailable');
+    return { status: env.PROVABLE_ROUND ? 'ahead' : 'unknown' }; } });
 if (!range) process.exit(65);
 console.log(JSON.stringify(range));
 `);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_DIR: dir, COMMENTS_PATH: commentsPath,
-    REAL_NODE: process.execPath, CURRENT_HEAD: validated, REVIEWED_HEAD: reviewed,
+    REAL_NODE: process.execPath, CURRENT_HEAD: validated, BUILT_HEAD: validated, REVIEWED_HEAD: reviewed,
     HAM_NODE_BIN: join(bin, 'node-fixture'), HAM_RUN_DIR: dir, HAM_BASE_HEAD: reviewed,
     HAM_AUDIT_DETAILS_FILE: join(dir, 'details.md'), HAM_AUDIT_REMEDIATED_TOTAL: '1',
     HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
@@ -107,6 +114,7 @@ sleep() { echo "$1" >> "$FIXTURE_DIR/backoffs"; if [ "\${LOSE_LEASE:-0}" = 1 ]; 
 source "$FIXTURE_DIR/publish.sh"
 status=$?
 echo "status=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD published=$HAM_PUBLISHED_AUDIT_HEAD"
+echo "base=$HAM_BASE_HEAD"
 echo "note=\${HAM_NO_MERGE_NOTE:-}"
 echo "release-retryable=\${HAM_RELEASE_RETRYABLE_ABORT_REASON:-}"
 exit "$status"
@@ -210,19 +218,18 @@ for (const head of ['', validated.slice(0, 39), 'malformed-head']) {
 }
 
 for (const [kind, overrides] of [
-  ['head', { CURRENT_HEAD: other, HAM_BASE_HEAD: other }],
   ['base', { REVIEWED_HEAD: other, HAM_BASE_HEAD: validated }],
   ['identity id', { APP_ID: '88', HAM_BASE_HEAD: validated }],
   ['identity login', { APP_LOGIN: 'fixture-other-app', HAM_BASE_HEAD: validated }],
 ]) {
-  test(`pending edge with different ${kind} cannot authorize provenance`, t => {
+  test(`pending edge with different ${kind} is never reused as validation evidence`, t => {
     const f = fixture(t);
     assert.equal(f.run({ FAIL_COUNT: '5' }).status, 1);
     const result = f.run(overrides);
-    assert.equal(result.status, 20, result.stderr);
-    assert.match(result.stdout, /outcome=exact-head-review-required held=0/);
-    assert.equal(f.posts(), 5);
-    assert.deepEqual(f.comments(), []);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(f.comments().map(c => c.body).join('\n'), /ham-recovered-attestation/);
+    assert.doesNotMatch(result.stdout, /review-required/);
+    assert.equal(f.posts(), 6, 'fresh validation publishes a new audit');
   });
 }
 
@@ -241,8 +248,8 @@ test('head movement immediately before recovery cannot publish a pending edge', 
   assert.equal(f.run({ FAIL_COUNT: '5' }).status, 1);
   const result = f.run({ HAM_BASE_HEAD: validated, MOVE_HEAD: other });
   assert.equal(result.status, 20, result.stderr);
-  assert.match(result.stdout, /outcome=exact-head-review-required/);
-  assert.match(result.stdout, /release-retryable=\n/);
+  assert.match(result.stdout, /outcome=head-changed held=0/);
+  assert.match(result.stdout, /release-retryable=head-changed/);
   assert.equal(f.posts(), 5);
 });
 
@@ -288,4 +295,111 @@ test('sibling hammer phase classifiers retry GraphQL server errors and refuse pe
       assert.equal(result.status, error.includes('403') ? 1 : 0, `${name}: ${error}: ${result.stderr}`);
     }
   }
+});
+
+// The publication fixture uses the real range evaluator, audit renderer,
+// attestation selector and eligibility predicate. All external boundaries fail
+// on any unrecognized call, including a request to review or a live merge.
+function mergeVerdict(f, overrides = {}) {
+  const body = f.comments().at(-1).body;
+  const primaryChange = { headSha: validated, hasHammerCommits: false };
+  return isEligibleForAmaClosure({ headSha: reviewed, verdict: 'request-changes', riskClass: 'low',
+    remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 1,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 0, ...overrides.reviewState },
+  { headSha: validated, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [],
+    statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }], ...overrides.pr },
+  { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+  { primaryChange, hamTerminalRemediation: { active: true, commit: { sha: validated },
+    auditComment: { body, findings: overrides.findings || [{ title: 'Repair validation', blocking: true, addressed: true }] } },
+    hamTerminalRemediationGroundTruth: { commit: { sha: validated, changedFiles: ['src/example.mjs'], primaryChange },
+      auditComment: { body, author: 'hammer-worker', ...overrides.auditComment },
+      range: JSON.parse(readFileSync(join(f.dir, 'range.json'), 'utf8')) } });
+}
+
+for (const startingBase of ['', 'invalid', other]) {
+  test(`HAMNOREREVIEW-01 unprovable starting base ${startingBase || 'missing'} audits the reviewed range and admits merge`, t => {
+    const f = fixture(t);
+    const result = f.run({ HAM_BASE_HEAD: startingBase });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /outcome=published held=1/);
+    assert.match(result.stdout, new RegExp(`base=${reviewed}`));
+    assert.match(f.comments()[0].body, new RegExp(`HAM-Base-Head: ${reviewed}`));
+    assert.match(f.comments()[0].body, new RegExp(`HAM-Validated-Head: ${validated}`));
+    const range = JSON.parse(readFileSync(join(f.dir, 'range.json'), 'utf8'));
+    assert.equal(range.reviewedHead, reviewed);
+    assert.equal(range.baseSha, reviewed);
+    assert.equal(range.currentHead, validated);
+    assert.equal(mergeVerdict(f).eligible, true);
+    assert.equal(mergeVerdict(f, { pr: { statusCheckRollup: [{ name: 'test', conclusion: 'FAILURE' }] } }).eligible, false,
+      'failed tests on the exact hammer head still block merge');
+    assert.equal(mergeVerdict(f, { auditComment: { author: 'fixture-builder' } }).eligible, false,
+      'a foreign signer cannot certify the widened range');
+    assert.equal(mergeVerdict(f, { pr: { headSha: other } }).eligible, false,
+      'the audit cannot authorize another head');
+    assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required|daemon merges after/);
+  });
+}
+
+for (const reviewedHead of ['invalid', 'a'.repeat(39), 'z'.repeat(40)]) {
+  test(`HAMNOREREVIEW-01 unavailable reviewed head ${reviewedHead} releases with retryable attribution`, t => {
+    const f = fixture(t);
+    const result = f.run({ HAM_BASE_HEAD: '', REVIEWED_HEAD: reviewedHead });
+    assert.equal(result.status, 20, result.stderr);
+    assert.match(result.stdout, /outcome=reviewed-head-unavailable held=0/);
+    assert.match(result.stdout, /release-retryable=reviewed-head-unavailable/);
+    assert.match(result.stdout, /note=HAM closing status — no merge\. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass\./);
+    assert.deepEqual(f.comments(), []);
+    assert.equal(f.audit(), null);
+    assert.equal(existsSync(join(f.dir, 'range.json')), false);
+    assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
+  });
+}
+
+test('HAMNOREREVIEW-01 provable remediation base retains its existing audit range', t => {
+  const f = fixture(t);
+  const result = f.run({ HAM_BASE_HEAD: other, PROVABLE_ROUND: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`base=${other}`));
+  assert.match(f.comments()[0].body, new RegExp(`HAM-Base-Head: ${other}`));
+  assert.equal(JSON.parse(readFileSync(join(f.dir, 'range.json'), 'utf8')).proof, 'completed-remediation-round-chain');
+});
+
+test('HAMNOREREVIEW-01 pending-attestation read failure releases for a hammer retry', t => {
+  const f = fixture(t);
+  const result = f.run({ FAIL_PENDING_READ: '1' });
+  assert.equal(result.status, 20, result.stderr);
+  assert.match(result.stdout, /outcome=pending-attestation-unavailable held=0/);
+  assert.match(result.stdout, /release-retryable=pending-attestation-unavailable/);
+  assert.deepEqual(f.comments(), []);
+  assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
+});
+
+test('HAMNOREREVIEW-01 moved live head cannot be adopted as the built head', t => {
+  const f = fixture(t);
+  const result = f.run({ CURRENT_HEAD: other });
+  assert.equal(result.status, 20, result.stderr);
+  assert.match(result.stdout, /outcome=head-changed held=0/);
+  assert.deepEqual(f.comments(), []);
+  assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
+});
+
+test('HAMNOREREVIEW-01 starting-base read failure also widens responsibility without review', t => {
+  const f = fixture(t);
+  const result = f.run({ HAM_BASE_HEAD: other, PROVABLE_ROUND: '1', RANGE_READ_FAILURE: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(f.comments()[0].body, new RegExp(`HAM-Base-Head: ${reviewed}`));
+  assert.equal(mergeVerdict(f).eligible, true);
+});
+
+test('HAMNOREREVIEW-01 comment-only final findings merge after hammer covers the whole reviewed range', t => {
+  const f = fixture(t);
+  writeFileSync(join(f.dir, 'details.md'), '- **Cleanup** (non-blocking): src/example.mjs: repaired\n');
+  const result = f.run({ HAM_BASE_HEAD: other, HAM_AUDIT_REMEDIATED_BLOCKING: '0',
+    HAM_AUDIT_REMEDIATED_NON_BLOCKING: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(f.comments()[0].body, new RegExp(`HAM-Base-Head: ${reviewed}`));
+  const verdict = mergeVerdict(f, { reviewState: { verdict: 'comment-only', blockingFindingCount: 0,
+    nonBlockingFindingCount: 1, nonBlockingFindingIdentities: ['cleanup'] },
+    findings: [{ title: 'Cleanup', blocking: false, addressed: true }] });
+  assert.equal(verdict.eligible, true, JSON.stringify(verdict));
 });

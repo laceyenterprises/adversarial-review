@@ -584,7 +584,7 @@ test('only a review head that diverged from the HAM parent may use the rebase pa
   }
 });
 
-test('a HAM head failing self-certification only on the reversal authorization requests the exact-head review', async () => {
+test('HAMNOREREVIEW-01 missing reversal authorization retains the safety hold without review', async () => {
   const { result: primary } = await collect({ cites: ['PRR_other_pr finding=1 kind=blocking'] });
   const checks = { workerClass: true, head: true, parent: true, commitIdentity: true, nonEmptyCommit: true, primaryChange: false };
   const trace = { primaryChange: primary, hamTerminalRemediation: { active: true, checks } };
@@ -606,11 +606,9 @@ test('a HAM head failing self-certification only on the reversal authorization r
     probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
     requestBoundedReviewImpl: async (options) => { requests.push(options.headSha); return { triggered: true }; }, ...extra });
   const recovered = await recover({ ...refusal, missingEvidence, exactHeadReview: true });
-  assert.equal(recovered.reason, 'closer-head-exact-review-requested');
-  assert.equal(recovered.needsOperator, false);
-  assert.equal(recovered.missingEvidence.evidence, 'reversal-authorization');
-  assert.deepEqual(requests, [head]);
-  assert.match(logs[0], /missing-evidence=no verified Reversal-Authorized-By covers the reverted src\/a\.mjs region/);
+  assert.equal(recovered, null, 'primary-change preservation remains a hold');
+  assert.deepEqual(requests, []);
+  assert.deepEqual(logs, []);
   // Without that proof, or with any other co-occurring refusal, the operator hold stays.
   for (const result of [refusal, { ...refusal, missingEvidence, exactHeadReview: true, reasons: [...refusal.reasons, 'ci-not-green'] },
     { ...refusal, missingEvidence, exactHeadReview: true, reasons: ['primary-change-reverted'] },
@@ -620,7 +618,7 @@ test('a HAM head failing self-certification only on the reversal authorization r
   // A live owner still wins.
   assert.equal(await recover({ ...refusal, missingEvidence, exactHeadReview: true },
     { probeOwnershipImpl: async () => ({ owned: true, uncertain: false }) }), null);
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 0);
 });
 
 // The original reversal itself was already

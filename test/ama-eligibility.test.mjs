@@ -3440,7 +3440,7 @@ test('LABELGATE-01: label-only CI misses carry typed ineligibility', () => {
 });
 
 
-test('qualified primary-evidence refusal recovers stale known findings without authorizing merge', async () => {
+test('HAMNOREREVIEW-01 primary-evidence refusal holds without requesting review', async () => {
   const currentHead = 'c'.repeat(40);
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { verdict: 'request-changes', blockingFindingCount: 1,
@@ -3472,16 +3472,14 @@ test('qualified primary-evidence refusal recovers stale known findings without a
     requestBoundedReviewImpl: async () => { requests++; return { triggered: true }; },
   });
   const recovered = await recover(refusal);
-  assert.equal(recovered.reason, 'closer-head-exact-review-requested');
-  assert.equal(recovered.skipMergeAgent, true);
-  assert.equal(recovered.recoveryWait, true);
+  assert.equal(recovered, null);
   assert.equal(verdict.eligible, false);
   assert.equal(await recover({ ...refusal, exactHeadReview: false }), null);
   assert.equal(await recover(refusal, true), null);
   for (const reason of ['ci-not-green', 'pr-not-mergeable', 'blocking-label-present']) {
     assert.equal(await recover({ ...refusal, reasons: [...refusal.reasons, reason] }), null);
   }
-  assert.equal(requests, 1);
+  assert.equal(requests, 0);
 });
 
 for (const noDiff of [false, true]) test(`HAMFINAL-02: exact validation closes fleet head (no diff: ${noDiff})`, async () => {

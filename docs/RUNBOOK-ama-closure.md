@@ -2440,15 +2440,10 @@ is limited to 1200 characters and the operator summary to 4096 characters,
 including a trailing `...` on truncation. Diagnostic time-budget exhaustion is
 reported before the rejection details so it survives summary truncation. The
 operator diagnostic budget remains 15 seconds. When a HAM head's own exact-head
-self-certification failed
-only on that authorization (`stale-review-head`, `verdict-not-settled-success`
-and `blocking-findings-unknown` are its cascade), the closer marks the
-`primary-change-repair-required` refusal `exactHeadReview: true` and the
-LEASEDEFER-01 leaf requests one bounded exact-head re-review instead of an
-operator hold. The merge stays refused by the predicate until the evidence is
-valid. Recovery runs before the primary-change page; only a refused recovery
-falls through to paging. `missingEvidence` alone does not authorize that review:
-`exactHeadReview` requires the HAM self-certification checks above.
+self-certification failed only on reversal authorization, the closer retains
+`primary-change-repair-required`. The hammer must restore the primary change or
+supply valid existing authorization; a new review is never requested as recovery.
+The predicate continues refusing merge until preservation evidence is valid.
 
 **The hammer's dispute adjudication is final (HAMFINAL-01).** Operator decision,
 2026-10-10, after agent-os PR 7987:
@@ -2621,34 +2616,12 @@ predicates. Its primary-line edits require HAMINTENT-03 per-finding
 `Reversal-Authorized-By` trailers or restoration of reverted lines. See the
 [watchdog data model](data-model/orphan-watchdog.md) for migration and evidence.
 
-LEASEDEFER-01 lets the closure orchestrator request an immediate
-`system-orphan-head-review:<headSha>` for a recognized closer-trailer tip when
-HAM returns `not-eligible` and every reason is one of `stale-review-head`,
-`verdict-not-settled-success` or `blocking-findings-unknown`, including the stale
-head reason. Before requesting review, recovery requires no held AMA closer
-lease for the PR at any head and a negative `probeOrphanOwnership` result for
-queued/running launches and remediation. Live or uncertain ownership returns to
-ordinary retry and the bounded watchdog. Hard refusals are classified first:
-labels, terminal PRs, disallowed risk classes and branch-protection/fast-merge
-failures retain `needsOperator` routing without requesting review. The watcher-owned
-`duplicate-family-unresolved` census hold retains its 30-second automatic retry.
-The leaf retains the durable per-head `heads.rereview` guard and lock, set
-before attempting the request. OWNERPROOF-01 instead uses its shared
-two-attempt review/HAM budget. Failed current-head review rows
-never reset through this leaf. Only a triggered request, or a returned row
-with the exact `system-orphan-head-review:<head>` marker and revision, returns `closer-head-exact-review-requested`, mapped to
-`ama-pending` while the watcher owns that review. A refused request falls through
-to OWNERPROOF-01 with its PR-wide idle clock, two per-head attempts and
-exhaustion page; refusal never creates an unconditional wait.
-A closer-trailer tip can arm stale-head HAM resume after a rebase breaks the
-closer-only chain only after an authoritative live-review probe finds no review
-on the new head. Without chain proof or authoritative reviewer identity, resume
-stays off and an ownerless head can request exact-head review. This intentionally widens dispatch beyond ancestry-proven closer-only chains:
-intervening worker commits may enter the hammer repair lane. The hammer owns
-final adjudication of that head; dispatch admission is not merge certification.
-While an exact-head review is pending/reviewing, the stale-tip path skips the
-additional live-review/commit/certificate probes. This admits repair only: the terminal-remediation validator still proves the exact head and its
-`reviewed-head` binding before merge.
+HAMNOREREVIEW-01 retires LEASEDEFER-01 exact-head review recovery. Recognized
+closer heads remain with hammer validation, including after a rebase breaks the
+starting-base proof. A missing round record widens the audit range to the last
+reviewed SHA. Ownership probes, safety holds, dispatch leases and retry limits
+remain in force; ownership never certifies a merge. Current-head closer evidence
+also prevents automated and ownerless recovery from requesting source review.
 
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
 hammer wake (also exposed to agent-os rescue). OWNERPROOF-01 does not require
@@ -2774,13 +2747,13 @@ one of:
    head-only ancestry is GitHub-verified and bound to trusted fleet App authors
    with GitHub's `web-flow` committer (or GitHub-signed base merges with
    `web-flow` as committer and verified/valid verification, whose second parent
-   is reachable from the live base). Locally signed human base merges require
-   exact-head re-review. The versioned
+   is reachable from the live base). A missing starting-base proof widens hammer responsibility
+   to the last reviewed head. The versioned
    `bin/hammer-head-context.mjs` helper discovers the live PR base and retries
    transient reads at most three times with 500/1000ms backoff and a 15-second
-   per-attempt timeout. The prompt bounds collection to 90 seconds; any failed
-   provenance proof releases the lease and requests one bounded exact-head
-   review. Proven heads retain merge ownership without another review; all
+   per-attempt timeout. The procedure bounds collection to 90 seconds; failed starting-base
+   proof widens the audit to the reviewed head, while failed validation or head
+   movement releases for another hammer pass. Proven heads retain merge ownership without another review; all
    ordinary structural merge gates still apply. The zero-finding path is
    admitted only after the caller supplies a finite measured terminal-unmerged
    duration that meets the comment-only grace threshold. This active trust is
@@ -4045,19 +4018,23 @@ checks, mergeability, provenance and operator gates to the hammer under its
 lease. Ordinary non-final heads retain the timeout refusal. Background dispatch
 retains the per-PR queue and checks the live head before launch.
 
-The exact-head `handed-to-review` transfer authorizes one review even if an
-earlier bounded request was consumed or interrupted. An ordinary head-refresh
-request can complete that transfer. A delivered review or an attempt after the
-transfer consumes the exception; another head cannot inherit it. The hammer
-records the transfer before advertising its exact-head route comment.
+HAMNOREREVIEW-01 keeps closure with the hammer. Publication first tries the
+captured starting-base proof; if it cannot prove that base, the hammer assumes
+responsibility from the last reviewed SHA, sets `HAM_BASE_HEAD` to that SHA and
+publishes that full range before the merge predicate. It reuses the published
+range rather than running a second probe that could discard responsibility.
+If the fallback reviewed SHA is invalid or unavailable, publication returns 20
+with a no-merge note and a `reviewed-head-unavailable` retryable lease-abort reason.
+Head changes, failed validation and unreadable pending attestations release for
+another hammer pass. They never request a review. Lease/CAS, required checks,
+HAMINTENT and head-bound authenticated evidence remain mandatory.
 
-Worker history collection computes fresh evidence when the daemon history cache
-belongs to another OS identity. It never reads or writes that foreign cache.
-API/compare failures remain read failures; an incomplete or untrusted ancestry
-proof remains a negative proof. Only the latter takes the exact-head review
-route. A read failure records `history-read-failed`, releases the merge lease as
-a retryable abort, and does not install an input-change stop hold or refund the
-charged attempt. Deterministic refusals and other stop holds retain their rules.
+The former LEASEDEFER-01 recovery leaf no longer requests reviews. Legacy
+review-required stops release for hammer retry without waiting for a review;
+real safety refusals remain held. Automated and ownerless recovery also select
+hammer for current-head closer evidence. Already-rendered prompts invoking the
+old handoff helper receive a terminal no-merge lease outcome for capped retry.
+Historical handed-to-review records remain supported during rolling deployment.
 
 Terminal launch evidence takes precedence over stale active worker status.
 An open same-head PR without a terminal closing decision retries through the

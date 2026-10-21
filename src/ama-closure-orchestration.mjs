@@ -1925,7 +1925,7 @@ async function dispatchAmaClosureFor({
 
   let allowStaleReviewHeadHammerResume = false;
   // NOOWNER-01: a closer tip suppresses ordinary automatic review refresh;
-  // ownerless, uncertified heads can use the explicit exact-head recovery.
+  // ownerless, uncertified heads return to hammer validation.
   let liveHeadCloserAuthored = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
@@ -1948,7 +1948,7 @@ async function dispatchAmaClosureFor({
   // A recognized closer-trailer tip can arm HAM resume even when a rebase broke
   // the closer-only chain. That flag admits a repair attempt; merge authority
   // still requires the exact-head terminal-remediation validator, including its
-  // reviewed-head binding. An uncertified head needs an exact-head review.
+  // reviewed-head binding. An uncertified closer head needs hammer validation.
   if (!orphanRecovery?.ownerProof && reviewedHeadIsStale && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
     && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
     try {
@@ -1970,6 +1970,7 @@ async function dispatchAmaClosureFor({
       throwIfAborted(signal);
       liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
         && ['closer-commit-trailer', 'hammer-validated-head'].includes(closerCommitSuppression?.reason);
+      if (ownerProofFactsSink?.value) ownerProofFactsSink.value.liveHeadCloserAuthored = liveHeadCloserAuthored;
       if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview
         && authoritativeReviewerLogins.length > 0) {
         const currentBodies = await runCoexistenceOperation(

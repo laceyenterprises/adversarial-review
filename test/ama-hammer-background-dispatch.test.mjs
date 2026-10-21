@@ -1086,22 +1086,17 @@ test('LEASEDEFER-01 HAM rebase resolves exact-head certification without a chain
   assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
 });
 
-test('LEASEDEFER-01 stale closer refusal reaches exact-head recovery on its first tick', async () => {
+test('HAMNOREREVIEW-01 stale closer refusal stays with hammer recovery on its first tick', async t => {
   const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
     reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
-  let requests = 0;
-  args.recoverStrandedCloserHeadImpl = async options => {
-    assert.equal(options.closerAuthored, true);
-    assert.equal(options.headSha, 'H1');
-    assert.ok(options.result.reasons.includes('stale-review-head'));
-    requests++;
-    return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: 'closer-head-exact-review-requested' };
-  };
+  args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    requestBoundedReviewImpl: () => assert.fail('hammer heads never request review') });
   const result = await maybeDispatchAmaClosureFor(args);
-  assert.equal(requests, 1);
-  assert.equal(result.reason, 'closer-head-exact-review-requested');
+  assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.ownerProofFacts.headSha, 'H1');
+  assert.equal(result.ownerProofFacts.liveHeadCloserAuthored, true);
 });
 
 test('LEASEDEFER-01 stale eligibility miss cannot transfer a live hammer lease to review', async t => {
@@ -1154,7 +1149,7 @@ for (const closer of [false, true]) {
   });
 }
 
-test('refused exact-head review for an unvalidated closer reaches bounded watchdog recovery', async t => {
+test('unvalidated closer without a review handoff reaches bounded watchdog recovery', async t => {
   const { args } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
@@ -1174,7 +1169,7 @@ test('refused exact-head review for an unvalidated closer reaches bounded watchd
     },
     recoverAmaAutomationImpl: () => assert.fail('orphan watchdog owns refusal'),
   });
-  assert.equal(requests, 1);
+  assert.equal(requests, 0);
   assert.equal(orphanCalls, 1);
   assert.equal(result.orphanRecovery.disposition, 'exhausted');
 });

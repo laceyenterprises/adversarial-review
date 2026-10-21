@@ -200,15 +200,17 @@ async function recoverAmaAutomationLocked({
     if (launch?.reclaimed > 0) return waiting('reclaim-launch');
   }
   const stale = reasons.includes('stale-review-head') || reasons.includes('stale-head');
+  const hammerHead = result?.ownerProofFacts?.headSha === headSha
+    && result.ownerProofFacts.liveHeadCloserAuthored === true;
   const malformed = reasons.some((item) => /findings-unknown$/.test(item));
   if (state.event) return exhausted();
   if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return stalled('attempt-cap');
   // NOOWNER-01: the watcher declined this head's re-review (its tip is a closer
   // commit, which is never re-reviewed). Asking again would only loop; wait out
   // the stall deadline, then page once.
-  if (stale && isCloserHeadRereviewDeclined(reviewStateRow, headSha)) return stalled('rereview-declined-closer-head');
+  if (stale && !hammerHead && isCloserHeadRereviewDeclined(reviewStateRow, headSha)) return stalled('rereview-declined-closer-head');
   try {
-    if (stale || (malformed && !state.rereviewRequested)) {
+    if (!hammerHead && (stale || (malformed && !state.rereviewRequested))) {
       state.rereviewBaseline = reviewStamp;
       state.rereviewRequestedAt = now();
       save();
@@ -225,7 +227,7 @@ async function recoverAmaAutomationLocked({
       if (!state.rereviewPending) return stalled('rereview-refused');
       return { outcome: 'ama-pending', amaClosureResult: result, recovery: { ...state, action: 'rereview', rereview } };
     }
-    if (automatedHammerReasonsCovered(reasons)) {
+    if (hammerHead || automatedHammerReasonsCovered(reasons)) {
       const retry = await dispatchHammer();
       if (retry?.dispatched) {
         charge();

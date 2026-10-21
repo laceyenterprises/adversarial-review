@@ -5,6 +5,7 @@ import { reviewerCredentialKey, recordCorporateClaudeQuotaCooldown } from './cla
 import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 import { selectReviewerTokenAccount, updateReviewerTokenLease, recordReviewerAccountQuotaFailure } from './reviewer-token-pool.mjs';
+import { journalReviewerTokenLease, forgetReviewerTokenLease, markReviewerTokenLeaseActive } from './reviewer-token-leases.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
@@ -676,11 +677,23 @@ async function spawnReviewerOnce(args) {
     args.onPostOperationSettled?.(result);
     return result;
   }
+  const rootDir = args.rootDir || ROOT;
+  if (receipt) {
+    try { journalReviewerTokenLease(rootDir, sessionUuid, receipt.identity, receipt.lease); }
+    catch (error) {
+      try { await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env }); }
+      catch { console.warn('[watcher] reviewer account release unavailable after journal write failure'); }
+      throw error;
+    }
+  }
   const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
-  if (receipt && !['cli-direct', 'acpx', 'fixture-stub'].includes(runtimeId)) {
+  if (receipt && !(args.accountBindingRuntimeIds || ['cli-direct', 'acpx']).includes(runtimeId)) {
     // These runtimes do not yet carry an execution binding to their credential
     // owner. Never claim the selected token was used by an unbound dispatch.
-    await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env });
+    try {
+      await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env, rootDir });
+      forgetReviewerTokenLease(rootDir, sessionUuid);
+    } catch { console.warn('[watcher] reviewer account release unavailable for unsupported runtime; journal retained'); }
     const result = { ok: false, failureClass: 'reviewer-account-held', effectiveReviewerModel: args.reviewerModel,
       reviewerSessionUuid: sessionUuid, error: 'reviewer-runtime-account-binding-unsupported' };
     args.onPostOperationSettled?.(result);
@@ -698,7 +711,12 @@ async function spawnReviewerOnce(args) {
     ...(receipt ? { reviewerAccountReceipt: receipt } : {}),
   });
   let renewal = Promise.resolve();
-  const updateLease = operation => (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, operation, { env });
+  const updateLease = async operation => {
+    const value = await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, operation, { env, rootDir });
+    if (operation === 'release') forgetReviewerTokenLease(rootDir, sessionUuid);
+    return value;
+  };
+  if (receipt) markReviewerTokenLeaseActive(rootDir, sessionUuid, true);
   const timer = receipt ? setInterval(() => {
     renewal = renewal.then(() => updateLease('renew')).catch(() => {
       console.warn('[watcher] reviewer account lease renewal unavailable; retaining original binding');
@@ -706,6 +724,13 @@ async function spawnReviewerOnce(args) {
   }, 60_000) : null;
   try {
     const result = withAccount(await spawnReviewerOnceWithAccount({ ...args,
+      onReviewerPgid: pgid => {
+        if (receipt) {
+          try { journalReviewerTokenLease(rootDir, sessionUuid, receipt.identity, receipt.lease, pgid); }
+          catch { console.warn('[watcher] reviewer lease PGID journal write unavailable; retaining acquisition intent'); }
+        }
+        args.onReviewerPgid?.(pgid);
+      },
       ...(args.onPostOperationSettled ? {
         onPostOperationSettled: result => args.onPostOperationSettled(withAccount(result)),
       } : {}),
@@ -724,7 +749,10 @@ async function spawnReviewerOnce(args) {
       catch { console.warn('[watcher] reviewer account lease release unavailable; retaining receipt for recovery'); }
     }
     return result;
-  } finally { if (timer) clearInterval(timer); }
+  } finally {
+    if (timer) clearInterval(timer);
+    if (receipt) markReviewerTokenLeaseActive(rootDir, sessionUuid, false);
+  }
 }
 
 async function spawnReviewerOnceWithAccount({
@@ -987,8 +1015,9 @@ async function spawnReviewerOnceWithAccount({
         onReviewerPgid,
       });
       if (reviewerAccountReceipt && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
-        recordReviewerAccountQuotaFailure(rootDir, reviewerAccountReceipt, { env: quotaCheckEnv,
-          resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) });
+        try { recordReviewerAccountQuotaFailure(rootDir, reviewerAccountReceipt, { env: quotaCheckEnv,
+          resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) }); }
+        catch (error) { console.warn(`[watcher] reviewer account quota cooldown persistence failed: ${error.message}`); }
       }
       if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
         && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
@@ -1460,6 +1489,10 @@ function settleReviewerAttempt({
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
   if (result.failureClass === 'reviewer-account-held') {
     reviewerSessionUuid = result.reviewerSessionUuid || reviewerSessionUuid;
+    log.warn(`[watcher] reviewer-account-held repo=${repoPath} pr=${prNumber} reason=${result.error || 'unknown'}`);
+    try { recordCascadeFailure(rootDir, { repo: repoPath, prNumber, failureClass: 'reviewer-account-held',
+      reviewerModel, headSha: reviewerHeadSha, failureReason: result.error || 'unknown' }); }
+    catch { log.warn('[watcher] reviewer account hold backoff persistence failed'); }
     withSqliteBusyRetrySync(
       () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
       { label: `reviewer-account-held:${repoPath}#${prNumber}`, log },

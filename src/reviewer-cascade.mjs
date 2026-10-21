@@ -293,6 +293,7 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'launchctl-bootstrap' ||
     value === 'quota-exhausted' ||
     value === 'broker-unavailable' ||
+    value === 'reviewer-account-held' ||
     value === 'github-unavailable' ||
     value === 'deploy-wedge' ||
     value === 'reviewer-output' ||

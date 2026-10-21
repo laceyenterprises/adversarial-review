@@ -42,8 +42,12 @@ function wireFor(family, suffix = 'declared-preference', requestId = 'session') 
 }
 async function selectWire(wire, extra = {}) {
   assert.equal(typeof pool.selectReviewerTokenAccount, 'function');
-  return pool.selectReviewerTokenAccount({ reviewerModel: wire.request.family, requestId: 'session', acquire: true,
-    oauth: wire.oauth, model: wire.request.requested_models[0], env: {}, ownerImpl: async () => wire, ...extra });
+  const rootDir = extra.rootDir || mkdtempSync(join(tmpdir(), 'reviewer-select-'));
+  try {
+    return await pool.selectReviewerTokenAccount({ reviewerModel: wire.request.family, requestId: 'session', acquire: true,
+      rootDir, oauth: wire.oauth, model: wire.request.requested_models[0], env: {},
+      ownerImpl: async value => value.operation === 'release' ? { ok: true, operation: 'release' } : wire, ...extra });
+  } finally { if (!extra.rootDir) rmSync(rootDir, { recursive: true, force: true }); }
 }
 
 for (const family of ['claude', 'codex']) {
@@ -72,7 +76,7 @@ for (const family of ['claude', 'codex']) {
     const second = await selectWire(wireFor(family));
     assert.notEqual(first.tokenAccountId, second.tokenAccountId);
     const calls = [];
-    await pool.updateReviewerTokenLease(first, 'renew', { ownerImpl: async value => calls.push(value) });
+    await pool.updateReviewerTokenLease(first, 'renew', { ownerImpl: async value => { calls.push(value); return { ok: true, operation: value.operation }; } });
     assert.equal(calls[0].lease.account_id, first.tokenAccountId);
     const context = { reviewerModel: family, reviewerAccountReceipt: first,
       codexBrokerProvider: 'codex-corp', claudeBrokerProvider: 'claude-code-corp' };
@@ -127,7 +131,12 @@ test('ITP-12 malformed owner leases and request substitution hold without leakin
   ]) {
     const wire = wireFor('codex');
     mutate(wire);
-    const result = await selectWire(wire);
+    const operations = [];
+    const result = await selectWire(wire, { ownerImpl: async value => {
+      operations.push(value.operation);
+      return value.operation === 'release' ? { ok: true, operation: 'release' } : wire;
+    } });
+    assert.deepEqual(operations, ['acquire', 'release']);
     assert.equal(result.hold, true);
     assert.ok(!JSON.stringify(result).includes('synthetic-secret'));
   }
@@ -155,7 +164,7 @@ test('ITP-12 undeclared reviewer pools preserve legacy routing without contactin
     ownerImpl: () => assert.fail('undeclared pools must stay offline') }), null);
 });
 
-for (const describe of [() => ({ id: 'agent-os-hq' }), () => ({}), undefined]) test('ITP-12 unsupported or unidentified runtime holds without dispatching a falsely attributed account', async () => {
+for (const describe of [() => ({ id: 'fixture-stub' }), () => ({ id: 'agent-os-hq' }), () => ({}), undefined]) test('ITP-12 unsupported or unidentified runtime holds without dispatching a falsely attributed account', async () => {
   const receipt = await selectWire(wireFor('codex'));
   const operations = [];
   const result = await spawnReviewer({ reviewerModel: 'codex', builderTag: 'claude-code',
@@ -177,7 +186,7 @@ test('ITP-12 a declaration change during lease acquisition releases the unstarte
   const operations = [];
   const result = await pool.selectReviewerTokenAccount({ reviewerModel: 'codex', requestId: 'session',
     model: 'gpt-6', acquire: true, env: {}, resolvePoolsImpl: () => reads++ ? changed : wire.oauth,
-    ownerImpl: async value => { operations.push(value.operation); return wire; } });
+    ownerImpl: async value => { operations.push(value.operation); return value.operation === 'release' ? { ok: true, operation: 'release' } : wire; } });
   assert.equal(result.hold, true);
   assert.equal(result.reason, 'evidence-generation-mismatch');
   assert.deepEqual(operations, ['acquire', 'release']);
@@ -240,6 +249,7 @@ for (const family of ['claude', 'codex']) test(`ITP-12 ${family} receipt survive
       completeReviewerPassImpl: (_, value) => metadata.push(value.metadata),
       readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
       onPostOperationSettled: value => { settled = value; },
+      accountBindingRuntimeIds: ['fixture-stub'],
       reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'fixture-stub' }), async spawnReviewer(req) {
         requestContext = req.subjectContext;
         writeReviewerRunRecord(root, { sessionUuid: 'session', state: 'completed', subjectContext: req.subjectContext });
@@ -274,6 +284,7 @@ for (const recordKind of ['missing', 'unreadable']) test(`ITP-12 ${recordKind} r
       quotaCheckEnv: {}, readReviewerQuotaDecisionImpl: async () => ({ available: true }),
       beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
       readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
+      accountBindingRuntimeIds: ['fixture-stub'],
       reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'fixture-stub' }),
         spawnReviewer: async () => ({ ok: false, failureClass: 'unknown', error: 'failed before launch' }) },
     });
@@ -328,14 +339,14 @@ test('ITP-12 reattach renews the original receipt and releases only after confir
       probeSession: () => ({ alive, matched: true }), fetchHeadSha: async () => 'head-1',
       findPostedReview: async () => null,
       onTerminalDeadSession: async () => calls.push('drained'),
-      updateReviewerTokenLeaseImpl: async (value, operation) => calls.push([value.tokenAccountId, operation]),
+      findReviewerProcess: () => ({ found: false }),
+      updateReviewerTokenLeaseImpl: async (value, operation) => calls.push([value.lease.account_id, operation]),
     };
     await reconcileReviewerSessions(options);
     assert.deepEqual(calls, [[receipt.tokenAccountId, 'renew']]);
     alive = false;
     await reconcileReviewerSessions(options);
-    assert.deepEqual(calls, [[receipt.tokenAccountId, 'renew'], [receipt.tokenAccountId, 'renew'],
-      'drained', [receipt.tokenAccountId, 'release']]);
+    assert.deepEqual(calls, [[receipt.tokenAccountId, 'renew'], [receipt.tokenAccountId, 'release'], 'drained']);
     assert.deepEqual(readReviewerRunRecord(root, 'session').subjectContext.reviewerAccountReceipt, receipt);
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });

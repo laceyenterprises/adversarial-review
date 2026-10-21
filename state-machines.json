@@ -136,6 +136,15 @@
     },
     {
       "id": "reviewer-run",
+      "capacityRecovery": {
+        "journal": "data/reviewer-token-leases/<sessionUuid>.json",
+        "intentBeforeAcquire": true,
+        "receiptBeforePassAndSpawn": true,
+        "positiveLeaseAcknowledgements": true,
+        "releaseGuard": "confirmed PGID/session drain, independent of run record and delivery state; failed operations retain journal for retry",
+        "recoveryConcurrency": 4,
+        "unlimitedByStaleRowCap": true
+      },
       "owner": "reviewer runtime",
       "codeSources": [
         "src/reviewer-token-pool.mjs",

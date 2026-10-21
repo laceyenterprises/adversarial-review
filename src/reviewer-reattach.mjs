@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
-import { updateReviewerTokenLease } from './reviewer-token-pool.mjs';
+import { reviewerPoolOwner, updateReviewerTokenLease } from './reviewer-token-pool.mjs';
+import { journalReviewerTokenLease, forgetReviewerTokenLease, reconcileReviewerTokenLeases } from './reviewer-token-leases.mjs';
 import {
   loginsMatch,
   resolveReviewerBotLogin,
@@ -544,11 +545,25 @@ async function reconcileReviewerSessions({
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
   recordReviewLatencyEventImpl = recordReviewLatencyEvent,
   updateReviewerTokenLeaseImpl = updateReviewerTokenLease,
+  reviewerPoolOwnerImpl = reviewerPoolOwner,
 } = {}) {
   const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0
     ? Number(maxRows)
     : Number.POSITIVE_INFINITY;
-  const matchingRows = statements.listReviewing.all().filter((row) => shouldReconcileRow(row, now));
+  const allRows = statements.listReviewing.all();
+  // Seed legacy receipts, then renew/release independently of row selection.
+  for (const row of allRows) {
+    const receipt = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext?.reviewerAccountReceipt;
+    if (receipt) {
+      try { journalReviewerTokenLease(rootDir, row.reviewer_session_uuid, receipt.identity, receipt.lease, row.reviewer_pgid); }
+      catch { log.warn('[watcher] reviewer account lease journal write unavailable'); }
+    }
+  }
+  const releasedAccountSessions = await reconcileReviewerTokenLeases({ rootDir, rows: allRows, now, log,
+    readRecord: sessionUuid => readReviewerRunRecordBestEffort(rootDir, { reviewer_session_uuid: sessionUuid }),
+    probeAlive, findProcess: findReviewerProcess, ownerImpl: reviewerPoolOwnerImpl,
+    updateLease: updateReviewerTokenLeaseImpl });
+  const matchingRows = allRows.filter((row) => shouldReconcileRow(row, now));
   // Lifecycle sync may have just closed a PR whose reviewer is still live.
   // Start with terminal claims, then share a capped poll with stale open rows.
   const rows = selectReconcileRows(db, matchingRows, limit);
@@ -558,8 +573,16 @@ async function reconcileReviewerSessions({
   onTerminalDeadSession = async event => {
     const receipt = readReviewerRunRecordBestEffort(rootDir, event.row)?.subjectContext?.reviewerAccountReceipt;
     await terminalCallback(event);
-    if (receipt) {
-      try { await updateReviewerTokenLeaseImpl(receipt, 'release'); }
+    if (receipt && !releasedAccountSessions.has(event.row.reviewer_session_uuid)) {
+      try {
+        journalReviewerTokenLease(rootDir, event.row.reviewer_session_uuid, receipt.identity, receipt.lease, event.row.reviewer_pgid);
+        const pgid = event.row.reviewer_pgid;
+        if (pgid && probeAlive(pgid)) return;
+        const found = findReviewerProcess(event.row.reviewer_session_uuid);
+        if (found?.found !== false) return;
+        await updateReviewerTokenLeaseImpl(receipt, 'release', { rootDir });
+        forgetReviewerTokenLease(rootDir, event.row.reviewer_session_uuid);
+      }
       catch { log.warn('[watcher] reviewer account release unavailable after confirmed process drain'); }
     }
   };
@@ -614,11 +637,6 @@ async function reconcileReviewerSessions({
   }
 
   for (const listedRow of rows) {
-    const accountReceipt = readReviewerRunRecordBestEffort(rootDir, listedRow)?.subjectContext?.reviewerAccountReceipt;
-    if (accountReceipt) {
-      try { await updateReviewerTokenLeaseImpl(accountReceipt, 'renew'); }
-      catch { log.warn('[watcher] reviewer account renewal unavailable during recovery; binding retained'); }
-    }
     let row = listedRow;
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';

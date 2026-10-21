@@ -1065,8 +1065,10 @@ observations do not rewrite/log another transition, and closeout wakes settle as
 cannot act. Ceiling wake admission is independent of the legacy exhaustion
 dispatch reason or exhaustion snapshot. No review round or merge authority is added.
 
-<a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
-merges autonomously and the bare remote records that SHA. The synthetic commit
+<a id="smv-clean"></a>**smv-clean:** synthetic reviewer lease intents survive a lost
+transport response, failed release stays retryable, and live leases renew until
+process drain is confirmed, independently of delivery rows. An approved
+exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
 <a id="smv-handoff"></a>**smv-handoff:** null same-repository head metadata
@@ -1540,21 +1542,40 @@ settlement results and reviewer-pass metadata. Native auth preparation and refre
 use its provider even if preference recovers or inherited environment changes.
 Renewals use the original account/lease/generation every 60 seconds, and restart
 reconciliation renews the same receipt. Only confirmed drain releases capacity;
-an active run record, uncertain exception or failed release retains the broker
-slot for recovery/operator inspection. Broker expiry alone never frees it.
-After a resolved spawn attempt, a missing run record returns `null` and releases
-the lease; an unreadable record retains it because process drain is uncertain.
+an active process or failed release retains the broker slot for recovery.
+Broker expiry alone never frees it. Before acquisition, a durable journal records
+the session request ID. Any receipt returned is journaled before pass/spawn writes.
+Validation/serialization failures release best-effort; killed transports and
+pre-launch exceptions remain discoverable through broker diagnostics by request
+ID, even without a run record. After a resolved attempt, terminal or missing run
+records permit release; corrupt records defer to the journal's process probes.
+The independent recovery sweep runs before capped row reconciliation with four
+transports at a time, including terminal/missing rows and runs beyond the row cap.
+It renews live bindings and releases only after PGID/session probes confirm drain.
+A 60-second launch grace protects receipts without a PGID. Unknown probes or
+failed operations log a warning and retain the journal for the next sweep.
+Renew/release require explicit positive acknowledgements; transport exceptions,
+fence loss and hold responses cannot count as success.
 Typed quota exhaustion writes a bounded cooldown for the selected account before
 settlement; sibling accounts remain eligible for subsequent attempts.
 
-There are no new lifecycle states or smoke promises. Account holds release the
-existing session claim without spending retry budgets; the existing sandbox smoke
-does not enroll live accounts. See [run-record data](docs/data-model/reviewer-run-records.md)
-and [account cooldowns](docs/data-model/reviewer-account-cooldowns.md). Offline
+Unreadable OAuth declarations log the role and routing decision. A durable
+last-good reviewer enrollment record keeps undeclared roles on legacy routing
+through unrelated config errors, while previously enrolled roles hold with
+`pool-configuration-unreadable`. A corrupt enrollment record holds conservatively.
+Account holds log repo, PR and reason, release the claim without charging review
+attempts, and use the existing 1/2/4/8/15-minute per-PR cascade backoff before the
+next claim. Correct the declarations/evidence and allow that bounded backoff to
+expire; no account is silently reselected on a live lease.
+
+There are no new delivery or runtime states. The sandbox smoke checks journal
+recovery and retry with synthetic leases; it does not enroll live accounts. See [run-record data](docs/data-model/reviewer-run-records.md)
+and [lease/enrollment recovery](docs/data-model/reviewer-token-leases.md).
+See also [account cooldowns](docs/data-model/reviewer-account-cooldowns.md). Offline
 consumer checks and opt-in owner integration (temporary fixtures, no live broker):
 
 ```sh
-node test/run-tests.mjs reviewer-token-pool.test.mjs
+node test/run-tests.mjs reviewer-token-pool.test.mjs reviewer-token-lease-recovery.test.mjs
 python3 -I -B test/verify-reviewer-token-owner.py /path/to/registered/agent-os
 ```
 
@@ -1568,3 +1589,5 @@ capacity incorrectly in 100/100 duplicate-spawn replays; the guarded version
 retains capacity in 100/100 replays. The opt-in owner tests also pin CLC's
 primary reserve refusal to the canonical policy flags, so a generic non-coding
 task exemption cannot silently admit the primary account below its reserve.
+They also run the real `propose` with only registry/evidence/broker boundaries
+injected, verifying the minimal daemon shim and JSON row payload offline.

@@ -2,6 +2,21 @@
   "version": 1,
   "entries": [
     {
+      "id": "reviewer-token-leases",
+      "title": "Reviewer Token Lease Recovery and Enrollment",
+      "path": "docs/data-model/reviewer-token-leases.md",
+      "store": "data/reviewer-token-leases/<sessionUuid>.json and data/reviewer-pool-declarations.json",
+      "schemaSurface": "src/reviewer-token-leases.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-token-pool.mjs",
+        "src/reviewer-spawn-settle.mjs",
+        "src/reviewer-reattach.mjs",
+        "src/adapters/reviewer-runtime/token-pool-owner.py"
+      ],
+      "timestampSource": "createdAt is first acquisition intent's local ISO timestamp; no TTL deletion",
+      "owner": "reviewer orchestration and broker execution owner"
+    },
+    {
       "id": "reviewer-account-cooldowns",
       "title": "Reviewer Account Cooldowns",
       "path": "docs/data-model/reviewer-account-cooldowns.md",
@@ -831,7 +846,8 @@
         "src/reviewer-reattach.mjs",
         "src/reviewer-spawn-settle.mjs",
         "src/agy-reviewer-identities.mjs",
-        "src/watcher-reviewer-pool.mjs"
+        "src/watcher-reviewer-pool.mjs",
+        "src/reviewer-token-leases.mjs"
       ],
       "owner": "reviewer runtime adapters and agy identity lease recovery"
     },

@@ -17,7 +17,30 @@ def execute(value):
     client = BrokerExecutionClient()
     operation = value["operation"]
     if operation in {"renew", "release"}:
-        return getattr(client, operation)(value["lease"])
+        result = getattr(client, operation)(value["lease"])
+        # Broker renew returns {lease: ...}; release returns {released: true}.
+        positive = (
+            isinstance(result, dict)
+            and (
+                result.get("released") is True
+                if operation == "release"
+                else bool(result.get("lease"))
+            )
+        )
+        if not positive:
+            raise RuntimeError("lease operation failed")
+        return {"ok": True, "operation": operation}
+    if operation == "recover":
+        matches = [
+            lease
+            for lease in client.diagnostics()["active"]
+            if lease["request_id"] == value["requestId"]
+        ]
+        if len(matches) > 1 or any(
+            lease["identity"] != value["identity"] for lease in matches
+        ):
+            raise RuntimeError("ambiguous execution receipt")
+        return {"ok": True, "lease": matches[0] if matches else None}
 
     from cwp_dispatch.quota_recovery import QuotaRecoveryMixin
     from cwp_dispatch.quota_reserve import snapshot
@@ -29,7 +52,7 @@ def execute(value):
         "worker_class": value["identity"],
         "launch_request_id": value["requestId"],
         "task_type": "review",
-        "request_payload_json": {"workerModel": value["model"]},
+        "request_payload_json": json.dumps({"workerModel": value["model"]}),
     }
     reserve_state = snapshot(daemon.hq_root)
     proposal = propose(
@@ -102,26 +125,44 @@ def execute(value):
             # loss is capacity pressure, never quota exhaustion or permission
             # to use an unleased account.
             return {"held": "capacity-saturated"}
-    return {
-        "oauth": value["oauth"],
-        "request": {
-            "identity": value["identity"],
-            "family": value["family"],
-            "identity_models": list(proposal.identity_models),
-            "requested_models": [value["model"]],
-            "generation": result["generation"],
-            "now": __import__("time").time(),
-            "snapshot": proposal.snapshot,
-        },
-        "selection": result,
-        "lease": lease,
-    }
+    try:
+        response = {
+            "oauth": value["oauth"],
+            "request": {
+                "identity": value["identity"],
+                "family": value["family"],
+                "identity_models": list(proposal.identity_models),
+                "requested_models": [value["model"]],
+                "generation": result["generation"],
+                "now": __import__("time").time(),
+                "snapshot": proposal.snapshot,
+            },
+            "selection": result,
+            "lease": lease,
+        }
+        json.dumps(response, allow_nan=False)
+        return response
+    except Exception:
+        if lease is not None:
+            # The Node pre-acquire intent recovers this fence from broker
+            # diagnostics if release also fails or the transport is killed.
+            try:
+                if not client.release(lease):
+                    raise RuntimeError("lease release failed")
+            except Exception:
+                pass
+        raise
 
 
 if __name__ == "__main__":
+    value = {}
     try:
-        print(json.dumps(execute(json.load(sys.stdin)), allow_nan=False))
+        value = json.load(sys.stdin)
+        print(json.dumps(execute(value), allow_nan=False))
     except Exception:
         # Dependencies, evidence and broker errors hold admission. Do not echo
         # exception diagnostics: downstream owners may include private values.
+        if value.get("operation") in {"renew", "release", "recover"}:
+            print(json.dumps({"error": "lease-operation-failed"}))
+            sys.exit(1)
         print(json.dumps({"held": "evidence-unknown"}))

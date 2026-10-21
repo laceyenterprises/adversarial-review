@@ -43,7 +43,11 @@ the receipt's provider; preference changes never rewrite it. Watcher renewal and
 startup reconciliation use the original lease fence. An active record retains
 occupancy even when a duplicate adapter invocation returns. Recovery releases
 only after confirming process drain, and keeps the receipt in the terminal record.
-Expiry or an unreadable record cannot authorize a different account or release.
+Expiry cannot authorize a different account or release. A separate
+`data/reviewer-token-leases/` journal survives missing/corrupt run records and
+terminal delivery rows; reconciliation probes the recorded PGID and session UUID
+before releasing. Unknown process evidence retains the journal for retry.
+See [reviewer token leases](reviewer-token-leases.md).
 This adds metadata to the existing states, without a new state or SQL migration.
 
 ## Lease recovery contract (CCX-08)

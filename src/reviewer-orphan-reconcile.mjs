@@ -73,6 +73,7 @@ const NULL_PGID_LAUNCH_GRACE_MS = 60 * 1000;
 // subprocesses are admitted.
 export async function reconcileOrphanedReviewing(octokit) {
   return reconcileReviewerSessions({
+    rootDir: ROOT,
     db,
     octokit,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,

@@ -36,6 +36,7 @@
   "steps": [
     {
       "id": "clean",
+      "description": "Synthetic broker receipt recovery survives a lost acquire response without a delivery row or run record; live processes renew, failed releases retain the journal, and confirmed drain retries release with a positive acknowledgement. No live broker or enrollment.",
       "promise": "smv-clean",
       "edges": [
         "review-row.23",

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { journalReviewerTokenLease, forgetReviewerTokenLease, markReviewerTokenLeaseActive } from './reviewer-token-leases.mjs';
 
 function cooldownPath(rootDir, accountId, env) {
   return join(resolveAdversarialReviewStateDir(rootDir, env), 'reviewer-account-cooldowns',
@@ -67,16 +68,42 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
   model = null,
   rootDir = fileURLToPath(new URL('..', import.meta.url)),
   resolvePoolsImpl = resolveIdentityTokenPools,
-  ownerImpl = reviewerPoolOwner } = {}) {
+  ownerImpl = reviewerPoolOwner, log = console } = {}) {
   const family = normalizeReviewerModel(reviewerModel);
   if (!['claude', 'codex'].includes(family)) return null;
   const identity = `${family}-reviewer`;
   const fromConfig = oauth === null;
+  const declarationPath = join(rootDir, 'data', 'reviewer-pool-declarations.json');
+  if (fromConfig) {
+    try {
+      oauth = resolvePoolsImpl({ env });
+      const identities = Object.keys(oauth.identity_token_pools).filter(id => ['claude-reviewer', 'codex-reviewer'].includes(id));
+      const value = JSON.stringify({ identities });
+      let previous;
+      try { previous = readFileSync(declarationPath, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (previous !== value) writeFileAtomic(declarationPath, value);
+    } catch {
+      // An unrelated declaration error must not enroll legacy roles. Once a
+      // role has enrolled, retain its fail-closed boundary across restarts.
+      let declared = Boolean(oauth?.identity_token_pools && Object.hasOwn(oauth.identity_token_pools, identity));
+      try { declared ||= JSON.parse(readFileSync(declarationPath, 'utf8')).identities.includes(identity); }
+      catch (error) { declared ||= error.code !== 'ENOENT'; }
+      log.warn(`[watcher] reviewer pool configuration unreadable identity=${identity} routing=${declared ? 'hold' : 'legacy'}`);
+      return declared ? { hold: true, reason: 'pool-configuration-unreadable', identity, pooled: true } : null;
+    }
+  }
+  let acquiredLease = null;
+  let admitted = false;
+  let journaled = false;
   try {
-    oauth ??= resolvePoolsImpl({ env });
     if (!Object.hasOwn(oauth.identity_token_pools, identity)) return null;
     model ??= resolveRemediationModel(identity, { env,
       ...(family === 'codex' ? { pin: env.CODEX_MODEL_ID || null } : {}), fallbackModel: null }).resolvedModel;
+    if (acquire) {
+      journalReviewerTokenLease(rootDir, requestId, identity);
+      journaled = true;
+      markReviewerTokenLeaseActive(rootDir, requestId, true);
+    }
     const wire = await ownerImpl({ operation: acquire ? 'acquire' : 'propose', oauth,
       identity, family, model, requestId, hqRoot: resolveHqRoot(env),
       blockedAccountIds: oauth.identity_token_pools[identity].filter(id => {
@@ -85,6 +112,8 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
       }),
       unknownCooldownAccountIds: oauth.identity_token_pools[identity].filter(id => readReviewerAccountCooldown(rootDir, id, { env })?.unknown),
     }, { env });
+    acquiredLease = acquire ? wire.lease : null;
+    if (acquiredLease) journalReviewerTokenLease(rootDir, requestId, identity, acquiredLease);
     if (wire.held) return { hold: true, reason: wire.held, identity, pooled: true };
     // Never validate against an owner-supplied substitute declaration/request.
     const request = wire.request;
@@ -108,15 +137,28 @@ export async function selectReviewerTokenAccount({ reviewerModel, requestId = 'r
       throw new Error('reviewer pool lease mismatch');
     }
     if (fromConfig && !isDeepStrictEqual(oauth, resolvePoolsImpl({ env }))) {
-      if (lease) await ownerImpl({ operation: 'release', lease }, { env });
       return { hold: true, reason: 'evidence-generation-mismatch', identity, pooled: true };
     }
+    admitted = true;
     return Object.freeze({ hold: false, pooled: true, identity, provider: account.broker_provider,
       brokerProvider: account.broker_provider,
       reason: selection.reason, tokenAccountId: selection.account_id,
       evidenceGeneration: selection.generation, selection, lease: lease ? Object.freeze({ ...lease }) : null });
   } catch {
     return { hold: true, reason: 'evidence-unknown', identity, pooled: true };
+  } finally {
+    if (journaled) markReviewerTokenLeaseActive(rootDir, requestId, false);
+    if (!admitted && acquiredLease) {
+      try {
+        await updateReviewerTokenLease({ lease: acquiredLease }, 'release', { env, ownerImpl });
+        forgetReviewerTokenLease(rootDir, requestId);
+      } catch {
+        try { journalReviewerTokenLease(rootDir, requestId, identity, null); } catch {}
+        log.warn(`[watcher] reviewer account lease release unavailable session=${requestId}; journal retained`);
+      }
+    }
+    // Unknown transport outcomes keep the pre-acquire intent for diagnostics
+    // recovery, even when no receipt ever made it across stdio.
   }
 }
 
@@ -139,5 +181,13 @@ export function reviewerBrokerProviders(context = {}) {
 export async function updateReviewerTokenLease(receipt, operation, options = {}) {
   if (!receipt?.lease) return null;
   if (!['renew', 'release'].includes(operation)) throw new Error('invalid reviewer lease operation');
-  return (options.ownerImpl || reviewerPoolOwner)({ operation, lease: receipt.lease }, options);
+  const { rootDir } = options;
+  const sessionUuid = receipt.lease.request_id;
+  if (operation === 'release' && rootDir && sessionUuid) {
+    journalReviewerTokenLease(rootDir, sessionUuid, receipt.identity || receipt.lease.identity, receipt.lease);
+  }
+  const result = await (options.ownerImpl || reviewerPoolOwner)({ operation, lease: receipt.lease }, options);
+  if (result?.ok !== true || result.operation !== operation) throw new Error('reviewer lease operation failed');
+  if (operation === 'release' && rootDir && sessionUuid) forgetReviewerTokenLease(rootDir, sessionUuid);
+  return result;
 }

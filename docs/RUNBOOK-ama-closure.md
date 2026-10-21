@@ -1363,6 +1363,18 @@ The surface `status` is one of five values (SPEC §4.4):
 | `succeeded` | Fresh post-CLI GitHub state proves the authorized head merged. **TERMINAL — STICKY.** The writer refuses to demote this to anything else. | None. Verify the trailers via `git show`. |
 | `failed-without-merge` | A merge attempt was made, GitHub still shows the PR open/unmerged after post-CLI reconciliation, and the failure is not a normal defer/supersede. | Inspect `attempts[].cliExitCode` and the closer worker's stderr via `hq dispatch logs <lrq>`. Common cause: branch protection mismatch — re-check §1 prerequisite. |
 
+HAMSELFREBASE-01 keeps the hammer's own successful server-side rebase in the
+same merge attempt. Verify-head fetches the exact returned head, detaches the
+scratch checkout, synchronizes initialized submodules, and records
+`HAM_PRODUCED_HEAD`. It refuses to carry dirty tracked files into that checkout.
+Run changed-surface tests there when `needsRevalidation` is true, then publish
+the attestation and use the existing bounded required-check wait and exact-head
+merge under the merge lease in this run. The existing pending-CI release and
+reacquisition stay unchanged. Publish's initial live-head comparison and its
+recovered-attestation comparison both use the produced head. A foreign push
+still stops with `head-changed`; sync failures release without attesting or
+merging. Rebase conflicts retain the existing lease-release conflict procedure.
+
 HAM-03 stale-head / behind recovery stores its bounded rebase counter in this
 same audit history. The closer initializes the live `Rebase-Attempts` value
 from the maximum prior `attempts[].rebaseAttempts` for the PR/head instead of

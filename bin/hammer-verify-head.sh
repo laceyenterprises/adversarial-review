@@ -541,7 +541,18 @@ elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required s
 fi
 echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
 
+# Keep this identity across verify/publish/merge in the persistent shell. Only
+# our successful publication or server-side rebase may replace it.
+HAM_PRODUCED_HEAD=$(git rev-parse HEAD) || return 1
+export HAM_PRODUCED_HEAD
 while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
+  if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
+    HAM_PHASE_OUTCOME=head-changed
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the hammer-produced head; released for the next hammer pass."
+    ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
+    ham_release_merge_lease || return 1
+    return 20
+  fi
   # STOP CHASING A MOVING BASE (agent-os#5464). Once we have rebased onto a recent
   # base at least once (HAM_REBASE_ATTEMPTS>=1) and (a) the base has no strict
   # up-to-date rule, (b) the PR is MERGEABLE, and (c) the newer base does not touch
@@ -593,6 +604,20 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
   fi
   ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
+  # Fetch the exact result, never a branch tip that a later author push could
+  # move. Refuse dirty tracked files rather than carrying them onto that head.
+  if ! ham_is_full_sha "$POST_REMEDIATION_SHA" \
+    || ! git diff --quiet || ! git diff --cached --quiet \
+    || ! ham_bounded_git_sync "$POST_REMEDIATION_SHA" \
+    || ! git checkout --detach "$POST_REMEDIATION_SHA" \
+    || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive \
+    || [ "$(git rev-parse HEAD)" != "$POST_REMEDIATION_SHA" ]; then
+    echo "HAM hard-blocker: cannot sync scratch checkout to the server-rebased head" >&2
+    HAM_PHASE_OUTCOME=rebased-head-sync-failed
+    ham_release_merge_lease || return 1
+    return 1
+  fi
+  HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then

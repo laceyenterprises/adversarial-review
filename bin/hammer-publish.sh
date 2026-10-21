@@ -105,9 +105,14 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   ham_publish_abort 1; return 1
 fi
 HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
-if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ]; then
+HAM_PRODUCED_HEAD="${HAM_PRODUCED_HEAD:-$HAM_BUILT_HEAD}"
+if [ "$HAM_BUILT_HEAD" != "$HAM_PRODUCED_HEAD" ]; then
+  echo "HAM hard-blocker: local checkout differs from the hammer-produced head; revalidate before publishing" >&2
+  ham_publish_abort 1; return 1
+fi
+if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
   HAM_PHASE_OUTCOME=head-changed
-  HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the built head; released for the next hammer pass."
+  HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the hammer-produced head; released for the next hammer pass."
   ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
   ham_publish_abort 20; return 20
 fi
@@ -134,7 +139,7 @@ if [ -n "$HAM_RECOVERED_BODY" ]; then
       <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" '<!-- hq:ham-recovered-attestation -->') || return 1
     [ -z "$existing" ] || return 0
     current=$(ham_pr --json headRefOid --jq '.headRefOid') || return 1
-    [ "$current" = "$POST_REMEDIATION_SHA" ] || {
+    [ "$current" = "$HAM_PRODUCED_HEAD" ] || {
       HAM_RECOVERY_HEAD_CHANGED=1
       echo "pending attestation head changed; releasing for the next hammer pass" >&2
       return 1
@@ -344,6 +349,8 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   elif [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = published ]; then
     HAM_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.head')
   fi
+  HAM_PRODUCED_HEAD="$HAM_PUSHED_HEAD"
+  export HAM_PRODUCED_HEAD
   unset HAM_REMOTE_CI_STARTED_AT
   HAM_NO_MERGE_NOTE=""
   HAM_HEAD_WAITED_SECONDS=0

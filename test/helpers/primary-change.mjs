@@ -99,7 +99,7 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
           ...(status === 'R100' ? { additions: 0, deletions: 0 } : {}) };
       });
       data = { ...commit(sha), files };
-      if (args.at(-1) === '{sha, verification: .commit.verification}') data = { sha, verification };
+      if (args[args.indexOf('--jq') + 1] === '{sha, verification: .commit.verification}') data = { sha, verification };
       else delete data.commit.verification;
     } else if (path.includes('/comments') || path.includes('/reviews')) data = [];
     else throw new Error(`Unexpected fixture read: ${path}`);

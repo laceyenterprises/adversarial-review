@@ -1,4 +1,5 @@
 import { createHistoryReader } from './history-reader.mjs';
+import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // NOOWNER-01 (SEV1) — after a hammer stops without merging, the next hammer
@@ -293,9 +294,9 @@ export function readHammerStopForHead({
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     reasons: stopReasons(attempt),
     refusal: deterministicRefusal(attempt, { repo, prNumber, headSha }),
-    closingStatus: oneLine(attempt?.closingStatus),
+    closingStatus: oneLine(attempt?.closingStatus, attempt?.reason === 'history-read-failed' ? HISTORY_READ_ERROR_LIMIT : TEXT_LIMIT),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
-      ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason) } : {}),
+      ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason, HISTORY_READ_ERROR_LIMIT) } : {}),
     next: oneLine(attempt?.next),
     recordedAt: attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || null,
     stopKey: `${latest.fileHead}:${attempt?.attemptNumber ?? latest.order}:${attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || ''}`,

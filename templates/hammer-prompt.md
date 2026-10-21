@@ -185,6 +185,8 @@ includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk sum
 If primary evidence is missing or unsupported, stop before remediation and report
 `primaryChange.reason`. For `history-read-failed` / `historyReadFailed: true`,
 audit that reason with `noExecution: true` and the underlying `historyReadError`.
+Keep the reader's full bounded error (up to 2,000 characters, including stderr)
+in `historyReadError` and the closing-status summary; do not shorten it to 300 characters.
 Release the lease and abort retryably under the per-PR cap (two per series,
 lifetime six); do not park or retain a stop hold. Otherwise audit `deferred`
 with reason `primary-change-unknown`. Never replace the original author head.

@@ -39,6 +39,8 @@ function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   // Keep the extensionless CommonJS fixture independent of TMPDIR's package scope.
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }));
+  writeFileSync(join(root, 'load.mjs'), "import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n");
+  writeFileSync(join(root, 'top.yaml'), 'version: 1\n');
   const callsFile = join(root, 'calls.json');
   writeFileSync(callsFile, '[]');
   // A PATH-local gh fixture makes the real CLI and retry helper run offline.
@@ -71,6 +73,7 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
     // This deliberately minimal environment does not inherit the runner's
     // state isolation. Bind the metered CLI's shared state to this fixture too.
     env: { PATH: root + ':/usr/bin:/bin', HOME: root, TMPDIR: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
+      NODE_OPTIONS: `--import=${join(root, 'load.mjs')}`, AGENT_OS_CONFIG_PATH: join(root, 'top.yaml'),
       GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json') },
   });
   assert.ifError(result.error);
@@ -118,6 +121,25 @@ test('primary-change CLI does not retry permanent permission errors', (t) => {
   assert.equal(result.status, 1, result.stderr);
   assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'history-read-failed');
   assert.deepEqual(result.calls, [['api', prPath]]);
+});
+
+test('primary-change CLI does not retry a missing endpoint', t => {
+  const result = runCli(t, [{ path: prPath, error: 'gh: Not Found (HTTP 404)' }]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(JSON.parse(result.stdout).historyReadFailed, true);
+  assert.deepEqual(result.calls, [['api', prPath]]);
+});
+
+test('primary-change CLI retains long transport stderr up to 2000 characters', t => {
+  const cause = `${'synthetic request detail '.repeat(25)}egress-proxy: upstream connect failed`;
+  const result = runCli(t, Array.from({ length: 3 }, () => ({ path: prPath,
+    error: `${cause}\n${'x'.repeat(3000)}` })));
+  assert.equal(result.status, 1, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.historyReadFailed, true);
+  assert.equal(parsed.reason.length, 2000);
+  assert.match(parsed.reason, /egress-proxy: upstream connect failed/);
+  assert.deepEqual(result.calls, Array.from({ length: 3 }, () => ['api', prPath]));
 });
 
 test('primary-change CLI fails closed on malformed JSON without retrying the successful read', (t) => {

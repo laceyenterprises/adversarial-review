@@ -6,6 +6,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
+import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs } from './history-read-policy.mjs';
+import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
@@ -15,7 +17,16 @@ const commitFields = '{sha, commit: {message: .commit.message, author: .commit.a
 // subtrees) and diff one changed blob pair at a time. Never buffer a compare's
 // patches, and never treat a server cap as a complete protected file list.
 export function createHistoryReader(options = {}) {
-  const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execFileAsync, ...ghOptions } = options;
+  const { execGhWithRetryImpl = execGhWithRetry, diffImpl = execFileAsync,
+    contextTimeoutMs = HISTORY_CONTEXT_TIMEOUT_MS, nowMs = () => performance.now(), ...ghOptions } = options;
+  let deadline;
+  const remainingMs = () => {
+    ghOptions.signal?.throwIfAborted();
+    deadline ??= nowMs() + contextTimeoutMs;
+    const remaining = Math.floor(deadline - nowMs());
+    if (remaining <= 0) throw new Error('history read context budget exhausted');
+    return remaining;
+  };
   const cache = new Map();
   const json = async (path, jq = '.') => {
     try {
@@ -24,9 +35,15 @@ export function createHistoryReader(options = {}) {
       const immutable = /\/(?:git\/(?:trees|blobs)|commits)\/[0-9a-f]{40}(?:\?|$)/i.test(path)
         || /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}(?:\?|$)/i.test(path);
       const execute = async () => {
-        const { stdout } = await execGhWithRetryImpl({ ...ghOptions,
-          args: ['api', path, '--jq', jq], timeoutMs: loadAwareTimeoutMs(15000) });
-        return JSON.parse(stdout);
+        const run = () => execGhWithRetryImpl({ ...ghOptions,
+          // Include response headers so failed rate-limit reads retain the
+          // server's Retry-After; strip headers before parsing successful JSON.
+          args: ['api', path, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
+          retries: 2, retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
+        // CLI reads must defer an exhausted shared quota instead of entering an
+        // unbounded throttle sleep. Daemon callers retain their existing scope.
+        const { stdout } = await (currentGitHubBudgetScope() ? run() : withGitHubBudgetScope({}, run));
+        return JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, ''));
       };
       const env = ghOptions.env || process.env;
       return await (immutable
@@ -36,7 +53,7 @@ export function createHistoryReader(options = {}) {
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
         ? ` (output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded)` : '';
-      const error = new Error(`history read failed: ${path}${limit}: ${cause.message}`, { cause });
+      const error = new Error(historyReadErrorDetail(`history read failed: ${path}${limit}: ${historyReadErrorDetail(cause)}`), { cause });
       error.primaryChangeReadFailed = true;
       throw error;
     }
@@ -102,7 +119,7 @@ export function createHistoryReader(options = {}) {
           let patch;
           try {
             ({ stdout: patch } = await diffImpl('git', ['-c', 'core.autocrlf=false', '-c', 'core.attributesFile=/dev/null', 'diff', '--diff-algorithm=myers', '--no-indent-heuristic', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', '--', beforePath, afterPath],
-              { cwd: dir, encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: GH_LOOKUP_MAX_BUFFER, ...(ghOptions.signal ? { signal: ghOptions.signal } : {}) }));
+              { cwd: dir, encoding: 'utf8', timeout: Math.min(loadAwareTimeoutMs(15000), remainingMs()), maxBuffer: GH_LOOKUP_MAX_BUFFER, ...(ghOptions.signal ? { signal: ghOptions.signal } : {}) }));
           } catch (error) {
             if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS') {
               throw new Error(`history diff output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded for ${path}`, { cause: error });

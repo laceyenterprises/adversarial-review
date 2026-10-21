@@ -2,6 +2,7 @@ import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-
 import { createHash } from 'node:crypto';
 import { storedPrimaryChange, primaryChangeStoreOwned } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
+import { historyReadFailureReason } from './history-read-policy.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
@@ -1159,8 +1160,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       completeFileLists: primary.filesComplete === true && final.filesComplete === true,
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) {
-    const message = String(error.message || error);
-    return unknown(message.startsWith('history read failed:') ? message : `history read failed: ${message}`,
+    return unknown(historyReadFailureReason(error),
       { readFailed: true, historyReadFailed: true });
   }
 }
@@ -1286,7 +1286,7 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
         { metadata: args.get.metadata, commitVerification: args.get.commitVerification }) }));
     } catch (error) {
-      return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true, reason: String(error.message).startsWith('history read failed:') ? error.message : `history read failed: ${error.message}` };
+      return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true, reason: historyReadFailureReason(error) };
     }
   } else history = await fetchPrimaryChangeHistory(args);
   if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;

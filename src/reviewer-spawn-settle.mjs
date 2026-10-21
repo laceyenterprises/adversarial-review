@@ -1,3 +1,4 @@
+import { buildReviewerAttribution } from './reviewer-attribution.mjs';
 import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
 import { openReviewStateDb } from './review-state.mjs';
@@ -563,6 +564,7 @@ function configuredHqOwner(pool) {
 }
 
 async function spawnReviewer(args) {
+  if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;
   const env = args.quotaCheckEnv || args.env || process.env;
@@ -804,7 +806,9 @@ async function spawnReviewerOnceWithAccount({
     return {
       ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug',
       routingRefusal: true, error: normalizeReviewerModel(reviewerModel) === 'claude'
-        ? 'Claude-family reviewer cannot review a Claude-family builder' : CODEX_BUILDER_REVIEW_REFUSAL,
+        ? 'Claude-family reviewer cannot review a Claude-family builder'
+        : normalizeReviewerModel(reviewerModel) === 'gemini'
+          ? 'Gemini-family reviewer cannot review a Gemini-family builder' : CODEX_BUILDER_REVIEW_REFUSAL,
     };
   }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
@@ -913,6 +917,8 @@ async function spawnReviewerOnceWithAccount({
 
   const reviewerSpawnToken = randomUUID();
   const reviewerIdentity = resolveReviewerIdentity({ reviewerModel, botTokenEnv });
+  let reviewerAttribution = reviewerAccountReceipt
+    ? buildReviewerAttribution({ reviewerModel, reviewerAccountReceipt }) : null;
   const spawnRecord = {
     ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
     spawnToken: reviewerSpawnToken,
@@ -945,7 +951,7 @@ async function spawnReviewerOnceWithAccount({
       // budget counter keys per (repo, pr, head) — a head move re-arms review.
       headSha: reviewerHeadSha || null,
       metadata: {
-        ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
+        ...(reviewerAccountReceipt ? { reviewerAccountReceipt, reviewerAttribution } : {}),
         branch,
         builderTag,
         reviewerBuildId: REVIEWER_BUILD_ID,
@@ -979,6 +985,8 @@ async function spawnReviewerOnceWithAccount({
       pool: agyReviewerIdentityPool,
     }, async (agyIdentity, agyIdentityLease) => {
       agyIdentityUser = agyIdentityLease?.user;
+      reviewerAttribution = buildReviewerAttribution({ reviewerModel, reviewerAccountReceipt,
+        agyHolderLease: agyIdentityLease });
       onReviewerRuntimeStarted();
       const runtimeResult = await activeReviewerRuntimeAdapter.spawnReviewer({
         model: reviewerModel,
@@ -1008,6 +1016,7 @@ async function spawnReviewerOnceWithAccount({
           codexBrokerProvider,
           claudeBrokerProvider,
           reviewerAccountReceipt,
+          reviewerAttribution,
           ...(agyIdentity ? { agyIdentity } : {}),
           // Persisted in the run record so a restarted watcher keeps this
           // identity out while this review still runs.
@@ -1091,6 +1100,7 @@ async function spawnReviewerOnceWithAccount({
             ? Number(reviewDbAttemptNumber)
             : Number(reviewAttemptNumber);
           await postGitHubReviewWithCaptureImpl({
+            reviewerAttribution,
             rootDir,
             repo,
             prNumber,
@@ -1290,6 +1300,7 @@ async function spawnReviewerOnceWithAccount({
         // the writer keeps the column honest rather than storing a wrong id.
         workerRunId: resolvedWorkerRunId,
         metadata: {
+          ...(reviewerAttribution ? { reviewerAttribution } : {}),
           ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
           reviewerSessionUuid,
           launchRequestId,
@@ -1341,6 +1352,7 @@ async function spawnReviewerOnceWithAccount({
         // tagTokenUsage() normalization drops it (usually null on this path).
         workerRunId: rawErrTokenUsage?.workerRunId || null,
         metadata: {
+          ...(reviewerAttribution ? { reviewerAttribution } : {}),
           ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
           reviewerSessionUuid,
           reviewerModel,

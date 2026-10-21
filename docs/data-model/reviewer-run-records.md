@@ -97,3 +97,17 @@ in `subjectContext` for every reviewer runtime. Agent-runtime records preserve
 these alongside the runtime identity; watcher pass metadata retains both for
 post recovery. The pass reaper forwards these fields into follow-up creation,
 which holds and retries unresolved branches before any remediation worker starts.
+
+## Common attribution projection (ITP-13)
+
+New bound spawns also carry `subjectContext.reviewerAttribution`, the version-1
+projection documented in [reviewer passes](reviewer-passes.md#review-execution-attribution-itp-13).
+The CLI adapter passes only that allowlisted projection to the posting process;
+full leases and private holder transport remain in the run record.
+The CLI child and restart recovery validate and retain an existing projection;
+they do not rebuild it from the sanitized context's missing holder lease.
+Older `agyIdentityLease` and `reviewerAccountReceipt` objects remain dual-readable.
+Reattach projects their attribution into the matching pass without renaming a
+historic subject, changing signed bytes, or rewriting this run record. Account
+identity never determines the GitHub actor or HCP subject. The existing per-session
+run paths, per-review holder scratch and per-PR reply paths remain unchanged.

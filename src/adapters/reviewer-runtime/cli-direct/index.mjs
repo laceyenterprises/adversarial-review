@@ -1,3 +1,4 @@
+import { buildReviewerAttribution, validateReviewerAttribution } from '../../../reviewer-attribution.mjs';
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
 import { reviewerBrokerProviders } from '../../../reviewer-token-pool.mjs';
 import { execFile } from 'node:child_process';
@@ -206,6 +207,9 @@ function stripForbiddenFallbackEnv(env, forbiddenFallbacks = DEFAULT_FORBIDDEN_F
 
 function buildReviewerProcessArgs(subjectContext = {}) {
   return {
+    reviewerAttribution: subjectContext.reviewerAttribution
+      ? validateReviewerAttribution(subjectContext.reviewerAttribution)
+      : buildReviewerAttribution(subjectContext),
     repo: subjectContext.repo,
     prNumber: subjectContext.prNumber,
     reviewerModel: subjectContext.reviewerModel || subjectContext.model,

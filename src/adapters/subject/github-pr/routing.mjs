@@ -141,7 +141,18 @@ function getReviewerRouteTable({
 
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
   const raw = String(builderClassInput || '').trim().toLowerCase();
-  const builderClass = ({ 'codex-corp': 'codex', 'remediator-codex': 'codex', 'remediator-codex-corp': 'codex', 'remediator-claude': 'claude-code', 'claude-code-corp': 'claude-code', 'remediator-claude-corp': 'claude-code' })[raw] || raw;
+  const builderClass = ({
+    'codex-corp': 'codex',
+    'remediator-codex': 'codex',
+    'remediator-codex-corp': 'codex',
+    'hammer': 'codex',
+    'hammer-corp': 'codex',
+    'claude-code-corp': 'claude-code',
+    'remediator-claude': 'claude-code',
+    'remediator-claude-corp': 'claude-code',
+    'hammer-claude': 'claude-code',
+    'hammer-claude-corp': 'claude-code',
+  })[raw] || raw;
   return Object.prototype.hasOwnProperty.call(routeTable || {}, builderClass)
     ? builderClass
     : null;
@@ -159,9 +170,12 @@ function normalizeReviewerModel(reviewerInput) {
       return 'claude';
     case 'codex':
     case 'codex-corp':
+    case 'codex-reviewer':
+    case 'remediator-codex':
     case 'remediator-codex-corp':
       return 'codex';
     case 'gemini':
+    case 'gemini-reviewer':
       return 'gemini';
     default:
       return null;
@@ -196,10 +210,10 @@ function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
   return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] === reviewerModel;
 }
 
-// Both accounts of each native builder family keep the same refusal, even for an explicit last resort.
+// Every account/holder keeps its reviewer family refusal, including explicit last resorts.
 export const CODEX_BUILDER_REVIEW_REFUSAL = 'Codex-family reviewer cannot review a Codex-family builder';
 export function reviewerRefusesBuilder(builderClass, reviewerModel) {
-  return ['codex', 'claude'].includes(normalizeReviewerModel(reviewerModel))
+  return ['codex', 'claude', 'gemini'].includes(normalizeReviewerModel(reviewerModel))
     && isCrossModelReviewWaived(builderClass, reviewerModel);
 }
 
@@ -290,7 +304,7 @@ function applyGeminiReviewerRoute({
   const normalizedBuilder =
     normalizeBuilderClass(builderClass, routeTable) || normalizeBuilderClass(baseRoute.builderClass, routeTable);
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
-  if (reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel)) {
+  if (!baseIsGemini && reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel)) {
     const crossModel = routeTable[normalizedBuilder];
     return { ...baseRoute, reviewerModel: crossModel.reviewerModel, botTokenEnv: crossModel.botTokenEnv };
   }

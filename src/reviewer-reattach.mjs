@@ -1,3 +1,5 @@
+import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
+import { normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
@@ -114,6 +116,7 @@ const RECONCILABLE_REVIEWER_MODELS = new Set([
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   'opencode',
   'hermes',
+  'codex-corp', 'codex-reviewer', 'claude-reviewer', 'claude-reviewer-corp', 'gemini-reviewer',
 ]);
 
 function isReconcilableReviewer(reviewer) {
@@ -122,12 +125,12 @@ function isReconcilableReviewer(reviewer) {
 
 function reviewerBotLogin(reviewer) {
   if (!isReconcilableReviewer(reviewer)) return null;
-  return resolveReviewerBotLogin(String(reviewer).trim().toLowerCase());
+  return resolveReviewerBotLogin(normalizeReviewerModel(reviewer) || String(reviewer).trim().toLowerCase());
 }
 
 function reviewerBotLoginAliases(reviewer) {
   if (!isReconcilableReviewer(reviewer)) return [];
-  return resolveReviewerBotLoginAliases(String(reviewer).trim().toLowerCase());
+  return resolveReviewerBotLoginAliases(normalizeReviewerModel(reviewer) || String(reviewer).trim().toLowerCase());
 }
 
 function parseTime(value) {
@@ -272,6 +275,7 @@ function makeReviewPostedProbe(octokit) {
   const cache = new Map();
 
   return async function reviewPostedAfter(row, { refresh = false, headSha = null } = {}) {
+    if (reviewerRefusesBuilder(row.builderTag, row.reviewer)) return null;
     const startedAtMs = parseTime(row.reviewer_started_at);
 
     const { owner, repo } = splitRepoPath(row.repo);
@@ -305,6 +309,7 @@ function makeReviewPostedProbe(octokit) {
     return cache.get(key)
       .filter((review) => expectedLogins.some((login) => loginsMatch(review?.user?.login, login)))
       .filter((review) => !headSha || review?.commit_id === headSha)
+      .filter((review) => !row.reviewer_head_sha || !review?.commit_id || review.commit_id === row.reviewer_head_sha)
       .filter((review) => {
         const submittedAtMs = parseTime(review?.submitted_at);
         return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);
@@ -553,7 +558,13 @@ async function reconcileReviewerSessions({
   const allRows = statements.listReviewing.all();
   // Seed legacy receipts, then renew/release independently of row selection.
   for (const row of allRows) {
-    const receipt = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext?.reviewerAccountReceipt;
+    const context = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
+    row.builderTag = context?.builderTag || null;
+    if (context && !reviewerRefusesBuilder(row.builderTag, row.reviewer)) {
+      try { persistReviewerAttributionForSession(db, row, { ...context, reviewerModel: row.reviewer }); }
+      catch { log.warn('[watcher] reviewer attribution recovery unavailable; original receipt retained'); }
+    }
+    const receipt = context?.reviewerAccountReceipt;
     if (receipt) {
       try { journalReviewerTokenLease(rootDir, row.reviewer_session_uuid, receipt.identity, receipt.lease, row.reviewer_pgid); }
       catch { log.warn('[watcher] reviewer account lease journal write unavailable'); }
@@ -638,6 +649,12 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
+    if (reviewerRefusesBuilder(row.builderTag, row.reviewer)) {
+      markStickyOrphan({ statements, row, failureAt,
+        message: 'Reviewer family matches the recorded builder family; operator must verify before retrying.',
+        log, event: 'reviewer_reattach_family_refused' });
+      continue;
+    }
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';
     let closedPrStateUnverified = false;

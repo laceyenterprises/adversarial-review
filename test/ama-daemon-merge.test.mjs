@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 
 import {
@@ -758,6 +762,37 @@ test('lease held by another principal → defers cleanly; no merge, no audit', a
   assert.equal(h.calls.release, 0, 'never release a lease we do not hold');
   assert.equal(h.auditStore.size, 0);
 });
+
+for (const gateAfterWait of ['green', 'pending', 'behind', 'moved-head']) {
+  test(`LEASEFAIR-01 durable daemon waiter resumes before closers with ${gateAfterWait} live gate`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'daemon-fair-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { rootDir, repo: 'o/r', base: 'main', holderPid: process.pid, holderHost: hostname() };
+    const holder = acquireMergeLease({ ...identity, holderPr: 99, holderHead: 'closer-head' });
+    const h = makeHarness();
+    h.deps.acquireLeaseImpl = () => acquireDaemonMergeLease({ ...identity, holderPr: 7, holderHead: HEAD });
+    h.deps.releaseLeaseImpl = lease => releaseMergeLease({ rootDir, ...lease });
+    const deferred = await attemptDaemonCleanMerge(baseArgs(h));
+    assert.equal(deferred.reason, 'lease-contended');
+    assert.equal(deferred.queuePosition, 1);
+    assert.equal(deferred.waitMessage, 'waiting for the merge lease, position 1');
+    assert.equal(h.calls.merge, 0);
+    releaseMergeLease({ rootDir, ...holder.lease });
+    for (let i = 0; i < 8; i++) {
+      assert.equal(acquireMergeLease({ ...identity, holderPr: 200 + i, holderHead: 'closer-head',
+        waiterId: `closer-${i}`, registerWaiter: true }).acquired, false);
+    }
+    // Admission is still green; change only the fresh gate read under the lease.
+    h.deps.fetchLiveGateImpl = async () => greenGate(gateAfterWait === 'pending'
+      ? { requiredChecks: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] }
+      : gateAfterWait === 'behind' ? { mergeStateStatus: 'BEHIND' }
+      : gateAfterWait === 'moved-head' ? { candidateHead: OTHER_HEAD } : {});
+    const resumed = await attemptDaemonCleanMerge(baseArgs(h));
+    assert.equal(resumed.leaseAcquired, true, 'next eligible poll acquires despite eight closer waiters');
+    assert.equal(resumed.merged, gateAfterWait === 'green');
+    assert.equal(h.calls.merge, gateAfterWait === 'green' ? 1 : 0, 'never merge stale-base, pending CI or moved head');
+  });
+}
 
 // ── Mandatory scenario 6: ineligible GitHub state → no merge; reason surfaced ─
 

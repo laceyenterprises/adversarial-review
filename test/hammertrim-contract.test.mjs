@@ -606,6 +606,8 @@ else exec /bin/date "$@"; fi
 ham_fixture_emit_git_merge_signal() { echo FIXTURE_MERGE_SIGNAL; }
 ham_fixture_mark_ama_closer_lease_succeeded() { echo FIXTURE_CLOSER_SUCCEEDED; }
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
+ham_base_touches_pr_files() { return 1; }
 ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
 sleep() { :; }
 source "$1"
@@ -1054,7 +1056,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
 const fs = require('node:fs'); const file = process.env.TMPDIR + '/clock';
 fs.writeFileSync(file, String(Number(fs.readFileSync(file)) + Number(process.argv[2])));
 `, { mode: 0o755 });
-  writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$*" in 'rev-parse HEAD') echo '${head}' ;; *) echo '${base}' ;; esac\n`, { mode: 0o755 });
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$*" in 'rev-parse HEAD') echo '${head}' ;; 'diff --name-only '*) exit 0 ;; *) echo '${base}' ;; esac\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'node-stub'), `#!/bin/sh
 case "$1" in
   */merge-lease.mjs)
@@ -1110,7 +1112,7 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
   assert.equal(graphql.length, 3, 'audit identity, comment and merge use GraphQL');
-  assert.equal(rest.length, 43, 'includes the live stacked-base recheck immediately before merge');
+  assert.equal(rest.length, 46, 'includes fresh PR/check admission after the CI-wait lease release and the live stacked-base recheck');
 });
 
 test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {

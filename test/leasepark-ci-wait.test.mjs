@@ -16,7 +16,7 @@ const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<HQ_ROOT>>', quote(rootDir)).replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
   .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');
 
-function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false }) {
+function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gate.json'), JSON.stringify({ headMatches: true, state: 'OPEN', ...gate }));
@@ -40,7 +40,7 @@ HAM_GATE_JSON="$TEST_ROOT/gate.json"
 HAM_MERGE_LEASE_RELEASE_RETRY_CAP=1
 HAM_REMOTE_CI_WAIT_SECONDS=${greenAfterSleep ? greenAfterPolls + 1 : 1}
 HAM_REMOTE_CI_POLL_SECONDS=1
-HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1
+HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=${transientRead ? 3 : 1}
 ${render(release).replace(' release \\', ' release --root-dir "$TEST_ROOT" \\')}
 ${helpers}
 ${acquire}
@@ -50,10 +50,27 @@ HAM_MERGE_LEASE_WAIT_SECONDS=0
 ${fixture ? `${overlapHelper}
 HAM_VALIDATION_BASE_SHA=${quote(fixture.validationBase)}
 ham_bounded_git_sync() { git fetch origin main >/dev/null 2>&1; }` : `ham_base_touches_pr_files() { return ${overlap ? 0 : 1}; }`}
-ham_refresh_github_gate() { return 0; }
+ham_refresh_github_gate() {
+  ${transientRead ? 'if [ "$FAKE_SECONDS" -eq 0 ]; then return 1; fi' : ':'}
+  return 0
+}
 ham_append_terminal_audit() { echo "$*" >> "$TEST_ROOT/audits"; }
 date() { echo "$FAKE_SECONDS"; }
 sleep() {
+  ${daemonDuringWait ? `
+  [ "$HAM_MERGE_LEASE_HELD" -eq 0 ] || exit 91
+  "$HAM_NODE_BIN" --input-type=module - "$TEST_ROOT" <<'NODE'
+import { acquireDaemonMergeLease, releaseMergeLease } from '${rootDir}/src/ama/merge-lease.mjs';
+import { hostname } from 'node:os';
+const rootDir = process.argv[2];
+const result = acquireDaemonMergeLease({ rootDir, repo: 'fixture/repo', base: 'main',
+  holderPr: 100, holderHead: 'daemon-head', holderPid: process.pid, holderHost: hostname() });
+if (!result.acquired) process.exit(92);
+if (!releaseMergeLease({ rootDir, ...result.lease }).released) process.exit(93);
+NODE
+  [ "$?" -eq 0 ] || exit 94
+  echo daemon-served >> "$TEST_ROOT/daemon-service"
+  ` : ':'}
   FAKE_SECONDS=$((FAKE_SECONDS + 1))
   ${greenAfterSleep ? `if [ "$FAKE_SECONDS" -ge ${greenAfterPolls} ]; then jq \'.ok = true | .checksConclusion = "SUCCESS" | .reasons = []\' "$HAM_GATE_JSON" > "$TEST_ROOT/green.json"; mv "$TEST_ROOT/green.json" "$HAM_GATE_JSON"; fi` : ':'}
 }
@@ -100,7 +117,7 @@ test('CI-green reacquisition retains the pending attempt charge', t => {
 test('successful acquisition clears refund state inherited from a previous lease', t => {
   const result = runWait(t, { gate: { ok: true, checksConclusion: 'SUCCESS', reasons: [] }, staleAbortBeforeAcquire: true });
   assert.equal(result.audit, 'exit:0\n');
-  assert.equal(result.attempts[0].attempts, 1);
+  assert.equal(result.attempts[0].attempts, 2);
   assert.equal(result.attempts[0].retryable, 0);
 });
 
@@ -114,7 +131,7 @@ for (const failAfterGreen of [false, true]) {
   });
 }
 
-function rebasedFixture(t, moveAfterRebase = false) {
+function rebasedFixture(t, moveAfterRebase = false, disjoint = false) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-base-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const repo = join(dir, 'repo');
@@ -155,8 +172,9 @@ function rebasedFixture(t, moveAfterRebase = false) {
   if (moveAfterRebase) {
     git(repo, 'checkout', 'main');
     lines[29] = 'base change after rebase';
-    writeFileSync(shared, `${lines.join('\n')}\n`);
-    git(repo, 'commit', '-am', 'overlapping file after rebase');
+    writeFileSync(disjoint ? join(repo, 'unrelated.txt') : shared, `${lines.join('\n')}\n`);
+    git(repo, 'add', disjoint ? 'unrelated.txt' : 'shared.txt');
+    git(repo, 'commit', '-m', 'base advancement after rebase');
     git(repo, 'push', 'origin', 'main');
     git(repo, 'checkout', 'topic');
   }
@@ -179,8 +197,24 @@ test('real overlap guard blocks base changes after the validated head was rebase
   const fixture = rebasedFixture(t, true);
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
     greenAfterSleep: true, greenAfterPolls: 3, fixture });
-  assert.match(result.audit, /failed-without-merge base-changed-file-overlap\nexit:20/);
+  assert.match(result.audit, /deferred base-advanced-during-ci-wait\nexit:20/);
 });
+
+test('LEASEFAIR-01 even disjoint base advancement during CI requires rebase and fresh CI', t => {
+  const fixture = rebasedFixture(t, true, true);
+  const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
+    greenAfterSleep: true, fixture });
+  assert.match(result.audit, /deferred base-advanced-during-ci-wait\nexit:20/);
+});
+
+for (const transientRead of [false, true]) {
+  test(`LEASEFAIR-01 daemon acquires while closer waits on ${transientRead ? 'unreadable' : 'pending'} CI`, t => {
+    const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
+      greenAfterSleep: true, greenAfterPolls: 3, daemonDuringWait: true, transientRead });
+    assert.equal(result.audit, 'exit:0\n');
+    assert.equal(readFileSync(join(result.dir, 'daemon-service'), 'utf8').match(/daemon-served/g).length, 3);
+  });
+}
 
 for (const [name, gate] of [
   ['conflict with green CI', { checksConclusion: 'SUCCESS', mergeable: 'CONFLICTING', reasons: ['pr-not-mergeable'] }],
@@ -197,7 +231,7 @@ for (const [name, gate] of [
 
 test('base overlap after CI-green reacquire requires revalidation', t => {
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, greenAfterSleep: true, overlap: true });
-  assert.match(result.audit, /failed-without-merge base-changed-file-overlap/);
+  assert.match(result.audit, /deferred base-advanced-during-ci-wait/);
   assert.match(result.audit, /exit:20/);
 });
 

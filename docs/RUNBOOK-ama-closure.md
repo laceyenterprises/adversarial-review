@@ -1428,16 +1428,12 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
 2. **Rebase onto a recent `main` and confirm the merge guards.** The hammer
    always rebases at least once onto the current base and re-validates the
    rebased head — required checks plus the changed-surface test bar above —
-   before merging. After that validation, a target branch with an explicit
-   `required_status_checks.strict=false` rule, or no required-status-checks rule
-   at all, does not force the hammer to chase a moving base when the PR becomes
-   `BEHIND` only because unrelated PRs landed. In that narrow lane the hammer may
-   merge the still-`BEHIND` head only when GitHub reports `MERGEABLE`, the newer
-   base has no changed-file overlap with this PR (`ham_base_touches_pr_files`),
-   and the head already completed the one recent rebase plus validation. A
-   strict up-to-date rule, an undetermined branch-protection read, a non-
-   `MERGEABLE`/conflicting PR, or any base/PR changed-file overlap still fails
-   closed into the normal rebase-and-revalidate path.
+   before merging. LEASEFAIR-01 releases the lease during remote CI, then
+   requires the fetched current base to be contained in that exact validated
+   head after reacquisition. Any base advancement, including disjoint changes
+   and non-strict branches, defers for rebase and fresh CI. A lagging `BEHIND`
+   snapshot avoids a redundant rebase only if the validated head already
+   contains the entire current base.
 3. **Keep canonical docs current.** Doc-currency is part of the terminal
    remediation scope, not net-new feature work. When the diff changes an
    in-repo persistent store shape and `docs/data-model/` exists, the hammer
@@ -3453,13 +3449,12 @@ Publication and verify-head export `HAM_HEAD_WAITED_SECONDS` and
 `HAM_REQUIRED_CHECKS_WAITED_SECONDS` so subsequent child processes inherit the
 current wait totals for audit reporting. Phases that update them must run in
 the persistent shell; child-process changes do not propagate back to a parent.
-After reacquisition it re-runs the fail-closed changed-file overlap guard from
-verify-head against the live base before the final fresh exact-head gate. The
-comparison starts at the merge-base of the exact CI-validated head and fetched
-live base, rather than the older parallel-phase validation base. This recomputes
-the incorporated base even when the earlier validation base is unavailable. Base
-changes overlapping PR files require rebase and revalidation even without a
-strict branch-protection rule; disjoint movement may proceed under that rule.
+After reacquisition LEASEFAIR-01 re-runs the fail-closed base revalidation from
+verify-head against the fetched live base before the final fresh exact-head
+gate. The merge-base of that base and the exact CI-validated head must equal
+the entire current base. The older parallel-phase validation base is not used
+as a substitute. Any new base commit, including disjoint changes, requires
+rebase and fresh CI even without a strict branch-protection rule.
 
 IDENTBASE-01 merge-agent rebases with a worker author remain reviewable. Do not
 assume a per-head review ceiling bounds repeated new rebase heads: the combined
@@ -3639,6 +3634,48 @@ including red CI alongside UNKNOWN; independent eligibility holds still apply.
 Fresh exact-head
 eligibility and merge gates remain mandatory before daemon merge or a repair
 dispatch.
+
+## LEASEFAIR-01: fair merge lease service
+
+Daemon acquisitions use a durable priority reservation per repo/base/PR/head.
+The existing 250/500 ms retries still bound work on a watcher tick; deferral now
+retains a place ahead of closer acquisitions instead of racing them again.
+Daemon requests are FIFO within their class, including equal timestamp arrivals;
+a refresh preserves the arrival order across watcher process changes. Closers
+cannot barge between queue selection and holder creation, which share one lock.
+The current holder always finishes under its existing fence.
+
+Service is bounded by the current holder's remaining critical section, earlier
+daemon requests, and the next eligible watcher pass after release. Repeated
+closer acquisitions add no delay. This assumes a running watcher and a holder
+that makes progress: a live same-host holder is never forcibly preempted on age.
+Existing bounded closure-wait paging still reports a stuck holder, with
+"waiting for the merge lease, position N", rather than a safety-hold remedy.
+Reservations expire after 120 seconds without a fresh eligible attempt, so an
+abandoned or newly ineligible head cannot indefinitely block closers. See the
+[durable waiter schema](data-model/merge-lease-waiters.md).
+
+The hammer releases before entering remote-CI polling, including the first
+snapshot, transient reads, polling cadence and UNKNOWN sampling/backoffs. Once
+CI is green it reacquires, fetches the current base, and requires that base to
+be contained in the exact validated head. Any advancement, even disjoint files,
+records `deferred / base-advanced-during-ci-wait`, refunds the reacquisition's
+provisional attempt, and returns to the existing bounded hammer retry lane for
+rebase and fresh CI. It never treats old-head CI as validation of a new base.
+A busy strict-base lane can require another CI run; no idle lease is retained
+to prevent that, and the existing hammer retry/lifetime caps remain in force.
+The final live head/required-check gate is refreshed under the lease, preserving
+stale-head, current-review, remediation, primary-change and merge authority checks.
+
+No migration, configuration change or new CI check is needed. Deploy through the
+normal submodule float and daemon rollout; already running closers finish with
+their original procedure and are never interrupted by a reservation. After
+rollout, inspect waiter service order and logs for a deferred clean head taking
+the first eligible acquisition ahead of closer retries. Check that remote-CI
+waits show no base holder and that any advanced base defers without a merge.
+The lifecycle graph is unchanged. The clean offline smoke also verifies
+priority service without preemption; focused synthetic regressions cover
+reacquisition, CI and current-base behavior.
 
 ## CI-cost mode (CIGUARD-01 / CIGUARDADV-01)
 
@@ -3870,7 +3907,8 @@ then selects the owner, including hammer for final comment-only findings in
 strict mode, without an operator step. The decision leaves lease files intact;
 the acquisition path reclaims them. Live pending leases and sticky succeeded
 outcomes retain their holds. The daemon retries lease contention after 250 and
-500 ms in the same tick. Pending gates, uncertain/live ownership and deferred daemon
+500 ms in the same tick, retaining its LEASEFAIR-01 priority reservation when
+still contended. Pending gates, uncertain/live ownership and deferred daemon
 attempts record a bounded wait in `data/ama-closure-waits/` (see the
 [wait data model](data-model/ama-closure-waits.md)); the default limit
 is 30 minutes, adjustable through `AMA_CLOSURE_WAIT_BOUND_MS`. Exhaustion

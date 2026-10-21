@@ -132,7 +132,7 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
     const stops = ['foreign', 'foreign-recovery', 'conflict', 'dirty'].includes(scenario);
     assert.equal(result.signal, null, diagnostics);
     assert.equal(result.status, scenario === 'conflict' ? 21 : scenario === 'dirty' ? 1 : stops ? 20 : 0, diagnostics);
-    assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), scenario === 'pending' ? 'acquire\nrelease\nacquire\nrelease\n' : 'acquire\nrelease\n', diagnostics);
+    assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), !stops ? 'acquire\nrelease\nacquire\nrelease\n' : 'acquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'update-branch').length, 1);

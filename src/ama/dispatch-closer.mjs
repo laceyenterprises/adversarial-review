@@ -143,7 +143,7 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
-import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
 export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
   hasMergedDependentProtectingPr,
@@ -6133,7 +6133,8 @@ async function maybeDispatchAmaCloserAttempt({
               };
             },
             acquireLeaseImpl: () => {
-              const res = acquireMergeLeaseImpl({
+              const res = acquireDaemonMergeLease({
+                acquireMergeLeaseImpl,
                 rootDir,
                 repo,
                 base: baseBranch,
@@ -6141,9 +6142,9 @@ async function maybeDispatchAmaCloserAttempt({
                 holderHead: mergeHead,
                 holderPid: process.pid,
                 holderHost: hostname(),
-                now: dispatchContext.dispatchedAt || new Date().toISOString(),
+                now: new Date().toISOString(),
               });
-              return { acquired: Boolean(res?.acquired), lease: res?.lease, existingLease: res?.existingLease };
+              return { ...res, acquired: Boolean(res?.acquired) };
             },
             releaseLeaseImpl: (lease) => {
               releaseMergeLeaseImpl({

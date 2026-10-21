@@ -539,6 +539,17 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ## Hammer merge logic
 
+LEASEFAIR-01 gives deferred daemon merges a durable priority reservation ahead
+of the next closer acquisition, FIFO among daemon requests. Closers release
+before remote-CI polling, including read retries and UNKNOWN sampling, then
+reacquire and refresh the exact-head gate. After that release, any current-base
+commit absent from the validated head requires rebase and fresh CI, including
+disjoint changes. Contention notices report the queue position; the existing
+bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
+unchanged; the clean smoke verifies priority service without preemption. Additional offline regressions are in `ama-merge-lease`,
+`ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
+See the [waiter contract](docs/data-model/merge-lease-waiters.md).
+
 When the hammer closes a PR (the common MSM path),
 `templates/hammer-prompt.md` directs one linear flow. The verify-head,
 publish, and merge procedures live in `bin/hammer-*.sh` and are rendered by
@@ -551,9 +562,9 @@ HAMSELFREBASE-01 keeps a successful server-side rebase in this flow: verify-head
 fetches the exact resulting SHA, detaches the scratch checkout and synchronizes
 initialized submodules before changed-surface revalidation. Publish and recovered
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
-merge remain bound to that head under the merge lease. The existing pending-CI
-release and reacquisition stay unchanged. Foreign pushes still stop
-with `head-changed`. Existing lifecycle states and smoke promises are unchanged.
+merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
+before remote-CI polling and reacquires before merging. Foreign pushes still
+stop with `head-changed`. Existing lifecycle states are unchanged.
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
@@ -561,8 +572,8 @@ with `head-changed`. Existing lifecycle states and smoke promises are unchanged.
 3. **Rebase onto the base branch** if the head is behind, and confirm the rebased
    head is content-equivalent to the reviewed head (or re-validate it).
 4. **Push the validated head.**
-5. **Wait (bounded) for GitHub required checks to go green** on that exact head —
-   never merge a red or not-yet-green gate.
+5. **Release while waiting for GitHub required checks**, then reacquire and
+   confirm the exact green head contains the fetched current base.
 6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
 7. **Append the terminal audit and release the lease.**
 

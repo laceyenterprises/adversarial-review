@@ -58,6 +58,23 @@ const tick = (overrides = {}) => watcherTick({ ...identity(), evidence: { headSh
 const scenario = process.argv[2];
 let evidence = {};
 if (scenario === 'clean') {
+  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease } = await import('../../src/ama/merge-lease.mjs');
+  const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main',
+    holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
+  const holder = acquireMergeLease({ ...leaseArgs, holderPr: 1, holderHead: 'closer' });
+  assert.equal(holder.acquired, true);
+  const closerRequest = { ...leaseArgs, holderPr: 2, holderHead: 'next-closer', registerWaiter: true, waiterId: 'next-closer' };
+  assert.equal(acquireMergeLease(closerRequest).acquired, false);
+  const daemonRequest = { ...leaseArgs, holderPr: 3, holderHead: 'daemon' };
+  const deferred = acquireDaemonMergeLease(daemonRequest);
+  assert.equal(deferred.acquired, false);
+  assert.equal(deferred.queuePosition, 1);
+  assert.equal(deferred.existingLease.leaseId, holder.lease.leaseId);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...holder.lease }).released, true);
+  assert.equal(acquireMergeLease(closerRequest).acquired, false);
+  const served = acquireDaemonMergeLease(daemonRequest);
+  assert.equal(served.acquired, true);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...served.lease }).released, true);
   const review = await createFixtureStubReviewerRuntimeAdapter({ rootDir, reviewerBodies: [cleanBody] }).spawnReviewer({ sessionUuid: 'synthetic-review' });
   assert.equal(review.reviewBody, cleanBody); assert.equal(readReviewerRunRecord(rootDir, 'synthetic-review').state, 'completed');
   await tick(); assert.equal(store.merged, true);

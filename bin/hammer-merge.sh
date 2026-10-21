@@ -480,7 +480,10 @@ HAM_REMOTE_CI_STATUS=waiting
 HAM_REMOTE_CI_STARTED_AT=$(date +%s)
 HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_WAIT_SECONDS ))
 HAM_REMOTE_CI_GATE_READ_FAILURES=0
+# CI polling (including UNKNOWN sampling and read backoffs) owns no base
+# lease. Only the final refreshed gate and merge run in the serialized lane.
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+ham_release_merge_lease || return 1
 while :; do
   HAM_REQUIRED_CHECKS_WAITED_SECONDS=$(( $(date +%s) - HAM_REMOTE_CI_STARTED_AT ))
   if ! ham_refresh_github_gate; then
@@ -592,10 +595,11 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-
     fi
     return "$HAM_REACQUIRE_EXIT"
   fi
-  # Only base changes not already contained in the exact CI-validated head can
-  # require another rebase; the parallel-phase validation base may be older.
+  # A lease released for CI may have let another PR advance the base. Require
+  # that entire base in the validated head; otherwise retry rebase and CI.
   if ham_base_touches_pr_files validated-head; then
-    ham_append_terminal_audit failed-without-merge base-changed-file-overlap || true
+    ham_append_terminal_audit deferred base-advanced-during-ci-wait || true
+    ham_mark_merge_lease_retryable_abort base-advanced-during-ci-wait
     ham_release_merge_lease
     return 20
   fi

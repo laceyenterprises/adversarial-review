@@ -133,6 +133,10 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       currentRevisionRef,
       logger,
     });
+    const leaseWaitMessage = coexistenceDecision.amaClosureResult?.reason === 'daemon-deferred'
+      && coexistenceDecision.amaClosureResult?.daemonCleanMerge?.reason === 'lease-contended'
+      ? coexistenceDecision.amaClosureResult.daemonCleanMerge.waitMessage
+        || 'waiting for the merge lease, position unknown' : null;
     if (coexistenceDecision.outcome === 'pr-terminal') {
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership rather than retain.
@@ -154,7 +158,7 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       const { amaClosureResult } = coexistenceDecision;
       logger.log(
         `[watcher] reviewer-timeout exhaustion awaiting AMA hammer for ${repoPath}#${prNumber}: ` +
-        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+        `${leaseWaitMessage || amaClosureResult.reason || 'ama-dispatch-pending'} ` +
         (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
         `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
         `workerClass=${amaClosureResult.workerClass || 'unknown'}`
@@ -173,7 +177,9 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       logger.log(
         `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
         `AMA enabled but not eligible (reasons: ${reasonsHint}); ` +
-        (isAmaCloserLaunching(amaClosureResult)
+        (leaseWaitMessage
+          ? leaseWaitMessage
+          : isAmaCloserLaunching(amaClosureResult)
           ? 'closer is launching; awaiting dispatch outcome'
           : 'safety hold requires operator action (inspect and resolve the named safety hold under its existing approval policy)')
       );

@@ -3252,6 +3252,25 @@ an additional HQ diagnostic still refuses this classification. Launch receipts
 retain ownership for normal reconciliation,
 and competing live pending leases remain protected from duplicate dispatch.
 The capacity-only `reaped`/`cancelled` statuses do not expand per-PR retry authority.
+TERMLEASE-01: a terminal `superseded`, `failed-without-merge` or `deferred`
+lease at the current head is reclaimed on the same dispatch pass once its launch
+is terminal in the ledger or matching dispatch record, or confirmed absent from
+the ledger. This needs no ownerless-recovery delay and does not depend on the
+process's success exit. Live launches/retries, unreadable retry chains and
+otherwise unproven liveness retain the hold; terminal `succeeded` stays sticky.
+The dispatcher revalidates the observed owner under a nonblocking reclaim lock,
+removes it and competes through the existing exclusive acquisition CAS, logging
+`ama_closer.terminal_lease_reclaimed`. Retry, review, CI and lifetime gates remain.
+Supersession is recorded on the dispatch record; its matching rekeyed lease is
+released rather than terminalized at the superseding head. A replacement lease
+or completed review handoff is preserved. Inline and settled background
+`ama.closure_blocker` events identify a retained terminal lease by launch ID and
+outcome (including live or unproven liveness), replacing the provisional
+`ama-closer-dispatch-backgrounded` status once the refusal is known.
+After deployment, confirm a finished non-merge terminal lease produces the named
+reclaim event and a fresh current-head launch on the same pass, while a live
+launch still holds and a superseded rekey leaves no terminal lease at the new head.
+
 Launch completion is not merge success. Capacity reconciliation leaves leases
 untouched; the current PR decision path separately reconciles its own record and
 lease before eligibility, inside the existing operation timeout. A terminal

@@ -1644,8 +1644,11 @@ for (const scenario of [
     assert.equal(reads, scenario.noRead || scenario.stdout !== undefined ? 0 : 1);
     const lease = readAmaCloserLease(rootDir, identity);
     if (scenario.outcome) {
-      assert.equal(lease.status, 'terminal');
-      assert.equal(lease.terminalOutcome, scenario.outcome);
+      if (scenario.rekeyed && scenario.outcome === 'superseded') assert.equal(lease, null);
+      else {
+        assert.equal(lease.status, 'terminal');
+        assert.equal(lease.terminalOutcome, scenario.outcome);
+      }
       assert.equal(logs.length, 1);
       if (!scenario.noRead) assert.equal(logs[0].prState, scenario.state);
       assert.equal(reconcileAmaCloserLease(args), false);
@@ -2195,4 +2198,217 @@ test('HAMMERQUOTAREAD-01: snapshot provenance survives personal dispatch and aud
     assert.equal(audit.harnessResolution[key], value);
     assert.equal(audit.attempts.at(-1).harnessResolution[key], value);
   }
+});
+
+// TERMLEASE-01 fixtures contain only synthetic heads, launches and repository IDs.
+for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succeeded']) {
+  test(`TERMLEASE-01: current-head terminal ${outcome} with a finished launch`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'termlease-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const oldHead = 'b'.repeat(40);
+    const args = findingsRemediationArgs(rootDir, { reviewState: { verdict: 'comment-only',
+      reviewCycleExhausted: true, blockingFindingCount: 0, nonBlockingFindingCount: 2 } });
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now });
+    updateAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now,
+      status: 'dispatched', lrqId: 'synthetic-finished' });
+    rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: oldHead, toHeadSha: HEAD, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'terminal', terminalOutcome: outcome });
+    // The launch exited successfully after pushing; it did not merge this head.
+    appendAmaAuditAttempt({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: oldHead,
+      now, attempt: { outcome: 'succeeded' } });
+    const deps = testDeps(), logs = [];
+    const before = readAmaCloserLease(rootDir, identity);
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      logger: { ...deps.logger, info: line => logs.push(line) },
+    });
+    const dispatches = deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status');
+    if (outcome === 'succeeded') {
+      assert.equal(result.reason, 'lease-held', JSON.stringify(result));
+      assert.equal(dispatches.length, 0);
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+    } else {
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.equal(dispatches.length, 1, 'launches on the same watcher pass');
+      assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_hammer_1');
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.ok(logs.some(line => JSON.parse(line).event === 'ama_closer.terminal_lease_reclaimed'));
+    }
+  });
+}
+
+for (const probe of [
+  { ok: true, row: { status: 'running' } },
+  { ok: false, reason: 'query-failed' },
+  { ok: true, row: { status: 'succeeded' }, retryChainUnreadable: true },
+  { ok: true, row: { status: 'succeeded' }, retryChain: [{ status: 'running', launch_request_id: 'synthetic-retry' }] },
+]) test(`TERMLEASE-01: terminal lease retains possible live launch ${JSON.stringify(probe)}`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-live-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const args = findingsRemediationArgs(rootDir), deps = testDeps();
+  acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-live' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'superseded' });
+  const before = readAmaCloserLease(rootDir, identity);
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps, readLaunchRequestStatusImpl: () => probe });
+  assert.equal(result.reason, 'lease-held', JSON.stringify(result));
+  assert.match(result.closureBlocker, /terminal lease from launch synthetic-live still live/);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+  assert.equal(deps.calls.length, 0);
+});
+
+for (const evidence of ['missing ledger row', 'terminal dispatch record']) {
+  test(`TERMLEASE-01: reclaim terminal lease with ${evidence}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'termlease-evidence-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const args = findingsRemediationArgs(rootDir), deps = testDeps();
+    acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-ended' });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred' });
+    if (evidence === 'terminal dispatch record') {
+      // A historical copy with the same LRQ must not hide terminal proof.
+      updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: '0'.repeat(40) }, () => ({
+        ...identity, headSha: '0'.repeat(40), launchRequestId: 'synthetic-ended',
+        state: 'dispatched', lastObservedStatus: 'running', lastAttemptedAt: '2026-07-19T12:00:00Z',
+      }));
+      updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: 'b'.repeat(40) }, () => ({
+        ...identity, headSha: 'b'.repeat(40), launchRequestId: 'synthetic-ended',
+        state: 'launch-terminal', lastObservedStatus: 'succeeded',
+      }));
+    }
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: false, reason: evidence === 'missing ledger row'
+        ? 'missing-launch-request-row' : 'query-failed' }),
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+  });
+}
+
+test('TERMLEASE-01: delayed liveness evidence cannot delete a replacement lease', async t => {
+  const { deleteAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-replacement-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const args = findingsRemediationArgs(rootDir), deps = testDeps();
+  acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-ended' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'superseded' });
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps, readLaunchRequestStatusImpl: () => {
+    deleteAmaCloserLease(rootDir, identity);
+    acquireAmaCloserLease({ rootDir, ...identity, watcherPid: process.pid });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-replacement' });
+    return { ok: true, row: { status: 'succeeded' } };
+  } });
+  assert.equal(result.dispatched, false);
+  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'synthetic-replacement');
+  assert.equal(deps.calls.length, 0);
+});
+
+test('TERMLEASE-01: superseding a finished dispatch releases its rekeyed current-head lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-supersede-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: oldHead };
+  const args = findingsRemediationArgs(rootDir);
+  const now = args.dispatchContext.dispatchedAt;
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-superseded' });
+  rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: oldHead, toHeadSha: HEAD, now });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'launch-terminal', workerClass: 'hammer', launchRequestId: 'synthetic-superseded',
+    retryCount: 1, reviewedSha: HEAD, lastObservedStatus: 'succeeded', dispatchedAt: now,
+  }));
+  assert.equal(reconcileAmaCloserLease({ rootDir, ...identity, now,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readMergedSignalImpl: () => ({ ok: false }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: HEAD }),
+    logger: { info() {} },
+  }), true);
+  assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD }), null,
+    'supersession releases the carried lease before any new dispatch');
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+  });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const current = readAmaCloserLease(rootDir, { ...identity, headSha: HEAD });
+  assert.equal(current.status, 'dispatched');
+  assert.equal(current.lrqId, 'lrq_hammer_1');
+  const original = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+  assert.equal(original.outcome, 'superseded');
+});
+
+
+test('TERMLEASE-01: concurrent reclaimers dispatch only one replacement launch', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-concurrent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const args = findingsRemediationArgs(rootDir), deps = testDeps();
+  acquireAmaCloserLease({ rootDir, ...identity, now: args.dispatchContext.dispatchedAt });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-ended' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'superseded' });
+  const dispatch = () => maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === 'synthetic-ended' ? 'succeeded' : 'running' } }),
+  });
+  const results = await Promise.all([dispatch(), dispatch()]);
+  assert.equal(results.filter(result => result.dispatched).length, 1, JSON.stringify(results));
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status').length, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_hammer_1');
+});
+
+test('TERMLEASE-01: dispatch supersession keeps the outcome off the superseding head lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-dispatch-supersede-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: oldHead };
+  const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchRecordHeadSha: oldHead } });
+  const now = args.dispatchContext.dispatchedAt;
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-predecessor' });
+  rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: oldHead, toHeadSha: HEAD, now });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'launch-terminal', workerClass: 'hammer', launchRequestId: 'synthetic-predecessor',
+    retryCount: 1, reviewedSha: HEAD, lastObservedStatus: 'succeeded', dispatchedAt: now,
+  }));
+  appendAmaAuditAttempt({ hqRoot: args.dispatchContext.hqRoot, ...identity, now,
+    attempt: { outcome: 'succeeded' } });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    // The dispatch record and HQ prove completion while the ledger is unreadable.
+    // Reconciliation therefore leaves settlement to the dispatch decision path.
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }),
+    execFileImpl: async (command, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
+      ? { stdout: JSON.stringify({ status: 'succeeded' }) } : deps.execFileImpl(command, argv, options),
+  });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD }).status, 'dispatched');
+  assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD }).lrqId, 'lrq_hammer_1');
+  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity))).outcome, 'superseded');
+});
+
+test('TERMLEASE-01: a live dispatch record names its terminal lease on early refusal', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'termlease-live-record-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  const args = findingsRemediationArgs(rootDir), deps = testDeps();
+  const now = args.dispatchContext.dispatchedAt;
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-live' });
+  updateAmaCloserLease({ rootDir, ...identity, now, status: 'terminal', terminalOutcome: 'superseded' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, workerClass: 'hammer',
+    state: 'dispatched', launchRequestId: 'synthetic-live', retryCount: 1,
+    dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'running' }));
+  const before = readAmaCloserLease(rootDir, identity);
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'running' }) }),
+  });
+  assert.equal(result.dispatched, false, JSON.stringify(result));
+  assert.match(result.closureBlocker, /terminal lease from launch synthetic-live still live/);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
 });

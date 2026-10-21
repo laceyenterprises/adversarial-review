@@ -423,6 +423,15 @@ two-path merge model** (operational reference:
   spawned. `strict_mode` defaults on; turning it off permits daemon
   merge over *known non-blocking* findings only.
 
+TERMLEASE-01: terminal non-merge closer leases (`superseded`,
+`failed-without-merge`, `deferred`) release on the same dispatch pass once ledger
+or matching dispatch evidence proves the launch ended or is absent. Live or
+unproven launch/retry evidence retains the hold; `succeeded` stays sticky.
+Superseded dispatches release their matching rekeyed lease and keep supersession
+on the dispatch record. Retained terminal blockers name the launch after inline
+or background settlement. The synthetic handoff smoke exercises same-pass
+terminal reclamation; deployment verification is in the closure runbook.
+
 A PR body may declare a merge-order hold with the bare full-line trailer
 `Protects-Against-Unsafe-Merge-Until-PR: #1234`.
 
@@ -1397,7 +1406,8 @@ stateDiagram-v2
     s2 --> s0: closer-lease.07 review completed; locked reclaim
     s2 --> s3: closer-lease.08 external terminal outcome
     s0 --> [*]: closer-lease.09 expired pending lease reclaimed
-    s1 --> [*]: closer-lease.10 terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained
+    s1 --> [*]: closer-lease.10 superseded launch releases matching rekeyed lease; otherwise terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained
+    s3 --> [*]: closer-lease.11 non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky
     s3 --> [*]
 ```
 

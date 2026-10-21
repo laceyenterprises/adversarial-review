@@ -1629,3 +1629,28 @@ test('DRAINDEFER-01: background drain settlement re-dispatches on the first clea
   assert.equal(calls, 2, 'a settled drain refusal costs no additional pass');
   assert.equal(queue.takeSettled('example/repo#42@' + HEAD).result.dispatched, true);
 });
+
+
+test('TERMLEASE-01: settled background refusal reports its terminal launch blocker', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  const events = [];
+  const closureBlocker = 'terminal lease from launch synthetic-live still live or unproven (superseded)';
+  const args = closureArgs({
+    repoPath: 'synthetic/repository', prNumber: 42,
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    logger: { log() {}, warn() {}, info: line => events.push(JSON.parse(line)) },
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true,
+      reason: 'lease-held', closureBlocker }),
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const submitted = await maybeDispatchAmaClosureFor(args);
+  assert.equal(submitted.reason, AMA_HAMMER_BACKGROUND_REASON);
+  await queue.drain();
+  assert.ok(events.some(event => event.event === 'ama.closure_blocker' && event.reason === closureBlocker));
+  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+    maybeDispatchAmaClosureForImpl: input => maybeDispatchAmaClosureFor({ ...args, ...input }),
+  });
+  assert.equal(result.amaClosureResult.closureBlocker, closureBlocker);
+  assert.equal(events.at(-1).reason, closureBlocker);
+});

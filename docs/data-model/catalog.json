@@ -712,7 +712,7 @@
     },
     {
       "id": "ama-closer-leases",
-      "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky.",
+      "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky. TERMLEASE-01 reclaims terminal superseded/failed-without-merge/deferred on the same pass with proven ended/absent launch; live or unproven launches hold. Superseded dispatches release matching rekeyed leases and retain the dispatch outcome.",
       "title": "AMA Closer Leases",
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",

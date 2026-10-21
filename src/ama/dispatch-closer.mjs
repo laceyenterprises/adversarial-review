@@ -118,6 +118,8 @@ import {
   isReclaimablePendingAmaCloserLease,
   isReclaimableDispatchedAmaCloserLease,
   isReclaimableDispatchedAmaCloserLeaseAsync,
+  isReclaimableTerminalAmaCloserLease,
+  deleteAmaCloserLeaseIfCurrent,
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
@@ -1706,7 +1708,7 @@ function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIde
     unadoptedLaunchRequestId: launchRequestId, outcome: null, lastError: null,
     retryCount: Math.max(0, Number(current.retryCount || 0) - 1),
   } : null);
-  finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded', now, logger, repo, prNumber });
+  finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded', launchRequestId, now, logger, repo, prNumber });
   return true;
 }
 
@@ -1804,7 +1806,7 @@ function* reconcileAmaCloserLeaseSteps({
     if (liveRecord?.state === 'dispatching'
       || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
-      terminalOutcome, now, logger, repo, prNumber })) return false;
+      terminalOutcome, launchRequestId, now, logger, repo, prNumber })) return false;
     updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, live =>
       live?.launchRequestId === launchRequestId && live.state !== 'dispatching'
         ? { ...live, outcome: terminalOutcome, terminalOutcome } : null, { cleanupScratchImpl });
@@ -1881,8 +1883,23 @@ function finalizeAmaCloserLeaseBestEffort({
   logger,
   repo,
   prNumber,
+  launchRequestId,
 }) {
   try {
+    // Supersession belongs to the original dispatch. Its carried lease must
+    // not become a terminal tombstone on the head that superseded that run.
+    if (terminalOutcome === 'superseded' && launchRequestId) {
+      const carried = readAmaCloserDispatchLease(rootDir, { ...leaseIdentity, launchRequestId });
+      if (carried?.lrqId === launchRequestId && carried.headSha !== leaseIdentity.headSha
+        && ![AMA_CLOSER_LEASE_STATUS.TERMINAL, AMA_CLOSER_LEASE_STATUS.HANDED_TO_REVIEW].includes(carried.status)) {
+        return deleteAmaCloserLeaseIfCurrent(rootDir, carried);
+      }
+      const exact = readAmaCloserLease(rootDir, leaseIdentity);
+      if (exact?.lrqId !== launchRequestId) return false;
+      if (exact.rekeyedFromHeadSha && exact.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED) {
+        return deleteAmaCloserLeaseIfCurrent(rootDir, exact);
+      }
+    }
     updateAmaCloserLease({
       rootDir,
       ...leaseIdentity,
@@ -4600,6 +4617,19 @@ export async function maybeDispatchAmaCloser(args) {
     });
     preservePredecessor = result.reason === 'dispatch-retry-live' || result.preservePredecessorArtifacts === true;
     admissionCompleted = true;
+    if (!result.dispatched && dispatchContext?.rootDir && drainIdentity.headSha
+      && (result.inFlight || ['lease-held', 'ama-closer-launch-in-progress', 'dispatch-retry-chain-unreadable',
+        'dispatch-retry-live', 'closer-lease-held-by-other-process', 'hammer-closer-in-flight'].includes(result.reason)
+        || result.reason?.startsWith('existing-dispatch-') || result.reason?.startsWith('dispatch-status-')
+        || result.reason?.startsWith('in-flight:'))) {
+      const lease = readAmaCloserLease(dispatchContext.rootDir, drainIdentity);
+      if (lease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) {
+        result.closureBlocker = lease.terminalOutcome === 'succeeded'
+          ? `terminal lease from launch ${lease.lrqId || 'unknown'} records succeeded`
+          : `terminal lease from launch ${lease.lrqId || 'unknown'} still live or unproven (${lease.terminalOutcome})`;
+        result.existingLease = lease;
+      }
+    }
     return result;
   } finally {
     // Interrupted admission cannot prove that predecessor ownership ended.
@@ -5824,6 +5854,7 @@ async function maybeDispatchAmaCloserAttempt({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: existingDispatchHeadAdvanced ? 'superseded' : 'failed-without-merge',
+          launchRequestId: existingRecord.launchRequestId,
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
@@ -6003,6 +6034,7 @@ async function maybeDispatchAmaCloserAttempt({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: 'superseded',
+          launchRequestId: existingRecord.launchRequestId,
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
@@ -6013,6 +6045,7 @@ async function maybeDispatchAmaCloserAttempt({
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
           lastError: 'terminal-dispatch-superseded-by-head-advance',
+          outcome: 'superseded',
         }));
       } else if (
         (certifiedPark || (currentHeadFinalHammerTerminalRemediation &&
@@ -6409,6 +6442,7 @@ async function maybeDispatchAmaCloserAttempt({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: terminalLaunchLeaseOutcome({ status, auditOutcome: auditTerminalOutcome }),
+        launchRequestId: existingRecord.launchRequestId,
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
@@ -6560,6 +6594,7 @@ async function maybeDispatchAmaCloserAttempt({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
             terminalOutcome: terminalLaunchLeaseOutcome({ status }),
+            launchRequestId: existingRecord.launchRequestId,
             now: dispatchContext.dispatchedAt,
             logger,
             repo,
@@ -6608,6 +6643,7 @@ async function maybeDispatchAmaCloserAttempt({
         leaseIdentity: existingRecordLeaseIdentity,
         terminalOutcome: terminalLaunchLeaseOutcome({ status,
           headAdvanced: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge }),
+        launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt,
         logger,
         repo,
@@ -7194,7 +7230,29 @@ async function maybeDispatchAmaCloserAttempt({
   });
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
-    if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
+    if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+      && ['superseded', 'failed-without-merge', 'deferred', 'succeeded'].includes(existingLease.terminalOutcome)) {
+      const probe = existingLease.lrqId
+        ? await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+          launchRequestId: existingLease.lrqId, rootDir, hqRoot, signal, env,
+          ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath,
+          includeRetryChain: true,
+        })).catch(() => ({ ok: false })) : null;
+      throwIfAborted(signal);
+      const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
+        .find(record => record.launchRequestId === existingLease.lrqId
+          && isReclaimableTerminalAmaCloserLease(existingLease, { launchStatusProbe: probe, dispatchRecord: record }));
+      if (isReclaimableTerminalAmaCloserLease(existingLease, { launchStatusProbe: probe, dispatchRecord: record })
+        && deleteAmaCloserLeaseIfCurrent(rootDir, existingLease)) {
+        logAmaCloserDispatchEvent(logger, 'ama_closer.terminal_lease_reclaimed', {
+          repo, prNumber, headSha: existingLease.headSha, launchRequestId: existingLease.lrqId,
+          terminalOutcome: existingLease.terminalOutcome,
+        });
+        leaseResult = acquireAmaCloserLease({ rootDir, ...leaseIdentity, dispatchTimeoutMs,
+          watcherPid: process.pid, now: dispatchContext.dispatchedAt });
+      }
+      if (!leaseResult.acquired) leaseResult = { ...leaseResult, existingLease: readAmaCloserLease(rootDir, leaseIdentity) };
+    } else if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
       && !isReclaimablePendingAmaCloserLease(existingLease, { now: dispatchContext.dispatchedAt, processKillImpl })) {
       // A concurrent launch won the CAS after the initial observation.
     } else if ((ownerProofRecovery && (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL

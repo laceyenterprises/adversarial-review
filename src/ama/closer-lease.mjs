@@ -169,6 +169,39 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
   } catch { return false; }
 }
 
+// TERMLEASE-01: terminal no-merge attempts own nothing once their launch ends.
+// Positive ledger liveness (including retries) always wins over an older record.
+export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord } = {}) {
+  if (lease?.status !== TERMINAL
+    || !['superseded', 'failed-without-merge', 'deferred'].includes(lease.terminalOutcome)) return false;
+  const inFlight = launchRequestInFlight(launchStatusProbe);
+  if (inFlight === true || launchStatusProbe?.retryChainUnreadable) return false;
+  if (inFlight === false || launchStatusProbe?.reason === 'missing-launch-request-row') return true;
+  if (!lease.lrqId) return true;
+  return dispatchRecord?.launchRequestId === lease.lrqId
+    && (dispatchRecord.state === 'launch-terminal'
+      || ['succeeded', 'completed', 'failed', 'failed-without-merge', 'deferred', 'superseded',
+        'canceled', 'cancelled', 'reaped', 'rejected', 'not-found', 'operator_triage_required',
+        'reaped_stuck_requested', 'unverified-terminal-success'].includes(dispatchRecord.lastObservedStatus));
+}
+
+// Revalidate after asynchronous evidence reads before retiring an observed owner.
+// Acquisition still uses the exclusive link CAS; a losing caller cannot dispatch.
+export function deleteAmaCloserLeaseIfCurrent(rootDir, lease) {
+  const leasePath = amaCloserLeaseFilePath(rootDir, lease);
+  const fd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
+  try {
+    try { fsExt.flockSync(fd, 'exnb'); }
+    catch (error) {
+      if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+      return false;
+    }
+    if (!isCurrentAmaCloserLease(rootDir, lease)) return false;
+    deleteAmaCloserLease(rootDir, lease);
+    return true;
+  } finally { closeSync(fd); }
+}
+
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
   // Persisted dispatchTimeoutMs is the effective subprocess budget, already sized
   // by the dispatcher. Only the nominal fallback needs load scaling here.

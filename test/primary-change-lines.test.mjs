@@ -46,6 +46,8 @@ for (const lines of [
   '10-11; step-0; regression from 2026-10-18',
   '10-11 (caused by step-1, task-2 or LAC-1559)',
   '10-11 notes: exit code 0, attempt 3',
+  '10-11: description',
+  'foo(2-4), bar(10-11), baz(30-40)',
 ]) {
   test(`HAMLINES-01: cited range covers the reversed span: ${lines}`, async () => {
     for (const rebased of [false, true]) {
@@ -55,7 +57,7 @@ for (const lines of [
   });
 }
 
-for (const lines of ['10', '`10`', '~10', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)',
+for (const lines of ['10', '`10`', '~10', '10: bug', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)',
   '10 (diff line 90)', '10 (RIGHT, diff line 90)', '10 (diff lines 90-100)']) {
   test(`HAMLINES-01: single file-line citation authorizes a single-line reversal: ${lines}`, async () => {
     assert.equal(checkPrimaryChange(await reversal(lines, { single: true }), head).ok, true);
@@ -66,6 +68,17 @@ test('HAMLINES-01: uncovered ranges, gaps and approximate endpoints confer no ex
   for (const lines of ['2-4; 30-40', '2-4, 30-40', '9; 12', '~9', '~11-12',
     '`handler` (~30-40)', '10 (RIGHT side, diff line 11)', '90 (RIGHT side, diff line 10)']) {
     refused(await reversal(lines), 'not-covered-by-cited-finding');
+  }
+});
+
+test('HAMLINES-01: colon notes and comma-separated symbols retain line-level coverage', async () => {
+  for (const rebased of [false, true]) {
+    for (const lines of ['30-40: description mentions 10-11', '42: bug',
+      'foo(2-4), bar(30-40)', 'foo(2-4), bar(30-40); baz(50-60)',
+      'foo(10), bar(11)']) {
+      refused(await reversal(lines, { rebased }), 'not-covered-by-cited-finding');
+    }
+    refused(await reversal('0: invalid', { rebased }), 'finding-lines-invalid');
   }
 });
 
@@ -103,6 +116,37 @@ test('HAMLINES-01: unreadable lines allow only the matching reviewed changed cod
   const evidence = await reversal('unknown', { rebased: false });
   evidence.reversalAuthorizations[0].reviewedFiles = [];
   refused(evidence, 'finding-lines-unreadable: "unknown"');
+});
+
+test('HAMLINES-01: unreadable fallback uses base spans and original paths across head shifts and renames', async () => {
+  const prefix = '@@ -0,0 +1,5 @@\n+one()\n+two()\n+three()\n+four()\n+five()';
+  for (const rebased of [false, true]) {
+    for (const renamed of [false, true]) {
+      const evidence = await reversal('unknown', { rebased });
+      const authorization = evidence.reversalAuthorizations[0];
+      const filename = renamed ? 'src/renamed.mjs' : 'src/a.mjs';
+      const metadata = { filename, status: renamed ? 'renamed' : 'modified',
+        ...(renamed ? { previous_filename: 'src/a.mjs' } : {}) };
+      for (const files of new Set([evidence.primaryFiles, authorization.parentFiles, authorization.reviewedFiles])) {
+        const file = files[0];
+        Object.assign(file, metadata, { additions: file.additions + 5,
+          patch: `${prefix}\n${file.patch.replace(/(\+)(\d+)(,2 @@)/, (_, plus, line, suffix) =>
+            `${plus}${Number(line) + 5}${suffix}`)}` });
+      }
+      evidence.finalFiles = [{ ...metadata, additions: 5, deletions: 0, patch: prefix }];
+      const file = authorization.commit.files[0];
+      file.filename = filename;
+      file.patch = file.patch.replace(/@@ -(\d+),2 \+(\d+) @@/, (_, old, next) =>
+        `@@ -${Number(old) + 5},2 +${Number(next) + 5} @@`);
+      authorization.review.body = authorization.review.body.replace('`src/a.mjs`', `\`${filename}\``);
+      // The changed base unit is half-open (10..11, or 15..16 after a
+      // rebase). Its inclusive reviewed head span is 15..16. Segment lookup
+      // must use the base unit and the pre-rename path, not that head span.
+      assert.equal(checkPrimaryChange(evidence, head).ok, true, JSON.stringify({ rebased, renamed }));
+      authorization.review.body = authorization.review.body.replace(`\`${filename}\``, '`src/other.mjs`');
+      refused(evidence, 'finding-lines-unreadable: "unknown"');
+    }
+  }
 });
 
 test('HAMLINES-01: file-level fallback retains the HAM content coverage proof', async () => {

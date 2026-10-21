@@ -404,7 +404,7 @@ function findingLineRanges(text) {
     const ranges = [];
     let rest = value;
     while (true) {
-      const match = /^\s*~?(-?\d+)(?:\s*[-–]\s*(-?\d+))?(?=$|[\s;,()])/.exec(rest);
+      const match = /^\s*~?(-?\d+)(?:\s*[-–]\s*(-?\d+))?(?=$|[\s;,():])/.exec(rest);
       if (!match) break;
       ranges.push({ start: Number(match[1]), end: Number(match[2] || match[1]) });
       rest = rest.slice(match[0].length);
@@ -420,7 +420,7 @@ function findingLineRanges(text) {
   if (leading.ranges.length) return leading.ranges;
   // Legacy symbol-qualified citations put the entire list in parentheses.
   // Require a complete numeric list, rather than searching prose for numbers.
-  return [...fileLines.matchAll(/(?:^|;)\s*[\w.]+[^();]*\((?:post-diff\s+)?([^()]*)\)\s*(?=;|$)/g)].flatMap((match) => {
+  return [...fileLines.matchAll(/(?:^|[;,])\s*[\w.]+[^();,]*\((?:post-diff\s+)?([^()]*)\)\s*(?=[;,]|$)/g)].flatMap((match) => {
     const { ranges, rest } = readList(match[1]);
     return rest.trim() ? [] : ranges;
   });
@@ -484,6 +484,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           // With no coordinates, file-level coverage is limited to the finding's
           // own reviewed changed code. The HAM patch/content proof below still
           // has to cover this exact region; unrelated file content gets no waiver.
+          // Segment lookup uses half-open base spans and the pre-rename path;
+          // `reviewed` instead holds inclusive head lines and the renamed path.
           const reviewedRegion = rebased
             ? rebasedRegion(parentFiles, reviewedFiles, path, region, cache) : region;
           if (!sameFile || !protectedSegment(reviewedFiles, path, reviewedRegion, cache)) {

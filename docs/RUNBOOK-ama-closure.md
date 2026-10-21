@@ -2426,13 +2426,18 @@ ranges confer no coverage. Approximate endpoints are treated as exact, without
 extra tolerance, to avoid waiving uncited code. A leading range list ends at the
 first explanatory note; numbers in later prose, symbols or parentheses supply
 no coverage and cannot invalidate that list. Legacy symbol-qualified entries
-must end with a parenthesized numeric list (optionally prefixed by `post-diff`).
+must end with a parenthesized numeric list (optionally prefixed by `post-diff`)
+and may be separated by semicolons or commas. A colon may directly follow a
+leading line or range to introduce a note (`10-15: description`).
 In harness output `N (RIGHT side, diff line M)`, only `N` cites a file line;
 `M` is metadata, including when the annotation omits `RIGHT side,` or uses
 `RIGHT,` instead.
 New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
 If no file-line number is readable, file-level coverage requires a matching
-finding file and a region inside that file's reviewed changed segment. The HAM
+finding file and a region inside that file's reviewed changed segment. The
+segment lookup uses half-open merge-base spans and the original pre-rename path;
+the finding file is compared to the reviewed head's resolved filename. Head line
+shifts and renames do not change those segment lookup coordinates. The HAM
 patch must still prove coverage of that region's parent-state content. Otherwise
 the refusal names the unreadable `Lines:` text. Invalid numeric ranges still
 refuse authorization. All identity, ancestry, reviewed-head, worker-ticket,

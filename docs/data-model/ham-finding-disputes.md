@@ -1,5 +1,12 @@
 # Data Model - HAM Finding Disputes
 
+Finding-record projections retain admitted dispute evidence by finding and
+reviewed head. Insert/update triggers copy observations to
+`review_finding_disputes`; replacing this table's latest dispute does not erase
+previous finding history. These copies provide corpus evidence only and do not
+participate in the authority checks below. See
+[review finding records](review-findings.md).
+
 **Owner:** AMA bounded finding disputes and reviewer context provenance
 **Store:** `data/reviews.db`, table `ham_finding_disputes`
 **Source of truth:** `src/review-state.mjs` (`ensureReviewStateSchema`)

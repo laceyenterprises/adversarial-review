@@ -877,6 +877,15 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
+Review-body capture records individual findings and remediation evidence in
+`data/reviews.db`. The read-only JSON command
+`node bin/review-findings.mjs show --db <database>` exposes them to corpus
+readers. Bounded, offline `backfill` and `link-job` commands repair historical
+records from stored bodies and jobs. See the
+[finding data model](docs/data-model/review-findings.md) for schemas, cursors,
+attribution limits and replay instructions. Finding statuses are historical
+read projections; existing lifecycle transitions and smoke promises are unchanged.
+
 REMEDBRANCH-01: follow-up creation holds unresolved PR head branches in pending
 and retries without a worker or round charge; three failed lookups stop for
 operator inspection, with explicit requeue resetting the attempt budget. The

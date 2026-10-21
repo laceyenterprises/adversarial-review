@@ -1570,8 +1570,11 @@ a strict-schema watcher startup failure. See Agent OS PR #7346.
 ## Missing branches and unpublished commits (REMEDBRANCH-01)
 
 A pending job with `branchResolution.reason = branch-unresolved` waits for its
-60-second branch retry; no remediation worker or round is charged. Inspect the
-PR read/credentials if it persists. Both reviewer runtimes now preserve the
+60-second branch retry; no remediation worker or round is charged. After three
+failed lookups including creation, it stops with `branch-unresolved` and no more
+automatic PR reads. Inspect the PR metadata/credentials, then explicitly requeue
+the job to reset the attempt count and retry immediately. Legacy holds without
+an attempt count receive two more attempts. Both reviewer runtimes preserve the
 head branch and builder tag through pass recovery.
 Settled clean reviews skip branch resolution and settle without a worker or
 round charge, including legacy jobs with a future branch retry. Their gate
@@ -1584,6 +1587,9 @@ the terminal TTL. Inspect the retained work and publish through
 and exact remote lease. Missing branch metadata is resolved from the live PR;
 never substitute an empty branch or bypass the publisher's diff/lease checks.
 The gate reports failed publication without an operator-decision-required notice.
+Once the live head exactly matches the retained commit, it reports pending review
+instead (`remediation-published-awaiting-review`, or `stale-review-head` when the
+prior reviewed head is known); publication alone cannot satisfy the review gate.
 An inspected workspace HEAD overrides reply hashes: when it still equals the
 job's `revisionRef`, external SHAs in worker commentary cannot create publication
 debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.

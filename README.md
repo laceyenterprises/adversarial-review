@@ -878,14 +878,17 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 ## State machines and smoke verification (SMV v1)
 
 REMEDBRANCH-01: follow-up creation holds unresolved PR head branches in pending
-and retries without a worker or round charge; the handoff smoke checks hold and
-recovery. Settled clean reviews bypass branch reads and legacy branch holds;
+and retries without a worker or round charge; three failed lookups stop for
+operator inspection, with explicit requeue resetting the attempt budget. The
+handoff smoke checks hold, bounded exhaustion and recovery. Settled clean reviews
+bypass branch reads and legacy branch holds;
 the handoff smoke verifies settlement without a worker or round charge and
 that unchanged workspace HEADs cannot acquire publication debt from reply hashes.
 Reviewer pass/run metadata preserves branch and builder tag across
 runtime paths. A `committed-unpublished` stop retains the local commit/workspace,
 names job and commit in the PR comment, and reports failed publication without an
-operator-decision notice. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+operator-decision notice. Confirmed publication changes the gate to pending
+review, preserving the retained evidence. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on
 the deployed producer before a submodule bump or reader deployment: both
@@ -1309,7 +1312,7 @@ stateDiagram-v2
     state "cancelled" as s5
     [*] --> s0: follow-up-job.01 create from delivered review
     s0 --> s1: follow-up-job.02 resolve head branch, claim and start round
-    s0 --> s4: follow-up-job.03 settled clean bypasses branch hold or exhausted rounds
+    s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds
     s0 --> s3: follow-up-job.04 claim failure
     s0 --> s5: follow-up-job.05 operator cancellation
     s1 --> s2: follow-up-job.06 validated worker reply
@@ -1319,12 +1322,12 @@ stateDiagram-v2
     s1 --> s0: follow-up-job.10 transient retry
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
-    s0 --> s0: follow-up-job.18 branch-unresolved remediation: bounded delayed head resolution without worker or round charge
+    s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]

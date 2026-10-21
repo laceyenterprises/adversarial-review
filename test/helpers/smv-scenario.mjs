@@ -160,6 +160,21 @@ if (scenario === 'clean') {
     claimedAt: branchHeld.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: 'fixture/head' }) });
   assert.equal(branchReady.job.branch, 'fixture/head');
 
+  const exhaustedRoot = join(rootDir, 'exhausted-branch-contract');
+  const unresolved = createFollowUpJob({ rootDir: exhaustedRoot, repo, prNumber,
+    reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes',
+    readPRHeadImpl: () => ({ branch: null }) });
+  claimNextFollowUpJob({ rootDir: exhaustedRoot,
+    claimedAt: unresolved.job.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) });
+  const retried = readFollowUpJob(unresolved.jobPath);
+  const exhausted = claimNextFollowUpJob({ rootDir: exhaustedRoot, returnStopped: true,
+    claimedAt: retried.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) });
+  assert.equal(exhausted.job.remediationPlan.stop.code, 'branch-unresolved');
+  assert.equal(exhausted.job.branchResolution.attempts, 3);
+  assert.equal(exhausted.job.remediationPlan.currentRound, 0);
+  assert.equal(claimNextFollowUpJob({ rootDir: exhaustedRoot, claimedAt: '2099-01-01T00:00:00Z',
+    readPRHeadImpl: refuse }), null);
+
   const cleanRoot = join(rootDir, 'clean-branch-contract');
   const clean = createFollowUpJob({ rootDir: cleanRoot, repo, prNumber,
     reviewerModel: 'gemini', reviewBody: cleanBody, readPRHeadImpl: refuse });
@@ -169,6 +184,12 @@ if (scenario === 'clean') {
     retryAfter: '2099-01-01T00:00:00Z' } };
   writeFollowUpJob(clean.jobPath, cleanHeld);
   const { pickAdversarialGateStatus } = await import('../../src/adversarial-gate-status.mjs');
+  const publishedGate = pickAdversarialGateStatus({ headSha,
+    reviewRow: { review_status: 'posted', pr_state: 'open' },
+    latestJob: { jobId: 'published-smoke', status: 'stopped',
+      remediationPlan: { stop: { code: 'committed-unpublished' } }, unpublishedWork: { commitSha: headSha } } });
+  assert.equal(publishedGate.reason, 'remediation-published-awaiting-review');
+  assert.equal(publishedGate.state, 'pending');
   assert.equal(pickAdversarialGateStatus({ repo, prNumber,
     reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: cleanHeld }).reason, 'review-settled');
   const settled = claimNextFollowUpJob({ rootDir: cleanRoot, returnStopped: true, readPRHeadImpl: refuse });

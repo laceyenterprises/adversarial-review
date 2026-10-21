@@ -2,7 +2,7 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
 ## Branch and publication contract (REMEDBRANCH-01)
@@ -17,10 +17,14 @@ title when absent.
 
 If resolution fails or returns no head ref, the job stays in `pending` with
 `branch: null` and `branchResolution: { state: "blocked", reason:
-"branch-unresolved", retryAfter: <ISO timestamp> }`. This is a hold, not a ready
-worker job. The claim loop retries after 60 seconds under the atomic queue claim,
-returns unresolved jobs to pending, and never charges a remediation round for
-that hold. Successful resolution stores the branch and clears `branchResolution`.
+"branch-unresolved", attempts: <integer>, retryAfter: <ISO timestamp> }`. This is a
+hold, not a ready worker job. The claim loop retries after 60 seconds under the
+atomic queue claim, returning unresolved jobs to pending until three failed
+lookups (including creation) stop the job with `branch-unresolved`. No worker
+spawns or remediation round is charged. Legacy holds without `attempts` count
+as one prior failure. Explicit operator requeue resets attempts to zero and
+makes the next lookup immediately eligible. Successful resolution stores the
+branch and clears `branchResolution`.
 Legacy branchless jobs must resolve the branch before either local or HQ spawn.
 Settled clean reviews bypass branch resolution at creation and claim. Legacy
 clean jobs carrying a branch hold settle immediately without a lookup, worker,
@@ -43,8 +47,11 @@ HEAD at `revisionRef` produces no publication debt. Explicit worker-reported
 commit evidence remains a fallback when the workspace is unavailable.
 The stop reason and PR comment name the job and commit; the gate remains failed
 with reason `remediation-committed-unpublished`, without an operator-decision
-notice. Workspace retention skips this publication debt, including past the
-normal terminal TTL. Recover by inspecting that workspace and running the same
+notice. If the live head exactly matches the retained commit, the gate reports
+pending review (`remediation-published-awaiting-review`, or the existing
+`stale-review-head` when the prior reviewed head is known). Publication alone
+never settles the review or deletes the retained evidence. Workspace retention
+skips this publication debt, including past the normal terminal TTL. Recover by inspecting that workspace and running the same
 guarded publisher with the original previous head and remote lease; the record
 is diagnostic evidence and does not authorize a merge or an unguarded push.
 

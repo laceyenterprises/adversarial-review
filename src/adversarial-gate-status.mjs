@@ -1005,6 +1005,10 @@ function pickAdversarialGateStatus({
 
   if (latestJob?.remediationPlan?.stop?.code === 'committed-unpublished') {
     const commit = latestJob.unpublishedWork?.commitSha || 'unknown';
+    if (headSha && commit === headSha) {
+      return decide('pending', `Remediation job ${latestJob.jobId} commit is published; re-review of the current head is pending.`,
+        'remediation-published-awaiting-review');
+    }
     return decide('failure', `Remediation job ${latestJob.jobId} committed ${commit} locally; publication is pending.`,
       'remediation-committed-unpublished');
   }

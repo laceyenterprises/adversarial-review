@@ -107,6 +107,7 @@
       "owner": "follow-up daemon",
       "codeSources": [
         "src/follow-up-jobs.mjs",
+        "src/follow-up-branch.mjs",
         "src/follow-up-remediation.mjs"
       ],
       "states": [
@@ -120,7 +121,7 @@
       "transitions": [
         {"id": "follow-up-job.01","from": "[*]","to": "pending","trigger": "create from delivered review","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.02","from": "pending","to": "in_progress","trigger": "resolve head branch, claim and start round","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "settled clean bypasses branch hold or exhausted rounds","codeSource": "src/follow-up-jobs.mjs"},
+        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "settled clean bypasses branch hold, exhausted branch lookups or rounds","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.04","from": "pending","to": "failed","trigger": "claim failure","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.05","from": "pending","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.06","from": "in_progress","to": "completed","trigger": "validated worker reply","codeSource": "src/follow-up-jobs.mjs"},
@@ -130,12 +131,12 @@
         {"id": "follow-up-job.10","from": "in_progress","to": "pending","trigger": "transient retry","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round unless comment-only final hammer handoff","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
+        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger; branch-unresolved resets lookup attempts","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},
         {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"},
         {"id": "follow-up-job.16","from": "in_progress","to": "stopped","trigger": "operator-only findings after lifecycle admission: hold without spawning","codeSource": "src/follow-up-remediation.mjs"},
         {"id": "follow-up-job.17","from": "in_progress","to": "failed","trigger": "exited worker has a matching preservation-refusal sidecar","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.18","from": "pending","to": "pending","trigger": "branch-unresolved remediation: bounded delayed head resolution without worker or round charge","codeSource": "src/follow-up-jobs.mjs"}
+        {"id": "follow-up-job.18","from": "pending","to": "pending","trigger": "branch-unresolved remediation: up to three delayed head lookups without worker or round charge","codeSource": "src/follow-up-jobs.mjs"}
       ]
     },
     {
@@ -297,6 +298,7 @@
     }
   ],
   "sourceProjectionSha256": {
+    "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",

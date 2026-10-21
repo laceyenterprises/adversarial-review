@@ -1,4 +1,4 @@
-import { resolveFollowUpBranch } from './follow-up-branch.mjs';
+import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
@@ -110,6 +110,7 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 });
 const ARCHIVE_ANOMALY_DIR = ['data', 'archive-anomalies'];
 const RETRIGGERABLE_STOP_CODES = Object.freeze([
+  'branch-unresolved',
   'max-rounds-reached',
   'round-budget-exhausted',
   'daemon-bounce-safety',
@@ -2570,6 +2571,21 @@ function claimNextFollowUpJob({
       pendingJob = resolveFollowUpBranch(pendingJob, { readPRHeadImpl, now: claimedAt });
       writeFollowUpJob(inProgressPath, pendingJob);
       if (pendingJob.branchResolution?.state === 'blocked') {
+        if (pendingJob.branchResolution.attempts >= MAX_BRANCH_RESOLUTION_ATTEMPTS) {
+          let stopped = null;
+          try {
+            stopped = markStoppedImpl({ rootDir, jobPath: inProgressPath, stoppedAt: claimedAt,
+              commentDeliveryExemption: 'no-remediation-started', sourceStatus: pendingJob.status,
+              stopCode: 'branch-unresolved',
+              stopReason: 'PR head branch could not be resolved after three attempts; operator must verify PR metadata and requeue.',
+            });
+          } catch (err) {
+            handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode: 'branch-unresolved', err });
+          }
+          if (returnStopped && stopped) return { job: stopped.job, jobPath: stopped.jobPath,
+            stopped: true, reason: 'branch-unresolved' };
+          continue;
+        }
         renameSync(inProgressPath, pendingPath);
         continue;
       }
@@ -3471,6 +3487,9 @@ function requeueFollowUpJobForNextRound({
   const nextJob = {
     ...currentJob,
     revisionRef: nextRevisionRef,
+    ...(previousStopCode === 'branch-unresolved' ? {
+      branchResolution: { ...currentJob.branchResolution, attempts: 0, retryAfter: requestedAt },
+    } : {}),
     status: 'pending',
     pendingAt: requestedAt,
     claimedAt: null,

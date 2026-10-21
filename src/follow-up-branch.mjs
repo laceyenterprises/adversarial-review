@@ -4,6 +4,8 @@ import { meteredExecFileSync } from './metered-gh.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
 
+export const MAX_BRANCH_RESOLUTION_ATTEMPTS = 3;
+
 export function readFollowUpPRHead({ repo, prNumber }) {
   if (!/^[\w.-]+\/[\w.-]+$/u.test(repo || '') || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) <= 0) {
     throw new Error('Invalid PR identity for branch resolution');
@@ -17,6 +19,10 @@ export function readFollowUpPRHead({ repo, prNumber }) {
 export function resolveFollowUpBranch(job, { readPRHeadImpl = readFollowUpPRHead, now = new Date().toISOString() } = {}) {
   const branch = typeof job.branch === 'string' ? job.branch.trim() : '';
   if (branch) return { ...job, branch, branchResolution: null };
+  // Legacy holds already made one lookup at creation.
+  const previousAttempts = Number.isSafeInteger(job.branchResolution?.attempts) && job.branchResolution.attempts >= 0
+    ? job.branchResolution.attempts : job.branchResolution?.state === 'blocked' ? 1 : 0;
+  if (previousAttempts >= MAX_BRANCH_RESOLUTION_ATTEMPTS) return job;
   try {
     const head = readPRHeadImpl({ repo: job.repo, prNumber: job.prNumber });
     if (typeof head?.branch === 'string' && head.branch.trim()) {
@@ -25,6 +31,7 @@ export function resolveFollowUpBranch(job, { readPRHeadImpl = readFollowUpPRHead
   } catch { /* Unknown evidence holds the job; the daemon retries without a worker. */ }
   return { ...job, branch: null, branchResolution: {
     state: 'blocked', reason: 'branch-unresolved',
+    attempts: previousAttempts + 1,
     retryAfter: new Date(Date.parse(now) + 60_000).toISOString(),
   } };
 }

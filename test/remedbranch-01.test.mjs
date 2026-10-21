@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, writeFollowUpJob, markFollowUpJobSpawned, buildRemediationReply, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, requeueFollowUpJobForNextRound, readFollowUpJob, writeFollowUpJob, markFollowUpJobSpawned, buildRemediationReply, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { findCommittedUnpublishedWork } from '../src/remediation-unpublished.mjs';
@@ -56,6 +56,55 @@ test('REMEDBRANCH-01: unresolved head holds and retries without charging a round
     claimedAt: held.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: 'feature/retry' }) });
   assert.equal(claimed.job.branch, 'feature/retry');
   assert.equal(claimed.job.branchResolution, null);
+});
+
+test('REMEDBRANCH-01: failed branch lookups stop after three attempts and operator requeue resets the bound', t => {
+  const options = input(t);
+  let reads = 0;
+  const readPRHeadImpl = () => { reads++; throw new Error('branch unavailable'); };
+  const created = createFollowUpJob({ ...options, readPRHeadImpl });
+  assert.equal(created.job.branchResolution.attempts, 1);
+  assert.equal(claimNextFollowUpJob({ rootDir: options.rootDir,
+    claimedAt: created.job.createdAt, readPRHeadImpl }), null);
+  assert.equal(reads, 1, 'backoff must not perform a lookup');
+  assert.equal(claimNextFollowUpJob({ rootDir: options.rootDir,
+    claimedAt: created.job.branchResolution.retryAfter, readPRHeadImpl }), null);
+  const held = readFollowUpJob(created.jobPath);
+  assert.equal(held.branchResolution.attempts, 2);
+  const stopped = claimNextFollowUpJob({ rootDir: options.rootDir, returnStopped: true,
+    claimedAt: held.branchResolution.retryAfter, readPRHeadImpl });
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.reason, 'branch-unresolved');
+  assert.equal(stopped.job.branchResolution.attempts, 3);
+  assert.equal(stopped.job.remediationPlan.currentRound, 0);
+  assert.equal(stopped.job.remediationWorker, null);
+  assert.equal(reads, 3);
+  assert.equal(claimNextFollowUpJob({ rootDir: options.rootDir,
+    claimedAt: '2099-01-01T00:00:00Z', readPRHeadImpl }), null);
+  assert.equal(reads, 3, 'terminal jobs never probe again automatically');
+  const requestedAt = '2099-01-01T00:00:00Z';
+  const requeued = requeueFollowUpJobForNextRound({ rootDir: options.rootDir,
+    jobPath: stopped.jobPath, requestedAt });
+  assert.equal(requeued.job.branchResolution.attempts, 0);
+  const ready = claimNextFollowUpJob({ rootDir: options.rootDir, claimedAt: requestedAt,
+    readPRHeadImpl: () => ({ branch: 'feature/recovered' }) });
+  assert.equal(ready.job.branch, 'feature/recovered');
+  assert.equal(ready.job.branchResolution, null);
+});
+
+test('REMEDBRANCH-01: legacy branch holds receive only two further failed lookups', t => {
+  const options = input(t);
+  const created = createFollowUpJob({ ...options, readPRHeadImpl: () => ({ branch: null }) });
+  delete created.job.branchResolution.attempts;
+  writeFollowUpJob(created.jobPath, created.job);
+  let reads = 0;
+  const readPRHeadImpl = () => { reads++; return { branch: null }; };
+  claimNextFollowUpJob({ rootDir: options.rootDir, claimedAt: created.job.branchResolution.retryAfter, readPRHeadImpl });
+  const held = readFollowUpJob(created.jobPath);
+  const stopped = claimNextFollowUpJob({ rootDir: options.rootDir, returnStopped: true,
+    claimedAt: held.branchResolution.retryAfter, readPRHeadImpl });
+  assert.equal(stopped.reason, 'branch-unresolved');
+  assert.equal(reads, 2);
 });
 
 test('REMEDBRANCH-01: clean reviews settle without reading a missing branch', t => {
@@ -223,6 +272,23 @@ test('REMEDBRANCH-01: reported committed-unpublished work names job and retained
   assert.match(decision.description, new RegExp(commitSha));
   assert.equal(decision.operatorDecisionRequired, false);
   assert.equal(decision.state, 'failure');
+});
+
+test('REMEDBRANCH-01: confirmed publication clears publication failure while awaiting current-head review', () => {
+  const commitSha = 'b'.repeat(40);
+  const job = { jobId: 'published-job', status: 'stopped', reviewBody,
+    remediationPlan: { stop: { code: 'committed-unpublished' } }, unpublishedWork: { commitSha } };
+  for (const liveHead of [null, head, commitSha]) {
+    const decision = pickAdversarialGateStatus({ headSha: liveHead,
+      reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: job });
+    assert.equal(decision.state, liveHead === commitSha ? 'pending' : 'failure');
+    assert.equal(decision.reason, liveHead === commitSha
+      ? 'remediation-published-awaiting-review' : 'remediation-committed-unpublished');
+  }
+  const stale = pickAdversarialGateStatus({ headSha: commitSha,
+    reviewRow: { review_status: 'posted', pr_state: 'open', reviewer_head_sha: head }, latestJob: job });
+  assert.equal(stale.reason, 'stale-review-head');
+  assert.equal(stale.state, 'pending');
 });
 
 test('REMEDBRANCH-01: reconciliation stops committed-unpublished at the round cap and retains its workspace', async t => {

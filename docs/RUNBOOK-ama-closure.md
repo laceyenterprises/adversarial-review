@@ -2436,11 +2436,24 @@ compare from the cited review head to the HAM parent is exactly `diverged`, the
 collector still accepts the citation if the trailer is on a HAM commit in the
 current history, the review is on this pull request and contains that finding
 and kind, and the protected region has the same removed/added-line multisets in the
-reviewed diff (`<base>...<review head>`) as in the current primary diff
-(REVERSALPROV-02). Multiplicity matters; matches must remain unambiguous in both
-diffs. Distinct additions disambiguate hunks with identical deletions; identical
+reviewed diff (`<base>...<review head>`) as in the HAM parent's diff
+(REVERSALPROV-02, REVAUTHVERIFY-01). The primary diff and HAM parent share
+merge-base coordinates: those protected base lines select the parent's segment,
+including earlier HAM edits, before mapping its content to the reviewed patch.
+The author's original added text need not survive earlier repairs. Multiplicity
+matters; matches must remain unambiguous in the parent and reviewed diffs.
+Repeated author segments or common individual lines do not create extra
+candidates when the corresponding parent-state segment is unique.
+Distinct additions disambiguate hunks with identical deletions; identical
 changed-content segments still refuse ambiguous mapping. Context, offsets and
 changed-line order do not establish authority.
+Mapping refusals identify `region-moved` when the protected base lines no longer
+select a parent segment, `content-changed-by-author` when parent/reviewed content
+does not match, `not-covered-by-cited-finding` for file/line coverage failures,
+or `ambiguous:<n>` for multiple matching segment candidates. Without a rebase,
+shared base coordinates select both segments directly; changed content after
+review still cannot borrow the earlier finding. Immutable original reversal
+proofs use the same parent-state mapping, including earlier HAM edits.
 Reviewed-parent content comparisons retain path, status and changed-content
 multisets while ignoring context and hunk partitioning. A citation with no later
 superseding authoritative review remains current by GitHub review order.

@@ -22,18 +22,26 @@ const message = (cites) => ['HAM repair', '', 'Worker-Class: hammer', 'Worker-Ti
 // shift: how far the rebases moved the author hunk. reviewedPatch: the author
 // hunk as the cited review saw it, in the older base's coordinates.
 export async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=blocking'], reviews = [review()],
-  rebasedAdded, reviewedAdded, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
+  rebasedAdded, reviewedAdded, earlierHammerAdded, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
   duplicatePrimary = false, duplicateReviewed = false, originalRecorded = false, originalAdded,
   originalLogin = 'the-hammer-lacey[bot]', originalParent = reviewedHead, snapshotCapped = false,
   originalLine = 10, snapshotStatus = 'ahead', hammerLogin = 'the-hammer-lacey[bot]', nullAuthor = false, builderOnly = false, parentExtraHunk = false, parentContext = '', reviewedContext = '', unrelated = true, attestationAuthor = null, attestationHead = head } = {}) {
-  const primary = authorPatch(10 + shift, rebasedAdded);
-  if (parentExtraHunk) { primary.patch += '\n@@ -40 +40 @@\n-other\n+extra'; primary.additions++; primary.deletions++; }
-  primary.patch += parentContext;
-  const ham = { sha: head, parents: [{ sha: author }], author: nullAuthor ? null : { login: hammerLogin },
+  const parent = authorPatch(10 + shift, earlierHammerAdded || rebasedAdded);
+  const primary = earlierHammerAdded ? authorPatch(10 + shift, rebasedAdded) : parent;
+  for (const file of new Set([primary, parent])) {
+    if (parentExtraHunk) { file.patch += '\n@@ -40 +40 @@\n-other\n+extra'; file.additions++; file.deletions++; }
+    file.patch += parentContext;
+  }
+  const parentHead = earlierHammerAdded ? sha('3') : author;
+  const ham = { sha: head, parents: [{ sha: parentHead }], author: nullAuthor ? null : { login: hammerLogin },
     committer: { login: 'the-hammer-lacey[bot]' },
     commit: { verification: { verified: false, reason: 'unsigned' }, message: builderOnly ? 'Builder change\n\nWorker-Class: codex' : message(cites), author: { date: authoredAt }, committer: { date: '2026-10-11T17:30:00Z', email: 'the-hammer-lacey[bot]@users.noreply.github.com' } },
     files: [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 2,
-      patch: `@@ -${10 + shift},2 +${10 + shift} @@\n${rebasedAdded ? `-${rebasedAdded.slice(1)}` : '-start_unsafe()'}\n-log_startup()\n+start()` }] };
+      patch: `@@ -${10 + shift},2 +${10 + shift} @@\n-${(earlierHammerAdded || rebasedAdded || '+start_unsafe()').slice(1)}\n-log_startup()\n+start()` }] };
+  const earlierHammer = { ...ham, sha: parentHead, parents: [{ sha: author }],
+    commit: { ...ham.commit, message: message([]) }, files: [{ filename: 'src/a.mjs', status: 'modified',
+      additions: 1, deletions: 1,
+      patch: `@@ -${10 + shift} +${10 + shift} @@\n-start_unsafe()\n${earlierHammerAdded}` }] };
   const duplicate = (file) => ({ ...file, additions: file.additions * 2, deletions: file.deletions * 2,
     patch: `${file.patch}\n${file.patch.replace(/@@ -\d+ \+\d+,2 @@/, '@@ -45 +45,2 @@')}` });
   const original = { ...ham, sha: sha('d'), parents: [{ sha: originalParent }],
@@ -47,22 +55,27 @@ export async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=bl
       if (path === 'repos/fixture/repo/pulls/8088/reviews?per_page=100') return reviews;
       if (path === 'repos/fixture/repo/issues/8088/comments?per_page=100') return attestationAuthor ? [{ user: { login: attestationAuthor }, body: `HAM-Base-Head: ${author}\nHAM-Validated-Head: ${attestationHead}` }] : [];
       if (path.endsWith(`/commits/${head}`)) return ham;
+      if (earlierHammerAdded && path.endsWith(`/commits/${parentHead}`)) return earlierHammer;
       if (path.endsWith(`/commits/${original.sha}`)) return original;
       if (originalRecorded && path.endsWith(`${reviewedHead}...${sha('f')}`)) {
         return { status: snapshotStatus, total_commits: snapshotCapped ? 250 : 1, commits: [original] };
       }
       if (path.endsWith(`${oldBase}...${reviewedHead}`)) return { status: 'ahead',
-        merge_base_commit: { sha: oldBase }, files: [duplicateReviewed ? duplicate(authorPatch(10, reviewedAdded)) : { ...authorPatch(10, reviewedAdded), patch: authorPatch(10, reviewedAdded).patch + reviewedContext }] };
+        merge_base_commit: { sha: oldBase }, files: [duplicateReviewed ? duplicate(authorPatch(10, reviewedAdded || earlierHammerAdded)) : { ...authorPatch(10, reviewedAdded || earlierHammerAdded), patch: authorPatch(10, reviewedAdded || earlierHammerAdded).patch + reviewedContext }] };
       if (path.endsWith(`${base}...${head}`)) return { status: 'ahead', merge_base_commit: { sha: base }, files: [],
-        total_commits: 2, commits: [{ sha: author, commit: { message: 'author change' } }, ham] };
+        total_commits: earlierHammerAdded ? 3 : 2,
+        commits: [{ sha: author, commit: { message: 'author change' } }, ...(earlierHammerAdded ? [earlierHammer] : []), ham] };
+      if (earlierHammerAdded && path.endsWith(`${base}...${parentHead}`)) return { status: 'ahead', merge_base_commit: { sha: base }, files: [parent] };
+      if (earlierHammerAdded && path.endsWith(`${author}...${parentHead}`)) return { status: 'ahead' };
+      if (earlierHammerAdded && path.endsWith(`${reviewedHead}...${parentHead}`)) return { status: reviewToParent, merge_base_commit: { sha: oldBase } };
       if (path.endsWith(`${base}...${author}`)) return { status: 'ahead', merge_base_commit: { sha: base }, files: [duplicatePrimary ? duplicate(primary) : primary] };
       if (path.endsWith(`${author}...${author}`)) return { status: 'identical' };
       if (path.endsWith(`${reviewedHead}...${author}`)) return { status: reviewToParent, merge_base_commit: { sha: oldBase } };
       if (path.endsWith(`${base}...${reviewedHead}`)) return { status: 'diverged', merge_base_commit: { sha: oldBase },
-        files: [duplicateReviewed ? duplicate(authorPatch(10, reviewedAdded)) : { ...authorPatch(10, reviewedAdded), patch: authorPatch(10, reviewedAdded).patch + reviewedContext }, ...(unrelated ? [{ filename: 'src/mainline.mjs', additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+base_only()' }] : [])] };
+        files: [duplicateReviewed ? duplicate(authorPatch(10, reviewedAdded || earlierHammerAdded)) : { ...authorPatch(10, reviewedAdded || earlierHammerAdded), patch: authorPatch(10, reviewedAdded || earlierHammerAdded).patch + reviewedContext }, ...(unrelated ? [{ filename: 'src/mainline.mjs', additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+base_only()' }] : [])] };
       // Every pre-rebase head has diverged from the rebased history.
       if ([reviewedHead, ...reviews.map(entry => entry.commit_id), base].some(from =>
-        [author, originalParent, ...reviews.map(entry => entry.commit_id)].some(to => path === `repos/fixture/repo/compare/${from}...${to}`))) return { status: 'diverged', merge_base_commit: { sha: oldBase }, files: [] };
+        [author, parentHead, originalParent, ...reviews.map(entry => entry.commit_id)].some(to => path === `repos/fixture/repo/compare/${from}...${to}`))) return { status: 'diverged', merge_base_commit: { sha: oldBase }, files: [] };
       throw new Error(`unexpected ${path}`);
     };
   const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head, get: transport });

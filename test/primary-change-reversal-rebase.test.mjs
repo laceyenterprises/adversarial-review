@@ -331,7 +331,7 @@ test('finding coverage uses reviewed coordinates after a rebase and still refuse
     const narrow = review({ body: review().body.replace('`10-11`', '`11`') });
     const uncovered = await collect({ shift, reviews: [narrow] });
     assert.equal(uncovered.result.reason, 'primary-change-reverted');
-    assert.deepEqual(uncovered.result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
+    assert.deepEqual(uncovered.result.missingEvidence.rejected.map(entry => entry.reason), ['not-covered-by-cited-finding']);
   }
 });
 
@@ -504,7 +504,7 @@ test('a rebased reversal whose protected patch differs from the reviewed one is 
   assert.equal((await collect({ reviews: [narrow] })).result.reason, 'primary-change-reverted');
 });
 
-test('identical segments must be unique in both primary and reviewed diffs', async () => {
+test('identical segments must be unique in both parent and reviewed diffs', async () => {
   for (const options of [{ duplicatePrimary: true }, { duplicateReviewed: true }]) {
     const { evidence, result } = await collect(options);
     if (options.duplicatePrimary) {
@@ -517,15 +517,15 @@ test('identical segments must be unique in both primary and reviewed diffs', asy
     const checked = checkPrimaryChange(evidence, head);
     assert.equal(result.reason, 'primary-change-reverted');
     assert.equal(checked.reason, 'primary-change-reverted');
-    assert.match(checked.missingEvidence.summary, /patch differs or is ambiguous/);
+    assert.match(checked.missingEvidence.summary, /ambiguous:2/);
   }
 });
 
 test('evaluator diagnostics explain nonexistent findings, patch mismatches and line coverage failures', async () => {
   for (const [options, reason] of [
     [{ cites: ['PRR_cited finding=2 kind=blocking'] }, 'finding-not-found'],
-    [{ rebasedAdded: '+start_unsafe(retry=True)' }, 'rebased protected region patch differs or is ambiguous'],
-    [{ reviews: [review({ body: review().body.replace('`10-11`', '`11`') })] }, 'finding-does-not-cover-region'],
+    [{ rebasedAdded: '+start_unsafe(retry=True)' }, 'content-changed-by-author'],
+    [{ reviews: [review({ body: review().body.replace('`10-11`', '`11`') })] }, 'not-covered-by-cited-finding'],
   ]) {
     const { result } = await collect(options);
     assert.equal(result.missingEvidence.accepted, 0);
@@ -735,7 +735,7 @@ test('refused-region sweep cannot add accepted or rejected authorization evidenc
   const result = checkPrimaryChange(evidence, head);
   assert.equal(result.reason, 'primary-change-reverted');
   assert.equal(result.missingEvidence.accepted, 0);
-  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['not-covered-by-cited-finding']);
   assert.deepEqual(result.missingEvidence.regions, [{ start: 15, end: 16 }]);
 });
 
@@ -793,7 +793,7 @@ test('REVERSALPROV-02: a cited region leaves the uncited removed remainder prote
   assert.equal(result.reason, 'primary-change-reverted');
   assert.equal(result.missingEvidence.accepted, 1);
   assert.deepEqual(result.missingEvidence.regions, [{ start: 35, end: 36 }]);
-  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['not-covered-by-cited-finding']);
 });
 
 test('REVERSALPROV-02: uncited insertion reversals refuse with or without a final file diff', async () => {
@@ -938,8 +938,110 @@ test('REVERSALPROV-02: rebase segments distinguish identical deletions with dist
   evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 1, deletions: 1,
     patch: '@@ -35 +35 @@\n-start()\n+distinct()' }];
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
-  // Truly identical segments are still ambiguous and fail closed.
+  // Truly identical current parent/reviewed segments still fail closed.
   evidence.primaryFiles = evidence.primaryFiles.map(file => ({ ...file, additions: file.additions + 1,
     patch: file.patch.replace('+distinct()', '+start_unsafe()\n+log_startup()') }));
+  authorization.parentFiles = evidence.primaryFiles;
+  authorization.reviewedFiles = authorization.reviewedFiles.map(file => ({ ...file, additions: file.additions + 1,
+    patch: file.patch.replace('+distinct()', '+start_unsafe()\n+log_startup()') }));
   assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+const terminalPolicyReview = () => review({ state: 'COMMENTED',
+  body: '## Blocking issues\n- None.\n## Non-blocking issues\n'
+    + '- **Terminal policy**\n  - **File:** `src/a.mjs`\n  - **Lines:** `10-11`\n'
+    + '  - **Problem:** Generated vocabulary trims the terminal policy.\n'
+    + '  - **Recommended fix:** Restore the explicit policy and assert it.\n'
+    + '## Verdict\nComment only' });
+const earlierHammerOptions = () => ({ earlierHammerAdded: '+generated_terminal_policy()',
+  reviews: [terminalPolicyReview()], cites: ['PRR_cited finding=1 kind=non-blocking'] });
+
+test('REVAUTHVERIFY-01: current non-blocking finding authorizes reversal of an earlier hammer edit', async () => {
+  const { evidence, result } = await collect(earlierHammerOptions());
+  assert.equal(result.ok, true);
+  assert.equal(evidence.primaryHead, author);
+  const authorization = evidence.reversalAuthorizations[0];
+  assert.equal(authorization.commit.parents[0].sha, sha('3'));
+  assert.match(evidence.primaryFiles[0].patch, /start_unsafe/);
+  assert.match(authorization.reviewedFiles[0].patch, /generated_terminal_policy/);
+  assert.match(authorization.parentFiles[0].patch, /generated_terminal_policy/);
+  const unrebased = structuredClone(evidence);
+  const current = unrebased.reversalAuthorizations[0];
+  current.rebased = false;
+  current.reviewedFiles = structuredClone(current.parentFiles);
+  current.review.body = current.review.body.replace('`10-11`', '`15-16`');
+  assert.equal(checkPrimaryChange(unrebased, head, { strictNonBlockingRemediation: true }).ok, true);
+  // Strict remediation policy and a current citation are still required.
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  const uncited = await collect({ ...earlierHammerOptions(), cites: [] });
+  assert.equal(uncited.result.reason, 'primary-change-reverted');
+  assert.equal(uncited.result.missingEvidence.accepted, 0);
+  const superseded = await collect({ ...earlierHammerOptions(), reviews: [terminalPolicyReview(),
+    review({ node_id: 'PRR_new', state: 'COMMENTED', body: '## Verdict\nComment only' })] });
+  assert.equal(superseded.result.reason, 'primary-change-reverted');
+  assert.equal(superseded.evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
+});
+
+test('REVAUTHVERIFY-01: immutable original proof maps the earlier hammer content too', async () => {
+  const { evidence } = await snapshotReversal({ ...earlierHammerOptions(),
+    reviews: [terminalPolicyReview(), review({ node_id: 'PRR_snapshot', commit_id: sha('f'),
+      state: 'COMMENTED', body: '## Verdict\nComment only' })] });
+  assert.ok(evidence.reversalAuthorizations?.[0]?.originalAuthorization, JSON.stringify(evidence));
+  assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, true);
+});
+
+test('REVAUTHVERIFY-01: duplicate author segments do not obscure unique parent-state provenance', async () => {
+  const { evidence } = await collect(earlierHammerOptions());
+  const authorization = evidence.reversalAuthorizations[0];
+  const duplicate = (files, line) => files.map(file => ({ ...file, additions: file.additions + 2,
+    deletions: file.deletions + 1,
+    patch: `${file.patch}\n@@ -${line} +${line + 1},2 @@\n-start()\n+start_unsafe()\n+log_startup()` }));
+  evidence.primaryFiles = duplicate(evidence.primaryFiles, 35);
+  authorization.parentFiles = duplicate(authorization.parentFiles, 35);
+  authorization.reviewedFiles = duplicate(authorization.reviewedFiles, 30);
+  evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified', additions: 2, deletions: 1,
+    patch: '@@ -35 +35,2 @@\n-start()\n+start_unsafe()\n+log_startup()' }];
+  assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, true);
+  // Common patch lines are not independent mapping candidates.
+  const common = JSON.parse(JSON.stringify(evidence).replaceAll('start()', '});')
+    .replaceAll('log_startup()', '  }'));
+  assert.equal(checkPrimaryChange(common, head, { strictNonBlockingRemediation: true }).ok, true);
+});
+
+test('REVAUTHVERIFY-01: genuinely duplicate reviewed-state candidates refuse with their count', async () => {
+  const { evidence } = await collect(earlierHammerOptions());
+  const authorization = evidence.reversalAuthorizations[0];
+  for (const key of ['parentFiles', 'reviewedFiles']) {
+    authorization[key] = authorization[key].map(file => ({ ...file, additions: file.additions * 2,
+      deletions: file.deletions * 2,
+      patch: `${file.patch}\n${file.patch.replace(/@@ -\d+ \+\d+,2 @@/, '@@ -45 +46,2 @@')}` }));
+  }
+  const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['ambiguous:2']);
+});
+
+test('REVAUTHVERIFY-01: intervening author content and moved regions cannot borrow a finding', async () => {
+  for (const rebased of [true, false]) {
+    const { evidence } = await collect(earlierHammerOptions());
+    const authorization = evidence.reversalAuthorizations[0];
+    authorization.rebased = rebased;
+    if (!rebased) {
+      authorization.reviewedFiles = structuredClone(authorization.parentFiles);
+      authorization.review.body = authorization.review.body.replace('`10-11`', '`15-16`');
+    }
+    authorization.parentFiles[0].patch = authorization.parentFiles[0].patch
+      .replace('generated_terminal_policy()', 'author_changed_policy()');
+    authorization.commit.files[0].patch = authorization.commit.files[0].patch
+      .replace('generated_terminal_policy()', 'author_changed_policy()');
+    const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['content-changed-by-author']);
+  }
+  const { evidence } = await collect(earlierHammerOptions());
+  evidence.reversalAuthorizations[0].parentFiles[0].patch = evidence.reversalAuthorizations[0].parentFiles[0].patch
+    .replace('@@ -15 +15,2 @@', '@@ -45 +45,2 @@');
+  const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['region-moved']);
 });

@@ -1516,6 +1516,8 @@ reviewer admission uses the canonical Python selection owner and broker executio
 semaphore. The declared corporate-first order keeps the reviewer role and GitHub
 identity constant. Fresh refusal can select primary; unknown or stale evidence
 holds. Undeclared roles retain the legacy selectors during migration.
+Claude and Codex admission reject cached pooled selections when the grounding
+refresh fails, including when no local account cooldown is active.
 
 `src/reviewer-token-pool.mjs` transports secret-free requests to
 `src/adapters/reviewer-runtime/token-pool-owner.py`, which reuses worker-pool's

@@ -1941,6 +1941,9 @@ export async function processReviewSubject(entry, ctx) {
       const blockedClaudeWorkerClasses = () => readCorporateClaudeQuotaCooldown(ROOT)
         ? ['claude-reviewer-corp'] : [];
       const refreshClaudeAccount = (selection = afhGrounding?.claudeAccountSelection) => {
+        if (afhGrounding?.staleIfError) {
+          return { ...selection, hold: true, reason: 'claude-account-evidence-unknown' };
+        }
         if (selection?.pooled) return selection;
         if (!blockedClaudeWorkerClasses().length) return selection;
         if (selection?.provider && selection.provider !== 'claude-code-corp') return selection;

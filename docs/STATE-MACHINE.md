@@ -225,6 +225,8 @@ retry budgets, using the effective result session after any fallback. An
 unreadable fleet quota snapshot stays unavailable when every pool selection is
 held; selection holds still reach admission. Leased accounts require an explicitly
 supported runtime ID. These rules add no run state or merge-authority transition.
+At the dispatch boundary, stale-if-error grounding holds Claude and Codex pooled
+selections even without a local cooldown; fresh pooled selections remain eligible.
 
 | run-state | Meaning |
 |---|---|

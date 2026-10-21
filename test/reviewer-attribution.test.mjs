@@ -12,6 +12,7 @@ import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-sta
 import { captureReviewerBodyAfterPost } from '../src/review-body-capture.mjs';
 import { reconcileReviewerSessions } from '../src/reviewer-reattach.mjs';
 import { backfillReviewerPassBodies, matchReviewerPassArtifact } from '../src/backfill-review-bodies.mjs';
+import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 const attributionUrl = new URL('../src/reviewer-attribution.mjs', import.meta.url);
 const attribution = await import(attributionUrl.href).catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND' && error.url === attributionUrl.href) return {};
@@ -45,6 +46,45 @@ const builders = { codex: ['codex', 'codex-corp', 'clio-agent', 'hammer', 'hamme
   gemini: ['gemini'], pi: ['pi'], opencode: ['opencode'], hermes: ['hermes'] };
 const reviewers = { codex: ['codex', 'codex-corp', 'codex-reviewer'],
   claude: ['claude', 'claude-reviewer', 'claude-reviewer-corp'], gemini: ['gemini', 'gemini-reviewer'] };
+test('ITP-13 attribution accepts initial zero generations and rejects invalid counters', () => {
+  const value = project({ reviewerModel: 'codex', reviewerAccountReceipt: {
+    ...receipt('codex', 'primary'), evidenceGeneration: 0, lease: { generation: 0 },
+  } });
+  assert.equal(value.evidenceGeneration, 0);
+  assert.equal(value.leaseGeneration, 0);
+  assert.deepEqual(attribution.validateReviewerAttribution(value), value);
+  for (const invalid of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => attribution.validateReviewerAttribution({ ...value, leaseGeneration: invalid }), /invalid reviewer attribution/);
+  }
+});
+test('ITP-13 model aliases retain attribution and family changes discard it', () => {
+  for (const [family, aliases] of Object.entries(reviewers)) {
+    const value = project({ reviewerModel: family });
+    for (const model of aliases) assert.deepEqual(attribution.reviewerAttributionForModel(value, model), value);
+    assert.equal(attribution.reviewerAttributionForModel(value, family === 'codex' ? 'claude' : 'codex'), null);
+  }
+});
+test('ITP-13 CLI child receives the sanitized Gemini holder projection intact', async t => {
+  const rootDir = fixture(t);
+  const reviewerAttribution = project({ reviewerModel: 'gemini', agyHolderLease: {
+    identity: 'gemini-reviewer', tokenAccountId: 'agy-primary', user: 'holder-a',
+    reviewId: 'attempt-1', generation: 'lease-1', evidenceGeneration: 0,
+  } });
+  let child;
+  const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir, logger: log,
+    preflightImpl: async () => ({}),
+    spawnCapturedImpl: async (_cmd, args, options) => {
+      child = JSON.parse(args[1]);
+      options.onSpawn({ pgid: 99999 });
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+  const result = await adapter.spawnReviewer({ model: 'gemini', prompt: '', timeoutMs: 100,
+    sessionUuid: 'gemini-projection', subjectContext: { repo, prNumber: 1, reviewerModel: 'gemini', reviewerAttribution } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(child.reviewerAttribution, reviewerAttribution);
+  assert.equal(child.agyHolderLease, undefined);
+});
 test('ITP-13 every builder family × reviewer family × token keeps family exclusions', () => {
   for (const [builderFamily, aliases] of Object.entries(builders)) for (const builder of aliases) {
     for (const [reviewerFamily, models] of Object.entries(reviewers)) for (const model of models) {
@@ -83,12 +123,14 @@ for (const family of ['claude', 'codex', 'gemini']) test(`ITP-13 ${family} accou
   await enqueuePendingReviewedAttestation(root, args, Object.assign(new Error('HCP unavailable'), { code: 'ECONNREFUSED' }));
   assert.deepEqual((await readPendingReviewedAttestations(root))[0].payload.payload.reviewer_attribution, projections[1]);
 });
-test('ITP-13 historical holder recovery adds a projection without rewriting signed history', async t => {
+for (const projected of [false, true]) test(`ITP-13 ${projected ? 'projected' : 'historical'} holder recovery preserves attribution and signed history`, async t => {
   const root = fixture(t);
   const metadata = { reviewerSessionUuid: 'session-1', signedHistory: { payload: { reviewer_identity: 'old-holder' }, signature: 'historic-bytes' } };
   beginReviewerPass(root, { repo, prNumber: 1, attemptNumber: 1, reviewerClass: 'gemini', passKind: 'first-pass', startedAt, headSha: 'head-1', metadata });
   writeReviewerRunRecord(root, { sessionUuid: 'session-1', state: 'spawned', pgid: 99999, spawnedAt: startedAt,
-    subjectContext: { repo, prNumber: 1, reviewerModel: 'gemini', agyIdentityLease: { user: 'old-holder', reviewId: 'old-review' } } });
+    subjectContext: { repo, prNumber: 1, reviewerModel: 'gemini', ...(projected
+      ? { reviewerAttribution: project({ reviewerModel: 'gemini', agyHolderLease: { user: 'old-holder', reviewId: 'old-review' } }) }
+      : { agyIdentityLease: { user: 'old-holder', reviewId: 'old-review' } }) } });
   const path = join(root, 'data/reviewer-runs/session-1.json');
   const original = readFileSync(path, 'utf8');
   const db = openReviewStateDb(root);
@@ -166,10 +208,10 @@ test('ITP-13 reusing a captured review attests its original account and stale he
   await assert.rejects(postGitHubReviewWithCapture({ ...args, botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' }), /subject mismatch/);
 });
 
-test('ITP-13 recovery rejects a legacy same-family reviewer and does not borrow another session receipt', async t => {
+for (const passSession of ['other-session', 'session-1']) test(`ITP-13 same-family recovery refuses attribution for ${passSession}`, async t => {
   const root = fixture(t);
   beginReviewerPass(root, { repo, prNumber: 1, attemptNumber: 1, reviewerClass: 'codex', passKind: 'first-pass', startedAt,
-    metadata: { reviewerSessionUuid: 'other-session' } });
+    metadata: { reviewerSessionUuid: passSession } });
   writeReviewerRunRecord(root, { sessionUuid: 'session-1', state: 'spawned', pgid: 99999,
     subjectContext: { reviewerModel: 'codex-corp', builderTag: 'codex-corp', reviewerAccountReceipt: receipt('codex', 'corporate') } });
   const db = openReviewStateDb(root);

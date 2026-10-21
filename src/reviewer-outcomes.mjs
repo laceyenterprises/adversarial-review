@@ -29,3 +29,15 @@ export function reviewerExecutionFailureExitCode(error) {
 export function reviewerPostFailureExitCode(error) {
   return error?.failureClass === 'stale-review-head' ? STALE_REVIEW_HEAD_EXIT_CODE : 1;
 }
+
+export function assertReviewHeadCurrent({ repo, prNumber, normalizedHeadSha, normalizedCurrentHeadSha }) {
+  if (normalizedHeadSha && normalizedCurrentHeadSha && normalizedHeadSha !== normalizedCurrentHeadSha) {
+    const err = new Error(
+      `[stale-review-head] reviewer output for ${repo}#${prNumber} targeted stale head ` +
+      `${normalizedHeadSha.slice(0, 12)}; current head is ${normalizedCurrentHeadSha.slice(0, 12)}; ` +
+      'refusing GitHub review post'
+    );
+    err.failureClass = 'stale-review-head';
+    throw err;
+  }
+}

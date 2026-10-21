@@ -1,4 +1,4 @@
-import { validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
@@ -23,7 +23,7 @@ import { filterGitHubBody } from './github-outbound-body.mjs';
  * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { reviewerExecutionFailureExitCode, reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
+import { assertReviewHeadCurrent, reviewerExecutionFailureExitCode, reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
   accessSync,
@@ -1678,19 +1678,7 @@ async function postGitHubReviewWithCapture({
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir });
   const normalizedHeadSha = String(reviewerHeadSha || '').trim().toLowerCase();
   const normalizedCurrentHeadSha = String(currentHeadSha || '').trim().toLowerCase();
-  if (
-    normalizedHeadSha &&
-    normalizedCurrentHeadSha &&
-    normalizedHeadSha !== normalizedCurrentHeadSha
-  ) {
-    const err = new Error(
-      `[stale-review-head] reviewer output for ${repo}#${prNumber} targeted stale head ` +
-      `${normalizedHeadSha.slice(0, 12)}; current head is ${normalizedCurrentHeadSha.slice(0, 12)}; ` +
-      'refusing GitHub review post'
-    );
-    err.failureClass = 'stale-review-head';
-    throw err;
-  }
+  assertReviewHeadCurrent({ repo, prNumber, normalizedHeadSha, normalizedCurrentHeadSha });
   if (reviewerAttribution) validateReviewerAttribution(reviewerAttribution,
     resolveReviewerIdentityForBotTokenEnv(botTokenEnv, reviewerIdentity || reviewerModel));
   const lookupRetry = {
@@ -1698,13 +1686,7 @@ async function postGitHubReviewWithCapture({
     sleepImpl: sqliteBusySleepImpl ?? sqliteBusyRetrySleepImpl,
     log,
   };
-  const lookupArgs = {
-    repo,
-    prNumber,
-    attemptNumber: Number(attemptNumber),
-    passKind,
-    reviewerModel,
-  };
+  const lookupArgs = { repo, prNumber, attemptNumber: Number(attemptNumber), passKind, reviewerModel };
   const capturedReview = findCapturedReviewerBodyForPost(
     rootDir,
     { ...lookupArgs, headSha: normalizedHeadSha || null, includeMetadata: true },
@@ -2370,7 +2352,7 @@ async function main() {
       reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
       execution: reviewerExecution, singleReview: reviewModeDecision.singleReview,
-      reviewerAttribution: reviewerAttribution?.family === effectiveModel ? validateReviewerAttribution(reviewerAttribution) : null,
+      reviewerAttribution: reviewerAttributionForModel(reviewerAttribution, effectiveModel),
       botTokenEnv: effectiveBotTokenEnv,
       passKind,
       reviewerSpawnToken,

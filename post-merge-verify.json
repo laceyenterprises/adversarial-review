@@ -20,7 +20,7 @@
       ],
       "exclusions": [
         "Live GitHub, paid models, deployed daemon health",
-        "ITP-13 attribution projection, historic signature preservation and family/token matrix are covered by the bounded offline tests in README.md; no live signer or host cutover is exercised",
+        "ITP-13 attribution projection, sanitized CLI/recovery projection retention, zero generations, same-family metadata refusal, historic signature preservation and family/token matrix are covered by the bounded offline tests in README.md; no live signer or host cutover is exercised",
         "ITP-14 privileged pool enrollment and dispatcher account binding; offline tests cover canonical dispatch, reserve task kind and unknown holds",
         "ITP-12 declared-account enrollment and live broker leases; offline consumer and owner fixture checks are documented in README.md"
       ]

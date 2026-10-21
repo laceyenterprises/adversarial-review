@@ -560,7 +560,7 @@ async function reconcileReviewerSessions({
   for (const row of allRows) {
     const context = readReviewerRunRecordBestEffort(rootDir, row)?.subjectContext;
     row.builderTag = context?.builderTag || null;
-    if (context) {
+    if (context && !reviewerRefusesBuilder(row.builderTag, row.reviewer)) {
       try { persistReviewerAttributionForSession(db, row, { ...context, reviewerModel: row.reviewer }); }
       catch { log.warn('[watcher] reviewer attribution recovery unavailable; original receipt retained'); }
     }

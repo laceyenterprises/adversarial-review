@@ -317,6 +317,9 @@ metadata. Captured-body and pending-post retries keep the original projection,
 never the retrying process's account. Reattach adds the projection only to passes
 with the same repo, PR and `reviewerSessionUuid`; a metadata compare-and-swap
 preserves concurrent writers. It never rewrites run records or historic signatures.
+Recovery reuses a validated run-record projection before consulting legacy raw
+receipts, and refuses same-family attribution before writing pass metadata.
+Integer evidence and lease generations are non-negative, including initial zero.
 A recorded same-family builder/reviewer pair becomes `failed-orphan` before
 posted-review recovery; the live process continues to hold its account lease.
 

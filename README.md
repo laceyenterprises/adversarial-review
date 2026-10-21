@@ -1735,6 +1735,11 @@ node test/run-tests.mjs reviewer-attribution.test.mjs review-body-capture.test.m
 ITP-19 remains the separately approved operator rollout; this change performs no
 host cutover or alias retirement.
 
+CLI dispatch and restart recovery retain validated, prebuilt holder projections
+when raw leases are absent from sanitized context. Corporate model aliases use
+their canonical family at review posting. Recovery refuses same-family pass
+attribution before metadata writes, and integer generations include initial zero.
+
 Acceptance replay used pre-change parent `6761b30b94035ca9e4e93f6b2dccae7a5fc65f81`:
 all 10 ITP-13 outcome tests failed there and pass after implementation. The focused
 357-test pass covers capture, restart recovery, native spawn/settle, legacy

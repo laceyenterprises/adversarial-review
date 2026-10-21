@@ -103,8 +103,10 @@ which holds and retries unresolved branches before any remediation worker starts
 New bound spawns also carry `subjectContext.reviewerAttribution`, the version-1
 projection documented in [reviewer passes](reviewer-passes.md#review-execution-attribution-itp-13).
 The CLI adapter passes only that allowlisted projection to the posting process;
-full leases and private holder transport remain in the run record. Older
-`agyIdentityLease` and `reviewerAccountReceipt` objects remain dual-readable.
+full leases and private holder transport remain in the run record.
+The CLI child and restart recovery validate and retain an existing projection;
+they do not rebuild it from the sanitized context's missing holder lease.
+Older `agyIdentityLease` and `reviewerAccountReceipt` objects remain dual-readable.
 Reattach projects their attribution into the matching pass without renaming a
 historic subject, changing signed bytes, or rewriting this run record. Account
 identity never determines the GitHub actor or HCP subject. The existing per-session

@@ -6,7 +6,7 @@ const SUBJECTS = Object.freeze({
   claude: 'claude-reviewer-lacey', codex: 'codex-reviewer-lacey', gemini: 'gemini-reviewer-lacey',
 });
 const reference = value => typeof value === 'string' && value.trim() === value && /^[A-Za-z0-9._:-]{1,160}$/.test(value) ? value : null;
-const generation = value => Number.isSafeInteger(value) && value > 0 ? value : reference(value);
+const generation = value => Number.isSafeInteger(value) && value >= 0 ? value : reference(value);
 
 export function buildReviewerAttribution(context = {}) {
   const family = normalizeReviewerModel(context.reviewerModel);
@@ -50,8 +50,14 @@ export function validateReviewerAttribution(value, reviewerSubject = value?.revi
 
 export function reviewerAttributionMetadata(metadata = {}, context = {}) {
   if (metadata.reviewerAttribution) return metadata; // immutable attempt binding
-  const reviewerAttribution = buildReviewerAttribution({ ...metadata, ...context });
+  const reviewerAttribution = context.reviewerAttribution
+    ? validateReviewerAttribution(context.reviewerAttribution)
+    : buildReviewerAttribution({ ...metadata, ...context });
   return reviewerAttribution ? { ...metadata, reviewerAttribution } : metadata;
+}
+
+export function reviewerAttributionForModel(value, model) {
+  return value?.family === normalizeReviewerModel(model) ? validateReviewerAttribution(value) : null;
 }
 
 // Add a read projection only to this execution's pass. Leave original receipts,

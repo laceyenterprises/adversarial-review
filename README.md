@@ -1420,13 +1420,16 @@ acquire/revalidate through the existing lease/admission owner before dispatch.
 
 `readAccountSelection(result, { oauth, request })` consumes the Python
 `SelectionResult.to_dict()` wire value alongside its original request and
-effective declarations. `readSelectionSnapshot(snapshot, oauth)` validates raw
+effective declarations. Unavailable and pool-level capacity-saturated results
+must contain only refusing candidates; `accounts-unavailable` must cover every
+declared pool member. `readSelectionSnapshot(snapshot, oauth)` validates raw
 evidence without upgrading missing components to readiness. Unsupported
 versions, unknown fields and credential-bearing extensions refuse without
 echoing their values. Credential storage and refresh remain with existing owners.
 
 `resolveIdentityTokenPools(options)` uses the existing role config cascade.
-An explicitly configured `reviewer.gemini.identities` list must agree with the
+An explicitly configured `reviewer.gemini.identities` list is normalized to
+strings, as in the legacy reviewer resolver, and must agree with the
 new Gemini pool's ordered holders; conflicting declarations and duplicate
 provider/holder bindings refuse. Legacy-only config remains readable and does
 not invent account attribution. `identityPoolsFromSnapshot(payload, oauth)`
@@ -1450,6 +1453,10 @@ produced all 155 complete outcomes in
 outcomes, including every unknown hold and account-model denial. When updating
 the contract, verify the copies and replay the Python owner from its registered
 read-only workspace explicitly:
+
+The argument is the source root containing both `agent_os_config` and
+`agent_os_core`; in the companion layout both packages live under
+`platform/agent-os-config/src`.
 
 ```sh
 node test/verify-identity-token-owner.mjs /path/to/registered/agent-os/platform/agent-os-config/src

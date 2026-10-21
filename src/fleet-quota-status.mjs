@@ -162,7 +162,7 @@ export function parseHqFleetQuotaSnapshot(stdout) {
 // Additive ITP-08 account diagnostics. Old state has no projection; do not
 // infer a primary account from provider/class names or change route policy.
 export function identityPoolsFromSnapshot(payload, oauth) {
-  if (!Object.hasOwn(payload, 'identityPools')) return null;
+  if (!payload || typeof payload !== 'object' || !Object.hasOwn(payload, 'identityPools')) return null;
   return readIdentityPoolProjection(payload.identityPools, oauth);
 }
 

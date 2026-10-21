@@ -35,6 +35,18 @@ test('published outcome coverage matches every versioned owner vector', () => {
   assert.deepEqual(outcomes.cases.map(c => c.name), vectors.cases.map(c => c.name));
 });
 
+test('Claude remediator fallback vectors degrade the preferred corporate account', () => {
+  for (const reason of ['quota-exhausted', 'not-ready', 'reserve-refused', 'model-denied', 'capacity-saturated']) {
+    const vector = vectors.cases.find(c => c.name === `remediator-claude-${reason}`);
+    const value = merge(vectors.defaults, vector.patch);
+    const [preferred, fallback] = value.oauth.identity_token_pools['remediator-claude'];
+    assert.deepEqual(Object.keys(vector.patch.request.snapshot.accounts), [preferred]);
+    assert.equal(vector.expected.account_id, fallback);
+    assert.equal(vector.expected.considered[0].account_id, preferred);
+    assert.equal(vector.expected.considered[0].reason, reason);
+  }
+});
+
 for (const [index, vector] of vectors.cases.entries()) {
   test(`ITP-10 consumes Python outcome: ${vector.name}`, () => {
     assert.equal(typeof reader.readAccountSelection, 'function');
@@ -113,6 +125,24 @@ test('role config reads effective declarations without changing routing or pin p
   assert.deepEqual(resolved, oauth);
 });
 
+test('role config normalizes legacy Gemini holder scalars like the legacy resolver', () => {
+  const { oauth } = inputs();
+  // YAML boolean scalars stringify to valid opaque holder IDs. Numeric IDs
+  // remain invalid under the owner's alphabetic-prefix declaration contract.
+  oauth.token_accounts['agy-login-a'].holder_user = 'true';
+  oauth.token_accounts['agy-login-b'].holder_user = 'false';
+  const values = { 'oauth.token_accounts': oauth.token_accounts, 'oauth.identity_token_pools': oauth.identity_token_pools,
+    'reviewer.gemini.identities': [true, false] };
+  const options = { env: {}, topPath: '/unused', modulePaths: [],
+    loaderImpl: () => ({ get: (key, fallback) => values[key] ?? fallback }) };
+  assert.deepEqual(roles.resolveGeminiReviewerIdentities(options), ['true', 'false']);
+  assert.deepEqual(resolveIdentityTokenPools(options), oauth);
+  values['reviewer.gemini.identities'] = [false, true];
+  assert.throws(() => resolveIdentityTokenPools(options), /conflicting legacy\/new declaration/);
+  oauth.token_accounts['agy-login-a'].holder_user = '101';
+  assert.throws(() => resolveIdentityTokenPools(options), /expected opaque ID/);
+});
+
 test('temporary effective config rejects old/new holder conflict and retains legacy-only config', () => {
   assert.equal(typeof resolveIdentityTokenPools, 'function');
   const dir = mkdtempSync(join(tmpdir(), 'itp-reader-'));
@@ -145,7 +175,9 @@ function fleetFixture() {
 }
 
 test('fleet reader supports old state and preserves account-level unknowns', () => {
-  assert.equal(identityPoolsFromSnapshot({}, {}), null);
+  for (const payload of [null, undefined, false, 0, 'uninitialized', {}]) {
+    assert.equal(identityPoolsFromSnapshot(payload, {}), null);
+  }
   assert.equal(identityPoolsFromSnapshot({ identityPools: {} }, {} ) !== null, true);
   const payload = fleetFixture();
   const pools = identityPoolsFromSnapshot(payload, inputs().oauth);
@@ -153,6 +185,30 @@ test('fleet reader supports old state and preserves account-level unknowns', () 
   assert.equal(pools['codex-reviewer'].active, null);
   payload.identityPools['codex-reviewer'].tokens[0].free = 0;
   assert.equal(pools['codex-reviewer'].tokens[0].free, 1);
+});
+
+for (const [status, reason] of [['unavailable', 'accounts-unavailable'], ['hold', 'capacity-saturated']]) {
+  for (const terminalReason of ['ready', 'evidence-unknown']) {
+    test(`${status} receipt rejects terminal ${terminalReason} candidate without selected account`, () => {
+      const value = inputs();
+      const result = { ...structuredClone(outcomes.cases[0].result), status, reason, account_id: null,
+        considered: value.oauth.identity_token_pools[value.request.identity].map((account_id, index) => ({
+          account_id, reason: index === 0 ? 'quota-exhausted' : terminalReason,
+          component: terminalReason === 'ready' && index !== 0 ? null : 'quota',
+        })) };
+      assert.throws(() => reader.readAccountSelection(result, value), /candidate must refuse/);
+    });
+  }
+}
+
+test('accounts-unavailable receipt must consider every declared account', () => {
+  const value = inputs();
+  const result = { ...structuredClone(outcomes.cases[0].result), status: 'unavailable',
+    reason: 'accounts-unavailable', account_id: null, considered: [] };
+  for (const considered of [[], [{ account_id: 'openai-corporate', reason: 'quota-exhausted', component: 'quota' }]]) {
+    result.considered = considered;
+    assert.throws(() => reader.readAccountSelection(result, value), /all accounts must be considered/);
+  }
 });
 
 for (const mutate of [

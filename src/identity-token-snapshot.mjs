@@ -181,6 +181,12 @@ export function readAccountSelection(value, { oauth, request }) {
     if (record.status === 'unavailable') {
       requireValue(record.account_id === null && ['pool-undeclared', 'accounts-unavailable'].includes(record.reason),
         'selection', 'inconsistent unavailable result');
+      requireValue(record.considered.every(candidate => refusalReasons.includes(candidate.reason)),
+        'selection.considered', 'unavailable candidate must refuse');
+      if (record.reason === 'accounts-unavailable') {
+        requireValue(record.considered.length === members.length,
+          'selection.considered', 'all accounts must be considered');
+      }
     } else {
       requireValue([...evidenceReasons, 'evidence-request-mismatch', 'capacity-saturated'].includes(record.reason),
         'selection', 'inconsistent held result');
@@ -188,6 +194,9 @@ export function readAccountSelection(value, { oauth, request }) {
         requireValue(evidenceReasons.includes(record.reason)
           && record.considered.at(-1)?.account_id === record.account_id
           && record.considered.at(-1)?.reason === record.reason, 'selection', 'held account mismatch');
+      } else if (record.reason === 'capacity-saturated') {
+        requireValue(record.considered.every(candidate => refusalReasons.includes(candidate.reason)),
+          'selection.considered', 'saturated candidate must refuse');
       }
     }
   }

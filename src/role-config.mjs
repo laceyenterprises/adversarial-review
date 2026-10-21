@@ -514,7 +514,8 @@ export function resolveGeminiReviewerIdentities({
 // Reader-only rollout: callers opt in; existing role/pin selectors are intact.
 export function resolveIdentityTokenPools(options = {}) {
   const cfg = loadRoleConfig({ ...options, contextKey: 'oauth.identity_token_pools' });
-  const legacy = cfg.get('reviewer.gemini.identities', null);
+  const rawLegacy = cfg.get('reviewer.gemini.identities', null);
+  const legacy = Array.isArray(rawLegacy) ? rawLegacy.map(String) : rawLegacy;
   return readIdentityTokenPools({
     token_accounts: cfg.get('oauth.token_accounts', {}),
     identity_token_pools: cfg.get('oauth.identity_token_pools', {}),

@@ -5,6 +5,35 @@
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
+## Job filenames and per-PR reads (LEDGERSCAN-01)
+
+`buildFollowUpJob` creates `<sanitizeRepo(repo)>-pr-<prNumber>-<timestamp>`
+job IDs; `createFollowUpJob` writes `<jobId>.json`, appending a numeric suffix
+on a creation collision. This naming predates schema version 2.
+`moveFollowUpJob`, `moveTerminalJobRecord`, claim/requeue transitions and
+`archiveStoppedFollowUpJobs` preserve the basename. `writeFollowUpJob` updates
+the supplied existing path. There is no alternate production job-name format
+requiring a fallback history scan.
+
+`summarizePRRemediationLedger` filters directory names by that PR prefix before
+opening files in both full and refund-only modes. The trailing `-` separates
+PR 87 from PR 8776. Parsed repo, PR and domain remain authoritative, including
+when sanitized repo names collide. Unreadable matching records are logged and
+skipped individually. Archived stopped records already use a PR prefix filter.
+Directory enumeration still covers all names; job reads and JSON parsing now
+scale with the matching PR's records. For example, a bucket with 10,000 jobs
+and 3 matching records requires 3 job reads instead of 10,000.
+
+The watcher's latest-job, revision, active-ownership and filtered merge-agent
+dispatch lookups also narrow filenames before reading. Case-insensitive
+ownership predicates retain case-insensitive filename matching.
+`listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo })`
+optionally narrows reads; callers retain their parsed identity checks. Omitting
+the filter retains the whole-bucket reader used by reports and maintenance.
+Health/latency reports, diagnosis/reset/recovery tools, replay reports and
+queue-wide admission, reconciliation, shutdown and retention sweeps retain
+their existing whole-history or whole-active-queue behavior.
+
 ## Refused remediation publication (REMLABEL-01)
 
 `bin/remediation-publish.mjs` validates the candidate against a freshly fetched

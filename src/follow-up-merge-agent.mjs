@@ -491,9 +491,12 @@ function dispatchMatchesFilter(dispatch, { repo = null, prNumber = null } = {}) 
 
 function listMergeAgentDispatches(rootDir, filter = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
+  const prefix = filter.repo && filter.prNumber != null
+    ? `${sanitizeDispatchPathSegment(String(filter.repo).replace(/\//g, '__'))}-pr-${Number(filter.prNumber)}-`
+    : null;
   try {
     return readdirSync(dir)
-      .filter((name) => name.endsWith('.json'))
+      .filter((name) => name.endsWith('.json') && (prefix === null || name.startsWith(prefix)))
       .map((name) => {
         try {
           return JSON.parse(readFileSync(join(dir, name), 'utf8'));
@@ -1250,7 +1253,7 @@ function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = nul
   let latest = null;
   let latestTs = '';
   for (const key of keys) {
-    for (const entry of listFollowUpJobsInDir(rootDir, key)) {
+    for (const entry of listFollowUpJobsInDir(rootDir, key, { repo, prNumber })) {
       const job = entry?.job;
       if (!job) continue;
       if (job.repo !== repo) continue;

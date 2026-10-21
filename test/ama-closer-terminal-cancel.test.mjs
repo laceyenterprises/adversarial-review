@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -282,10 +283,10 @@ test('active remediation scan skips corrupt and quota-held pending jobs', (t) =>
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'pending');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'a.json'), '{');
-  writeFileSync(join(dir, 'b.json'), JSON.stringify({ repo: 'o/r', prNumber: 1,
+  writeFileSync(join(dir, 'o__r-pr-1-corrupt.json'), '{');
+  writeFileSync(join(dir, 'o__r-pr-1-held.json'), JSON.stringify({ repo: 'o/r', prNumber: 1,
     remediationPlan: { retryAfter: '2026-10-01T00:00:00Z' } }));
-  writeFileSync(join(dir, 'c.json'), JSON.stringify({ repo: 'o/r', prNumber: 2 }));
+  writeFileSync(join(dir, 'o__r-pr-2-active.json'), JSON.stringify({ repo: 'o/r', prNumber: 2 }));
   const logger = { warn() {} };
   assert.equal(findActiveRemediationJob(rootDir, { repo: 'o/r', prNumber: 1 },
     { logger, now: '2026-09-27T00:00:00Z' }), null);

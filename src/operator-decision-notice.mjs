@@ -62,7 +62,7 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   const ended = Boolean(record?.launchRequestId) && isHammerWorkerClass(record?.workerClass)
     && ['failed', 'failed-without-merge', 'cancelled', 'canceled', 'stopped', 'aborted', 'succeeded', 'completed', 'terminal', 'unverified-terminal-success', 'operator_triage_required', 'reaped_stuck_requested'].includes(record?.lastObservedStatus)
     && !['merged', 'succeeded'].includes(record?.outcome);
-  const activeJob = [...listFollowUpJobsInDir(rootDir, 'pending'), ...listFollowUpJobsInDir(rootDir, 'inProgress')]
+  const activeJob = [...listFollowUpJobsInDir(rootDir, 'pending', identity), ...listFollowUpJobsInDir(rootDir, 'inProgress', identity)]
     .some(({ job }) => job?.repo === repo && Number(job.prNumber) === Number(prNumber));
   const held = findLiveAmaCloserLease(rootDir, identity) ? 'live-closer-lease'
     : isActiveAmaCloserDispatchRecord(record, { lease, now: new Date(now).toISOString() }) ? 'closer-in-flight'

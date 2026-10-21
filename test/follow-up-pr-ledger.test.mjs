@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 // Integration tests for the per-PR remediation ledger (the durable
 // counter that drives final-round verdict-categorization decisions),
 // the PR-wide cap enforcement on freshly created follow-up jobs, and
@@ -15,6 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   buildFollowUpJob,
@@ -408,7 +410,7 @@ test('summarizePRRemediationLedger fails soft on a single corrupt JSON record wi
   // records — modeled on a partially-written or operator-edited file.
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   writeFileSync(
-    path.join(completedDir, 'corrupt-not-json.json'),
+    path.join(completedDir, `${followUpJobFilePrefix(makeJobInput(rootDir).repo, 7)}corrupt-not-json.json`),
     '{ this is not valid json',
     'utf8',
   );

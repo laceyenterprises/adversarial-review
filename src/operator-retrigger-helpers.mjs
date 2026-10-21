@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { followUpJobFilePrefix } from './follow-up-job-names.mjs';
 
 import {
   ROUND_BUDGET_BY_RISK_CLASS,
@@ -39,12 +40,13 @@ function findOperatorAuditEntry(job, idempotencyKey) {
 }
 
 function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
+  const prefix = followUpJobFilePrefix(repo, prNumber);
   let latest = null;
   for (const key of FOLLOW_UP_STATUS_KEYS) {
     const dir = getFollowUpJobDir(rootDir, key);
     if (!existsSync(dir)) continue;
 
-    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json') && entry.startsWith(prefix)).sort()) {
       const jobPath = join(dir, name);
       let job;
       try {
@@ -68,13 +70,14 @@ function findLatestFollowUpJob(rootDir, { repo, prNumber }) {
 }
 
 function findFollowUpJobForRevision(rootDir, { repo, prNumber, revisionRef }) {
+  const prefix = followUpJobFilePrefix(repo, prNumber);
   const revision = String(revisionRef || '').trim();
   if (!revision) return null;
   for (const key of FOLLOW_UP_STATUS_KEYS) {
     const dir = getFollowUpJobDir(rootDir, key);
     if (!existsSync(dir)) continue;
 
-    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json') && entry.startsWith(prefix)).sort()) {
       const jobPath = join(dir, name);
       let job;
       try {

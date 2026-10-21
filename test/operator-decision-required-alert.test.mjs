@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 // Non-budget remediation stops still require a visible operator decision.
 // Budget exhaustion is handed to the hammer instead.
 import { test } from 'node:test';
@@ -58,11 +59,11 @@ test('withheld-head failure retries failed delivery and debounces only after que
 function writeStoppedRequestChangesJob(root, stopCode = 'manual-stop') {
   const dir = getFollowUpJobDir(root, 'stopped');
   mkdirSync(dir, { recursive: true });
-  writeFollowUpJob(join(dir, 'o-r-pr-1.json'), {
+  writeFollowUpJob(join(dir, 'o__r-pr-1-stopped.json'), {
     schemaVersion: 1,
     kind: 'adversarial-review-follow-up',
     status: 'stopped',
-    jobId: 'o-r-pr-1',
+    jobId: 'o__r-pr-1-stopped',
     createdAt: '2026-09-04T12:00:00.000Z',
     stoppedAt: '2026-09-04T12:10:00.000Z',
     repo: REPO,
@@ -359,7 +360,7 @@ for (const route of ['lease', 'eligible', 'pending', 'in-progress', 'handoff', '
         { closureOwner: { owner: 'hammer' }, dispatched: false });
       if (route === 'dispatch') fixtureJSON(amaCloserDispatchFilePath(root, identity), {
         ...identity, state: 'dispatched', lastObservedStatus: 'running' });
-      if (['pending', 'in-progress'].includes(route)) writeFollowUpJob(join(getFollowUpJobDir(root, route === 'in-progress' ? 'inProgress' : route), 'synthetic.json'), {
+      if (['pending', 'in-progress'].includes(route)) writeFollowUpJob(join(getFollowUpJobDir(root, route === 'in-progress' ? 'inProgress' : route), 'o__r-pr-1-synthetic.json'), {
         ...identity, status: route, kind: 'adversarial-review-follow-up' });
       for (const now of route === 'eligible' ? [0, 44 * 60_000] : [0, 44 * 60_000, 60 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...options, now,
         reviewRow: { review_status: 'pending' } });

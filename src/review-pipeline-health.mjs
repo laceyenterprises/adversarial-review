@@ -1148,16 +1148,16 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS
     ),
-    firstPassCiOrphanDeadlineMs: loadAwareTimeoutMs(parsePositiveInteger(
+    firstPassCiOrphanDeadlineMs: parsePositiveInteger(
       overrides.firstPassCiOrphanDeadlineMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS
-    )),
-    firstPassCiOrphanWorkerStatusTimeoutMs: loadAwareTimeoutMs(parsePositiveInteger(
+    ),
+    firstPassCiOrphanWorkerStatusTimeoutMs: parsePositiveInteger(
       overrides.firstPassCiOrphanWorkerStatusTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
       DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS
-    )),
+    ),
     launchdTimeoutMs: loadAwareTimeoutMs(parsePositiveInteger(
       overrides.launchdTimeoutMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
@@ -2636,9 +2636,10 @@ function branchWorkerIndex(hqRoot) {
 function liveWorkerForBranch(hqRoot, repo, branch, {
   execFileSyncImpl,
   workerIndex = branchWorkerIndex(hqRoot),
-  workerStatusTimeoutMs = loadAwareTimeoutMs(DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS),
+  workerStatusTimeoutMs = DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS,
 }) {
   if (!branch) return null;
+  const timeout = loadAwareTimeoutMs(workerStatusTimeoutMs);
   const hqBin = process.env.AGENT_OS_HQ_BIN || process.env.HQ_BIN || 'hq';
   const ownerUser = readHqOwnerUser(hqRoot);
   const liveStatuses = new Set(['requested', 'admitted', 'leased', 'starting', 'running']);
@@ -2650,7 +2651,7 @@ function liveWorkerForBranch(hqRoot, repo, branch, {
       if (ownerUser) args.push('--as-owner', ownerUser);
       const output = execFileSyncImpl(
         hqBin, args,
-        { encoding: 'utf8', timeout: workerStatusTimeoutMs, stdio: ['ignore', 'pipe', 'pipe'] }
+        { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] }
       );
       const status = String(parseJson(output, {})?.status || '').toLowerCase();
       // Keep in sync with session-ledger launch_request_terminal_statuses.py:
@@ -2710,7 +2711,7 @@ function summarizeFirstPassCiOrphans(firstPassQueue, {
   const candidates = (firstPassQueue.firstPassPrs || [])
     .filter((queued) => queued.reviewAttempts <= 0 && !queued.reviewerFailed);
   const maxProbedPrs = config.firstPassCiOrphanMaxProbedPrs || DEFAULT_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS;
-  const deadlineMs = config.firstPassCiOrphanDeadlineMs || DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS;
+  const deadlineMs = loadAwareTimeoutMs(config.firstPassCiOrphanDeadlineMs || DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS);
   const deadlineAt = Date.now() + deadlineMs;
   const workerIndex = branchWorkerIndex(hqRoot);
   let probedPrs = 0;

@@ -113,7 +113,7 @@ function sleepMs(ms) {
 }
 
 async function acquireLock(lockPath) {
-  const startedAt = Date.now();
+  const deadline = Date.now() + loadAwareTimeoutMs(LOCK_TIMEOUT_MS);
   while (true) {
     try {
       writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx' });
@@ -125,7 +125,7 @@ async function acquireLock(lockPath) {
       if (breakStaleLock(lockPath)) {
         continue;
       }
-      if ((Date.now() - startedAt) >= loadAwareTimeoutMs(LOCK_TIMEOUT_MS)) {
+      if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for slack-thread lock: ${lockPath}`);
       }
       await sleepMs(LOCK_RETRY_MS);

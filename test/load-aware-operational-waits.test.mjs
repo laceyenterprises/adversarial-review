@@ -1,10 +1,10 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import os from 'node:os';
+import os, { loadavg } from 'node:os';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS } from '../src/ama/closure-wait.mjs';
 import { resolveReviewerTimeoutMs, resolveProgressTimeoutMs, resolveAgyPrintTimeoutMs,
@@ -15,6 +15,9 @@ import { amaCloserPendingLeaseExpiryMs, isReclaimablePendingAmaCloserLease, AMA_
 import { resolveRoutingTierReadinessTimeoutMs } from '../src/routing-tier-readiness.mjs';
 import { ownerlessBoundMs } from '../src/ama/orphan-watchdog.mjs';
 import { readPipelineGithub } from '../src/pipeline-health-github.mjs';
+import { resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
+import { resolveReviewPipelineHealthConfig, summarizeFirstPassCiOrphans } from '../src/review-pipeline-health.mjs';
+import { createSlackThreadCommsAdapter } from '../src/adapters/comms/slack-thread/index.mjs';
 
 function busyHost(t) {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
@@ -33,6 +36,88 @@ function waitFixture(t, overrides = {}) {
     reason: 'in-flight:synthetic-launch', env: {}, pageImpl: async text => pages.push(text), ...overrides };
   return { pages, observe: options => observeClosureWait({ ...args, ...options }) };
 }
+
+const preloadedLoadavg = os.loadavg;
+test('idle-host preload synchronizes the named OS loadavg binding', () => {
+  assert.equal(loadavg, preloadedLoadavg);
+  assert.deepEqual(loadavg(), [0, 0, 0]);
+});
+
+test('slack lock acquisition retains its initial budget when host load drops', async t => {
+  busyHost(t);
+  const rootDir = mkdtempSync(join(os.tmpdir(), 'slack-load-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const lockPath = join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl.lock');
+  mkdirSync(join(rootDir, '.slack-thread-transcripts', 'subject.md'), { recursive: true });
+  writeFileSync(lockPath, `${process.pid}\n`);
+  let clock = 0, attempts = 0;
+  t.mock.method(Date, 'now', () => clock);
+  t.mock.method(os, 'loadavg', () => {
+    attempts++;
+    return [os.cpus().length * 3, 0, 0];
+  });
+  let failure;
+  const adapter = createSlackThreadCommsAdapter({ rootDir,
+    slackClient: { postMessage: async () => ({ deliveryExternalId: 'synthetic-delivery' }) } });
+  const pending = adapter.postReview({ kind: 'comment-only', body: 'fixture' }, {
+    domainId: 'research-finding', subjectExternalId: 'subject.md',
+    revisionRef: 'fixture', round: 1, kind: 'review',
+  }).catch(error => { failure = error; });
+  // The first synchronous attempt has sampled the busy host before sleeping.
+  assert.equal(attempts, 1);
+  clock = 6_000; // Past nominal 5s, but within the granted 30s.
+  t.mock.method(os, 'loadavg', () => { attempts++; return [0, 0, 0]; });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  unlinkSync(lockPath);
+  await pending;
+  assert.equal(failure, undefined);
+  assert.equal(attempts, 1, 'a retry must not resize its deadline');
+});
+
+test('reused pipeline health config scales orphan deadlines and worker probes at use time', t => {
+  busyHost(t);
+  const env = {
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS: '100',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS: '200',
+  };
+  const config = resolveReviewPipelineHealthConfig(env);
+  assert.equal(config.firstPassCiOrphanDeadlineMs, 100);
+  assert.equal(config.firstPassCiOrphanWorkerStatusTimeoutMs, 200);
+  const overridden = resolveReviewPipelineHealthConfig(env, {
+    firstPassCiOrphanDeadlineMs: 150, firstPassCiOrphanWorkerStatusTimeoutMs: 250,
+  });
+  assert.equal(overridden.firstPassCiOrphanDeadlineMs, 150);
+  assert.equal(overridden.firstPassCiOrphanWorkerStatusTimeoutMs, 250);
+  const hqRoot = mkdtempSync(join(os.tmpdir(), 'orphan-load-'));
+  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+  const workerDir = join(hqRoot, 'workers', 'fixture');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    repo: 'example/project', branch: 'fixture', launchRequestId: 'synthetic-launch',
+  }));
+  const queue = { firstPassPrs: [1, 2].map(prNumber => ({
+    repo: 'example/project', prNumber, reviewAttempts: 0, reviewerFailed: false,
+  })) };
+  for (const multiplier of [6, 1]) {
+    t.mock.method(os, 'loadavg', () => [multiplier === 6 ? os.cpus().length * 3 : 0, 0, 0]);
+    resetLoadAwareTimeoutCachesForTesting();
+    let clock = 0, probes = 0;
+    t.mock.method(Date, 'now', () => clock);
+    const result = summarizeFirstPassCiOrphans(queue, { hqRoot, config,
+      execFileSyncImpl: (command, args, options) => {
+        if (command === 'gh') return args.includes('checks')
+          ? JSON.stringify([{ name: 'test', state: 'FAILURE', bucket: 'fail' }])
+          : JSON.stringify({ state: 'OPEN', headRefName: 'fixture' });
+        probes++;
+        assert.equal(options.timeout, 200 * multiplier, 'worker timeout scales exactly once');
+        clock = 200; // Second PR fits only the busy-host 600ms deadline.
+        return JSON.stringify({ status: 'running' });
+      },
+    });
+    assert.equal(probes, multiplier === 6 ? 2 : 1);
+    assert.equal(result.count, 0);
+  }
+});
 
 test('closure wait grants the full multiplier beyond the helper default one-hour cap', async t => {
   busyHost(t);

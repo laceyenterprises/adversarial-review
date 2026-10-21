@@ -6,7 +6,11 @@ bases before scaling. Each listed wait uses `src/load-aware-timeout.mjs`.
 `loadAwareTimeoutSeconds` consumers use seconds; all other values are milliseconds.
 Named functions identify the operation being awaited. Existing already-scaled
 sibling calls are included for review. Derived caller deadlines are consumed
-without another multiplier. Long budgets explicitly lift the default one-hour cap.
+without another multiplier. Slack lock acquisition fixes its deadline before
+retrying, so falling load cannot shorten an already-granted window. First-pass
+CI orphan configuration retains nominal deadline and worker-status budgets;
+scans and worker probes scale them when invoked. Long budgets explicitly lift
+the default one-hour cap.
 
 | File:line | Nominal value | Waits on |
 | --- | --- | --- |
@@ -235,11 +239,10 @@ without another multiplier. Long budgets explicitly lift the default one-hour ca
 | `src/remediation-workflow-push-capability.mjs:403` | `WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS = 5000 ms` | mintMergeAgentWorkflowPushToken |
 | `src/retrigger-review.mjs:228` | `CURRENT_HEAD_LOOKUP_TIMEOUT_MS = 30000 ms` | fetchCurrentPrHeadSha |
 | `src/review-body-capture.mjs:186` | `REVIEW_LOOKUP_TIMEOUT_MS = 8000 ms` | lookupRecentReviewArtifact |
-| `src/review-pipeline-health.mjs:1151` | `parsePositiveInteger( overrides.firstPassCiOrphanDeadlineMs ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS, DEFAULT_FIRST_PASS_CI_ORPHAN_DEADLINE_MS )` | resolveReviewPipelineHealthConfig |
-| `src/review-pipeline-health.mjs:1156` | `parsePositiveInteger( overrides.firstPassCiOrphanWorkerStatusTimeoutMs ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS, DEFAULT_FIRST_PAS…` | resolveReviewPipelineHealthConfig |
+| `src/review-pipeline-health.mjs:2714` | `config.firstPassCiOrphanDeadlineMs` (nominal default 120000 ms) | summarizeFirstPassCiOrphans |
+| `src/review-pipeline-health.mjs:2642` | `workerStatusTimeoutMs` (nominal default 30000 ms) | liveWorkerForBranch |
 | `src/review-pipeline-health.mjs:1161` | `parsePositiveInteger( overrides.launchdTimeoutMs ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS, DEFAULT_LAUNCHD_TIMEOUT_MS )` | resolveReviewPipelineHealthConfig |
 | `src/review-pipeline-health.mjs:1435` | `10000 ms` | fetchPRTerminalStateSync |
-| `src/review-pipeline-health.mjs:2639` | `DEFAULT_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS = 30000 ms` | liveWorkerForBranch |
 | `src/review-pipeline-health.mjs:2676` | `20000 ms` | execGhWithTransientRetry |
 | `src/review-pipeline-health.mjs:3588` | `20000 ms` | mergeTreeConflictPaths |
 | `src/review-pipeline-health.mjs:3712` | `20000 ms` | summarizeConflictingOpenPrs |

@@ -41,7 +41,8 @@ and workspace probes preserve their owner/root arguments when requesting JSON.
 If a probe receives non-JSON output, it keeps its existing failure behavior and
 logs `[hq-dispatch-status]` with the arguments (bounded to 1000 characters) and
 the first 200 output characters. These warnings share one budget per process:
-at most one warning per minute, across dispatch IDs and probe types.
+at most one warning per minute, across dispatch IDs and probe types. A backward
+clock adjustment renews the budget so diagnostics do not stay suppressed.
 
 ## Infrastructure refunds (REMREFUND-01)
 

@@ -139,6 +139,39 @@ test('non-JSON probes retain their failure behavior and emit one shared diagnost
   assert.ok(f.warnings[0].includes(JSON.stringify(f.calls()[0])));
 });
 
+for (const stdout of [HUMAN, '', ' \n\t ', '{broken}']) {
+  test(`producer-contract parser warns on non-JSON output ${JSON.stringify(stdout)}`, () => {
+    const parse = createHqDispatchStatusOutputParser();
+    const warnings = [];
+    const args = ['dispatch', 'status', LRQ, '--json'];
+    assert.throws(() => parse(stdout, args, parseHqDispatchStatus, {
+      warn: message => warnings.push(message),
+    }), /\$stdout (?:invalid JSON|empty)/);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /non-JSON output/);
+    assert.ok(warnings[0].endsWith(`stdout=${JSON.stringify(stdout)}`));
+  });
+}
+
+test('backward clock adjustments renew the warning budget', () => {
+  let time = 60_000;
+  const parse = createHqDispatchStatusOutputParser({ nowMs: () => time });
+  const warnings = [];
+  const logger = { warn: message => warnings.push(message) };
+  const args = ['dispatch', 'status', LRQ, '--json'];
+  const fail = () => assert.throws(() => parse(HUMAN, args, parseHqDispatchStatus, logger));
+  fail();
+  time = 0;
+  fail();
+  assert.equal(warnings.length, 2);
+  time = 59_999;
+  fail();
+  assert.equal(warnings.length, 2);
+  time = 60_000;
+  fail();
+  assert.equal(warnings.length, 3);
+});
+
 test('diagnostics are bounded, renew after a minute, and preserve the thrown error', () => {
   let time = 0;
   const parse = createHqDispatchStatusOutputParser({ nowMs: () => time });

@@ -9,7 +9,7 @@ export function createHqDispatchStatusOutputParser({ nowMs = Date.now } = {}) {
       const invalidJson = err instanceof SyntaxError || /\$stdout (?:invalid JSON|empty)/.test(err?.message || '');
       const now = nowMs();
       if (invalidJson && typeof logger?.warn === 'function'
-          && (lastWarningAt === null || now - lastWarningAt >= 60_000)) {
+          && (lastWarningAt === null || now < lastWarningAt || now - lastWarningAt >= 60_000)) {
         lastWarningAt = now;
         logger.warn(`[hq-dispatch-status] non-JSON output; args=${JSON.stringify(args).slice(0, 1000)}; stdout=${JSON.stringify(String(stdout ?? '').slice(0, 200))}`);
       }

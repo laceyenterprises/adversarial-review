@@ -685,7 +685,6 @@ test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
         }
         const recordPath = join(rootDir, 'data', 'reviewer-runs', 'agent-hq-polling.agent-os-hq.review.md');
         writeFileSync(recordPath, validReviewBody());
-        assert.ok(args.includes('--json'));
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
       },
     });
@@ -965,7 +964,6 @@ test('agent-os-hq reattaches by polling persisted launch request id', async () =
       env: makeHqEnv(hqRoot),
       execFileImpl: async (_command, args) => {
         assert.deepEqual(args, ['dispatch', 'status', 'lrq_reattach', '--json', '--root', hqRoot]);
-        assert.ok(args.includes('--json'));
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
       },
     });

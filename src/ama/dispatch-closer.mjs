@@ -7231,7 +7231,12 @@ async function maybeDispatchAmaCloserAttempt({
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
     if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
-      && ['superseded', 'failed-without-merge', 'deferred', 'succeeded'].includes(existingLease.terminalOutcome)) {
+      && existingLease.terminalOutcome === 'succeeded') {
+      // Sticky success cannot be reclaimed, including by the recovery paths below.
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'lease-held', existingLease });
+    }
+    if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+      && ['superseded', 'failed-without-merge', 'deferred'].includes(existingLease.terminalOutcome)) {
       const probe = existingLease.lrqId
         ? await Promise.resolve().then(() => readLaunchRequestStatusImpl({
           launchRequestId: existingLease.lrqId, rootDir, hqRoot, signal, env,

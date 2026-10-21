@@ -2219,13 +2219,18 @@ for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succee
     appendAmaAuditAttempt({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: oldHead,
       now, attempt: { outcome: 'succeeded' } });
     const deps = testDeps(), logs = [];
+    let launchStatusReads = 0;
     const before = readAmaCloserLease(rootDir, identity);
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
-      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readLaunchRequestStatusImpl: () => {
+        launchStatusReads += 1;
+        return { ok: true, row: { status: 'succeeded' } };
+      },
       logger: { ...deps.logger, info: line => logs.push(line) },
     });
     const dispatches = deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status');
     if (outcome === 'succeeded') {
+      assert.equal(launchStatusReads, 0, 'sticky succeeded leases bypass launch status probes');
       assert.equal(result.reason, 'lease-held', JSON.stringify(result));
       assert.equal(dispatches.length, 0);
       assert.deepEqual(readAmaCloserLease(rootDir, identity), before);

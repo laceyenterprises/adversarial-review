@@ -102,6 +102,26 @@ test('terminal policies fail loudly on drift and retain legacy capacity aliases'
   assert.equal(probe.row.ticket_ref, 'HAM');
 });
 
+test('consumer modules reject producer drift before filtering terminal policy', () => {
+  const vocabularyUrl = new URL('../src/producer-contracts/launch-status.mjs', import.meta.url).href;
+  for (const [path, status] of [
+    ['../src/ama/launch-request-status.mjs', 'reaped_stuck_requested'],
+    ['../src/remediation-hq-dispatch.mjs', 'succeeded'],
+    ['../src/adapters/reviewer-runtime/agent-os-hq/index.mjs', 'succeeded'],
+  ]) {
+    const moduleUrl = new URL(path, import.meta.url).href;
+    const code = `import { TERMINAL_LAUNCH_REQUEST_STATUSES } from ${JSON.stringify(vocabularyUrl)};
+TERMINAL_LAUNCH_REQUEST_STATUSES.delete(${JSON.stringify(status)});
+await import(${JSON.stringify(moduleUrl)});`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0, path);
+    assert.match(result.stderr, new RegExp(`terminal policy missing from producer vocabulary: ${status}`));
+  }
+});
+
 test('changing broker diagnostics do not repeat the same quota deferral', () => {
   const messages = [];
   const log = createReviewerQuotaBlockLogger();
@@ -113,6 +133,11 @@ test('changing broker diagnostics do not repeat the same quota deferral', () => 
   }
   assert.equal(messages.length, 1);
   assert.match(messages[0], /timeout at 10:00/);
+  log({ repoPath: 'example/repo', prNumber: 1, logger: { warn: text => messages.push(text) },
+    route: { quotaBlocked: true, reviewerModel: 'codex', quotaGrounding: {
+      state: 'unknown', reason: 'broker-unavailable', diagnostics: ['reserveFloors.openai.weeklyMeasurement missing'],
+    } } });
+  assert.equal(messages.length, 2, 'a different diagnostic field is a grounding transition');
 });
 
 for (const stdout of ['', 'unavailable', 'banner\n{invalid}']) {

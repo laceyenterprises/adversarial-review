@@ -2,10 +2,13 @@ import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../producer
 // Shared launch terminality; releasing ownership is not retry/re-arm authority.
 // Retry/re-arm authority keeps its existing policy subset; the owner also
 // reports blocked decisions terminal. Capacity and retry remain separate policies.
-export const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
-  'succeeded', 'failed', 'operator_triage_required', 'canceled', 'superseded', 'reaped_stuck_requested',
-]);
-assertTerminalLaunchPolicy(AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES);
+export const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set(
+  ['succeeded', 'failed', 'operator_triage_required', 'canceled', 'superseded', 'reaped_stuck_requested']
+    .filter(status => {
+      assertTerminalLaunchPolicy([status]);
+      return readLaunchRequestStatus(status).terminal;
+    }),
+);
 // Capacity-only terminal evidence must not widen per-PR retry/re-arm authority.
 export const AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
   ...AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, 'reaped', 'cancelled', 'completed', 'rejected',

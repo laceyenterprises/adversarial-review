@@ -1,5 +1,5 @@
 import { parseHqJsonObject, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
-import { assertTerminalLaunchPolicy } from './producer-contracts/launch-status.mjs';
+import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from './producer-contracts/launch-status.mjs';
 // Remediation HQ dispatch status/cancel helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave4). This is a
@@ -29,8 +29,10 @@ import { resolveHqRoot } from './remediation-reply-paths.mjs';
 const execFileAsync = promisify(execFile);
 
 // Remediation owns its existing terminal-event policy, including legacy spelling.
-const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded', 'cancelled']);
-assertTerminalLaunchPolicy(['succeeded', 'failed', 'canceled', 'superseded']);
+const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => {
+  assertTerminalLaunchPolicy([status]);
+  return readLaunchRequestStatus(status).terminal;
+}).concat('cancelled'));
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'daemon_bounced',

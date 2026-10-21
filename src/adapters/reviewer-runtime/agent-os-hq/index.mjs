@@ -1,5 +1,5 @@
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
-import { assertTerminalLaunchPolicy } from '../../../producer-contracts/launch-status.mjs';
+import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../../../producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -30,8 +30,10 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['gemini', 'gemini'],
 ]);
 // Preserve this runtime's terminal handling and legacy canceled spelling.
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded', 'cancelled']);
-assertTerminalLaunchPolicy(['succeeded', 'failed', 'canceled', 'superseded']);
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => {
+  assertTerminalLaunchPolicy([status]);
+  return readLaunchRequestStatus(status).terminal;
+}).concat('cancelled'));
 const SUCCESS_STATUSES = new Set(['succeeded']);
 const ACTIVE_RECORD_STATES = new Set(['spawned', 'heartbeating']);
 const DEFAULT_POLL_BASE_MS = 30_000;

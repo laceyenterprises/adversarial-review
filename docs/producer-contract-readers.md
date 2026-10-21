@@ -55,9 +55,11 @@ carry the producer and offending field/value without a new rejection.
 Dispatch status probes preserve the dispatch/worker vocabulary and producer
 diagnostics without interpreting them as launch-row statuses. Caller-owned
 terminal policy sets fail loudly at module load if generated producer vocabulary
-no longer recognizes a required terminal status; legacy capacity aliases remain
-explicit caller policy. Quota deferral logs deduplicate on routing state and
-reason, retaining changing diagnostic details only in the emitted message.
+no longer recognizes a required terminal status. Each required policy entry is
+asserted before producer terminality filters the set, so a vocabulary refresh
+cannot silently remove retry, remediation or reviewer terminal handling; legacy capacity aliases remain
+explicit caller policy. Quota deferral logs deduplicate on routing state, reason
+and sorted diagnostic field paths, retaining changing values only in the emitted message.
 
 Dispatch receipt identity aliases retain each caller's existing precedence and
 permissive compatibility behavior; whitespace-only aliases are skipped so a

@@ -572,7 +572,7 @@ test('HAMMERQUOTAREAD-01: timeout uses a three-minute-old snapshot without renew
   const result = await resolveCloserDispatchHarness({ ...args,
     execFileImpl: async (...call) => { timeouts.push(call[2].timeout); return args.execFileImpl(); } });
   assert.equal(result.hold, false);
-  assert.equal(result.reason, 'personal-ready');
+  assert.equal(result.reason, 'corporate-ready');
   assert.equal(result.evidenceSource, 'last-good-snapshot');
   assert.equal(result.evidenceAgeMs, 3 * 60_000);
   assert.equal(result.evidenceReadAt, SNAPSHOT_NOW - 3 * 60_000);
@@ -624,7 +624,7 @@ test('HAMMERQUOTAREAD-01: fresh state root persists a snapshot for a subsequent 
   const cached = await resolveCloserDispatchHarness({ ...args,
     nowMs: () => SNAPSHOT_NOW + 3 * 60_000 });
   assert.equal(cached.hold, false);
-  assert.equal(cached.reason, 'personal-ready');
+  assert.equal(cached.reason, 'corporate-ready');
   assert.equal(cached.evidenceSource, 'last-good-snapshot');
   assert.equal(cached.evidenceAgeMs, 3 * 60_000);
   assert.equal(cached.evidenceReadAt, SNAPSHOT_NOW);

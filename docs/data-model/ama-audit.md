@@ -52,6 +52,16 @@ sets preserve `all-fallbacks-grounded`. The same reason is returned to dispatch
 callers, along with `holdReason`. See the
 [quota snapshot contract](ama-closer-quota-snapshot.md).
 
+ITP-14 adds optional `harnessResolution.accountProposal` (and the same nested
+field per attempt): `{ identity, tokenAccountId, brokerProvider, reason,
+evidenceGeneration }`. Account/provider/generation are null when no selection
+was proposed. Both corporate and primary keep the canonical hammer role;
+`fellBack` denotes only an eligible declared cross-family role change. These
+fields convey no merge authority and are not a lease receipt. Managed dispatch
+revalidates admission and owns the actual durable account binding. Pool holds
+use the existing `deferred` audit outcome and `harness-hold:<reason>`; the legacy
+quota snapshot is not an alternative source of pooled admission evidence.
+
 ```mermaid
 erDiagram
   AMA_AUDIT ||--|{ AMA_ATTEMPT : records

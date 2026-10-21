@@ -6,7 +6,7 @@ import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMe
 import { ENUM_CODEX_WORKER_ACCOUNT_ORDER } from './config-loader.mjs';
 
 // Accounts share a model family, but never quota or broker evidence. Keep the
-// reviewer order separate from the configurable automatic worker order.
+// reviewer order separate from explicit compatibility worker overrides.
 const REVIEWER_ORDER = [['codex-corp', 'oauth-corp'], ['codex', 'oauth']];
 const WORKER_ORDER = [['codex', 'oauth'], ['codex-corp', 'oauth-corp']];
 
@@ -15,8 +15,8 @@ export function selectCodexReviewerAccount(payload, options = {}) {
 }
 
 export function selectCodexWorkerAccount(payload, options = {}) {
-  const order = options.policy === 'corporate-first' ? REVIEWER_ORDER : WORKER_ORDER;
-  return selectCodexAccount(payload, order, { ...options, fallThroughUnknown: true });
+  const order = options.policy === 'personal-first' ? WORKER_ORDER : REVIEWER_ORDER;
+  return selectCodexAccount(payload, order, options);
 }
 
 export function isAutomaticCodexAccountPolicy(policy) {
@@ -25,9 +25,8 @@ export function isAutomaticCodexAccountPolicy(policy) {
 
 function selectCodexAccount(payload, order, { model = null,
   statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false, personalExhausted = false,
-  fallThroughUnknown = false } = {}) {
+} = {}) {
   const rows = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
-  let unknownEvidence = false;
   for (const [provider, authPath] of order) {
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
     const row = rows.find(entry => entry?.provider === 'openai'
@@ -44,22 +43,18 @@ function selectCodexAccount(payload, order, { model = null,
       || (fresh && (cap.capped || (measured && weekly.percentRemaining === 0)));
     if (!exhausted && fresh && measured && cap.available
       && ready?.ready === true && ready?.can_serve === true) {
-      return { provider, authPath, hold: false,
-        reason: unknownEvidence ? 'codex-account-evidence-unknown-fallback-ready' : 'codex-account-ready' };
+      return { provider, authPath, hold: false, reason: 'codex-account-ready' };
     }
     if (!exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      if (!fallThroughUnknown) return { hold: true, reason: 'codex-account-evidence-unknown' };
-      // Workers may use independently measured capacity on the next account;
-      // unknown evidence never admits this account or proves it exhausted.
-      unknownEvidence = true;
+      return { hold: true, reason: 'codex-account-evidence-unknown' };
     }
   }
-  return { hold: true, reason: unknownEvidence ? 'codex-account-evidence-unknown' : 'no-ready-codex-account' };
+  return { hold: true, reason: 'no-ready-codex-account' };
 }
 
 // Only unpinned Codex lanes opt into account substitution. Corporate classes
 // already name an account and retain their existing dispatch/cap behavior.
-export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'personal-first', ...options } = {}) {
+export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'corporate-first', ...options } = {}) {
   if (!isAutomaticCodexAccountPolicy(policy) || !['hammer', 'codex'].includes(workerClass)) return null;
   const account = selectCodexWorkerAccount(payload, { ...options, policy });
   if (account.hold) return { ...account, workerClass };
@@ -68,15 +63,14 @@ export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'pe
   return { ...account,
     workerClass: account.provider === 'codex' ? workerClass
       : workerClass === 'hammer' ? 'hammer-corp' : 'remediator-codex-corp',
-    reason: selected === preferred ? `${selected}-ready`
-      : account.reason === 'codex-account-evidence-unknown-fallback-ready'
-        ? `${preferred}-evidence-unknown-${selected}-ready` : `${preferred}-unavailable-${selected}-ready`,
+    reason: selected === preferred ? `${selected}-ready` : `${preferred}-unavailable-${selected}-ready`,
   };
 }
 
 export function logCodexWorkerDispatch(log, workerClass, routing = {}, prefix = 'review-worker') {
-  if (!['hammer', 'hammer-corp', 'codex', 'remediator-codex-corp'].includes(workerClass)) return;
-  const account = workerClass.endsWith('-corp') ? 'corporate' : 'personal';
+  if (!['hammer', 'hammer-corp', 'codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) return;
+  const account = routing.pooled ? (routing.brokerProvider === 'codex-corp' ? 'corporate' : 'personal')
+    : workerClass.endsWith('-corp') ? 'corporate' : 'personal';
   (log?.info || log?.log)?.call(log, `[${prefix}] codex_account=${account} worker_class=${workerClass} reason=${routing?.reason || 'explicit-worker-class-pin'}`);
 }
 

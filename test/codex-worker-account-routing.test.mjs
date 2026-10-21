@@ -34,7 +34,7 @@ test('CODEXORDER-01: loader and role accessor validate YAML and env account orde
   const options = { topPath, modulePaths: [], env: {} };
   writeFileSync(topPath, 'version: 1\n');
   assert.equal(loadConfig(options).get(key), 'personal-first');
-  assert.equal(resolveCodexWorkerAccountOrder(options), 'personal-first');
+  assert.equal(resolveCodexWorkerAccountOrder(options), 'corporate-first');
   assert.deepEqual(ENUM_CODEX_WORKER_ACCOUNT_ORDER, ['personal-first', 'corporate-first']);
   for (const value of ENUM_CODEX_WORKER_ACCOUNT_ORDER) {
     writeFileSync(topPath, `version: 1\nroles:\n  codex_worker_account_order: ${value}\n`);
@@ -68,9 +68,9 @@ for (const [label, mutate, expected, reason] of [
   ['corporate not ready', f => { f.brokerAuth.provider_states['codex-corp'].ready = false; }, 'codex', 'corporate-unavailable-personal-ready'],
   ['corporate cannot serve', f => { f.brokerAuth.provider_states['codex-corp'].can_serve = false; }, 'codex', 'corporate-unavailable-personal-ready'],
   ['corporate measured zero', f => { f.reserveFloors['openai-oauth-corp'].weeklyMeasurement.percentRemaining = 0; }, 'codex', 'corporate-unavailable-personal-ready'],
-  ['corporate unknown', f => { delete f.reserveFloors['openai-oauth-corp']; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
-  ['corporate stale', f => { f.providerStatuses[1].cachedEvidenceStale = true; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
-  ['corporate stale exhaustion', f => { f.providerStatuses[1].cachedEvidenceStale = true; f.providerStatuses[1].state = 'exhausted'; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
+  ['corporate unknown', f => { delete f.reserveFloors['openai-oauth-corp']; }, null, 'codex-account-evidence-unknown'],
+  ['corporate stale', f => { f.providerStatuses[1].cachedEvidenceStale = true; }, null, 'codex-account-evidence-unknown'],
+  ['corporate stale exhaustion', f => { f.providerStatuses[1].cachedEvidenceStale = true; f.providerStatuses[1].state = 'exhausted'; }, null, 'codex-account-evidence-unknown'],
   ['both unknown', f => { f.reserveFloors = {}; }, null, 'codex-account-evidence-unknown'],
   ['corporate unknown personal capped', f => { delete f.reserveFloors['openai-oauth-corp']; f.providerStatuses[0].state = 'exhausted'; }, null, 'codex-account-evidence-unknown'],
   ['both capped', f => { f.providerStatuses[0].state = 'exhausted'; f.providerStatuses[1].state = 'exhausted'; }, null, 'no-ready-codex-account'],
@@ -139,8 +139,8 @@ test('CODEXORDER-01: registry class pins still narrow corporate-first automatic 
 });
 
 for (const [label, mutate, corporate, hold] of [
-  ['personal ready', () => {}, false, false],
-  ['personal ready, corporate unknown', f => { delete f.reserveFloors['openai-oauth-corp']; delete f.brokerAuth.provider_states['codex-corp']; }, false, false],
+  ['both ready', () => {}, true, false],
+  ['personal ready, corporate unknown', f => { delete f.reserveFloors['openai-oauth-corp']; delete f.brokerAuth.provider_states['codex-corp']; }, false, true],
   ['personal exhausted', f => { f.providerStatuses[0].state = 'exhausted'; }, true, false],
   ['personal not ready', f => { f.brokerAuth.provider_states.codex.ready = false; }, true, false],
   ['personal cannot serve', f => { f.brokerAuth.provider_states.codex.can_serve = false; }, true, false],
@@ -176,11 +176,11 @@ for (const [label, mutate, corporate, hold] of [
 });
 
 for (const [personalStatus, corporateStatus, expectedProvider, reason] of [
-  ['stale', 'measured', 'codex-corp', 'personal-evidence-unknown-corporate-ready'],
-  ['unknown', 'measured', 'codex-corp', 'personal-evidence-unknown-corporate-ready'],
+  ['stale', 'measured', 'codex-corp', 'corporate-ready'],
+  ['unknown', 'measured', 'codex-corp', 'corporate-ready'],
   ['stale', 'stale', null, 'codex-account-evidence-unknown'],
-  ['measured', 'measured', 'codex', 'personal-ready'],
-  ['measured', 'stale', 'codex', 'personal-ready'],
+  ['measured', 'measured', 'codex-corp', 'corporate-ready'],
+  ['measured', 'stale', null, 'codex-account-evidence-unknown'],
 ]) test(`worker producer-shaped quota: personal ${personalStatus}, corporate ${corporateStatus}`, async () => {
   const snapshot = codexAccountFixture();
   for (const [authPath, status, percentRemaining] of [
@@ -242,7 +242,7 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
   createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
-  const snapshot = account === 'unknown' ? {} : codexAccountFixture({ primary: account === 'corporate' ? 'exhausted' : 'ok' });
+  const snapshot = account === 'unknown' ? {} : codexAccountFixture({ corp: account === 'personal' ? 'exhausted' : 'ok' });
   const logs = []; const dispatches = [];
   const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
     guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
@@ -280,26 +280,19 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
     assert.equal(dispatches[0].env.CODEX_BROKER_PROVIDER, account === 'corporate' ? 'codex-corp' : 'codex');
     const choices = logs.filter(line => line.includes('codex_account='));
     assert.equal(choices.length, 1);
-    const reason = account === 'personal' ? 'personal-ready' : 'personal-unavailable-corporate-ready';
+    const reason = account === 'personal' ? 'corporate-unavailable-personal-ready' : 'corporate-ready';
     assert.match(choices[0], new RegExp(`codex_account=${account} .*reason=${reason}$`));
   }
 });
 
-test('worker recovery returns to personal; reviewers remain corporate-first', async () => {
-  const snapshot = codexAccountFixture({ primary: 'exhausted' });
-  assert.equal((await closer(snapshot)).workerClass, 'hammer-corp');
-  assert.equal((await remediator(snapshot)).workerClass, 'remediator-codex-corp');
-  snapshot.providerStatuses[0].state = 'ok';
+test('worker recovery restores corporate for the next attempt', async () => {
+  const snapshot = codexAccountFixture({ corp: 'exhausted' });
   assert.equal((await closer(snapshot)).workerClass, 'hammer');
   assert.equal((await remediator(snapshot)).workerClass, 'codex');
+  snapshot.providerStatuses[1].state = 'ok';
+  assert.equal((await closer(snapshot)).workerClass, 'hammer-corp');
+  assert.equal((await remediator(snapshot)).workerClass, 'remediator-codex-corp');
   assert.equal(selectCodexReviewerAccount(snapshot).provider, 'codex-corp');
-});
-
-test('worker resolvers default to personal-first without a declared cross-model fallback', async () => {
-  const snapshot = codexAccountFixture({ primary: 'exhausted' });
-  const execFileImpl = execFor(snapshot);
-  assert.equal((await resolveCloserDispatchHarness({ workerClass: 'hammer', execFileImpl, env })).workerClass, 'hammer-corp');
-  assert.equal((await resolveRemediationWorkerClassWithFallback({ primary: 'codex', execFileImpl, env })).workerClass, 'remediator-codex-corp');
 });
 
 test('job-local exhaustion remains account-scoped during automatic remediation routing', async () => {
@@ -362,7 +355,7 @@ test('explicit file and env pins preserve personal and corporate classes', async
 for (const corporate of [false, true]) test(`real recovery dispatch logs ${corporate ? 'corporate' : 'personal'} once`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-worker-dispatch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const snapshot = codexAccountFixture({ primary: corporate ? 'exhausted' : 'ok' });
+  const snapshot = codexAccountFixture({ corp: corporate ? 'ok' : 'exhausted' });
   const logs = []; const calls = [];
   const execFileImpl = async (command, args) => {
     calls.push(args);
@@ -395,6 +388,6 @@ test('worker account policy accepts get-only custom config loaders', () => {
   ]) {
     assert.equal(codexWorkerAccountPolicy(key, workerClass, {
       loaderImpl: () => ({ get: keyRead => keyRead === key ? workerClass : undefined }),
-    }), 'personal-first');
+    }), 'corporate-first');
   }
 });

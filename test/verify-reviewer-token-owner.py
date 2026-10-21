@@ -78,11 +78,20 @@ class OwnerIntegration(unittest.TestCase):
         reserve=None,
         unknown=None,
         real_propose=False,
+        identity=None,
+        task_kind="review",
     ):
         vector = next(
             v for v in vectors["cases"] if v["name"] == f"{family}-reviewer-{suffix}"
         )
         inputs = merge(vectors["defaults"], vector.get("patch", {}))
+        identity = identity or f"{family}-reviewer"
+        inputs["request"]["identity"] = inputs["request"]["snapshot"]["identity"] = (
+            identity
+        )
+        inputs["oauth"]["identity_token_pools"][identity] = list(
+            inputs["oauth"]["identity_token_pools"][f"{family}-reviewer"]
+        )
         # Real wall-clock evidence, without stale fixture timestamps.
         import time
 
@@ -97,8 +106,8 @@ class OwnerIntegration(unittest.TestCase):
         broker.saturated = saturated
 
         def propose(daemon, row, reserve, *, declarations, client):
-            self.assertEqual(row["worker_class"], f"{family}-reviewer")
-            self.assertEqual(row["task_type"], "review")
+            self.assertEqual(row["worker_class"], identity)
+            self.assertEqual(row["task_type"], task_kind)
             self.assertEqual(
                 json.loads(row["request_payload_json"])["workerModel"],
                 inputs["request"]["requested_models"][0],
@@ -113,6 +122,8 @@ class OwnerIntegration(unittest.TestCase):
         def collector(*args):
             snapshot = copy.deepcopy(inputs["request"]["snapshot"])
             if real_propose:
+                self.assertEqual(args[1]["task_type"], task_kind)
+                self.assertEqual(args[1]["worker_class"], identity)
                 self.assertEqual(set(vars(args[0])), {"hq_root", "_read_quota_status"})
                 self.assertIsInstance(args[1]["request_payload_json"], str)
                 generation = args[3]
@@ -129,10 +140,15 @@ class OwnerIntegration(unittest.TestCase):
                 "cwp_dispatch.token_pool_admission.BrokerExecutionClient",
                 return_value=broker,
             ),
-            nullcontext() if real_propose else patch(
+            nullcontext()
+            if real_propose
+            else patch(
                 "cwp_dispatch.token_pool_admission.propose", side_effect=propose
             ),
-            patch("cwp_dispatch.token_pool_admission.collect_snapshot", side_effect=collector),
+            patch(
+                "cwp_dispatch.token_pool_admission.collect_snapshot",
+                side_effect=collector,
+            ),
             patch(
                 "cwp_dispatch.token_pool_admission.resolve_registry_request",
                 return_value=(
@@ -140,16 +156,17 @@ class OwnerIntegration(unittest.TestCase):
                         allowed_models=tuple(inputs["request"]["identity_models"]),
                         default_model=inputs["request"]["requested_models"][0],
                     ),
-                    worker_class_request(f"{family}-reviewer"),
+                    worker_class_request(identity),
                 ),
             ),
             patch("cwp_dispatch.quota_reserve.snapshot", return_value=reserve or {}),
         ):
             result = transport.execute(
                 {
-                    "operation": "acquire",
+                    "operation": "acquire" if task_kind == "review" else "propose",
+                    "taskKind": task_kind,
                     "oauth": inputs["oauth"],
-                    "identity": f"{family}-reviewer",
+                    "identity": identity,
                     "family": family,
                     "model": inputs["request"]["requested_models"][0],
                     "hqRoot": str(repo),
@@ -159,6 +176,46 @@ class OwnerIntegration(unittest.TestCase):
                 }
             )
         return result, broker, inputs
+
+    def test_worker_roles_propose_with_own_task_reserves_and_no_local_lease(self):
+        for identity, family, task_kind in (
+            ("hammer", "codex", "merge"),
+            ("hammer-claude", "claude", "merge"),
+            ("remediator-codex", "codex", "coding"),
+            ("remediator-claude", "claude", "coding"),
+        ):
+            for suffix in (
+                "declared-preference",
+                "quota-exhausted",
+                "not-ready",
+                "reserve-refused",
+                "capacity-saturated",
+                "preferred-unknown",
+            ):
+                with self.subTest(identity=identity, suffix=suffix):
+                    result, broker, _ = self.run_case(
+                        family,
+                        suffix,
+                        identity=identity,
+                        task_kind=task_kind,
+                        real_propose=True,
+                    )
+                    selection = result["selection"]
+                    self.assertEqual(selection["identity"], identity)
+                    self.assertEqual(
+                        selection["status"],
+                        "hold" if suffix == "preferred-unknown" else "selected",
+                    )
+                    self.assertEqual(
+                        selection["reason"],
+                        "evidence-unknown"
+                        if suffix == "preferred-unknown"
+                        else "preferred-ready"
+                        if suffix == "declared-preference"
+                        else "fallback-ready",
+                    )
+                    self.assertEqual(broker.operations, [])
+                    self.assertIsNone(result["lease"])
 
     def test_real_shared_selection_for_both_reviewer_families(self):
         for family in ("claude", "codex"):
@@ -183,22 +240,30 @@ class OwnerIntegration(unittest.TestCase):
 
     def test_real_propose_accepts_transport_daemon_and_json_row(self):
         for family in ("claude", "codex"):
-            result, broker, _ = self.run_case(family, "declared-preference", real_propose=True)
+            result, broker, _ = self.run_case(
+                family, "declared-preference", real_propose=True
+            )
             self.assertEqual(result["selection"]["status"], "selected")
             self.assertEqual(broker.operations[0][0], "acquire")
 
     def test_post_acquire_serialization_failure_releases(self):
         broker = Broker()
         original = broker.acquire
+
         def acquire(**value):
             lease = original(**value)
             lease["invalid"] = float("nan")
             return lease
+
         broker.acquire = acquire
         released = []
         with (
             patch.object(Broker, "acquire", lambda _, **value: acquire(**value)),
-            patch.object(Broker, "release", lambda _, lease: released.append(lease) or {"released": True}),
+            patch.object(
+                Broker,
+                "release",
+                lambda _, lease: released.append(lease) or {"released": True},
+            ),
         ):
             with self.assertRaises(ValueError):
                 self.run_case("codex", "declared-preference")
@@ -210,7 +275,10 @@ class OwnerIntegration(unittest.TestCase):
             for result in (None, False, {}, {"held": "evidence-unknown"}):
                 broker = Broker()
                 setattr(broker, operation, lambda _, result=result: result)
-                with patch("cwp_dispatch.token_pool_admission.BrokerExecutionClient", return_value=broker):
+                with patch(
+                    "cwp_dispatch.token_pool_admission.BrokerExecutionClient",
+                    return_value=broker,
+                ):
                     with self.assertRaises(RuntimeError):
                         transport.execute({"operation": operation, "lease": {}})
 
@@ -220,20 +288,48 @@ class OwnerIntegration(unittest.TestCase):
             setattr(broker, operation, lambda _: {"held": "evidence-unknown"})
             output = StringIO()
             with (
-                patch("cwp_dispatch.token_pool_admission.BrokerExecutionClient", return_value=broker),
-                patch("sys.stdin", StringIO(json.dumps({"operation": operation, "lease": {}}))),
+                patch(
+                    "cwp_dispatch.token_pool_admission.BrokerExecutionClient",
+                    return_value=broker,
+                ),
+                patch(
+                    "sys.stdin",
+                    StringIO(json.dumps({"operation": operation, "lease": {}})),
+                ),
                 redirect_stdout(output),
                 self.assertRaises(SystemExit) as exit_result,
             ):
-                runpy.run_path(str(repo / "src/adapters/reviewer-runtime/token-pool-owner.py"), run_name="__main__")
+                runpy.run_path(
+                    str(repo / "src/adapters/reviewer-runtime/token-pool-owner.py"),
+                    run_name="__main__",
+                )
             self.assertEqual(exit_result.exception.code, 1)
-            self.assertEqual(json.loads(output.getvalue()), {"error": "lease-operation-failed"})
+            self.assertEqual(
+                json.loads(output.getvalue()), {"error": "lease-operation-failed"}
+            )
 
     def test_recover_uses_request_identity_without_selecting_or_acquiring(self):
         broker = Broker()
-        broker.diagnostics = lambda: {"active": [{"request_id": "session", "identity": "codex-reviewer", "lease_id": "lease"}]}
-        with patch("cwp_dispatch.token_pool_admission.BrokerExecutionClient", return_value=broker):
-            result = transport.execute({"operation": "recover", "requestId": "session", "identity": "codex-reviewer"})
+        broker.diagnostics = lambda: {
+            "active": [
+                {
+                    "request_id": "session",
+                    "identity": "codex-reviewer",
+                    "lease_id": "lease",
+                }
+            ]
+        }
+        with patch(
+            "cwp_dispatch.token_pool_admission.BrokerExecutionClient",
+            return_value=broker,
+        ):
+            result = transport.execute(
+                {
+                    "operation": "recover",
+                    "requestId": "session",
+                    "identity": "codex-reviewer",
+                }
+            )
             self.assertEqual(result["lease"]["lease_id"], "lease")
             self.assertEqual(broker.operations, [])
 

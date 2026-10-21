@@ -942,6 +942,11 @@ unavailable when all declared pool selections are held; those holds still reach
 account admission. Runtime adapters with no declared ID hold leased accounts just
 like other unsupported runtimes. These repairs retain the existing smoke promises;
 the offline reviewer-account consumer tests cover these refusal paths.
+ITP-14 uses the same selection owner for declared hammer/remediator pools. Unknown
+evidence uses the existing pre-launch deferral or budget-neutral claim release;
+pooled local remediation holds until managed dispatch is available. There are no
+new lifecycle states or live smoke promises. Offline acceptance is in
+`test/worker-token-pool.test.mjs` and `test/verify-reviewer-token-owner.py`.
 Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
 review's commit ID. Settlement requires a non-empty recovered head and retains
 null-safe comparisons against the inspected session and prior head, so a
@@ -1532,6 +1537,48 @@ node test/run-tests.mjs identity-token-snapshot.test.mjs
 The owner verification is an opt-in bounded publication check, not a new CI
 gate or runtime dependency. Keep Node readers deployed before enabling an
 incompatible owner vocabulary. No store, lifecycle or smoke contract changes.
+
+### Remediator and hammer account pools (ITP-14)
+
+Declared `hammer`, `hammer-claude`, `remediator-codex` and `remediator-claude`
+pools use `src/worker-token-pool.mjs` and the shared Python selection owner.
+The operator's current static order is corporate then primary for both families.
+`codex`/`claude-code` remediation routes become their privileged remediator role
+when that role has a pool; a corporate receipt never selects a builder role or
+requires a corporate class. The registry keeps GitHub entitlement, tools, models,
+role budgets and merge capabilities attached to the canonical role.
+
+The Node result is a proposal only. Managed `hq dispatch` revalidates admission
+and acquires/binds the account under its existing global semaphore. It emits no
+automatic harness or account pin. The proposal uses the role's coding/merge task
+policy, while reviewers retain their stricter reviewer reserve policy. Unknown,
+stale or unreadable evidence holds before fallback. Fresh pool exhaustion reaches
+only the existing declared eligible cross-family role, retaining `hammer-claude`
+and remediation reviewer-family exclusions. Typed infrastructure repair retains
+its declared cross-family edge. Recovery reselects on the next new attempt;
+running/resumed leases remain dispatcher-owned and unchanged.
+
+Managed remediation bypasses daemon-local OAuth preflight only for pooled
+privileged roles. A local runtime selection holds before workspace preparation;
+it cannot spawn with an unleased proposal. `accountProposal` in existing job and
+AMA audit evidence records non-secret selection metadata, never a bound lease.
+The dispatcher's launch/run provenance remains authoritative for the account that
+actually ran. Undeclared pools and explicit legacy corporate requests retain
+compatibility routing/affinity until the separately approved migration/drain.
+The compatibility order accessor now defaults to corporate-first while preserving
+explicit file/env order and class-pin provenance; the legacy strict schema's
+personal-first code default remains readable until policy migration. Declared
+pools always use their own ordered account IDs. No config key is added.
+An existing explicit personal class pin with a newly declared pool holds with
+`legacy-account-pin-requires-migration` for operator resolution; it cannot silently
+become corporate-first or create a new account hard pin. Named legacy corporate
+requests keep their compatibility affinity.
+
+Offline owner verification (using the registered companion workspace):
+`python3 -I -B test/verify-reviewer-token-owner.py ../agent-os`.
+This uses the real reducer with mocked collectors, registry and broker; it never
+reads production quota or credentials. Deployment/enrollment remains operator-only
+ITP-19, and ITP-23 owns the future operator account hard pin.
 
 ### Reviewer account pools (ITP-12)
 

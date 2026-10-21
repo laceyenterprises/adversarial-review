@@ -7031,6 +7031,11 @@ async function maybeDispatchAmaCloserAttempt({
   const harnessHoldReason = harnessFallback?.reason === 'all-fallbacks-grounded'
     ? 'all-fallbacks-grounded' : `harness-hold:${harnessFallback?.reason || 'unknown'}`;
   const harnessResolution = {
+    ...(harnessFallback?.pooled ? { accountProposal: {
+      identity: harnessFallback.identity, tokenAccountId: harnessFallback.tokenAccountId || null,
+      brokerProvider: harnessFallback.brokerProvider || null, reason: harnessFallback.reason,
+      evidenceGeneration: harnessFallback.evidenceGeneration || null,
+    } } : {}),
     workerClass: harnessFallback?.workerClass || workerClass,
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),

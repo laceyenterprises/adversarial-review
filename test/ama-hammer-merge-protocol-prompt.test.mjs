@@ -620,11 +620,15 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
 for (const auditFails of [false, true]) {
   test(`pending CI marks the lease retryable before release when audit fails=${auditFails}`, () => {
     const source = readFileSync(join(REPO_ROOT, 'bin', 'hammer-merge.sh'), 'utf8');
-    const start = source.indexOf('HAM_REMOTE_CI_GATE_READ_FAILURES=0\nHAM_ALREADY_MERGED_VALIDATED_HEAD=0');
+    const start = source.indexOf('HAM_ALREADY_MERGED_VALIDATED_HEAD=0\nham_release_merge_lease');
     const end = source.indexOf('\n  # Remote CI does not own', start);
     assert.ok(start > 0 && end > start);
     const script = `
-      ham_refresh_github_gate() { return 0; }
+      ham_refresh_github_gate() {
+        [ "$HAM_MERGE_LEASE_HELD" -eq 0 ] || exit 99
+        echo gate-read
+        return 0
+      }
       ham_already_merged_validated_head() { return 1; }
       ham_live_head_moved() { return 1; }
       ham_required_gate_ok() { return 1; }
@@ -633,7 +637,8 @@ for (const auditFails of [false, true]) {
       jq() { return 0; }
       ham_append_terminal_audit() { echo audit:$1:$2; return ${auditFails ? 1 : 0}; }
       ham_mark_merge_lease_retryable_abort() { marker="$1"; echo marker:$marker; }
-      ham_release_merge_lease() { echo release:$marker; }
+      ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo release:\${marker:-none}; }
+      HAM_MERGE_LEASE_HELD=1
       HAM_REMOTE_CI_DEADLINE=0
       HAM_GATE_JSON=/dev/null
       POST_REMEDIATION_SHA=validated-head
@@ -647,6 +652,8 @@ for (const auditFails of [false, true]) {
     assert.ifError(result.error);
     assert.equal(result.status, 20, result.stderr);
     assert.deepEqual(result.stdout.trim().split('\n'), [
+      'release:none',
+      'gate-read',
       'audit:deferred:required-checks-pending',
       'marker:required-checks-pending',
       'release:required-checks-pending',

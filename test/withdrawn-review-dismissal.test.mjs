@@ -152,6 +152,8 @@ esac
     writeFileSync(script, renderHammerProcedure('hammer-merge', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture POST_REMEDIATION_SHA=${headSha} HAM_PUBLISHED_AUDIT_HEAD=${headSha} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_MERGE_RETRY_CAP=1
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
+ham_base_touches_pr_files() { return 1; }
 ham_mark_merge_lease_retryable_abort() { :; }
 sleep() { :; }
 source "$1"

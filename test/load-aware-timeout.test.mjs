@@ -199,25 +199,26 @@ for (const busy of [0, 42.5, 85]) {
   });
 }
 
-test('slow ps failures have a five-second budget and cache from completion', () => {
+test('slow ps failures have a one-second budget to limit daemon event-loop stalls and cache from completion', () => {
   let now = 0;
   let calls = 0;
   const sample = createCpuBusySampler({ nowMs: () => now, warn() {},
     execFileSyncImpl: (command, args, options) => {
       assert.equal(command, '/bin/ps');
       assert.deepEqual(args, ['-A', '-o', '%cpu=']);
-      assert.equal(options.timeout, 5000);
+      // Sampling is synchronous on daemon hot paths; safe fallback needs no longer wait.
+      assert.equal(options.timeout, 1000);
       calls++;
       now += options.timeout;
       throw new Error('synthetic ps timeout');
     } });
   assert.equal(sample(), null);
-  assert.equal(now, 5000);
+  assert.equal(now, 1000);
   for (let i = 0; i < 100; i++) assert.equal(sample(), null);
-  now = 9999;
+  now = 5999;
   assert.equal(sample(), null);
   assert.equal(calls, 1);
-  now = 10000;
+  now = 6000;
   assert.equal(sample(), null);
   assert.equal(calls, 2);
 });

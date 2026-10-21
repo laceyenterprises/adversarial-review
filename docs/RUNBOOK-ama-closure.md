@@ -31,11 +31,16 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
-The `ps` sample has a five-second budget. If it fails or returns non-finite
+The synchronous `ps` sample has a one-second budget to limit daemon event-loop
+stalls; failed attempts already have a safe fallback. If it fails or returns non-finite
 data, the last successful CPU reading is reused while it is under 60 seconds
 old; otherwise the full load-based multiplier applies. Failed attempts do not
 refresh the successful reading's age. Substitution warnings are limited to one
-per minute per process. A measured zero still supplies zero corroboration.
+per minute per process. A measured zero still supplies zero corroboration,
+including when reused during failures for up to 60 seconds; this can retain
+nominal timeouts while contention rises. Hosts where `/bin/ps` is permanently
+missing or inaccessible use the full load curve under load once any last-good
+reading expires (immediately if none exists), subject to the configured cap.
 
 Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
 nominal budgets, or set `adversarial.reviewer.load_aware.max_multiplier` (1..20 inclusive,

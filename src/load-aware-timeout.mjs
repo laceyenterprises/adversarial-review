@@ -36,7 +36,8 @@ export const MAX_MULTIPLIER = 6;
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
 export const CPU_BUSY_THRESHOLD_PERCENT = 85;
 const SAMPLE_INTERVAL_MS = 5_000;
-const CPU_SAMPLE_TIMEOUT_MS = 5_000;
+// Sampling blocks daemon event loops; failures already have a safe fallback.
+const CPU_SAMPLE_TIMEOUT_MS = 1_000;
 const LAST_GOOD_CPU_MAX_AGE_MS = 60_000;
 const SUBSTITUTION_LOG_INTERVAL_MS = 60_000;
 const HOST_CPU_COUNT = os.cpus()?.length || 1;

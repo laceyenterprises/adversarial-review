@@ -3033,39 +3033,44 @@ identity. The cross-model fallback default remains `[hammer-claude]`.
 
 LANEFAILOVER-01: unpinned Codex workers resolve accounts before dispatch using
 the same fleet quota, weekly measurement, freshness and broker readiness
-evidence as REVIEWCORPFIRST-01 (PR 1367). Workers use **personal first**:
-`hammer` and the `codex` remediator stay personal while ready with capacity.
-Confirmed exhaustion or broker unavailability permits an independently ready
-corporate account, selecting `hammer-corp` or `remediator-codex-corp`.
-CODEXFALLTHRU-01: unknown/stale personal evidence also permits independently
-measured, available and broker-ready corporate capacity. It does not prove
-personal exhaustion. If no account qualifies, any unknown evidence returns
-`codex-account-evidence-unknown`; otherwise the hold reason is
-`no-ready-codex-account`. Every fresh dispatch resolves again, so personal
-recovery restores the personal class automatically. Codex reviewers remain
-**corporate first** and hold on unknown/stale preferred-account evidence.
+evidence as the reviewer account classifier. CODEXORDER-01 adds
+`roles.codex_worker_account_order` (`personal-first` or `corporate-first`, default
+`personal-first`), with env override `AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER`.
+This one value selects the preferred account for the AMA closer, merge-agent
+recovery and Codex remediation lanes. Personal capacity maps to `hammer` or
+`codex`; corporate capacity maps to `hammer-corp` or `remediator-codex-corp`.
 
-This applies to AMA closer dispatch, merge-agent recovery dispatch and Codex
-remediation claims. Explicit worker-class pins retain their previous behavior:
-a concrete file/env/CLI class value wins over code defaults or builder routing,
-including a personal pin. Already account-specific corporate classes are preserved. Existing
-supported configuration surfaces are unchanged; for example, the AMA
-`roles.adversarial.merge_authority.worker_class` supports `hammer-corp`.
-No config key, label, CI check, merge predicate, lease or retry budget is added.
-Claude-engine selection is unchanged. Account substitution does not send a
-cross-model fallback alert.
+Confirmed exhaustion or broker unavailability permits an independently ready
+second account. CODEXFALLTHRU-01 also permits independently measured, available
+and broker-ready second-account capacity when preferred-account evidence is
+unknown or stale. Unknown evidence neither admits that account nor proves it
+exhausted. If no account qualifies, any unknown evidence returns
+`codex-account-evidence-unknown`; otherwise the hold reason is
+`no-ready-codex-account`. Each fresh dispatch resolves again in the configured
+order. Codex reviewers remain **corporate first** and hold on unknown/stale
+preferred-account evidence.
+
+Explicit worker-class pins retain their previous behavior: a concrete
+file/env/CLI class value wins over code defaults or builder routing, including
+a personal pin. Already account-specific corporate classes are preserved.
+For example, the AMA `roles.adversarial.merge_authority.worker_class` supports
+`hammer-corp`. Cross-model fallback lists, HHR/AFH grounding, single-hop failover
+and merge eligibility retain their existing contracts. Account substitution
+does not send a cross-model fallback alert.
 
 Each dispatch emits one account line with its class and reason, for example
-`codex_account=personal worker_class=hammer reason=personal-ready` or
-`codex_account=corporate worker_class=hammer-corp reason=personal-unavailable-corporate-ready`.
-Unknown personal evidence followed by ready corporate capacity reports
-`reason=personal-evidence-unknown-corporate-ready`.
-Reviewer spawn logs also name `personal` or `corporate` and the routing reason.
-After deploying the watcher and follow-up consumer, verify personal-class logs
-while personal has capacity, then corporate-class logs after confirmed personal
-exhaustion or stale personal evidence without adding a pin. Inspect existing pins
-if automatic routing does not engage. Observe real account evidence; do not alter live quota state to test
-failover. Merge eligibility remains enforced independently on either account.
+`codex_account=corporate worker_class=hammer-corp reason=corporate-ready` or
+`codex_account=personal worker_class=hammer reason=corporate-unavailable-personal-ready`.
+Unknown corporate evidence followed by ready personal capacity reports
+`reason=corporate-evidence-unknown-personal-ready`; personal-first reasons use
+the corresponding personal-to-corporate wording.
+
+Rollout: ship this reader and the companion host strict-loader support before
+an operator sets the new key. Checked-in runtime YAML leaves it unset. After
+both readers ship, the operator can select either order and verify the existing
+account dispatch logs against observed quota and broker readiness. Inspect
+explicit class pins if automatic routing does not engage. Use synthetic fixtures
+for failover tests; do not alter live quota state to test routing.
 
 HAM context emits an under-8192-byte summary; use `bin/primary-change-context.mjs` for full patches. Commit identity stays local; merge decisions fetch primary evidence lazily and forward cancellation. The hammer in-lease merge re-fetches evidence independently of its claim. Transient evidence errors cannot suppress CI/conflict repair dispatch. Current commit provenance selects the first hammer parent, including login plus recorded-launch provenance for untagged hammer repairs after the builder boundary. Base merges use the first parent only after verifying the second parent belongs to the base ancestry.
 

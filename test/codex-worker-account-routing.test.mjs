@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
-import { codexWorkerAccountPolicy } from '../src/role-config.mjs';
-import { selectCodexWorkerAccount, selectCodexReviewerAccount, codexWorkerLaneFromSnapshot } from '../src/codex-account-routing.mjs';
+import { codexWorkerAccountPolicy, resolveCodexWorkerAccountOrder } from '../src/role-config.mjs';
+import { loadConfig, ENUM_CODEX_WORKER_ACCOUNT_ORDER } from '../src/config-loader.mjs';
+import { selectCodexWorkerAccount, selectCodexReviewerAccount, codexWorkerLaneFromSnapshot, isAutomaticCodexAccountPolicy, logCodexWorkerDispatch } from '../src/codex-account-routing.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { resolveMergeAgentDispatchHarness } from '../src/merge-agent-harness.mjs';
 import { dispatchMergeAgentForPR } from '../src/follow-up-merge-agent.mjs';
@@ -23,6 +24,119 @@ const remediator = (snapshot, options = {}) => resolveClaimedRemediatorRouting({
   job: { builderTag: 'claude-code', reviewerModel: 'codex' }, env, log: quiet,
   resolveImpl: args => resolveRemediationWorkerClassWithFallback({ ...args, execFileImpl: execFor(snapshot) }),
   ...options });
+
+test('CODEXORDER-01: loader and role accessor validate YAML and env account orders', t => {
+  const root = mkdtempSync(join(tmpdir(), 'codex-worker-order-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const topPath = join(root, 'config.yaml');
+  const key = 'roles.codex_worker_account_order';
+  const envKey = 'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER';
+  const options = { topPath, modulePaths: [], env: {} };
+  writeFileSync(topPath, 'version: 1\n');
+  assert.equal(loadConfig(options).get(key), 'personal-first');
+  assert.equal(resolveCodexWorkerAccountOrder(options), 'personal-first');
+  assert.deepEqual(ENUM_CODEX_WORKER_ACCOUNT_ORDER, ['personal-first', 'corporate-first']);
+  for (const value of ENUM_CODEX_WORKER_ACCOUNT_ORDER) {
+    writeFileSync(topPath, `version: 1\nroles:\n  codex_worker_account_order: ${value}\n`);
+    assert.equal(loadConfig(options).get(key), value);
+    assert.equal(resolveCodexWorkerAccountOrder(options), value);
+    for (const [roleKey, workerClass] of [
+      ['roles.remediator', 'codex'], ['roles.adversarial.merge_authority.worker_class', 'hammer'],
+      ['roles.merge_agent_worker_class', 'hammer'],
+    ]) assert.equal(codexWorkerAccountPolicy(roleKey, workerClass, options), value);
+    assert.equal(resolveCodexWorkerAccountOrder({ ...options, env: { [envKey]: '  ' } }), value);
+    for (const override of ENUM_CODEX_WORKER_ACCOUNT_ORDER) {
+      const withEnv = { ...options, env: { [envKey]: override } };
+      assert.equal(loadConfig(withEnv).get(key), override);
+      assert.equal(resolveCodexWorkerAccountOrder(withEnv), override);
+    }
+  }
+  writeFileSync(topPath, 'version: 1\nroles:\n  codex_worker_account_order: unknown-order\n');
+  assert.throws(() => loadConfig(options), { name: 'AgentOSConfigError', key });
+  writeFileSync(topPath, 'version: 1\nroles:\n  codex_worker_account_order: 1\n');
+  assert.throws(() => loadConfig(options), { name: 'AgentOSConfigError', key });
+  writeFileSync(topPath, 'version: 1\n');
+  assert.throws(() => loadConfig({ ...options, env: { [envKey]: 'unknown-order' } }),
+    { name: 'AgentOSConfigError', key });
+  assert.throws(() => resolveCodexWorkerAccountOrder({ ...options, env: { [envKey]: 'unknown-order' } }),
+    new RegExp(`${envKey} must be one of:`));
+});
+
+for (const [label, mutate, expected, reason] of [
+  ['both ready', () => {}, 'codex-corp', 'corporate-ready'],
+  ['corporate capped', f => { f.providerStatuses[1].state = 'exhausted'; }, 'codex', 'corporate-unavailable-personal-ready'],
+  ['corporate not ready', f => { f.brokerAuth.provider_states['codex-corp'].ready = false; }, 'codex', 'corporate-unavailable-personal-ready'],
+  ['corporate cannot serve', f => { f.brokerAuth.provider_states['codex-corp'].can_serve = false; }, 'codex', 'corporate-unavailable-personal-ready'],
+  ['corporate measured zero', f => { f.reserveFloors['openai-oauth-corp'].weeklyMeasurement.percentRemaining = 0; }, 'codex', 'corporate-unavailable-personal-ready'],
+  ['corporate unknown', f => { delete f.reserveFloors['openai-oauth-corp']; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
+  ['corporate stale', f => { f.providerStatuses[1].cachedEvidenceStale = true; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
+  ['corporate stale exhaustion', f => { f.providerStatuses[1].cachedEvidenceStale = true; f.providerStatuses[1].state = 'exhausted'; }, 'codex', 'corporate-evidence-unknown-personal-ready'],
+  ['both unknown', f => { f.reserveFloors = {}; }, null, 'codex-account-evidence-unknown'],
+  ['corporate unknown personal capped', f => { delete f.reserveFloors['openai-oauth-corp']; f.providerStatuses[0].state = 'exhausted'; }, null, 'codex-account-evidence-unknown'],
+  ['both capped', f => { f.providerStatuses[0].state = 'exhausted'; f.providerStatuses[1].state = 'exhausted'; }, null, 'no-ready-codex-account'],
+]) test(`CODEXORDER-01: corporate-first ${label} across all automatic worker gates`, async () => {
+  const corporateEnv = { ...env, AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER: 'corporate-first' };
+  const snapshot = codexAccountFixture(); mutate(snapshot);
+  const execFileImpl = execFor(snapshot);
+  const policy = codexWorkerAccountPolicy('roles.adversarial.merge_authority.worker_class', 'hammer', { env: corporateEnv });
+  assert.equal(policy, 'corporate-first');
+  assert.equal(isAutomaticCodexAccountPolicy(policy), true);
+  const selected = selectCodexWorkerAccount(snapshot, { policy, fallThroughUnknown: false });
+  assert.equal(selected.provider, expected ?? undefined);
+  assert.equal(selected.hold, expected === null);
+  const hammer = await resolveCloserDispatchHarness({ workerClass: 'hammer', codexAccountPolicy: policy,
+    env: corporateEnv, execFileImpl, probeWithoutFallbacks: false });
+  const recovery = await resolveMergeAgentDispatchHarness({ workerClass: 'hammer', env: corporateEnv,
+    execFileImpl, logger: quiet });
+  const remediation = await remediator(snapshot, { env: corporateEnv });
+  for (const [decision, personalClass, corporateClass] of [
+    [hammer, 'hammer', 'hammer-corp'], [recovery, 'hammer', 'hammer-corp'],
+    [remediation, 'codex', 'remediator-codex-corp'],
+  ]) {
+    assert.equal(Boolean(decision.hold), expected === null);
+    if (expected !== null) {
+      assert.equal(decision.workerClass, expected === 'codex' ? personalClass : corporateClass);
+      assert.equal(decision.reason, reason);
+      const logs = [];
+      logCodexWorkerDispatch({ info: line => logs.push(line) }, decision.workerClass, decision);
+      assert.match(logs[0], new RegExp(`codex_account=${expected === 'codex' ? 'personal' : 'corporate'} .*reason=${reason}$`));
+    }
+  }
+  assert.equal(hammer.reason, reason);
+  assert.equal(remediation.reason, reason);
+  assert.equal(recovery.deferred, expected === null);
+});
+
+test('CODEXORDER-01: corporate-first holds on unreadable snapshots in all worker lanes', async () => {
+  const corporateEnv = { ...env, AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER: 'corporate-first' };
+  const execFileImpl = async () => ({ stdout: 'synthetic invalid JSON' });
+  const hammer = await resolveCloserDispatchHarness({ workerClass: 'hammer', env: corporateEnv,
+    codexAccountPolicy: 'corporate-first', execFileImpl });
+  assert.equal(hammer.hold, true);
+  const recovery = await resolveMergeAgentDispatchHarness({ workerClass: 'hammer', env: corporateEnv, execFileImpl, logger: quiet });
+  assert.equal(recovery.deferred, true);
+  const remediation = await remediator(null, { env: corporateEnv,
+    resolveImpl: args => resolveRemediationWorkerClassWithFallback({ ...args, execFileImpl }) });
+  assert.equal(remediation.hold, true);
+  assert.ok(remediation.holdUntil);
+});
+
+test('CODEXORDER-01: registry class pins still narrow corporate-first automatic claims', async () => {
+  const loaderImpl = () => ({
+    get: key => ({ 'roles.codex_worker_account_order': 'corporate-first',
+      'roles.remediator': 'adversarial', 'roles.registry.remediator.workerClass': 'codex' })[key],
+    resolutionTrace: key => [{ source: key === 'roles.registry.remediator.workerClass' ? 'top:synthetic-config' : 'code-default' }],
+  });
+  let received;
+  await resolveClaimedRemediatorRouting({ primary: 'codex', job: { builderTag: 'generic-builder' },
+    env, loaderImpl, log: quiet, resolveImpl: async args => {
+      received = args.codexAccountPolicy;
+      return { workerClass: 'codex', hold: false, fellBack: false };
+    } });
+  assert.equal(received, 'pinned');
+  assert.equal(isAutomaticCodexAccountPolicy('pinned'), false);
+  assert.equal(codexWorkerLaneFromSnapshot(codexAccountFixture(), { workerClass: 'hammer', policy: 'pinned' }), null);
+});
 
 for (const [label, mutate, corporate, hold] of [
   ['personal ready', () => {}, false, false],
@@ -225,7 +339,7 @@ test('explicit file and env pins preserve personal and corporate classes', async
   for (const [hammerClass, remediatorClass] of [['hammer', 'codex'], ['hammer-corp', 'remediator-codex-corp']]) {
     // The recovery-role schema supports a personal hammer pin; the AMA role
     // additionally supports the corporate hammer pin.
-    writeFileSync(topPath, `version: 1\nroles:\n${hammerClass === 'hammer' ? '  merge_agent_worker_class: hammer\n  remediator: codex\n' : '  registry:\n    remediator:\n      workerClass: remediator-codex-corp\n'}  adversarial:\n    merge_authority:\n      worker_class: ${hammerClass}\n`);
+    writeFileSync(topPath, `version: 1\nroles:\n  codex_worker_account_order: corporate-first\n${hammerClass === 'hammer' ? '  merge_agent_worker_class: hammer\n  remediator: codex\n' : '  registry:\n    remediator:\n      workerClass: remediator-codex-corp\n'}  adversarial:\n    merge_authority:\n      worker_class: ${hammerClass}\n`);
     const pinnedEnv = { AGENT_OS_CONFIG_PATH: topPath };
     for (const key of ['roles.merge_agent_worker_class', 'roles.adversarial.merge_authority.worker_class']) {
       assert.equal(codexWorkerAccountPolicy(key, hammerClass, { env: pinnedEnv }), 'pinned');
@@ -280,7 +394,7 @@ test('worker account policy accepts get-only custom config loaders', () => {
     ['roles.adversarial.merge_authority.worker_class', 'hammer'],
   ]) {
     assert.equal(codexWorkerAccountPolicy(key, workerClass, {
-      loaderImpl: () => ({ get: () => workerClass }),
+      loaderImpl: () => ({ get: keyRead => keyRead === key ? workerClass : undefined }),
     }), 'personal-first');
   }
 });

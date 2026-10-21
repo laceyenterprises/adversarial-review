@@ -140,6 +140,7 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'adversarial'];
 const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'adversarial'];
+export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
 // REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
 // fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
 const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'remediator-claude'];
@@ -1900,6 +1901,11 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'adversarial',
             __enum: ENUM_ROLES_REMEDIATOR,
+          },
+          codex_worker_account_order: {
+            __type: TYPE_STRING,
+            __default: 'personal-first',
+            __enum: ENUM_CODEX_WORKER_ACCOUNT_ORDER,
           },
           // REMFALLBACK-01: ordered remediator classes to fall back to when the
           // routed remediator's provider is capped (grounded, AFH soft-grounded,
@@ -3924,6 +3930,10 @@ export const ENV_ALIASES = {
   'roles.merge_agent_worker_class': {
     canonical: 'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
     aliases: [['ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS', identity]],
+  },
+  'roles.codex_worker_account_order': {
+    canonical: 'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER',
+    aliases: [],
   },
   'roles.build_pack_default_worker_class': {
     canonical: 'AGENT_OS_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS',

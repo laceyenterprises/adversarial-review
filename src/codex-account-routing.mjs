@@ -3,9 +3,10 @@ import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMeasurement } from './fleet-quota-status.mjs';
+import { ENUM_CODEX_WORKER_ACCOUNT_ORDER } from './config-loader.mjs';
 
 // Accounts share a model family, but never quota or broker evidence. Keep the
-// two policies explicit: reviewers are corporate-first, workers personal-first.
+// reviewer order separate from the configurable automatic worker order.
 const REVIEWER_ORDER = [['codex-corp', 'oauth-corp'], ['codex', 'oauth']];
 const WORKER_ORDER = [['codex', 'oauth'], ['codex-corp', 'oauth-corp']];
 
@@ -14,7 +15,12 @@ export function selectCodexReviewerAccount(payload, options = {}) {
 }
 
 export function selectCodexWorkerAccount(payload, options = {}) {
-  return selectCodexAccount(payload, WORKER_ORDER, { ...options, fallThroughUnknown: true });
+  const order = options.policy === 'corporate-first' ? REVIEWER_ORDER : WORKER_ORDER;
+  return selectCodexAccount(payload, order, { ...options, fallThroughUnknown: true });
+}
+
+export function isAutomaticCodexAccountPolicy(policy) {
+  return ENUM_CODEX_WORKER_ACCOUNT_ORDER.includes(policy);
 }
 
 function selectCodexAccount(payload, order, { model = null,
@@ -54,15 +60,17 @@ function selectCodexAccount(payload, order, { model = null,
 // Only unpinned Codex lanes opt into account substitution. Corporate classes
 // already name an account and retain their existing dispatch/cap behavior.
 export function codexWorkerLaneFromSnapshot(payload, { workerClass, policy = 'personal-first', ...options } = {}) {
-  if (policy !== 'personal-first' || !['hammer', 'codex'].includes(workerClass)) return null;
-  const account = selectCodexWorkerAccount(payload, options);
+  if (!isAutomaticCodexAccountPolicy(policy) || !['hammer', 'codex'].includes(workerClass)) return null;
+  const account = selectCodexWorkerAccount(payload, { ...options, policy });
   if (account.hold) return { ...account, workerClass };
+  const preferred = policy === 'corporate-first' ? 'corporate' : 'personal';
+  const selected = account.provider === 'codex' ? 'personal' : 'corporate';
   return { ...account,
     workerClass: account.provider === 'codex' ? workerClass
       : workerClass === 'hammer' ? 'hammer-corp' : 'remediator-codex-corp',
-    reason: account.provider === 'codex' ? 'personal-ready'
+    reason: selected === preferred ? `${selected}-ready`
       : account.reason === 'codex-account-evidence-unknown-fallback-ready'
-        ? 'personal-evidence-unknown-corporate-ready' : 'personal-unavailable-corporate-ready',
+        ? `${preferred}-evidence-unknown-${selected}-ready` : `${preferred}-unavailable-${selected}-ready`,
   };
 }
 

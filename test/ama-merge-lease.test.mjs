@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,6 +47,71 @@ function acquire(rootDir, overrides = {}) {
     holderHost: 'test-host',
     now: '2026-06-20T18:00:00Z',
     ...overrides,
+  });
+}
+
+test('served daemon reservation is removed before another mutation lock can intervene', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'daemon-head',
+    holderPid: process.pid, holderHost: hostname() };
+  const daemon = acquireDaemonMergeLease({ ...request,
+    _afterHolderWrite: ({ leasePath }) => {
+      writeFileSync(`${leasePath}.mutation.lock`, JSON.stringify({
+        holderPid: process.pid, holderHost: hostname(), acquiredAt: new Date().toISOString(),
+      }));
+    },
+  });
+  assert.equal(daemon.acquired, true);
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), [], 'served reservation cannot survive lock contention');
+  rmSync(`${daemon.leasePath}.mutation.lock`);
+  assert.equal(releaseMergeLease({ rootDir, ...daemon.lease }).released, true);
+  assert.equal(acquire(rootDir, { ...request, holderPr: 103, registerWaiter: true }).acquired, true,
+    'closer proceeds immediately after daemon release');
+});
+
+test('failed served-waiter write rolls back the holder and retains the reservation for retry', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const waitersPath = mergeLeaseWaitersFilePath(rootDir, IDENTITY);
+  const leasePath = mergeLeaseFilePath(rootDir, IDENTITY);
+  const rename = fs.renameSync;
+  const failure = new Error('injected waiter persistence failure');
+  const mocked = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === waitersPath && existsSync(leasePath)) throw failure;
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => acquireDaemonMergeLease({ rootDir, ...IDENTITY,
+      holderPr: 102, holderHead: 'daemon-head', holderPid: process.pid, holderHost: hostname(),
+    }), err => err === failure);
+    assert.equal(existsSync(leasePath), false);
+    assert.equal(existsSync(`${leasePath}.mutation.lock`), false);
+    assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY)[0].priority, 'daemon');
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.equal(acquireDaemonMergeLease({ rootDir, ...IDENTITY,
+    holderPr: 102, holderHead: 'daemon-head', holderPid: process.pid, holderHost: hostname(),
+  }).acquired, true);
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+});
+
+for (const holderPresent of [false, true]) {
+  test(`pruned requester reports unknown queue position with holder ${holderPresent ? 'present' : 'absent'}`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    if (holderPresent) acquire(rootDir);
+    upsertMergeLeaseWaiter({ rootDir, ...IDENTITY, pr: 102, head: 'queued',
+      waiterId: 'live', holderPid: 4242, holderHost: 'test-host',
+      arrivedAt: '2026-06-20T18:00:00Z' });
+    const result = acquire(rootDir, { holderPid: 9999, registerWaiter: true,
+      waiterId: 'dead', pidAliveFn: pid => pid !== 9999 });
+    assert.equal(result.acquired, false);
+    assert.equal(result.queuePosition, null);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId), ['live']);
   });
 }
 

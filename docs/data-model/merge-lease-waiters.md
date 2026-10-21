@@ -12,9 +12,12 @@ positive integer `holderPid`, `holderHost`, and `deadlineSeconds`.
 LEASEFAIR-01 adds optional `priority: "daemon"`. Missing priority means an
 ordinary closer. Daemon reservations precede closer requests; each class uses
 arrival order, preserving insertion order for identical timestamps. Refreshing
-a request retains its arrival and insertion order. Queue selection and atomic
-holder creation share the existing per-base mutation lock, so a closer cannot
-read an empty queue then acquire ahead of a newly persisted reservation.
+a request retains its arrival and insertion order. Queue selection, atomic
+holder creation, and served-waiter removal share the existing per-base mutation
+lock, so a closer cannot read an empty queue then acquire ahead of a newly
+persisted reservation. Successful acquisition persists waiter removal before
+releasing that lock; it never depends on reacquiring a cleanup lock. A failed
+waiter-removal write rolls back the new holder and propagates the error.
 
 `acquireDaemonMergeLease` registers `daemon_<pr>_<head>` on every acquisition
 attempt. This identity survives watcher passes and process restarts. A daemon
@@ -26,7 +29,8 @@ matching waiter; abandoned or newly ineligible heads therefore block closer
 acquisitions for at most 120 seconds after their last attempt. No holder is
 preempted, including a live same-host holder past its nominal deadline.
 
-Contention results include `queuePosition` (one-based service order). The daemon
+Contention results include `queuePosition` (one-based service order, or `null`
+when the requester is absent from the pruned queue). The daemon
 propagates it with `waitMessage: "waiting for the merge lease, position N"` into
 watcher logs and the existing bounded-wait/page receipt. The existing page
 deadline does not authorize a merge or turn contention into a safety hold.

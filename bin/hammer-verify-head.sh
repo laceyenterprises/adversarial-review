@@ -509,6 +509,7 @@ ham_base_touches_pr_files() {
     ham_is_full_sha "$pr_ref" || return 0
     comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
     [ "$comparison_base" = "$current_base_sha" ] || return 0
+    return 1
   fi
   ham_is_full_sha "$comparison_base" || return 0
   pr_files=$(git diff --name-only "$current_base_sha...$pr_ref" 2>/dev/null) || return 0

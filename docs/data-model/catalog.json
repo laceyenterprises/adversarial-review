@@ -307,7 +307,9 @@
       "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/ama/dispatch-closer.mjs", "bin/merge-lease.mjs"],
       "owner": "AMA daemon and hammer merge lane",
       "optionalWaiterFields": ["priority"],
-      "daemonReservationSeconds": 120
+      "daemonReservationSeconds": 120,
+      "servedWaiterRemoval": "under-holder-acquisition-lock",
+      "queuePosition": "one-based-or-null-if-absent"
     },
     {
       "id": "merge-lease-attempts",

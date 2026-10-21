@@ -911,13 +911,14 @@ export function acquireMergeLease({
     if (!reclaim.reclaimed) {
       const { waiters } = withWaiterMutationLock({ rootDir, repo, base }, () =>
         pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base, now: acquiredAt, host: holderHost, pidAliveFn }));
+      const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
       return { acquired: false, leasePath, lease: existingLease, existingLease, waiter, reclaim,
-        queuePosition: waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) + 1 : null };
+        queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
     }
   }
 
-  // Serialize queue selection with holder creation. Otherwise a closer could
-  // inspect an empty queue, then barge after a daemon's reservation is durable.
+  // Serialize queue selection, holder creation and served-waiter removal.
+  // A second lock acquisition could strand the served priority reservation.
   const result = withWaiterMutationLock({ rootDir, repo, base }, () => {
     const waiterState = pruneMergeLeaseWaitersUnlocked({
       rootDir,
@@ -933,8 +934,9 @@ export function acquireMergeLease({
         return { acquired: false, leasePath, lease: null, existingLease: null, waiters, prunedWaiters: waiterState.pruned };
       }
       if (waiters[0]?.waiterId !== waiter.waiterId) {
+        const queueIndex = waiters.findIndex((w) => w.waiterId === waiter.waiterId);
         return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters,
-          queuePosition: waiters.findIndex((w) => w.waiterId === waiter.waiterId) + 1, prunedWaiters: waiterState.pruned };
+          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null, prunedWaiters: waiterState.pruned };
       }
     }
 
@@ -966,16 +968,20 @@ export function acquireMergeLease({
       throw err;
     }
 
+    if (waiter?.waiterId) {
+      try {
+        writeJsonFile(mergeLeaseWaitersFilePath(rootDir, { repo, base }),
+          waiterFileDoc(waiters.filter((w) => w.waiterId !== waiter.waiterId), acquiredAt));
+      } catch (err) {
+        // Do not leave an unreported holder if persisting waiter removal fails.
+        // The mutation lock still fences this newly created holder.
+        rmSync(leasePath, { force: true });
+        throw err;
+      }
+    }
     return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned, reclaim };
   });
   if (result.acquired && typeof _afterHolderWrite === 'function') _afterHolderWrite(result);
-  if (result.acquired && waiter?.waiterId) {
-    try {
-      removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
-    } catch (err) {
-      if (!isMutationLockBusyError(err)) throw err;
-    }
-  }
   return result;
 }
 

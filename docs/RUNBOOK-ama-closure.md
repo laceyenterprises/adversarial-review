@@ -3643,6 +3643,8 @@ retains a place ahead of closer acquisitions instead of racing them again.
 Daemon requests are FIFO within their class, including equal timestamp arrivals;
 a refresh preserves the arrival order across watcher process changes. Closers
 cannot barge between queue selection and holder creation, which share one lock.
+The served waiter is removed before that lock releases, so subsequent lock
+contention cannot leave a served daemon reservation ahead of waiting closers.
 The current holder always finishes under its existing fence.
 
 Service is bounded by the current holder's remaining critical section, earlier

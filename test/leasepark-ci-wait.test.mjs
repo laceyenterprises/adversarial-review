@@ -181,6 +181,25 @@ function rebasedFixture(t, moveAfterRebase = false, disjoint = false) {
   return { repo, head, validationBase };
 }
 
+test('validated head containing current base skips unnecessary failing git diffs', t => {
+  const fixture = rebasedFixture(t);
+  const helper = verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Resolve whether'));
+  const result = spawnSync('/bin/bash', ['-c', `
+BASE_BRANCH=main
+POST_REMEDIATION_SHA=${fixture.head}
+ham_is_full_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
+ham_bounded_git_sync() { command git fetch origin main >/dev/null 2>&1; }
+git() {
+  if [ "$1" = diff ]; then echo unexpected-diff >&2; return 128; fi
+  command git "$@"
+}
+${helper}
+ham_base_touches_pr_files validated-head
+`], { cwd: fixture.repo, encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1, result.stderr);
+});
+
 for (const validationBase of ['old', '', 'malformed']) {
   test(`rebased head clears real overlap guard after CI wait with ${validationBase || 'missing'} validation base`, t => {
     const fixture = rebasedFixture(t);

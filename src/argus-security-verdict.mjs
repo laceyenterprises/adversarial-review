@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ASR-06 — the verdict, and what the gate is allowed to conclude from silence.
 //
 // ASR-02 classifies, ASR-03 queues, ASR-04 routes, ASR-05 judges. This module is
@@ -261,7 +262,7 @@ export function resolveArgusSecurityVerdict({
   prNumber,
   headSha,
   nowMs = Date.now(),
-  stallDeadlineMs = ARGUS_REVIEW_STALL_DEADLINE_MS,
+  stallDeadlineMs = loadAwareTimeoutMs(ARGUS_REVIEW_STALL_DEADLINE_MS, { maxMs: Infinity }),
   findJob = defaultFindArgusJob,
 } = {}) {
   const finalize = (partial) => ({

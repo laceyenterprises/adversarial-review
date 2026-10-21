@@ -136,6 +136,8 @@ try {
     '--import',
     path.join(testDir, 'helpers', 'rate-limit-state-isolation.mjs'),
     '--import',
+    path.join(testDir, 'helpers', 'load-aware-timeout-fixture.mjs'),
+    '--import',
     path.join(testDir, 'helpers', 'temp-sandbox-guard.mjs'),
     '--test',
     '--test-concurrency=8',

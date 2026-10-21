@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 item 4 — retire the backlog safely, before the drain starts.
 //
 // 1,519 jobs sat pending when the drain was built, for 387 PRs, the oldest
@@ -82,7 +83,7 @@ export function createGhOpenPullHeadsLister({
     const { stdout } = await execGhWithRetryImpl({
       args: ['pr', 'list', '--repo', repo, '--state', 'open', '--limit', String(limit), '--json', 'number,headRefOid'],
       env,
-      timeoutMs: 120_000,
+      timeoutMs: loadAwareTimeoutMs(120_000),
       log: logger,
     });
     const rows = JSON.parse(String(stdout || '[]'));
@@ -137,7 +138,7 @@ export async function retireArgusBacklog({
   rootDir,
   listOpenPullHeads,
   runningJobIds = [],
-  claimLeaseMs = ARGUS_CLAIM_LEASE_MS,
+  claimLeaseMs = loadAwareTimeoutMs(ARGUS_CLAIM_LEASE_MS, { maxMs: Infinity }),
   nowMs = Date.now(),
   logger = console,
 } = {}) {

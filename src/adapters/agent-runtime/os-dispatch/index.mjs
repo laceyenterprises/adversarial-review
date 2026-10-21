@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 // The `os-dispatch` AgentRuntime (v2 app architecture §6.1) — the PRIMARY
 // runtime. Reviews and remediations route through the Agent OS app contract
 // (`/v1/dispatch`) instead of the repo's private per-model spawn harness, so
@@ -615,7 +616,7 @@ function withDefaultConnectOptions(
     }).app_id;
   }
   if (options.request_timeout_ms == null && options.requestTimeoutMs == null) {
-    options.request_timeout_ms = DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
+    options.request_timeout_ms = loadAwareTimeoutMs(DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS);
   }
   return options;
 }

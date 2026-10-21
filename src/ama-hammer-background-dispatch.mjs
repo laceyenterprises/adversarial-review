@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
@@ -281,7 +282,7 @@ export function createAmaHammerBackgroundQueue({
       const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
       const dispatchTimeoutMs = Number(timeoutMs);
       entry.boundMs = Number.isFinite(dispatchTimeoutMs) && dispatchTimeoutMs > 0
-        ? dispatchTimeoutMs : DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS;
+        ? dispatchTimeoutMs : loadAwareTimeoutMs(DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS, { maxMs: Infinity });
       // Persist before invoking any run, including a synchronous launch. Failure
       // to save refuses submission rather than launching untracked work.
       entry.pendingDispatch = persistPendingDispatch(pendingDispatch, entry.queuedAtMs);

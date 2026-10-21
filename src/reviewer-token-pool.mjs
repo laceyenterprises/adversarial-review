@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Transport/binding only. Account policy and the global semaphore stay with
 // agent_os_core and the broker; ITP-10 validates the owner's wire contract.
 import { spawn } from 'node:child_process';
@@ -45,7 +46,7 @@ export function reviewerPoolOwner(value, { env = process.env } = {}) {
       fileURLToPath(new URL('./adapters/reviewer-runtime/token-pool-owner.py', import.meta.url))],
     { env, stdio: ['pipe', 'pipe', 'ignore'] });
     let stdout = '';
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 15_000);
+    const timeout = setTimeout(() => child.kill('SIGKILL'), loadAwareTimeoutMs(15_000));
     child.stdout.on('data', data => {
       stdout += data;
       if (stdout.length > 1024 * 1024) child.kill('SIGKILL');

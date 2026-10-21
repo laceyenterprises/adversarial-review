@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Read durable worker activity without importing the remediation queue or
 // lifecycle gate. Both the watcher and the follow-up daemon use these probes.
 import { execFileSync } from 'node:child_process';
@@ -78,7 +79,7 @@ function readWorkerCpuPercent(job, { execFileSyncImpl = execFileSync } = {}) {
   const spawnedMs = Date.parse(worker.spawnedAt || '');
   if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(pgid) || pgid <= 0 || !Number.isFinite(spawnedMs)) return 0;
   try {
-    const value = execFileSyncImpl('ps', ['-p', String(pid), '-o', 'pgid=', '-o', 'lstart=', '-o', '%cpu='], { encoding: 'utf8', timeout: 2000 });
+    const value = execFileSyncImpl('ps', ['-p', String(pid), '-o', 'pgid=', '-o', 'lstart=', '-o', '%cpu='], { encoding: 'utf8', timeout: loadAwareTimeoutMs(2000) });
     const fields = String(value).trim().split(/\s+/);
     const observedPgid = Number(fields.shift());
     const cpu = Number.parseFloat(fields.pop());

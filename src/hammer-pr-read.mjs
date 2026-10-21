@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REST equivalent of the hammer's PR/head/check reads. Keep the shared check
 // classifier in charge; retain run timestamps and pending latest-run status.
 import { execFile } from 'node:child_process';
@@ -9,7 +10,7 @@ async function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = 
     throw new TypeError('Invalid GitHub PR reference');
   }
   const get = read || (async path => {
-    const { stdout } = await meteredExecFile(promisify(execFile), 'gh', ['api', path], { timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 10 * 1024 * 1024, env: process.env });
+    const { stdout } = await meteredExecFile(promisify(execFile), 'gh', ['api', path], { timeout: loadAwareTimeoutMs(30_000), killSignal: 'SIGKILL', maxBuffer: 10 * 1024 * 1024, env: process.env });
     return JSON.parse(stdout);
   });
   const pr = await get(`repos/${repo}/pulls/${prNumber}`);

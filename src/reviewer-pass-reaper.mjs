@@ -1,3 +1,4 @@
+import { loadAwareTimeoutSeconds } from './load-aware-timeout.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { recordCascadeFailure } from './reviewer-cascade.mjs';
@@ -217,9 +218,9 @@ function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
   );
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1) {
-    return DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS;
+    return loadAwareTimeoutSeconds(DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, { maxSeconds: Infinity });
   }
-  return parsed;
+  return loadAwareTimeoutSeconds(parsed, { maxSeconds: Infinity });
 }
 
 const ACTIVE_REVIEW_CLAIM_PREDICATE = `(

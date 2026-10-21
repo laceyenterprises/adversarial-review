@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // PR-side surface for the `retrigger-review` label.
 //
@@ -171,7 +172,7 @@ async function findExistingAckComment({
   prNumber,
   marker,
   execFileImpl,
-  timeoutMs = ACK_COMMENT_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(ACK_COMMENT_LOOKUP_TIMEOUT_MS),
 }) {
   if (!marker) return { found: false };
   try {
@@ -261,7 +262,7 @@ async function postRetriggerReviewAckComment({
     const adapter = createGitHubPRCommentsAdapter({
       rootDir,
       execFileImpl,
-      commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+      commentTimeoutMs: loadAwareTimeoutMs(ACK_COMMENT_TIMEOUT_MS),
       resolveGhToken: () => ({
         tokenEnvName: 'GITHUB_TOKEN',
         fallbackTokenEnvNames: ['GH_TOKEN'],

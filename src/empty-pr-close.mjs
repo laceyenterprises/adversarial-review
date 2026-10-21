@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { execFile } from 'node:child_process';
@@ -13,8 +14,8 @@ export async function closeEmptyPullRequest({ repo, prNumber, headSha,
   execFileImpl = execFileAsync, logger = console, env = process.env, withApiTelemetry = (_category, _context, fn) => fn() }) {
   if (!/^[a-f0-9]{40}$/.test(headSha || '')) return { closed: false };
   const requestedTimeout = Number(env.ADVERSARIAL_EMPTY_PR_CLOSE_TIMEOUT_MS);
-  const timeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-    ? requestedTimeout : EMPTY_PR_CLOSE_TIMEOUT_MS;
+  const timeout = loadAwareTimeoutMs(Number.isFinite(requestedTimeout) && requestedTimeout > 0
+    ? requestedTimeout : EMPTY_PR_CLOSE_TIMEOUT_MS);
   const call = args => withApiTelemetry(args[0] === 'api' ? (args[1].includes('/compare/') ? 'diff_fetch' : 'pr_view') : 'other', { repo, prNumber }, () => meteredExecFile(execFileImpl, 'gh', args, { encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024 }));
   const api = async path => JSON.parse((await call(['api', path])).stdout);
   let closed = false;

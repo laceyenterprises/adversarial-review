@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { codexReviewerAccountForGrounding, readCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { reviewerCredentialKey, selectClaudeAccountLaneFromSnapshot, readCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
@@ -853,7 +854,7 @@ export async function processReviewSubject(entry, ctx) {
           {
             const { stdout } = await withApiTelemetry('hold-release-routing', { repo: repoPath, prNumber }, () => meteredExecFile(execFileAsync, 'gh', ['pr', 'view', String(prNumber), '--repo', repoPath,
               '--json', 'state,headRefOid,labels,mergeable,mergeStateStatus,statusCheckRollup'],
-            { timeout: 15000, maxBuffer: 5 * 1024 * 1024 }));
+            { timeout: loadAwareTimeoutMs(15000), maxBuffer: 5 * 1024 * 1024 }));
             const live = JSON.parse(stdout);
             if (['CLOSED', 'MERGED'].includes(String(live.state).toUpperCase())) {
               markHoldReleaseRouted({ db, release, route: { stage: 'pr-terminal', action: 'none' } });

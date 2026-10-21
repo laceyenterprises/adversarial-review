@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Merge Authority v2 ledger store (ARC-15; docs/SPEC-merge-authority-v2.md §2).
 // The append-only persistence for the finalization event ledger, in the app
 // store (`data/reviews.db`, alongside review-state). This is the ONE writer's
@@ -52,7 +53,7 @@ export function ensureFinalizationLedgerSchema(db) {
   `);
 }
 
-function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
+function openDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   const db = new Database(join(rootDir, 'data', 'reviews.db'));
   db.pragma(`busy_timeout = ${Math.max(0, Number(busyTimeoutMs) || 0)}`);

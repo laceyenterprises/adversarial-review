@@ -91,8 +91,7 @@ test('FINALCLOSE-01 terminal launches exhaust the cap and page once with the las
 
 const reviewed = 'b'.repeat(40);
 const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- **Cleanup**\n  - **Problem:** redundant branch\n## Verdict\nComment only';
-function finalRound(t) {
-  const rootDir = mkdtempSync(join(tmpdir(), 'finalclose-round-'));
+function finalRound(t, rootDir = mkdtempSync(join(tmpdir(), 'finalclose-round-'))) {
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
@@ -328,14 +327,63 @@ for (const [reason, age, expectedPages] of [
       resolveAmaHammerDispatchModeImpl: () => 'inline',
       fetchPullRequestMergeabilityImpl: () => new Promise(() => {}),
       runDaemonCleanMergeAttemptImpl: async () => assert.fail('wait never grants merge authority'),
-      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt }),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt,
+        closerLaunchAlive: reason === 'existing-dispatch-running' }),
       observeClosureWaitImpl: observe,
       logger: { log() {}, warn() {} },
     });
     assert.equal(result.reason, reason);
   }
   assert.equal(pages.length, expectedPages);
+  if (reason === 'existing-dispatch-running' && expectedPages) {
+    assert.match(pages[0], /still running after 35 minutes/);
+    assert.doesNotMatch(pages[0], /exhausted/);
+  }
 });
+
+// Exercise the review's absent/terminal lease trigger through the real closer,
+// then carry its retained result through orchestration to the notice observer.
+for (const status of ['running', 'starting']) {
+  for (const leaseStatus of ['absent', 'terminal']) {
+    test(`LOADAR-01 retained ${status} closer with ${leaseStatus} lease keeps live notice`, async t => {
+      const f = fixture(t, { ledgerStatus: 'running', reportedStatus: status });
+      finalRound(t, f.rootDir);
+      if (leaseStatus === 'absent') deleteAmaCloserLease(f.rootDir, { repo, prNumber, headSha });
+      else updateAmaCloserLease({ rootDir: f.rootDir, repo, prNumber, headSha, status: leaseStatus, terminalOutcome: 'failed-without-merge' });
+      const clock = Date.parse(started) + 40 * minute;
+      const pages = [];
+      let calls = 0;
+      const args = { rootDir: f.rootDir, repoPath: repo, prNumber, currentRevisionRef: headSha,
+        labelNames: [], env: {}, now: () => clock,
+        reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+          reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+        candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+          mergeable: 'MERGEABLE', statusCheckRollup: f.args.prMetadata.statusCheckRollup },
+        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+        resolveAmaHammerDispatchModeImpl: () => 'inline',
+        fetchLatestHeadReviewBodiesImpl: async () => [body],
+        proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+        probeClosureOwnershipImpl: async () => assert.fail('absent/terminal handoff lease cannot enter ownership wait'),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible',
+          reasons: ['non-blocking-findings-present'] }),
+        maybeDispatchAmaCloserImpl: async () => { calls++; return maybeDispatchAmaCloser(f.args); },
+        observeClosureWaitImpl: options => observeClosureWait({ ...options, now: clock,
+          pageImpl: async text => pages.push(text) }),
+        logger: { log() {}, warn() {} },
+      };
+      for (let poll = 0; poll < 2; poll++) {
+        const result = await maybeDispatchAmaClosureFor(args);
+        assert.equal(result.reason, `existing-dispatch-${status}`);
+        assert.equal(result.closerLaunchAlive, true);
+      }
+      assert.equal(calls, 2);
+      assert.equal(f.launches.length, 0);
+      assert.equal(pages.length, 1, 'live notice still consumes the once-only receipt');
+      assert.match(pages[0], /closure still running after 40 minutes/);
+      assert.doesNotMatch(pages[0], /exhausted/);
+    });
+  }
+}
 
 for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 'succeeded']) {
   test(`HAMCLOSEWAIT-01 retained ${status} dispatch only reports active-running progress`, async t => {
@@ -353,6 +401,7 @@ for (const status of ['running', 'starting', 'stalled', 'blocked', 'unknown', 's
     const result = await maybeDispatchAmaCloser(f.args);
     assert.equal(result.reason, status === 'unknown' ? 'dispatch-status-unknown' : `existing-dispatch-${status}`);
     assert.equal(result.namedReason, result.reason, 'retained returns share the named no-dispatch reason');
+    assert.equal(result.closerLaunchAlive === true, status === 'running' || status === 'starting');
     if (status === 'running' || status === 'starting') assert.equal(result.closerProgressAt, started);
     else assert.equal(Object.hasOwn(result, 'closerProgressAt'), false);
     assert.equal(f.launches.length, 0, 'retained ownership never launches a duplicate');

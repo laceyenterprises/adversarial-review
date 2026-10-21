@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
 import { userInfo } from 'node:os';
@@ -346,7 +347,7 @@ async function listHammerWorkerDirs(hqRoot, {
   };
 }
 
-async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout = 30_000 }) {
+async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout = loadAwareTimeoutMs(30_000) }) {
   return execFileImpl('git', ['-C', repoPath, ...args], {
     env: process.env,
     maxBuffer: 5 * 1024 * 1024,
@@ -355,7 +356,7 @@ async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout =
   });
 }
 
-async function remoteRepoForPath(repoPath, execFileImpl, timeout = 10_000) {
+async function remoteRepoForPath(repoPath, execFileImpl, timeout = loadAwareTimeoutMs(10_000)) {
   try {
     const { stdout } = await execGit({
       repoPath,
@@ -375,7 +376,7 @@ async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = con
   for (let index = 0; index < repoPaths.length; index += 1) {
     const repoPath = repoPaths[index];
     if (Date.now() >= deadlineMs) return { byPath, complete: false, failedRepos: failedRepos + repoPaths.length - index };
-    const timeout = Math.max(1, Math.min(30_000, deadlineMs - Date.now()));
+    const timeout = Math.max(1, Math.min(loadAwareTimeoutMs(30_000), deadlineMs - Date.now()));
     try {
       await execGit({ repoPath, args: ['rev-parse', '--git-dir'], execFileImpl, timeout });
     } catch (err) {
@@ -390,7 +391,7 @@ async function registeredWorktreesByPath({ repoPaths, execFileImpl, logger = con
     try {
       const [{ stdout }, githubRepo] = await Promise.all([
         execGit({ repoPath, args: ['worktree', 'list', '--porcelain'], execFileImpl, timeout }),
-        remoteRepoForPath(repoPath, execFileImpl, Math.min(10_000, timeout)),
+        remoteRepoForPath(repoPath, execFileImpl, Math.min(loadAwareTimeoutMs(10_000), timeout)),
       ]);
       for (const record of parseGitWorktreePorcelain(stdout)) {
         const workerId = basename(dirname(record.path));
@@ -429,7 +430,7 @@ async function fetchPrState({ repo, prNumber, execGhWithRetryImpl = execGhWithRe
     args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,closedAt'],
     env,
     retries: 1,
-    timeoutMs: 20_000,
+    timeoutMs: loadAwareTimeoutMs(20_000),
   });
   return JSON.parse(stdout || '{}');
 }
@@ -644,7 +645,7 @@ async function probeHammerWorkerActivity({
       ({ stdout } = await execFileImpl(
         hqPath,
         ['dispatch', 'status', launchRequestId, '--json'],
-        { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
+        { env: { ...env }, maxBuffer: 1024 * 1024, timeout: loadAwareTimeoutMs(5_000) },
       ));
     } catch (err) {
       // Could not run/complete the probe (timeout kill, EAGAIN fork failure, EIO,
@@ -695,10 +696,10 @@ async function probeWorkerDirectoryUse({
   execFileImpl = execFileAsync,
   env = process.env,
   pid = null,
-  timeoutMs = normalizePositiveInteger(
+  timeoutMs = loadAwareTimeoutMs(normalizePositiveInteger(
     env.AMA_CLOSER_WORKTREE_PROCESS_PROBE_TIMEOUT_MS,
     DEFAULT_PROCESS_PROBE_TIMEOUT_MS,
-  ),
+  )),
   statSyncImpl = statSync,
   getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
   currentUserImpl = () => userInfo().username,
@@ -785,10 +786,10 @@ async function reapCloserHammerWorktrees({
     process.env.AMA_CLOSER_WORKTREE_UNKNOWN_PROBE_LIMIT,
     DEFAULT_UNKNOWN_PROBE_LIMIT,
   ),
-  processProbeTimeoutMs = normalizePositiveInteger(
+  processProbeTimeoutMs = loadAwareTimeoutMs(normalizePositiveInteger(
     process.env.AMA_CLOSER_WORKTREE_PROCESS_PROBE_TIMEOUT_MS,
     DEFAULT_PROCESS_PROBE_TIMEOUT_MS,
-  ),
+  )),
   probeFailureTtlMs = normalizePositiveInteger(
     process.env.AMA_CLOSER_WORKTREE_PROBE_FAILURE_TTL_MS,
     DEFAULT_PROBE_FAILURE_TTL_MS,

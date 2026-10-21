@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Diagnostics only. This state never authorizes a merge or releases a lease.
 import fsExt from 'fs-ext';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,7 +19,7 @@ async function locked(rootDir, action, logger = console) {
   const lock = await open(join(dir, 'state.lock'), 'a');
   let acquired = false;
   try {
-    const deadline = Date.now() + LOCK_WAIT_MS;
+    const deadline = Date.now() + loadAwareTimeoutMs(LOCK_WAIT_MS);
     for (;;) {
       try { await flock(lock.fd, 'exnb'); acquired = true; break; }
       catch (error) {

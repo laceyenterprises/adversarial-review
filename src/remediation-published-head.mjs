@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLINK-01: recovery requires worker/service evidence, never just a moved head.
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
@@ -48,7 +49,7 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
   if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return null;
   try {
     const output = String(execFileSyncImpl('git', ['-C', workspaceDir, 'show', '--no-patch', '--format=%H%n%B', 'HEAD'],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }));
+      { encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), stdio: ['ignore', 'pipe', 'pipe'] }));
     const [tip, ...message] = output.split(/\r?\n/u);
     if (tip !== headSha || !hasWorkerJobTrailer(message.join('\n'), job?.jobId)) return null;
   } catch { return null; }

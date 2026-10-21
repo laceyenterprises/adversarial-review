@@ -1,4 +1,5 @@
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
@@ -205,7 +206,7 @@ function resolveHqDispatchTimeoutMs(env = process.env, options = {}) {
     contextKey: 'follow_up.hq_dispatch_subprocess_timeout_ms',
   }).get('follow_up.hq_dispatch_subprocess_timeout_ms', HQ_DISPATCH_TIMEOUT_MS);
   const parsed = Number(cfgValue);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS);
 }
 
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
@@ -811,7 +812,7 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
   try {
     result = observeSynchronousChild('hq', () => spawnSync(hqPath, args, {
       env: { ...env },
-      timeout: 5_000,
+      timeout: loadAwareTimeoutMs(5_000),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }));
@@ -863,7 +864,7 @@ async function probeDispatchStatusViaHq({
     const { stdout } = await execFileImpl(hqPath, args, {
       env: { ...env },
       maxBuffer: 1024 * 1024,
-      timeout: 5_000,
+      timeout: loadAwareTimeoutMs(5_000),
     });
     const parsed = parseHqDispatchStatusOutput(String(stdout || '').trim(), args, JSON.parse, logger);
     const status = typeof parsed?.status === 'string'

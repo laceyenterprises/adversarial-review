@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -240,7 +241,7 @@ export async function probeReviewerProcessSession({
   try {
     const { stdout } = await execFileImpl('ps', ['-ww', '-p', String(numericPgid), '-o', 'command='], {
       encoding: 'utf8',
-      timeout: 2_000,
+      timeout: loadAwareTimeoutMs(2_000),
     });
     return { alive: true, matched: stdout.includes(String(sessionUuid)) };
   } catch {

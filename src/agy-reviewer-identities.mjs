@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 // ITP-11: agy logins are execution holders for gemini-reviewer. CCX-08
 // identity-named exports/env fields remain compatibility transport only.
@@ -273,7 +274,7 @@ function killGroup(child, signal) {
 // deadline settles with what was captured and drops the pipes.
 function runBoundedProcess(command, args, {
   stdin = null,
-  timeoutMs = HELPER_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(HELPER_TIMEOUT_MS),
   env = PINNED_COMMAND_ENV,
   cwd,
   spawnImpl = spawn,
@@ -341,7 +342,7 @@ function runBoundedProcess(command, args, {
   });
 }
 
-async function runPinnedCommand({ user, command, args = [], stdin = null, timeoutMs = HELPER_TIMEOUT_MS, libexecDir, sudo, spawnImpl }) {
+async function runPinnedCommand({ user, command, args = [], stdin = null, timeoutMs = loadAwareTimeoutMs(HELPER_TIMEOUT_MS), libexecDir, sudo, spawnImpl }) {
   const pinned = buildPinnedCommand({ user, command, args, libexecDir, sudo });
   return runBoundedProcess(pinned.command, pinned.args, { stdin, timeoutMs, spawnImpl });
 }
@@ -361,7 +362,7 @@ async function listUserProcesses({ user, runImpl = runBoundedProcess, ps = AGY_R
   if (!AGY_REVIEWER_USER_RE.test(String(user || ''))) {
     return { ok: false, processes: [], error: `not a local user name: ${JSON.stringify(user)}` };
   }
-  const result = await runImpl(ps, ['-U', user, '-o', 'pid=,pgid=,comm='], { timeoutMs: HELPER_TIMEOUT_MS });
+  const result = await runImpl(ps, ['-U', user, '-o', 'pid=,pgid=,comm='], { timeoutMs: loadAwareTimeoutMs(HELPER_TIMEOUT_MS) });
   const stderr = String(result.stderr || '').trim();
   if (result.timedOut || result.error || !(result.code === 0 || (result.code === 1 && !stderr))) {
     return { ok: false, processes: [], error: describeFailure('ps', result) };
@@ -449,7 +450,7 @@ async function extractAgyReviewWorkspace({
   runPinnedImpl = runPinnedCommand,
   spawnImpl = spawn,
   tar = AGY_REVIEWER_TAR,
-  timeoutMs = EXTRACT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(EXTRACT_TIMEOUT_MS),
   tarGraceMs = HELPER_TIMEOUT_MS,
 } = {}) {
   assertReviewId(reviewId);
@@ -649,7 +650,7 @@ function createAgyReviewerIdentityPool({
   deliverAlertImpl = deliverAlert,
   alertAfterMs = IDENTITY_ALERT_AFTER_MS,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  leaseWaitMs = LEASE_WAIT_MS,
+  leaseWaitMs = loadAwareTimeoutMs(LEASE_WAIT_MS, { maxMs: Infinity }),
   leasePollMs = LEASE_POLL_MS,
   readinessMaxAgeMs = READINESS_MAX_AGE_MS,
 } = {}) {
@@ -817,7 +818,7 @@ function createAgyReviewerIdentityPool({
           ok = Boolean(result?.ok);
           if (!ok) reason = `agy auth probe failed (${result?.reason || 'unknown'})`;
         } else {
-          const result = await runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['probe'], timeoutMs: PROBE_TIMEOUT_MS });
+          const result = await runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['probe'], timeoutMs: loadAwareTimeoutMs(PROBE_TIMEOUT_MS) });
           const fields = parseHelperKeyValues(result.stdout);
           ok = result.code === 0 && fields['probe.ok'] === 'yes';
           if (!ok) {

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // Fast-merge GitHub I/O layer.
 //
@@ -154,7 +155,7 @@ async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
     `repos/${repo}/commits/${headSha}`,
   ], {
     maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
   }));
   return normalizeVerifiedHamCommit(parseGhJson(stdout));
 }
@@ -168,7 +169,7 @@ async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
     '--slurp',
   ], {
     maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    timeout: loadAwareTimeoutMs(FAST_MERGE_GH_TIMEOUT_MS),
   }));
   return flattenGhPaginatedJson(parseGhJson(stdout, []));
 }

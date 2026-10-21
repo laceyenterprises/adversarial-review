@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -194,7 +195,7 @@ async function reapFollowUpWorkspaces({
   for (const [path, decision] of decisions) {
     if (decision.reap) {
       try {
-        const use = await probe({ workerDir: path, timeoutMs: 2000 });
+        const use = await probe({ workerDir: path, timeoutMs: loadAwareTimeoutMs(2000) });
         if (use.state !== 'inactive') {
           decision.reap = false;
           decision.veto = use.state === 'active';

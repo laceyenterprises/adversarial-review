@@ -136,16 +136,18 @@ test('raw string transport rejections retry and recover', async () => {
 
 test('backoff scales with corroborated host load and metadata reads recover', async t => {
   t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
+  t.mock.method(childProcess, 'execFileSync', () => `${os.cpus().length * 100}\n`);
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const delays = [];
   let calls = 0;
+  // Reader construction sizes its context budget and caches a CPU sample.
+  // Install both host mocks before that first load-aware sizing call.
   const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); },
     execFileImpl: async () => {
       if (++calls < 3) throw transportError('egress-proxy: upstream connect failed');
       return { stdout: '{"status":"ahead"}' };
     } });
-  t.mock.method(childProcess, 'execFileSync', () => `${os.cpus().length * 100}\n`);
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   assert.deepEqual(await get.metadata(`repos/fixture/repo/compare/${base}...${head}`), { status: 'ahead' });
   assert.deepEqual(delays, [3000, 6000]);
 });

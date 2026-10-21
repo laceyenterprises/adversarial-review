@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -105,7 +106,7 @@ async function git(repoDir, args, { execFileImpl = execFileDefault, allowFailure
     try {
       const result = await execFileImpl('git', ['-C', repoDir, ...args], {
         maxBuffer: 20 * 1024 * 1024,
-        timeout: 30_000,
+        timeout: loadAwareTimeoutMs(30_000),
       });
       return String(result.stdout || '').trimEnd();
     } catch (err) {

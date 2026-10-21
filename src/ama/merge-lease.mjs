@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 /**
  * AMG-01 — durable merge lease keyed by `(repo, base)`.
@@ -154,7 +155,7 @@ function noRevalidation(reason, { currentBase, mainAdvancedBy = 0, overlappingFi
   };
 }
 
-async function git(execFileImpl, repoPath, args, { timeoutMs = DEFAULT_GIT_TIMEOUT_MS } = {}) {
+async function git(execFileImpl, repoPath, args, { timeoutMs = loadAwareTimeoutMs(DEFAULT_GIT_TIMEOUT_MS) } = {}) {
   return execFileImpl('git', args, {
     cwd: repoPath,
     encoding: 'utf8',
@@ -236,7 +237,7 @@ function mutationLockIsStale(lock, { nowIso, host, pidAliveFn }) {
   if (!Number.isFinite(acquiredMs) || !Number.isFinite(nowMs)) {
     return true;
   }
-  return nowMs - acquiredMs >= MUTATION_LOCK_STALE_MS;
+  return nowMs - acquiredMs >= loadAwareTimeoutMs(MUTATION_LOCK_STALE_MS);
 }
 
 function breakStaleMutationLock(lockPath, { nowIso = isoNow(), host, pidAliveFn = pidIsLive } = {}) {
@@ -456,7 +457,7 @@ export async function assessMergeLeaseNeedsRevalidation({
   changedFilesFrom = 'HEAD',
   execFileImpl = execFileAsync,
   fetchAttempts = DEFAULT_FETCH_ATTEMPTS,
-  timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(DEFAULT_GIT_TIMEOUT_MS),
 } = {}) {
   const baseBranch = normalizeBaseBranch(base);
   const validationSha = normalizeFullSha(validationBase);
@@ -763,7 +764,7 @@ export function upsertMergeLeaseWaiter({
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
-      deadlineSeconds: parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS),
+      deadlineSeconds: loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
     };
     const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
     waiters.push(nextWaiter);
@@ -917,7 +918,7 @@ export function acquireMergeLease({
     holderHost: holderHost || hostname(),
     ...(holderProcessGroup != null ? { holderProcessGroup: Number(holderProcessGroup) } : {}),
     acquiredAt,
-    deadlineSeconds: parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS),
+    deadlineSeconds: loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
     updatedAt: acquiredAt,
   };
 
@@ -1154,7 +1155,7 @@ function execFileToPromise(execFileImpl, file, args, options = {}) {
   });
 }
 
-async function ghPrState({ repo, holderPr, execFileImpl, timeoutMs = DEFAULT_GH_TIMEOUT_MS }) {
+async function ghPrState({ repo, holderPr, execFileImpl, timeoutMs = loadAwareTimeoutMs(DEFAULT_GH_TIMEOUT_MS) }) {
   const runner = execFileImpl || execFileAsync;
   const options = {
     encoding: 'utf8',

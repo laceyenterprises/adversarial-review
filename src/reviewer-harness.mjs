@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Reviewer model-execution harness.
 //
@@ -214,7 +215,7 @@ const AGY_CLI = resolveAgyCliPath();
 
 function resolveClaudeAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.CLAUDE_AUTH_PROBE_TIMEOUT_MS || '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000);
 }
 
 function findOnPath(binaryName, pathValue = process.env.PATH || '') {
@@ -1786,7 +1787,7 @@ async function checkoutGeminiCredentialFromBrokerOnce({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
-  timeoutMs = GEMINI_CQP_CHECKOUT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GEMINI_CQP_CHECKOUT_TIMEOUT_MS),
 } = {}) {
   const { brokerUrl } = resolveCqpBrokerConfig(env);
   const secret = readCqpBrokerSecret({ env, readFileImpl });
@@ -1942,7 +1943,7 @@ async function releaseGeminiCredentialCheckout({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
-  timeoutMs = GEMINI_CQP_CHECKOUT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GEMINI_CQP_CHECKOUT_TIMEOUT_MS),
   log = console,
 } = {}) {
   if (!checkout?.checkoutId || typeof fetchImpl !== 'function') return;
@@ -2027,7 +2028,7 @@ async function reportGeminiCredentialSpend({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
-  timeoutMs = GEMINI_CQP_CHECKOUT_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(GEMINI_CQP_CHECKOUT_TIMEOUT_MS),
   log = console,
 } = {}) {
   if (!checkout?.credentialId || typeof fetchImpl !== 'function') return;
@@ -2265,7 +2266,7 @@ async function cleanupGeminiAntigravityResources({
 
 async function acquireGeminiFallbackLock({
   env = process.env,
-  waitMs = GEMINI_CQP_FALLBACK_LOCK_WAIT_MS,
+  waitMs = loadAwareTimeoutMs(GEMINI_CQP_FALLBACK_LOCK_WAIT_MS, { maxMs: Infinity }),
   sleepImpl = sleep,
   writeFileSyncImpl = writeFileSync,
   readFileSyncImpl = readFileSync,

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // OSS-readiness remediation subsystem.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19). This is a self-contained
@@ -203,7 +204,7 @@ async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl
     const result = await execFileImpl(scriptPath, [], {
       cwd: workspaceDir,
       maxBuffer: 20 * 1024 * 1024,
-      timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
+      timeout: loadAwareTimeoutMs(OSS_READINESS_SCRIPT_TIMEOUT_MS),
     });
     return {
       ok: true,
@@ -244,7 +245,7 @@ async function applyOssReadinessRemediation({
       applyResult = await execFileImpl(scriptPath, ['--apply'], {
         cwd: workspaceDir,
         maxBuffer: 20 * 1024 * 1024,
-        timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(OSS_READINESS_SCRIPT_TIMEOUT_MS),
       });
     } catch (err) {
       const failed = {

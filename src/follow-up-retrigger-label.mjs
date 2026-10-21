@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // PR-side operator surface for the `retrigger-remediation` label.
 //
@@ -225,7 +226,7 @@ async function findExistingAckComment({
   prNumber,
   marker,
   execFileImpl,
-  timeoutMs = ACK_COMMENT_LOOKUP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(ACK_COMMENT_LOOKUP_TIMEOUT_MS),
 }) {
   if (!marker) return { found: false };
   try {
@@ -329,7 +330,7 @@ async function deliverRetriggerOperatorNotice({
   const adapter = createGitHubPRCommentsAdapter({
     rootDir,
     execFileImpl,
-    commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+    commentTimeoutMs: loadAwareTimeoutMs(ACK_COMMENT_TIMEOUT_MS),
     resolveGhToken: () => ({
       tokenEnvName: 'GITHUB_TOKEN',
       fallbackTokenEnvNames: ['GH_TOKEN'],
@@ -632,7 +633,7 @@ const ROUND_CAP_CODES = new Set(['max-rounds-reached', 'round-budget-exhausted']
 
 export function resolveRetriggerOutcomeTimeoutMs(env = process.env) {
   const configured = Number(env?.[RETRIGGER_OUTCOME_TIMEOUT_ENV]);
-  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS);
 }
 
 function findFollowUpJobByFile(rootDir, jobPath) {

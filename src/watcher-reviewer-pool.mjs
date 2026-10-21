@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import {
   checkReviewerMemoryAdmission,
   peakReviewerMemoryMbFor,
@@ -758,7 +759,7 @@ async function fetchGeminiCredentialConcurrency({
   brokerUrl,
   secret = '',
   fetchImpl = globalThis.fetch,
-  timeoutMs = 4000,
+  timeoutMs = loadAwareTimeoutMs(4000),
 } = {}) {
   if (!brokerUrl || typeof fetchImpl !== 'function') return null;
   const url = `${String(brokerUrl).replace(/\/+$/, '')}/quota?provider=gemini`;

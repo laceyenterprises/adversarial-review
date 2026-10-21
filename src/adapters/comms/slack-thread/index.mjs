@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 /**
  * Slack-thread implementation of the comms-channel adapter.
  *
@@ -112,7 +113,7 @@ function sleepMs(ms) {
 }
 
 async function acquireLock(lockPath) {
-  const startedAt = Date.now();
+  const deadline = Date.now() + loadAwareTimeoutMs(LOCK_TIMEOUT_MS);
   while (true) {
     try {
       writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx' });
@@ -124,7 +125,7 @@ async function acquireLock(lockPath) {
       if (breakStaleLock(lockPath)) {
         continue;
       }
-      if ((Date.now() - startedAt) >= LOCK_TIMEOUT_MS) {
+      if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for slack-thread lock: ${lockPath}`);
       }
       await sleepMs(LOCK_RETRY_MS);
@@ -271,7 +272,7 @@ function createSlackWebApiClient({
 
 function normalizeSlackPostTimeoutMs(value) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SLACK_POST_TIMEOUT_MS;
+  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SLACK_POST_TIMEOUT_MS);
 }
 
 function renderReviewMessage(verdict) {

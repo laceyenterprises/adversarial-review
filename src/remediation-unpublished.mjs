@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Publication debt is distinct from unresolved findings or an operator decision.
 import { extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
 
@@ -10,7 +11,7 @@ export async function findCommittedUnpublishedWork({ reply, job, workspaceDir, e
   let commitSha = reported || null;
   try {
     const result = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--verify', 'HEAD^{commit}'],
-      { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 });
+      { encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), maxBuffer: 1024 });
     const head = String(result.stdout || '').trim();
     // An inspected workspace takes precedence over hashes in freeform commentary.
     if (/^[a-f0-9]{40}$/iu.test(head)) commitSha = head === job.revisionRef ? null : head;

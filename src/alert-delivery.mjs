@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { HAMMER_OWNER_PAGE_EVENTS, hammerOwnerRouteForPageEvent } from './ama/review-cycle-cap-route.mjs';
 import {
   existsSync,
@@ -534,7 +535,7 @@ function httpRequestText(urlString, {
   method = 'GET',
   headers = {},
   body,
-  timeoutMs = HTTP_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(HTTP_TIMEOUT_MS),
 } = {}) {
   const url = new URL(urlString);
   const payload = body != null ? JSON.stringify(body) : null;
@@ -796,7 +797,7 @@ function isDueForRetry(doc, nowMs) {
 
 function recoverStaleInflightAlerts(rootDir, {
   now = new Date(),
-  staleInflightAgeMs = DEFAULT_STALE_INFLIGHT_AGE_MS,
+  staleInflightAgeMs = loadAwareTimeoutMs(DEFAULT_STALE_INFLIGHT_AGE_MS),
 } = {}) {
   const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const results = [];
@@ -978,7 +979,7 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
         stdout,
         stderr: `${stderr}\ncanonical alert-delivery timed out after ${CANONICAL_ALERT_SCRIPT_TIMEOUT_MS}ms`.trim(),
       });
-    }, CANONICAL_ALERT_SCRIPT_TIMEOUT_MS);
+    }, loadAwareTimeoutMs(CANONICAL_ALERT_SCRIPT_TIMEOUT_MS));
     child.stdout.on('data', (chunk) => {
       stdout = appendBoundedOutput(stdout, chunk);
     });

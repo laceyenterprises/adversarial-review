@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Merge Authority v2 executor lease store (ARC-17; docs/SPEC-merge-authority-v2.md
 // §4). The single-executor-per-subject lease lives HERE — in the app store
 // (`data/reviews.db`), NOT in GitHub labels (the standing "Don't" for ARC-17).
@@ -43,7 +44,7 @@ export function ensureFinalizationExecutorLeaseSchema(db) {
   `);
 }
 
-function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
+function openDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
   const dataDir = join(rootDir, 'data');
   const dbPath = join(dataDir, 'reviews.db');
   const callerUid = typeof process.getuid === 'function' ? process.getuid() : null;

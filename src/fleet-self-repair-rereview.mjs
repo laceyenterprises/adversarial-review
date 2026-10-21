@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // FSR-06B — honour a fleet-self-repair re-review request for a trailer-only
 // head move, and never leave one silently parked.
 //
@@ -124,7 +125,7 @@ async function runWithTransientGitRetry({
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await execFileImpl('git', ['-C', checkoutDir, ...args], {
-        timeout: LOCAL_GIT_TIMEOUT_MS,
+        timeout: loadAwareTimeoutMs(LOCAL_GIT_TIMEOUT_MS),
         maxBuffer: LOCAL_GIT_MAX_BUFFER,
       });
     } catch (err) {

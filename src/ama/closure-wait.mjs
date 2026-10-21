@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -16,10 +17,11 @@ async function page(text, options) {
 // sending it, refund on transport refusal, and keep the original wait deadline.
 export async function observeClosureWait({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null }) {
+  launchWait = null, launchAlive = false }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
-  const boundMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
+  const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
+  const boundMs = loadAwareTimeoutMs(baseMs, { maxMs: Infinity });
   const dir = join(rootDir, 'data', 'ama-closure-waits');
   mkdirSync(dir, { recursive: true });
   const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
@@ -48,7 +50,7 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       }
       const row = db.prepare('SELECT * FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass);
       if (progress) db.prepare('UPDATE waits_by_class SET started=? WHERE head=? AND class=?').run(now, headSha, reasonClass);
-      // A running background launch borrows its own fixed window without
+      // A running background launch borrows its own execution window without
       // erasing the original wait debt. Refusal or restart removes this credit.
       const launching = reasonClass === 'final-round' && Number.isFinite(launchWait?.startedAt)
         && launchWait.startedAt <= now && Number.isFinite(launchWait.boundMs) && launchWait.boundMs > 0;
@@ -61,7 +63,10 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
     }).immediate();
     if (result.notify) {
       try {
-        await pageImpl(`HAMCLOSE-01 closure wait exhausted: ${repo} PR ${prNumber}@${headSha}: ${reason}`, {
+        const notice = launchAlive && !immediate
+          ? `closure still running after ${Math.floor((now - result.startedAt) / 60_000)} minutes`
+          : 'closure wait exhausted';
+        await pageImpl(`HAMCLOSE-01 ${notice}: ${repo} PR ${prNumber}@${headSha}: ${reason}`, {
           source: 'hamclose-closure-wait', severity: 'SEV1', dedupKey: `hamclose:${repo}:${prNumber}:${headSha}:${reasonClass}`,
         });
       } catch (error) {

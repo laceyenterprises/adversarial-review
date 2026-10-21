@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // A completed comment-only remediation may hand a descendant head to AMA.
 // The job's reviewed head must still be the settled verdict head; an unrelated
 // review or an unproven ancestry transition cannot grant closer authority.
@@ -100,7 +101,7 @@ export async function proveFinalRoundWorkerPush({
   };
   if (withheldBecause) return withheld(withheldBecause);
   if (!SHA.test(String(reviewedHead || ''))) return withheld('reviewed-head-invalid');
-  const deadline = Date.now() + 60000;
+  const deadline = Date.now() + loadAwareTimeoutMs(60000);
   const git = async (args) => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('git-proof-deadline-exceeded');

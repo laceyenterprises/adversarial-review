@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 /**
  * AMA-07 — durable closer lease keyed by `(repo, prNumber, headSha)`.
  *
@@ -112,7 +113,7 @@ export function isReclaimablePendingAmaCloserLease(lease, { now = null, processK
   const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
   return Number.isFinite(acquiredAtMs)
     && Number.isFinite(nowMs)
-    && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+    && nowMs - acquiredAtMs >= loadAwareTimeoutMs(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity });
 }
 
 export function isReclaimableDispatchedAmaCloserLease(lease, {
@@ -140,7 +141,7 @@ export function isReclaimableDispatchedAmaCloserLease(lease, {
   const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
   return Number.isFinite(updatedAtMs)
     && Number.isFinite(nowMs)
-    && nowMs - updatedAtMs >= reclaimAgeMs;
+    && nowMs - updatedAtMs >= loadAwareTimeoutMs(reclaimAgeMs, { maxMs: Infinity });
 }
 
 // Async dispatch/reaper paths yield during the existing bounded ledger read.
@@ -169,10 +170,12 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
 }
 
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
+  // Persisted dispatchTimeoutMs is the effective subprocess budget, already sized
+  // by the dispatcher. Only the nominal fallback needs load scaling here.
   const launchWindowMs = Number(dispatchTimeoutMs);
   return Number.isFinite(launchWindowMs) && launchWindowMs > 0
     ? launchWindowMs * AMA_CLOSER_LAUNCH_ATTEMPTS + AMA_CLOSER_LAUNCH_OVERHEAD_MS
-    : AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+    : loadAwareTimeoutMs(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity });
 }
 
 function supersededHeadsFor(lease) {
@@ -292,7 +295,7 @@ export function readAmaCloserDispatchLease(rootDir, record, names = null) {
 /** A current-head closer blocks a remediation claim until its existing lease expiry. */
 export function isHeldAmaCloserLease(rootDir, identity, {
   now = new Date().toISOString(),
-  pendingExpiryMs = AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
+  pendingExpiryMs = loadAwareTimeoutMs(AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity }),
   dispatchedExpiryMs = AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS,
   ...livenessOptions
 } = {}) {

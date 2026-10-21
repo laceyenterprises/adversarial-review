@@ -1,5 +1,6 @@
 import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
 import { normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
@@ -206,7 +207,7 @@ function probeReviewerSession({ pgid, sessionUuid, probeAlive = probePgidAlive }
     const stdout = execFileSync('ps', ['-p', String(numericPgid), '-o', 'command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
+      timeout: loadAwareTimeoutMs(2_000),
     });
     return { alive: true, matched: stdout.includes(String(sessionUuid)) };
   } catch {
@@ -235,7 +236,7 @@ function findReviewerProcessBySessionUuid(sessionUuid, { execFileSyncImpl = exec
     const stdout = execFileSyncImpl('ps', ['-ww', '-axo', 'pid=,pgid=,command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
+      timeout: loadAwareTimeoutMs(2_000),
     });
     for (const line of String(stdout || '').split(/\r?\n/)) {
       if (!line.includes(needle)) continue;

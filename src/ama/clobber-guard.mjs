@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // Clobber guard — content-preservation check for a MOVED merge head.
 //
 // THE HOLE THIS CLOSES. The daemon clean-merge lane can certify a *moved* head
@@ -112,7 +113,7 @@ export function computePatchIdFromDiff(diffText, { spawnImpl = spawn, gitBin = '
 }
 
 async function ghJson(execGh, args) {
-  const { stdout } = await execGh({ args, timeoutMs: CLOBBER_GUARD_GH_TIMEOUT_MS });
+  const { stdout } = await execGh({ args, timeoutMs: loadAwareTimeoutMs(CLOBBER_GUARD_GH_TIMEOUT_MS) });
   return JSON.parse(String(stdout || 'null'));
 }
 
@@ -139,7 +140,7 @@ async function commitShasUniqueToHead({ execGh, repo, baseSha, headSha }) {
 async function fetchCommitDiff({ execGh, repo, sha }) {
   const { stdout } = await execGh({
     args: ['api', `repos/${repo}/commits/${sha}`, '-H', 'Accept: application/vnd.github.v3.diff'],
-    timeoutMs: CLOBBER_GUARD_GH_TIMEOUT_MS,
+    timeoutMs: loadAwareTimeoutMs(CLOBBER_GUARD_GH_TIMEOUT_MS),
   });
   return String(stdout || '');
 }

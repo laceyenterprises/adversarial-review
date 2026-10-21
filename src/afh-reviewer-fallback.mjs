@@ -172,7 +172,7 @@ export async function probeClaudeReviewerRuntime({
   platform = process.platform,
   uid = null,
   transport = null,
-  timeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
+  timeoutMs = loadAwareTimeoutMs(CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS),
   retryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 } = {}) {
@@ -453,7 +453,7 @@ export async function readAfhReviewerGrounding({
   includeFleetQuotaStatus = false,
   fleetQuotaExecFileImpl = execFileImpl,
   claudeRuntimeProbeUid = null,
-  claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
+  claudeRuntimeProbeTimeoutMs = loadAwareTimeoutMs(CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS),
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
   selectReviewerTokenAccountImpl = selectReviewerTokenAccount,
 } = {}) {

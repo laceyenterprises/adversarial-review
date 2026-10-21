@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../../load-aware-timeout.mjs';
 // Failover drill (ARC-09, SPEC §3 ARC-09 / §6 Risks "Resume double-dispatch").
 // A disaster-recovery mechanism you never rehearse is a mechanism you don't
 // have. This drill exercises the REAL ARC-07 health router end to end inside a
@@ -93,7 +94,7 @@ function reviewerRequest(key, { domainId = 'code-pr' } = {}) {
     },
     idempotencyKey: key,
     budget: { maxTokens: 200_000, maxWallMs: 600_000 },
-    timeoutMs: 600_000,
+    timeoutMs: loadAwareTimeoutMs(600_000),
   };
 }
 

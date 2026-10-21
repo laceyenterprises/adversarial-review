@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 /**
  * AMA-04 — provenance trailers + audit JSON writer.
  *
@@ -139,11 +140,11 @@ function acquireAuditLock(filePath) {
         throw err;
       }
       const staleSinceMs = readLockStaleSince(lockPath);
-      if ((Date.now() - staleSinceMs) >= AUDIT_LOCK_STALE_MS) {
+      if ((Date.now() - staleSinceMs) >= loadAwareTimeoutMs(AUDIT_LOCK_STALE_MS)) {
         rmSync(lockPath, { force: true });
         continue;
       }
-      if ((Date.now() - startedAt) >= AUDIT_LOCK_TIMEOUT_MS) {
+      if ((Date.now() - startedAt) >= loadAwareTimeoutMs(AUDIT_LOCK_TIMEOUT_MS)) {
         throw new Error(`Timed out waiting for AMA audit lock: ${lockPath}`);
       }
       sleepMs(AUDIT_LOCK_RETRY_MS);

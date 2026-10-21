@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // Per-worker codex credential materialization (burst OAuth-cascade fix).
 //
 // WHY THIS EXISTS
@@ -194,7 +195,7 @@ export function materializePerWorkerCodexAuth({
                 env: { ...env, CODEX_WORKER_AUTH_PATH: authPath, CODEX_BROKER_PROVIDER: provider },
                 stdio: ['ignore', 'ignore', 'pipe'],
                 encoding: 'utf8',
-                timeout: 15000,
+                timeout: loadAwareTimeoutMs(15000),
               });
               break;
             } catch (err) {

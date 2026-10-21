@@ -1,4 +1,5 @@
 import { buildReviewerAttribution, validateReviewerAttribution } from '../../../reviewer-attribution.mjs';
+import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
 import { reviewerBrokerProviders } from '../../../reviewer-token-pool.mjs';
 import { execFile } from 'node:child_process';
@@ -445,7 +446,7 @@ function createCliDirectReviewerRuntimeAdapter({
           model: req.model,
           env: reviewerEnv,
           cwd: rootDir,
-          timeout: req.preflightTimeoutMs || 30_000,
+          timeout: req.preflightTimeoutMs || loadAwareTimeoutMs(30_000),
           requireMcpOAuth: domainRequiresMcpOAuth(domainConfig),
         });
         if (preflightResult?.claudeCli) reviewerEnv.CLAUDE_CLI = preflightResult.claudeCli;

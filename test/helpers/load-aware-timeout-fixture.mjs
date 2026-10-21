@@ -2,11 +2,19 @@ import './rate-limit-state-isolation.mjs';
 // Keep timeout-sensitive tests independent of machine load and local config.
 import { beforeEach } from 'node:test';
 import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { resetLoadAwareTimeoutCachesForTesting } from '../../src/load-aware-timeout.mjs';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-beforeEach(t => {
+// Module-level sizing also needs an idle synthetic host before test imports run.
+if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) {
+  os.loadavg = () => [0, 0, 0];
+  syncBuiltinESMExports();
+}
+
+// The runner preloads this for test workers; CLI children must stay ordinary programs.
+if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) beforeEach(t => {
   resetLoadAwareTimeoutCachesForTesting();
   const dir = mkdtempSync(join(os.tmpdir(), 'timeout-config-'));
   const previousPath = process.env.AGENT_OS_CONFIG_PATH;

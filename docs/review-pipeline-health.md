@@ -120,8 +120,12 @@ The Grafana dashboard lives at
   `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_MAX_PROBED_PRS`
   (default 25) and
   `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_DEADLINE_MS`
-  (default 120s) so this ticket-tier diagnostic cannot starve the hourly
-  health tick.
+  (nominal default 120s). That deadline and
+  `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FIRST_PASS_CI_ORPHAN_WORKER_STATUS_TIMEOUT_MS`
+  (nominal default 30s) remain unscaled in the resolved configuration. Each
+  orphan scan sizes a fixed deadline from current host load, and each branch
+  worker probe sizes its status-read budget at invocation, including when the
+  caller reuses the configuration across health ticks.
 - `review_pipeline_first_pass_ci_orphans_collected`: 1 when every eligible
   first-pass CI orphan candidate was probed successfully, 0 when GitHub checks,
   worker-liveness probing, or the configured probe budget left the snapshot

@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -579,7 +580,7 @@ async function explainedCheckoutPaths(checkoutDir, beforeHead, afterHead, afterS
     const { stdout } = await withTransientGitRetries(() => execFileAsync('git', [
       '--no-optional-locks', 'diff', '--no-ext-diff', '--no-renames', `--ignore-submodules=${ignoreSubmodules}`, '--name-only', '-z', ...revisions, '--',
     ], {
-      cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER, timeout: GIT_AUDIT_TIMEOUT_MS,
+      cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER, timeout: loadAwareTimeoutMs(GIT_AUDIT_TIMEOUT_MS),
     }), 'git diff');
     return new Set(String(stdout || '').split('\0').filter(Boolean));
   };

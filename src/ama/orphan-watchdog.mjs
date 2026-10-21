@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { summarizeExternalChecks } from '../remediation-ci-regression.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../review-statuses.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
@@ -20,13 +21,13 @@ const terminalLaunches = new Map();
 export const OWNERLESS_BOUND_MS = 15 * 60 * 1000;
 export function ownerlessBoundMs(env = process.env) {
   const value = Number(env.OWNERPROOF_IDLE_MINUTES);
-  return Number.isFinite(value) && value > 0 ? value * 60 * 1000 : OWNERLESS_BOUND_MS;
+  return loadAwareTimeoutMs(Number.isFinite(value) && value > 0 ? value * 60 * 1000 : OWNERLESS_BOUND_MS, { maxMs: Infinity });
 }
 const text = value => String(value || '').slice(0, 300);
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
 export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
-  readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = 5000, signal = null, reservationStartedAt = null,
+  readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
   excludeWatcherPid = null, env = process.env }) {
   const alive = (pid, group = false) => {
@@ -55,7 +56,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
     return { owned: true, proof: 'bounded-review-request' };
   }
   const prefix = `${String(repo).replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
-  const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000);
+  const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : loadAwareTimeoutMs(5000));
   const result = { owned: false, uncertain: false, reservationDispatched: false, reasons: [], launchIds: [] };
   const uncertain = reason => { result.uncertain = true; if (result.reasons.length < 5) result.reasons.push(text(reason)); };
   const namesFor = dir => {
@@ -204,7 +205,7 @@ export async function recoverOrphan(options) {
 async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate,
   labels = candidate?.labels || [], result, reviewStateRow, dispatchJob, dispatchHammer,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
-  ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
+  ownershipOperation = fn => fn({}), ownershipTimeoutMs = loadAwareTimeoutMs(5000),
   logger = console, signal = null, now = new Date().toISOString(), env = process.env,
   fsImpl = { existsSync, mkdirSync, openSync, closeSync }, DatabaseImpl = Database, flockSyncImpl = fsExt.flockSync }) {
   if (!headSha || candidate?.merged === true || String(candidate?.prState || '').toLowerCase() !== 'open'

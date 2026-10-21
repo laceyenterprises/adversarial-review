@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fork } from 'node:child_process';
 
 // Each reader owns its accounting queue; production shares the default reader.
@@ -23,7 +24,7 @@ export function createReviewerEvidenceReader({ maxConcurrent = 2 } = {}) {
   // group so neither normal accounting nor timeout cleanup can block admission.
   return async function readReviewerEvidenceInWorker(args, {
     workerUrl = new URL('./reviewer-token-ledger-worker.mjs', import.meta.url),
-    timeoutMs = 180_000,
+    timeoutMs = loadAwareTimeoutMs(180_000),
     onReady = () => {},
     killProcessGroup = (pid, signal) => process.kill(pid, signal),
   } = {}) {

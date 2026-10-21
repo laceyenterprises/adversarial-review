@@ -1,3 +1,4 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync, linkSync } from 'node:fs';
@@ -172,7 +173,7 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
       // Do not retry this POST in-call: a lost response may hide an accepted
       // rerun. The next tick reads the workflow snapshot before retrying.
       await postReservation(workflow, () => meteredExecFile(execFileImpl, 'gh', ['api', '--method', 'POST',
-        `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: 30_000 }));
+        `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: loadAwareTimeoutMs(30_000) }));
     }
   }
   return true;

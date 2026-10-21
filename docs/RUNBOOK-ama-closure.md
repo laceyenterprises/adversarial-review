@@ -4248,3 +4248,27 @@ as `no-dispatch`, reason `drain-wait-ended`, so a new eligibility blocker uses
 normal lane accounting. Hint cleanup is best effort and cannot refuse admission.
 Other exit-6 diagnostics include dispatch preflight timeouts and worker-class
 fallback refusals; these keep their existing transient/failure classification.
+
+
+## Load-aware operational waits (LOADAR-01)
+
+The closure-wait bound uses the existing load-aware helper with a 30-minute
+nominal base. `AMA_CLOSURE_WAIT_BOUND_MS` replaces the base and scales identically.
+Long budgets lift the helper's default one-hour absolute cap so the shared policy
+can grant its full multiplier. Reviewer wall/idle/print/chunk budgets, dispatch
+budgets, GitHub and ledger reads, status probes, lock waits and lease deadlines
+use the same helper. Derived effective budgets and persisted merge-lease
+deadlines are consumed once. The [inventory](load-aware-wait-inventory.md) records
+base values and deliberately fixed exceptions. No new settings are introduced.
+
+At the closure-wait bound, confirmed running/starting launch evidence from the
+existing status read changes the notice to "still running after N minutes".
+Pending reservations, unknown status and terminal success cannot establish
+liveness. Immediate pages retain exhaustion wording. The thirty-second retry,
+once-only page receipt, returned exhaustion flag and ownership behavior remain
+unchanged. Load-scaled lease ages still retain confirmed live launches at any age.
+
+After deployment, verify a slow live closer retains its owner and produces the
+live wording at the effective bound; an unknown launch still produces exhaustion.
+Use synthetic offline fixtures to verify multipliers and env overrides; no
+configuration flip or migration is required.

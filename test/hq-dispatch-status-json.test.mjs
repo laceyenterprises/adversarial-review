@@ -21,7 +21,7 @@ const NOW = Date.parse('2026-10-01T02:00:00Z');
 const HEAD = { repo: 'fixture/repo', prNumber: 1, headSha: 'fixture-head' };
 const HUMAN = 'failed — worker exited — next: inspect';
 
-function fixture(t, { status = 'failed', malformed = false } = {}) {
+function fixture(t, { status = 'failed', malformed = false, malformedOutput = HUMAN } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'status-json-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq-root');
@@ -35,7 +35,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + '\\n');
 if (args[0] !== 'dispatch' || args[1] !== 'status') process.exit(2);
 const payload = ${JSON.stringify({ status, workspaceDir: join(rootDir, 'worker'), failureClass: 'fixture-failure' })};
-console.log(${malformed} || !args.includes('--json') ? ${JSON.stringify(HUMAN)} : JSON.stringify(payload));
+console.log(${malformed} || !args.includes('--json') ? ${JSON.stringify(malformedOutput)} : JSON.stringify(payload));
 `, { mode: 0o755 });
   const env = {
     HQ_ROOT: hqRoot, HQ_BIN: hqBin, USER: 'fixture-owner',
@@ -122,6 +122,11 @@ test('remediation liveness and workspace probes request JSON and preserve --root
 // budget across all consumers and distinct dispatch arguments in one process.
 test('non-JSON probes retain their failure behavior and emit one shared diagnostic', async t => {
   const f = fixture(t, { malformed: true });
+  const whitespace = fixture(t, { malformed: true, malformedOutput: ' \n\t ' });
+  whitespace.logger = f.logger;
+  assert.equal((await active(whitespace)).status, null);
+  assert.equal(f.warnings.length, 1);
+  assert.ok(f.warnings[0].endsWith('stdout=""'), 'async probe trims whitespace-only output like the sync probe');
   assert.equal(scan(f).length, 1, 'sync probe still falls back to refusal history');
   assert.equal((await active(f)).status, null);
   assert.match((await review(f)).error, /did not return JSON/);
@@ -132,7 +137,6 @@ test('non-JSON probes retain their failure behavior and emit one shared diagnost
   assert.equal(f.warnings.length, 1);
   assert.match(f.warnings[0], /non-JSON output/);
   assert.ok(f.warnings[0].includes(JSON.stringify(f.calls()[0])));
-  assert.ok(f.warnings[0].includes(HUMAN));
 });
 
 test('diagnostics are bounded, renew after a minute, and preserve the thrown error', () => {

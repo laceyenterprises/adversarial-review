@@ -865,7 +865,7 @@ async function probeDispatchStatusViaHq({
       maxBuffer: 1024 * 1024,
       timeout: 5_000,
     });
-    const parsed = parseHqDispatchStatusOutput(String(stdout || ''), args, JSON.parse, logger);
+    const parsed = parseHqDispatchStatusOutput(String(stdout || '').trim(), args, JSON.parse, logger);
     const status = typeof parsed?.status === 'string'
       ? parsed.status.trim().toLowerCase()
       : null;

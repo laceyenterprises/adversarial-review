@@ -1,3 +1,4 @@
+import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
@@ -3749,7 +3750,9 @@ function parseAmaCloserDispatchStatusOutput(stdout) {
   const status = typeof parsed?.status === 'string'
     ? parsed.status.trim().toLowerCase()
     : null;
-  return status ? { status } : null;
+  if (!status) return null;
+  const evidence = readDispatchReceipt(parsed);
+  return { status, ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}) };
 }
 
 async function probeAmaCloserDispatchStatus({
@@ -3781,7 +3784,7 @@ async function probeAmaCloserDispatchStatus({
         await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt], signal);
         continue;
       }
-      return { status: 'unknown', degraded: true };
+      return { status: 'unknown', degraded: true, diagnostic: 'cwp_dispatch.dispatch: $.status missing/invalid' };
     } catch (err) {
       throwIfAborted(signal);
       if (hasAuthoritativeOwnerVisibility(asOwner) && isNotFoundDispatchStatusError(err)) {
@@ -3791,29 +3794,18 @@ async function probeAmaCloserDispatchStatus({
         await sleep(AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS[attempt], signal);
         continue;
       }
-      return { status: 'unknown', degraded: true, error: err?.message || String(err) };
+      return { status: 'unknown', degraded: true, diagnostic: 'cwp_dispatch.dispatch: $stdout unavailable', error: err?.message || String(err) };
     }
   }
-  return { status: 'unknown', degraded: true };
+  return { status: 'unknown', degraded: true, diagnostic: 'cwp_dispatch.dispatch: $.status missing/invalid' };
 }
 
 function parseAmaCloserDispatchOutput(stdout) {
   const text = String(stdout ?? '').trim();
   if (!text) return null;
 
-  try {
-    return JSON.parse(text);
-  } catch {}
-
+  try { return parseDispatchJsonOutput(text); } catch {}
   const lines = text.split('\n');
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const candidate = lines.slice(index).join('\n').trim();
-    if (!candidate.startsWith('{')) continue;
-    try {
-      return JSON.parse(candidate);
-    } catch {}
-  }
-
   let dispatchId = null;
   let launchRequestId = null;
   let ticketRef = null;
@@ -3835,11 +3827,13 @@ export function isAmaHammerLaunchTicket(ticket, prNumber) {
 }
 
 function normalizeDispatchIdentifiers(payload) {
-  if (!payload || typeof payload !== 'object') return { dispatchId: null, launchRequestId: null };
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { dispatchId: null, launchRequestId: null, diagnostic: 'cwp_dispatch.dispatch: $stdout missing/invalid object' };
+  const evidence = readDispatchReceipt(payload, { identityFields: ['launchRequestId', 'lrq', 'dispatchId'] });
   return {
     ticketRef: payload.ticketRef || payload.ticket_ref || payload.ticket || null,
     dispatchId: String(payload.dispatchId || '').trim() || null,
-    launchRequestId: String(payload.launchRequestId || payload.lrq || payload.dispatchId || '').trim() || null,
+    launchRequestId: String(evidence.rawIdentity || '').trim() || null,
+    ...(evidence.identityDiagnostic || evidence.status.diagnostic ? { diagnostic: [evidence.identityDiagnostic, evidence.status.diagnostic].filter(Boolean).join('; ') } : {}),
   };
 }
 
@@ -7039,6 +7033,7 @@ async function maybeDispatchAmaCloserAttempt({
     workerClass: harnessFallback?.workerClass || workerClass,
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),
+    ...(harnessFallback?.diagnostics?.length ? { diagnostics: harnessFallback.diagnostics } : {}),
     evidenceSource: harnessFallback?.evidenceSource || null,
     evidenceAgeMs: harnessFallback?.evidenceAgeMs ?? null,
     evidenceReadAt: harnessFallback?.evidenceReadAt ?? null,
@@ -8024,6 +8019,7 @@ async function maybeDispatchAmaCloserAttempt({
       : {}),
     dispatchId: parsed.dispatchId || parsed.launchRequestId || null,
     launchRequestId: parsed.launchRequestId || null,
+    ...(parsed.diagnostic ? { diagnostic: parsed.diagnostic } : {}),
     promptPath,
     harnessResolution,
     eligibilityReasons: verdict.trace,

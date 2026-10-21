@@ -1,0 +1,160 @@
+{
+  "httpStatus": 503,
+  "payload": {
+    "auth": {
+      "configured": true,
+      "enabled": true,
+      "ready": true,
+      "status": "ready"
+    },
+    "degraded_providers": {
+      "claude-code-corp": "NOT_READY",
+      "codex-corp": "NOT_READY"
+    },
+    "grants": {},
+    "instance": {
+      "bind": "127.0.0.1:0",
+      "claude_code_entitled_models": [],
+      "host_endpoint": null,
+      "id": "oauth-broker-native-127.0.0.1:0",
+      "pid": 1,
+      "role": "unknown",
+      "runtime": "native"
+    },
+    "provider_states": {
+      "claude-code": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "not_ready"
+      },
+      "claude-code-corp": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "codex": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "not_ready"
+      },
+      "codex-corp": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "gemini": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "not_ready"
+      },
+      "github-app-codex-agent": {
+        "can_serve": false,
+        "cannot_serve_since": 1800000000.0,
+        "kind": "NOT_READY",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "not_ready"
+      }
+    },
+    "providers": {
+      "claude-code": false,
+      "claude-code-corp": false,
+      "codex": false,
+      "codex-corp": false,
+      "gemini": false,
+      "github-app-codex-agent": false
+    },
+    "providers_detail": {
+      "claude-code": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "not_ready",
+        "structural": false
+      },
+      "claude-code-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "degraded",
+        "structural": false
+      },
+      "codex": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "not_ready",
+        "structural": false
+      },
+      "codex-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "degraded",
+        "structural": false
+      },
+      "gemini": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "not_ready",
+        "structural": false
+      },
+      "github-app-codex-agent": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "NOT_READY",
+        "state": "not_ready",
+        "structural": false
+      }
+    },
+    "refresh_in_flight": false,
+    "status": "not_ready",
+    "store_errors": {}
+  }
+}

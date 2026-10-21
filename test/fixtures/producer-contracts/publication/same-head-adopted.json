@@ -1,0 +1,124 @@
+{
+  "adapter": [
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": false,
+      "exitCode": 1,
+      "failureClass": "auth",
+      "message": "HTTP 403: forbidden",
+      "ok": false,
+      "rateLimit": null,
+      "retryAfter": null,
+      "source": "gh-cli"
+    },
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": true,
+      "failureClass": null,
+      "head": "branch",
+      "ok": true,
+      "prs": [
+        {
+          "headRefName": "branch",
+          "headRefOid": "<head-sha>",
+          "headRepositoryOwner": {
+            "login": "example"
+          },
+          "isCrossRepository": false,
+          "merge_commit_sha": null,
+          "merged_at": null,
+          "number": 2,
+          "repo": "example/repo",
+          "state": "OPEN",
+          "title": null,
+          "url": "https://github.com/example/repo/pull/2"
+        }
+      ],
+      "rateLimit": null,
+      "repo": "example/repo",
+      "retryAfter": null,
+      "source": "gh-cli",
+      "state": null
+    },
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "author": null,
+      "baseRefName": "main",
+      "body": null,
+      "complete": true,
+      "failureClass": null,
+      "headRefName": "branch",
+      "headRefOid": "<head-sha>",
+      "headRepositoryOwner": {
+        "login": "example"
+      },
+      "isCrossRepository": false,
+      "isDraft": false,
+      "labels": [],
+      "merge_commit_sha": null,
+      "merged_at": null,
+      "ok": true,
+      "pr": {
+        "fullRepo": "example/repo",
+        "number": 2,
+        "owner": "example",
+        "repo": "repo"
+      },
+      "rateLimit": null,
+      "retryAfter": null,
+      "source": "gh-cli",
+      "state": "OPEN",
+      "title": null,
+      "url": "https://github.com/example/repo/pull/2"
+    }
+  ],
+  "returncode": 0,
+  "sidecar": {
+    "branch": "branch",
+    "changeKind": "bug-fix",
+    "changeKindSource": "plan",
+    "draft": false,
+    "dryRun": false,
+    "fastMergeCategory": "",
+    "fastMergeLabel": "",
+    "fromPlan": "",
+    "fromPlanRawHash": "",
+    "fromPlanRepo": "",
+    "fromPlanRepoRoot": "",
+    "goalLineage": {},
+    "headSha": "<head-sha>",
+    "launchRequestId": "lrq-capture",
+    "openedAt": "2026-10-20T00:00:00Z",
+    "outcome": "opened",
+    "planOwnedPostMergeActions": "",
+    "planOwnedPostMergeActionsCommit": "",
+    "planPostMergeActionsDeferredReason": "",
+    "planTicketId": "PRM-05",
+    "prFinality": "infer",
+    "prUrl": "https://github.com/example/repo/pull/2",
+    "repo": "repo",
+    "riskClass": "medium",
+    "salvage": false,
+    "specRef": "none",
+    "targetBranch": "main",
+    "ticketRef": "PRM-05",
+    "title": "[codex] (fix) PRM-05: Capture publication",
+    "workerClass": "codex",
+    "workerId": "worker",
+    "workspaceRepos": [
+      "repo"
+    ],
+    "worktreePath": "<capture-root>/workspace"
+  },
+  "stderr": "adopting existing PR after adapter response failure: https://github.com/example/repo/pull/2\nGitHub PR exists: https://github.com/example/repo/pull/2; recording required launch identity\nPR opened: https://github.com/example/repo/pull/2\nsidecar at <capture-root>/sidecar.json\n",
+  "stdout": "https://github.com/example/repo/pull/2\n"
+}

@@ -1,0 +1,27 @@
+{
+  "statuses": [
+    "admitted",
+    "blocked_needs_decision",
+    "canceled",
+    "failed",
+    "leased",
+    "operator_triage_required",
+    "reaped_stuck_requested",
+    "requested",
+    "running",
+    "starting",
+    "succeeded",
+    "superseded",
+    "waiting_approval",
+    "waiting_input"
+  ],
+  "terminal": [
+    "blocked_needs_decision",
+    "canceled",
+    "failed",
+    "operator_triage_required",
+    "reaped_stuck_requested",
+    "succeeded",
+    "superseded"
+  ]
+}

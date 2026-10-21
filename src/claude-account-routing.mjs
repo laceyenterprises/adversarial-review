@@ -1,3 +1,4 @@
+import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -5,7 +6,7 @@ import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 // Account selection consumes the canonical fleet projection. Weekly thresholds,
 // freshness and reserve arithmetic stay in quota_reserve, not in this service.
-import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, reserveFloorWeeklyMeasurement } from './fleet-quota-status.mjs';
+import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 
 const LANES = Object.freeze({
   'hammer-claude': 'hammer-claude-corp',
@@ -36,6 +37,7 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
   const hasCorporate = statuses.some(row => row.provider === 'anthropic' && row.authPath === 'oauth-corp');
   if (!hasCorporate && !payload?.brokerAuth?.provider_states?.['claude-code-corp']
     && workerClass !== corporate && !blockedWorkerClasses.includes(corporate)) return null;
+  const diagnostics = [];
   for (const [lane, authPath, provider] of [
     [corporate, 'oauth-corp', 'claude-code-corp'],
     [primary, 'oauth', 'claude-code'],
@@ -44,7 +46,9 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
     const row = payload?.providerStatuses?.find(entry => String(entry?.provider || '').trim().toLowerCase() === 'anthropic'
       && (entry.authPath || entry.auth_path) === authPath);
     const policy = payload?.reserveFloors?.[`anthropic-${authPath}`];
-    const ready = payload?.brokerAuth?.provider_states?.[provider];
+    const broker = readBrokerProvider(payload?.brokerAuth, provider);
+    const ready = { ready: broker.ready, can_serve: broker.canServe };
+    diagnostics.push(...quotaAccountDiagnostics(payload, { provider: 'anthropic', authPath, cap, reserve: lane !== corporate }), ...broker.diagnostics);
     const locallyBlocked = blockedWorkerClasses.includes(lane);
     const weekly = reserveFloorWeeklyMeasurement(policy);
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
@@ -57,10 +61,10 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
       return { workerClass: lane, provider, authPath, hold: false, reason: 'claude-account-ready' };
     }
     if (lane === corporate && !exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      return { workerClass, hold: true, reason: 'claude-account-evidence-unknown' };
+      return { workerClass, hold: true, reason: 'claude-account-evidence-unknown', diagnostics };
     }
   }
-  return { workerClass, hold: true, reason: 'no-ready-claude-account' };
+  return { workerClass, hold: true, reason: 'no-ready-claude-account', diagnostics };
 }
 
 // Credential outage state is account-scoped. The review family remains Claude.

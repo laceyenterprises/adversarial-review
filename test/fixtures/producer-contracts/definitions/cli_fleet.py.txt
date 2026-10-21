@@ -1,0 +1,19 @@
+class FleetQuotaPayload(TypedDict):
+    """Transient fleet quota JSON; owner sections retain their existing types.
+
+    Null ledger adjuncts and unavailableSections are evidence, not routing policy.
+    """
+
+    identityPools: dict[str, Any]
+    reserveFloors: dict[str, "ReserveFloor"]
+    workerOutcomes24h: list[dict[str, Any]] | dict[str, Any]
+    providerStatuses: list[dict[str, Any]]
+    brokerAuth: dict[str, Any]
+    probeDaemonHeartbeat: dict[str, Any]
+    lastProbeAt: str | None
+    suspendedLaunchRequests: list[dict[str, Any]] | None
+    dismissedLaunchRequestCount: int | None
+    quotaExhaustionEvents24h: dict[str, int | None]
+    providerReportedQuotaHolds24h: dict[str, Any] | None
+    estRemaining: dict[str, Any] | None
+    unavailableSections: NotRequired[dict[str, Any]]

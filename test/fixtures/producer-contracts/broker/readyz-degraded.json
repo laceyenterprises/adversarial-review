@@ -1,0 +1,172 @@
+{
+  "httpStatus": 200,
+  "payload": {
+    "auth": {
+      "configured": true,
+      "enabled": true,
+      "ready": true,
+      "status": "ready"
+    },
+    "degraded_providers": {
+      "claude-code": "TRANSIENT",
+      "claude-code-corp": "TRANSIENT",
+      "codex": "TRANSIENT",
+      "codex-corp": "TRANSIENT",
+      "gemini": "TRANSIENT",
+      "github-app-codex-agent": "TRANSIENT"
+    },
+    "grants": {
+      "codex": {
+        "fingerprint_prefix": "62b1c0d7",
+        "last_refresh": 1800000000.0,
+        "provider": "codex"
+      }
+    },
+    "instance": {
+      "bind": "127.0.0.1:0",
+      "claude_code_entitled_models": [],
+      "host_endpoint": null,
+      "id": "oauth-broker-native-127.0.0.1:0",
+      "pid": 1,
+      "role": "unknown",
+      "runtime": "native"
+    },
+    "provider_states": {
+      "claude-code": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "claude-code-corp": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "codex": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded",
+        "worker_grant_fetched_at": 1800000000.0,
+        "worker_grant_fingerprint": "4edcd29c4fda"
+      },
+      "codex-corp": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "gemini": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      },
+      "github-app-codex-agent": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "TRANSIENT",
+        "ready": false,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "degraded"
+      }
+    },
+    "providers": {
+      "claude-code": false,
+      "claude-code-corp": false,
+      "codex": false,
+      "codex-corp": false,
+      "gemini": false,
+      "github-app-codex-agent": false
+    },
+    "providers_detail": {
+      "claude-code": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      },
+      "claude-code-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      },
+      "codex": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      },
+      "codex-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      },
+      "gemini": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      },
+      "github-app-codex-agent": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "degraded",
+        "kind": "TRANSIENT",
+        "state": "degraded",
+        "structural": false
+      }
+    },
+    "refresh_in_flight": false,
+    "status": "degraded",
+    "store_errors": {}
+  }
+}

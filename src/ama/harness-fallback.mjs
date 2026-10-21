@@ -268,7 +268,7 @@ export async function resolveCloserDispatchHarness({
   });
   const primaryAccount = accountLane(primary);
   if (primaryAccount?.reason === 'claude-account-evidence-unknown') {
-    return { ...base, hold: true, reason: primaryAccount.reason };
+    return { ...base, hold: true, reason: primaryAccount.reason, diagnostics: primaryAccount.diagnostics };
   }
   if (primaryAccount && !primaryAccount.hold) {
     return { ...base, workerClass: primaryAccount.workerClass,

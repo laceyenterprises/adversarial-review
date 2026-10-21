@@ -1,0 +1,120 @@
+# Quota producer contract (PRM-02)
+
+Worker-pool owns `quota_reserve.snapshot()` / `ReserveFloor` and
+`cli_fleet._json_payload()` / `FleetQuotaPayload`. The measurement owner remains
+`codex_quota_snapshots.QuotaMeasurement`, adopted from QUOTAEMIT-01 (PR 8691).
+The field meanings are in [the data-model domain](../../../docs/data-model/02-worker-pool-and-dispatch.md#fleet-quota-reserve-readings-quotaemit-01).
+This record follows [the producer-owned convention](../../../docs/contracts/producer-owned-contracts.md).
+
+`reserveFloors` keys name quota provider/account pairs: `openai-oauth`,
+`openai-oauth-corp`, `anthropic-oauth`, `anthropic-oauth-corp`. Corporate windows
+are independent. `measurement` selects the most constrained unreset window;
+`weeklyMeasurement` selects only 10080-minute OpenAI or `seven_day` Anthropic
+windows. Both report percentages, ISO observation/reset timestamps and original
+window diagnostics. A fresh five-hour window never proves weekly headroom.
+
+A measured weekly object has `status=confidence=measured` and a null reason.
+Retained old evidence is an object with `status=confidence=stale` and reason
+`stale`. A null weekly object requires `no-weekly-window` (absent, expired or
+short-only evidence) or `measurement-unavailable` (failed loading). Expired
+windows deliberately share `no-weekly-window` with absent windows: it means
+there is no usable weekly window, not that the producer never observed one.
+Inspect the raw account probe when triaging missing versus expired evidence. Disabled
+floor thresholds still emit available evidence. Missing/invalid keys are
+contract defects, distinct from documented null-plus-reason unavailability.
+
+The fleet envelope includes the floors and provider statuses, the broker's
+`brokerAuth` (unaltered while fresh), probe heartbeat and last probe time, suspended requests,
+dismissed count, exhaustion events, provider-reported holds, and estimated
+remaining capacity. `unavailableSections` is optional; adjunct failures retain
+the owner's existing empty/null/availability shape. Raw floors omit held counts;
+fleet adds integer-or-null `heldCount` and `pauseHeldCount`. It is transient JSON,
+not a new store. QUOTAINPUTSTALE-01 preserves the last broker observation when
+published inputs are late, with additive `observedAt`, `ageSeconds`, `retained: true`
+and `stale: true` fields on retained bodies. `provider_states.<provider>.ready`
+and `can_serve` retain their observed values. At 900 seconds from the original
+observation, readiness is omitted and `unavailableSections.brokerAuth` reports
+staleness. Failed republication never refreshes that observation clock. The
+[broker readiness fixture](../test/fixtures/quota-broker-readiness.json) and focused
+fleet-status tests cover the review service's expected paths without importing
+its repository. JSON status remains exit 0 on successful serialization, with
+existing failure exits and stderr behavior unchanged.
+
+## Readers and compatibility
+
+`quota_reserve.weekly_evidence` is the shared Python weekly reader.
+`fallback_block` retains its tuple shim; `fallback_evidence` adds producer and
+field diagnostics in both dispatch and admission candidate records. Reserve
+admission audits identify the paused/active/nearCap field. No threshold, fallback edge,
+account preference or allow/hold condition changes. In particular, a measured
+status with a malformed percentage gets a diagnostic without a new admission
+condition. Unknown/stale weekly evidence retains the existing Claude account
+switch hold; Codex retains its existing unknown-evidence policy.
+
+Fleet and harness readiness readers share
+`agent_os_core.broker_evidence.provider_evidence`; the broker owns its wire types
+and [capture record](../../../platform/oauth-broker/tests/fixtures/contracts/README.md).
+Readiness, cached-token servability and refresh-age inspection have distinct
+owner policies. Their sibling implementations were inspected and retain those
+policies. The existing quota-to-broker name resolver maps OpenAI to `codex`,
+Anthropic to `claude-code`, Google to `gemini`, and corporate accounts to the
+corresponding `-corp` name. Broker-wire readers do not invent provider aliases.
+
+## Captures and exact recapture
+
+Producer repository: `agent-os`. Emitting logic revision:
+`2f686a90a102cf52e631dbf597d3e85826dc7b5d`; quota repair revision:
+`36da525326825a94db3c02433f9b0b4fc496da8c`. PRM-02 adds return annotations,
+readers and capture tests; it does not change the serialized producer semantics.
+The capture harness/input definitions are in this PR's
+[`test_quota_reserve_weekly.py`](../lib/python/tests/test_quota_reserve_weekly.py).
+
+Examples live in [`fixtures/quota_reserve`](../lib/python/tests/fixtures/quota_reserve):
+
+- `repaired-{measured,disabled,absent,five-hour-only,expired,stale,unavailable}.json`:
+  actual `snapshot()` over four independent account inputs. Fixed observation
+  clock is 2026-10-20T03:00:00Z; short windows use 95% and weekly windows use
+  25%/40% for primary/corporate. Anthropic input files use the real usage parser;
+  OpenAI reader inputs are account-stamped rows, with no borrowed burn history.
+  These captures have no normalization.
+- `fleet-{ready,unavailable,degraded,disabled}.json`: actual `cmd_status` JSON
+  stdout (exit 0, empty stderr), including `_status_payload`, worker outcomes
+  and `_json_payload`, over disposable quota files, an empty follow-up log and
+  a migrated empty SQLite ledger. Real file readers, accounting queries and serializers execute.
+  External broker observations reuse the broker captures; review-store transport
+  returns no review rows. Only temporary-root path prefixes become `<scratch>`.
+- `reserveFloors-capture-2026-10-20.json` remains negative pre-repair reproduction
+  evidence; its source revision is unknown. Its unexplained null OpenAI weekly
+  fields and empty floors both fail the plan's unchanged activation predicate.
+
+From the repository root, after capturing the broker examples first:
+
+```bash
+export NETGUARD_ROOT="${NETGUARD_ROOT:?set to your provisioned netguard root}"
+test -d "$NETGUARD_ROOT/bin" && test -d "$NETGUARD_ROOT/site"
+NETGUARD_LOG=/tmp/prm02-quota-recapture.log \
+PATH="$NETGUARD_ROOT/bin:$PATH" PYTHONPATH="$NETGUARD_ROOT/site" \
+AGENT_OS_SESSION_LEDGER_VDB=false PRM_RECAPTURE=1 \
+"${PYTHON:-python3}" -c 'import subprocess,sys; raise SystemExit(subprocess.run([sys.executable,"-m","pytest","modules/worker-pool/lib/python/tests/test_quota_reserve_weekly.py","-k","producer_capture_parity","-q","--disable-warnings"],timeout=180).returncode)'
+```
+
+`NETGUARD_ROOT/bin` must contain the command wrappers and `site` the
+socket-free Python guard, as described in the broker capture record. Set
+`PYTHON` to an interpreter with the worker-pool test dependencies installed.
+`PRM_RECAPTURE=1` writes only the selected actual outputs and marks the capture
+tests skipped; rerun without it to verify parity. Snapshot equality covers
+`reserveFloors` and `brokerAuth`; unrelated fleet envelope fields use shape checks.
+Negative tests explicitly mutate missing/null/wrong-type fields, percentage types and unknown
+statuses. Consumer tests load these same examples. Activation-predicate tests
+invoke jq on the existing plan assertion; runtime never reads projects.
+
+## Deployment
+
+No configuration, schema migration or privileged activation is required.
+CLI readers load the code on their next invocation. Long-running dispatch
+readers receive diagnostics on their normal registered reload; this worker
+performs no restart. Same-user read-only verification is
+`hq fleet quota status --json`: inspect each floor's weekly object/reason and
+compare weekly consumption with that account's text status. This does not
+probe credentials or authorize launching the parked pack. Lifecycle states,
+transitions, smoke promises and enforcement policy are unchanged.

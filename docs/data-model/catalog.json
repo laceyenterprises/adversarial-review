@@ -191,6 +191,7 @@
     },
     {
       "id": "ama-audit",
+      "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",
       "store": "$HQ_ROOT/dispatch/audit/adversarial-merge-authority/",

@@ -45,7 +45,9 @@ at mode `0640`.
 `harnessResolution` and `attempts[].harnessResolution` record the closer's
 physical `workerClass`, resolver `reason`, `hold` boolean, and quota provenance:
 `evidenceSource`, `evidenceAgeMs`, `evidenceReadAt` (epoch milliseconds), and
-`liveReadReason`. Evidence fields are null when unavailable. Snapshot use is
+`liveReadReason`. Evidence fields are null when unavailable. Optional `diagnostics` is an array
+of producer/field strings explaining unreadable or unavailable account evidence;
+it does not change the hold reason, admission policy or retry authority. Snapshot use is
 recorded even when the class stays unchanged. Resolver holds write a `deferred`
 attempt with `reason: harness-hold:<resolver reason>`; genuine exhausted fallback
 sets preserve `all-fallbacks-grounded`. The same reason is returned to dispatch

@@ -1,3 +1,6 @@
+import { readDispatchReceipt } from '../../../producer-contracts/dispatch-receipt.mjs';
+import { parseHqDispatchStatus } from '../../../remediation-hq-dispatch.mjs';
+import { readLaunchRequestStatus } from '../../../producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,7 +30,8 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['codex', 'codex'],
   ['gemini', 'gemini'],
 ]);
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
+// Preserve this runtime's terminal handling and legacy canceled spelling.
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => readLaunchRequestStatus(status).terminal).concat('cancelled'));
 const SUCCESS_STATUSES = new Set(['succeeded']);
 const ACTIVE_RECORD_STATES = new Set(['spawned', 'heartbeating']);
 const DEFAULT_POLL_BASE_MS = 30_000;
@@ -179,16 +183,15 @@ function parseJsonObject(text, label) {
 
 function parseDispatchTicket(stdout) {
   const payload = parseJsonObject(stdout, 'hq dispatch');
-  const launchRequestId = String(payload.launchRequestId || payload.dispatchId || '').trim();
-  if (!launchRequestId) throw new Error('hq dispatch ticket missing launchRequestId/dispatchId');
+  const evidence = readDispatchReceipt(payload, { identityFields: ['launchRequestId', 'dispatchId'] });
+  // Keep the historical permissive identity shim; diagnostics never add a hold.
+  const launchRequestId = String(evidence.rawIdentity || '').trim();
+  if (!launchRequestId) throw new Error(`${evidence.identityDiagnostic}; hq dispatch ticket missing launchRequestId/dispatchId`);
   return { ...payload, launchRequestId };
 }
 
 function normalizeStatusPayload(stdout) {
-  const payload = parseJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload.status || '').trim();
-  if (!status) throw new Error('hq dispatch status payload missing status');
-  return payload;
+  return parseHqDispatchStatus(stdout, { normalize: false });
 }
 
 function hqArtifactDir(rootDir) {

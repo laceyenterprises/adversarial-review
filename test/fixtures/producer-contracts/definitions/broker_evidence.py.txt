@@ -1,0 +1,56 @@
+class ProviderEvidence:
+    ready: Any
+    diagnostic: str | None
+
+    @property
+    def ready_bool(self) -> bool | None:
+        """Strict readiness for consumers; `ready` retains legacy raw values."""
+        return self.ready if isinstance(self.ready, bool) else None
+
+def provider_evidence(
+    payload: Any, provider: str, *, legacy_truthiness: bool = False, flat_legacy: bool = False
+) -> ProviderEvidence:
+    """Read explicit state first, then the documented old readiness maps.
+
+    Unknown string states retain the old false verdict; diagnostics name the
+    value. Malformed legacy values retain the caller's previous interpretation.
+    """
+    prefix = f"{PRODUCER}: "
+    path = f"provider_states.{provider}"
+    if not isinstance(payload, Mapping):
+        return ProviderEvidence(None, prefix + "$ missing/invalid object")
+    states = payload.get("provider_states")
+    state = states.get(provider) if isinstance(states, Mapping) else None
+    issue = None
+    if isinstance(state, Mapping):
+        ready = state.get("ready")
+        if isinstance(ready, bool):
+            issue = None if ready else prefix + path + f".ready=false (kind={state.get('kind')!r})"
+            return ProviderEvidence(ready, issue)
+        label = state.get("state")
+        if isinstance(label, str):
+            issue = None if label == "ready" else prefix + path + f".state={label!r}"
+            if label not in {"ready", "degraded", "not_ready"}:
+                issue = prefix + path + f".state unrecognized {label!r}"
+            return ProviderEvidence(label == "ready", issue)
+        issue = prefix + path + ".ready missing/invalid boolean; .state missing/invalid string"
+    elif isinstance(states, Mapping) and provider in states:
+        issue = prefix + path + " invalid object"
+    providers = payload.get("providers")
+    if isinstance(providers, Mapping) and provider in providers:
+        raw = providers[provider]
+        ready = bool(raw) if legacy_truthiness else raw
+        if not isinstance(raw, bool):
+            issue = prefix + f"providers.{provider} invalid boolean {raw!r}"
+        elif not raw:
+            issue = issue or prefix + f"providers.{provider}=false"
+        return ProviderEvidence(ready, issue)
+    if flat_legacy and provider in payload:
+        raw = payload[provider]
+        return ProviderEvidence(
+            bool(raw), None if raw is True else prefix + f"{provider}={raw!r} (legacy)"
+        )
+    disabled = payload.get("disabled_providers")
+    if isinstance(disabled, list) and provider in disabled:
+        issue = prefix + f"disabled_providers includes {provider!r}; {path} absent"
+    return ProviderEvidence(None, issue or prefix + path + f" / providers.{provider} missing")

@@ -1,0 +1,62 @@
+class ResultEnvelope:
+    ok: bool
+    complete: bool
+    source: str
+    auth: dict[str, Any]
+    failureClass: str | None = None
+    retryAfter: int | None = None
+    rateLimit: dict[str, Any] | None = None
+    message: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "complete": self.complete,
+            "source": self.source,
+            "failureClass": self.failureClass,
+            "retryAfter": self.retryAfter,
+            "rateLimit": self.rateLimit,
+            "auth": self.auth,
+        }
+        if self.message:
+            payload["message"] = self.message
+        payload.update(self.data)
+        return payload
+
+    @property
+    def exit_code(self) -> int:
+        if self.ok:
+            return 0
+        return EXIT_CODES.get(str(self.failureClass or FailureClass.TRANSPORT), 75)
+
+class PrCreateReceiptRead:
+    """Projection of ResultEnvelope; acceptance alone does not supply identity."""
+
+    accepted: bool
+    url: Any
+    output: Any
+    diagnostics: tuple[str, ...]
+
+def read_pr_create_receipt(value: object) -> PrCreateReceiptRead:
+    producer = "agent_os_github_adapter.create_pr"
+    if isinstance(value, ResultEnvelope):
+        value = value.to_dict()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return PrCreateReceiptRead(False, "", "", (f"{producer}: $ invalid JSON",))
+    if not isinstance(value, dict):
+        return PrCreateReceiptRead(False, "", "", (f"{producer}: $ invalid; expected object",))
+    diagnostics = []
+    accepted = value.get("ok") is True
+    if not accepted:
+        diagnostics.append(
+            f"{producer}: ok={value.get('ok')!r}; failureClass={value.get('failureClass')!r}"
+        )
+    if accepted and (not isinstance(value.get("url"), str) or not value["url"]):
+        diagnostics.append(f"{producer}: url missing/invalid after remote acceptance")
+    return PrCreateReceiptRead(
+        accepted, value.get("url") or "", value.get("output") or "", tuple(diagnostics)
+    )

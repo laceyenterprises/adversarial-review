@@ -1,0 +1,146 @@
+"""Dependency-free owner of launch-request status vocabulary and meanings.
+
+The `launch_requests.status` values that count as *terminal* are load-bearing:
+the terminal_at DB-invariant (TAI pack) and the worker-lifecycle liveness view
+both gate on exactly this set, and if the two definitions ever drift the
+invariant silently breaks. This lightweight, dependency-free module owns the
+canonical set so `worker_handoff.py` (writer/lease side) and
+`canonical_views/worker_lifecycle.py` (read side) import one definition instead
+of maintaining parallel copies.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal, cast
+
+
+LaunchRequestStatus = Literal[
+    "requested",
+    "admitted",
+    "leased",
+    "starting",
+    "running",
+    "waiting_approval",
+    "waiting_input",
+    "succeeded",
+    "blocked_needs_decision",
+    "failed",
+    "operator_triage_required",
+    "canceled",
+    "superseded",
+    "reaped_stuck_requested",
+]
+
+LAUNCH_REQUEST_STATUS_REQUESTED: LaunchRequestStatus = "requested"
+LAUNCH_REQUEST_STATUS_ADMITTED: LaunchRequestStatus = "admitted"
+LAUNCH_REQUEST_STATUS_LEASED: LaunchRequestStatus = "leased"
+LAUNCH_REQUEST_STATUS_STARTING: LaunchRequestStatus = "starting"
+LAUNCH_REQUEST_STATUS_RUNNING: LaunchRequestStatus = "running"
+LAUNCH_REQUEST_STATUS_WAITING_APPROVAL: LaunchRequestStatus = "waiting_approval"
+LAUNCH_REQUEST_STATUS_WAITING_INPUT: LaunchRequestStatus = "waiting_input"
+LAUNCH_REQUEST_STATUS_SUCCEEDED: LaunchRequestStatus = "succeeded"
+LAUNCH_REQUEST_STATUS_BLOCKED_NEEDS_DECISION: LaunchRequestStatus = "blocked_needs_decision"
+LAUNCH_REQUEST_STATUS_FAILED: LaunchRequestStatus = "failed"
+LAUNCH_REQUEST_STATUS_OPERATOR_TRIAGE_REQUIRED: LaunchRequestStatus = "operator_triage_required"
+LAUNCH_REQUEST_STATUS_CANCELED: LaunchRequestStatus = "canceled"
+LAUNCH_REQUEST_STATUS_SUPERSEDED: LaunchRequestStatus = "superseded"
+# DDO-12: terminal state for LRQs the stuck-requested reaper killed because
+# the durable-retry path had stopped retrying them and they sat in
+# `requested` past `HQ_STUCK_REQUESTED_REAP_THRESHOLD_S`. Distinct from
+# `failed` so the retry-scheduler does NOT pick them up — these rows are
+# forensic evidence, not retry candidates.
+LAUNCH_REQUEST_STATUS_REAPED_STUCK_REQUESTED: LaunchRequestStatus = "reaped_stuck_requested"
+
+LAUNCH_REQUEST_STATUSES: frozenset[LaunchRequestStatus] = frozenset(
+    {
+        LAUNCH_REQUEST_STATUS_REQUESTED,
+        LAUNCH_REQUEST_STATUS_ADMITTED,
+        LAUNCH_REQUEST_STATUS_LEASED,
+        LAUNCH_REQUEST_STATUS_STARTING,
+        LAUNCH_REQUEST_STATUS_RUNNING,
+        LAUNCH_REQUEST_STATUS_WAITING_APPROVAL,
+        LAUNCH_REQUEST_STATUS_WAITING_INPUT,
+        LAUNCH_REQUEST_STATUS_SUCCEEDED,
+        LAUNCH_REQUEST_STATUS_BLOCKED_NEEDS_DECISION,
+        LAUNCH_REQUEST_STATUS_FAILED,
+        LAUNCH_REQUEST_STATUS_OPERATOR_TRIAGE_REQUIRED,
+        LAUNCH_REQUEST_STATUS_CANCELED,
+        LAUNCH_REQUEST_STATUS_SUPERSEDED,
+        LAUNCH_REQUEST_STATUS_REAPED_STUCK_REQUESTED,
+    }
+)
+
+
+# Every status in this subset requires a non-NULL terminal_at on writer output.
+TERMINAL_LAUNCH_REQUEST_STATUSES: frozenset[LaunchRequestStatus] = frozenset(
+    {
+        LAUNCH_REQUEST_STATUS_SUCCEEDED,
+        LAUNCH_REQUEST_STATUS_FAILED,
+        LAUNCH_REQUEST_STATUS_OPERATOR_TRIAGE_REQUIRED,
+        LAUNCH_REQUEST_STATUS_BLOCKED_NEEDS_DECISION,
+        LAUNCH_REQUEST_STATUS_CANCELED,
+        LAUNCH_REQUEST_STATUS_SUPERSEDED,
+        LAUNCH_REQUEST_STATUS_REAPED_STUCK_REQUESTED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchRequestStatusMeaning:
+    """Status evidence only; never publication, deferral or child-exit authority."""
+
+    status: LaunchRequestStatus | None
+    terminal: bool
+    succeeded: bool
+    blocked_needs_decision: bool
+    diagnostic: str | None = None
+
+
+def read_launch_request_status(value: object) -> LaunchRequestStatusMeaning:
+    """Interpret the writer vocabulary without guessing from process/run state.
+
+    Writers accept ``cancelled`` and persist ``canceled``. A raw legacy spelling
+    is not silently added to the durable vocabulary. Unknown evidence has a
+    diagnostic, leaving each reader's existing allow/hold policy intact.
+    """
+    if not isinstance(value, str) or value not in LAUNCH_REQUEST_STATUSES:
+        return LaunchRequestStatusMeaning(
+            status=None,
+            terminal=False,
+            succeeded=False,
+            blocked_needs_decision=False,
+            diagnostic=(
+                "session_ledger: launch_requests.status "
+                + ("missing" if value is None else f"unrecognized value {value!r}")
+            ),
+        )
+    return LaunchRequestStatusMeaning(
+        status=cast(LaunchRequestStatus, value),
+        terminal=value in TERMINAL_LAUNCH_REQUEST_STATUSES,
+        succeeded=value == LAUNCH_REQUEST_STATUS_SUCCEEDED,
+        blocked_needs_decision=value == LAUNCH_REQUEST_STATUS_BLOCKED_NEEDS_DECISION,
+    )
+
+
+__all__ = [
+    "LaunchRequestStatus",
+    "LaunchRequestStatusMeaning",
+    "LAUNCH_REQUEST_STATUSES",
+    "TERMINAL_LAUNCH_REQUEST_STATUSES",
+    "read_launch_request_status",
+    "LAUNCH_REQUEST_STATUS_REQUESTED",
+    "LAUNCH_REQUEST_STATUS_ADMITTED",
+    "LAUNCH_REQUEST_STATUS_LEASED",
+    "LAUNCH_REQUEST_STATUS_STARTING",
+    "LAUNCH_REQUEST_STATUS_RUNNING",
+    "LAUNCH_REQUEST_STATUS_WAITING_APPROVAL",
+    "LAUNCH_REQUEST_STATUS_WAITING_INPUT",
+    "LAUNCH_REQUEST_STATUS_SUCCEEDED",
+    "LAUNCH_REQUEST_STATUS_BLOCKED_NEEDS_DECISION",
+    "LAUNCH_REQUEST_STATUS_FAILED",
+    "LAUNCH_REQUEST_STATUS_OPERATOR_TRIAGE_REQUIRED",
+    "LAUNCH_REQUEST_STATUS_CANCELED",
+    "LAUNCH_REQUEST_STATUS_SUPERSEDED",
+    "LAUNCH_REQUEST_STATUS_REAPED_STUCK_REQUESTED",
+]

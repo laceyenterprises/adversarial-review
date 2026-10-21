@@ -865,6 +865,15 @@ writes are best-effort and cannot suppress a page or fail a completed review.
 A new head still re-arms review through the existing REVIEWSTALL-01 policy.
 
 
+## Producer-owned evidence readers
+
+PRM-06 centralizes quota, broker, launch-status, dispatch and publication envelope
+interpretation against pinned producer types and captured examples. Account
+holds and reviewer-route logs identify the producer and exact unavailable field;
+AMA audits retain the same diagnostics in `harnessResolution.diagnostics`.
+Routing reasons, account order, thresholds, retry authority and legacy shims stay
+unchanged. See [reader ownership, capture provenance and exact refresh commands](docs/producer-contract-readers.md).
+
 ## State machines and smoke verification (SMV v1)
 
 OPDECPAGE-01: operator-decision notices observe closure ownership without changing

@@ -1,0 +1,125 @@
+# PR publication receipts (PRM-05)
+
+Worker-pool owns publication orchestration and D1 records; the GitHub adapter
+owns remote-operation envelopes. Acceptance, captured identity, local recording,
+process exit, launch terminality and delivered multi-repository work are separate
+facts. This contract adds types, shared interpretation and diagnostics to the
+existing surfaces. It adds no admission, identity, attestation or merge policy.
+
+## Existing command inventory
+
+| Existing surface | Output and definition | Reader / meaning |
+|---|---|---|
+| `hq pr open` | Text/PR URL; **no `--json` mode**. Consumes adapter `ResultEnvelope`, then emits D1 `PrOpenRecord` through `hq-pr-open.sh.write_sidecar` and `publication_receipts.write_pr_open_record`. | Adapter-owned `envelope.read_pr_create_receipt`; D1 `publication_receipts.read_pr_open_record`; existing `pr_open_finality.pr_open_records` and `worker_outcome.publication_receipt_matches`. |
+| `hq pr adopt` | JSON by default: the persisted build-completion row from `build_completion_capture.capture_pr_open`, projected by the ledger's existing `_build_completion_row_to_dict`; `pr_adopt.PrAdoptionReceipt` types the command result. | `publication_receipts.read_pr_open_completion`; the caller retains exact PR-number/skipped checks. This recovery command is distinct from the opener's lost-response adoption. |
+| `hq pr disposition --json` | `pr_disposition.DispositionReceipt`: `action`, optional `reason`, `pr`, `commented`. | `pr_disposition.read_disposition_receipt`; reconcile keeps subprocess exit policy and adds a separate `diagnostic` when evidence is unavailable. |
+| `hq pr drift --json` | `pr_drift.PrDriftReceipt`, emitted by the same extracted analysis function formerly embedded in the shell. | `pr_drift.read_pr_drift_receipt`; drift remains operational analysis, not publication evidence. |
+| `hq pr backfill-pr-urls` | Progress lines followed by a JSON `publication_receipts.PrUrlBackfillTally`; no `--json` flag. | `publication_receipts.read_pr_url_backfill_tally` reads the final tally object; counts are not publication acceptance. |
+| `hq pr attest` / `sign` | Interactive identity repair; diagnostic text, no receipt JSON flag. | Existing `interactive_pr` owner; unavailable to dispatched workers. |
+| `hq pr fast-merge veto` | Text/audit side effect; adapter JSON is internal. | Existing fast-merge policy unchanged. |
+| `hq pr merge-preflight` | Process exit and stderr, no JSON output. | Existing `merge_preflight.PreflightDecision`; unchanged review/activation enforcement. |
+
+The opener's private `build_completion_capture pr-open` command returns the
+small `PrOpenCompletionReceipt` object (`pr_number`: integer or null). It does
+not return the full adoption row. The shared completion reader preserves raw
+values so shell truthiness and recovery's stricter integer/number matching stay
+with their existing callers. Neither reader grants authorization.
+
+## Presence, types and status/exit semantics
+
+`PrOpenRecord`, `PrOpenRefusal`, `PrOpenCompletionReceipt` and the backfill tally
+are defined in `lib/python/cwp_dispatch/publication_receipts.py`. D1's current
+writer always emits its string fields, including empty strings for unavailable
+plan/action/fast-merge provenance; it does not convert emptiness to null.
+`goalLineage` is an object, `workspaceRepos` an array of strings, and mode flags
+are booleans. `psrAfterAction` is an optional later owner enrichment. Backfill
+can add `backfilledAt`/`backfilledBy`. The wire has no new envelope/version.
+
+D1 outcomes remain `opened`, `opened_url_missing`, and `dry-run`. `opened` is a
+remote observation with a URL, **before** required local identity writes.
+`opened_url_missing` retains an empty `prUrl`; `dry-run` blanks
+`launchRequestId`. The reader retains the legacy filter: `opened`, truthy URL,
+and false/absent `dryRun`, followed by the existing caller's launch scope and
+exact-head/repository checks. Type diagnostics do not create new refusals;
+legacy records missing newer fields remain readable. D1 alone is not a signed
+identity, successful local capture, merge or final delivered completion.
+
+The adapter's existing `ResultEnvelope` remains authoritative, including
+`complete`, nullable `failureClass`/`retryAfter`/`rateLimit`, source and auth
+metadata. `ok: true` means remote acceptance even when `url` is empty. A failed
+create response can follow a successful remote mutation, so the opener still
+reads back and adopts only an open same-owner, non-cross-repository PR with the
+expected head branch, exact commit and base. Exit failure alone never permits a
+duplicate create. The new reader does not require `complete` for creation or
+relax the existing complete-read adoption rule.
+`read_pr_create_receipt` accepts a live `ResultEnvelope`, its `to_dict()` result,
+or a JSON string, using the same acceptance and diagnostic rules for each.
+
+- Opener exit `0`: normal closeout succeeded (dry-run also exits zero).
+- Exit `3`: a PR URL is known and D1 exists, but at least one required completion
+  capture/head-attestation write failed. Stdout retains
+  `HQ_PR_OPEN_IDENTITY_INCOMPLETE url=... number=...`; both writes are attempted.
+- Exit `4`: creation was accepted but no URL was captured; D1 is
+  `opened_url_missing`, with no certified PR identity.
+- Other refusal/error exits do not by themselves prove a remote PR is absent;
+  local D1 recording can also fail after remote acceptance. Preserve readback.
+- `PrOpenRefusal` is a best-effort pre-create policy audit, with nullable worker,
+  launch, ticket, repo and branch fields. Its `durable: true` describes the
+  written audit, not publication. Not every command error produces this audit.
+- Disposition actions are `warning`, `unchanged`, `parked`, `already-parked`,
+  `unparked`; warnings exit `75`, other actions `0`. These are not PR-open states.
+- Drift verdicts are `ok`, `warn`, `stale`. Counts retain their existing units:
+  commits, files, deleted lines and conflict files. Threshold comparison order
+  and comments/labels are unchanged; a drift verdict does not attest publication.
+- Backfill counts are integer record counts (`considered`, `missing_pr_url`,
+  `resolved`, `updated`, `unresolved`). Dry-run resolution does not mean a write.
+
+`pr_open_finality` remains the inline finality owner; `worker_outcome` remains
+the exact-head receipt matcher. A missing exact-head D1 now names the producer,
+repository and `headSha`, with missing/invalid D1 field diagnostics where
+available. The same deferral/allow decisions remain in force. Worker/LRQ scoping,
+including receipt diagnostics, requires an exact launch ID match for parsed
+records, so blank-ID historical dry runs do not contribute diagnostics.
+The optional keyword-only `pr_open_records(..., diagnostics=None)` list receives
+these diagnostics plus missing-worker errors. Unreadable or invalid-JSON sidecars
+contribute neither evidence nor diagnostics: their worker/timestamp/random
+filenames cannot establish launch scope. Missing exact-head evidence still
+produces its repository/head diagnostic and defers completion.
+Harvest JSON and CLI `deferralReason` use `missing-d1: <details>`, where details
+are semicolon-separated producer/field messages; consumers classify this reason
+by its prefix. Other deferral reasons remain exact tokens.
+Per-repository changes and explicit non-final behavior remain unchanged. A
+process exit zero or one repository's receipt does not complete all repositories.
+
+## Captures and verification
+
+[Capture provenance and exact recapture commands](../lib/python/cwp_dispatch/test/fixtures/publication-receipts/README.md)
+identify real producer functions, fake transport/disposable state and permitted
+normalization. Producer tests compare serialized output against those files;
+adapter, adoption, D1 and finality readers consume the same files. Missing,
+null, wrong-type, unknown-status and stale-head mutations are negative tests.
+No runtime code reads examples or project policy.
+
+Existing suites cover local identity failure/timeout/missing identity, refused
+and adopted publication, multi-repository deferral/terminality, scoped D1 reads,
+GitHub transport behavior and drift shell integration. See
+[validation evidence](../lib/python/cwp_dispatch/test/fixtures/publication-receipts/validation.md)
+for exact file lists and observed results, including baseline limitations.
+
+No durable schema, lifecycle status/transition or smoke-verified promise changes.
+The existing state/smoke declarations and enforcement stay in effect. After
+normal merge/main-catchup, subsequent CLI invocations load these changes; no
+migration, configuration change, service restart or privileged activation is
+required. `operator_steps`: None. A same-user read-only interface check is
+`hq pr open --help` (it continues to have no JSON flag); never create a test PR
+for activation or capture.
+
+## Shell reader diagnostics and sidecar permissions
+
+The completion-capture shell reader emits the producer diagnostic on stderr
+before reporting missing PR identity, retaining skipped-status reasons.
+The drift shell reader rejects invalid JSON or a diagnostic-bearing analysis
+receipt with a nonzero exit and a diagnostic, before any verdict-dependent
+comment or label mutation. Valid `ok`, `warn`, and `stale` behavior is unchanged.
+`write_pr_open_record` sets the temporary D1 file to mode `0640` before atomic
+replacement, including for direct Python callers regardless of ambient umask.

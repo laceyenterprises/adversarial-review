@@ -1,0 +1,88 @@
+{
+  "adapter": [
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": false,
+      "exitCode": 1,
+      "failureClass": "auth",
+      "message": "HTTP 403: forbidden",
+      "ok": false,
+      "rateLimit": null,
+      "retryAfter": null,
+      "source": "gh-cli"
+    },
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": true,
+      "failureClass": null,
+      "head": "branch",
+      "ok": true,
+      "prs": [
+        {
+          "headRefName": "branch",
+          "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "headRepositoryOwner": {
+            "login": "example"
+          },
+          "isCrossRepository": false,
+          "merge_commit_sha": null,
+          "merged_at": null,
+          "number": 2,
+          "repo": "example/repo",
+          "state": "OPEN",
+          "title": null,
+          "url": "https://github.com/example/repo/pull/2"
+        }
+      ],
+      "rateLimit": null,
+      "repo": "example/repo",
+      "retryAfter": null,
+      "source": "gh-cli",
+      "state": null
+    },
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "author": null,
+      "baseRefName": "main",
+      "body": null,
+      "complete": true,
+      "failureClass": null,
+      "headRefName": "branch",
+      "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "headRepositoryOwner": {
+        "login": "example"
+      },
+      "isCrossRepository": false,
+      "isDraft": false,
+      "labels": [],
+      "merge_commit_sha": null,
+      "merged_at": null,
+      "ok": true,
+      "pr": {
+        "fullRepo": "example/repo",
+        "number": 2,
+        "owner": "example",
+        "repo": "repo"
+      },
+      "rateLimit": null,
+      "retryAfter": null,
+      "source": "gh-cli",
+      "state": "OPEN",
+      "title": null,
+      "url": "https://github.com/example/repo/pull/2"
+    }
+  ],
+  "returncode": 1,
+  "sidecar": null,
+  "stderr": "agent_os_github_adapter.create_pr: ok=False; failureClass='auth'\nHTTP 403: forbidden\ngithub adapter pr-create failed and no open PR exists for branch \u2192 main; no sidecar written (stderr: <capture-root>/workers/worker/logs/pr-open-2026-10-20T00-00-00Z_abcdef.adapter-stderr.log)\n",
+  "stdout": ""
+}

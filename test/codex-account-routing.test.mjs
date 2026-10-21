@@ -19,7 +19,9 @@ test('missing all corporate evidence holds AFH and worker spill routing consiste
   delete fixture.reserveFloors['openai-oauth-corp'];
   delete fixture.brokerAuth.provider_states['codex-corp'];
   const snapshot = groundingFor(fixture);
-  assert.deepEqual(snapshot.codexAccountSelection, { hold: true, reason: 'codex-account-evidence-unknown' });
+  assert.equal(snapshot.codexAccountSelection.hold, true);
+  assert.equal(snapshot.codexAccountSelection.reason, 'codex-account-evidence-unknown');
+  assert.ok(snapshot.codexAccountSelection.diagnostics.length > 0);
   assert.equal(reviewerModelGrounding(snapshot, 'codex').accountHold, true);
   assert.equal(direct(fixture).quotaBlocked, true);
   assert.equal((await spill(fixture)).fellBack, false);
@@ -55,7 +57,9 @@ test('AFH detects snake_case corporate auth paths without corporate broker evide
   delete fixture.brokerAuth.provider_states['codex-corp'];
   const snapshot = groundingFor(fixture);
   assert.equal(snapshot.providers['openai/oauth-corp'].authPath, 'oauth-corp');
-  assert.deepEqual(snapshot.codexAccountSelection, { hold: true, reason: 'codex-account-evidence-unknown' });
+  assert.equal(snapshot.codexAccountSelection.hold, true);
+  assert.equal(snapshot.codexAccountSelection.reason, 'codex-account-evidence-unknown');
+  assert.ok(snapshot.codexAccountSelection.diagnostics.length > 0);
   assert.equal(reviewerModelGrounding(snapshot, 'codex').accountHold, true);
   assert.equal(direct(fixture).quotaBlocked, true);
 });
@@ -93,8 +97,10 @@ for (const evidence of ['stale', 'unknown', 'missing', 'cached-stale']) {
         weeklyMeasurement: { ...personal }, measurement: { ...personal },
       };
     }
-    assert.deepEqual(groundingFor(fixture).codexAccountSelection,
-      { hold: true, reason: 'codex-account-evidence-unknown' });
+    const account = groundingFor(fixture).codexAccountSelection;
+    assert.equal(account.hold, true);
+    assert.equal(account.reason, 'codex-account-evidence-unknown');
+    assert.ok(account.diagnostics.length > 0);
     const status = reviewerModelGrounding(groundingFor(fixture), 'codex');
     assert.equal(status.accountHold, true);
     assert.equal(status.grounded, false, 'unknown evidence cannot trigger a model switch');

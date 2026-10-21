@@ -1,0 +1,146 @@
+{
+  "httpStatus": 200,
+  "payload": {
+    "auth": {
+      "configured": true,
+      "enabled": true,
+      "ready": true,
+      "status": "ready"
+    },
+    "disabled_providers": [
+      "gemini"
+    ],
+    "grants": {
+      "codex": {
+        "fingerprint_prefix": "62b1c0d7",
+        "last_refresh": 1800000000.0,
+        "provider": "codex"
+      }
+    },
+    "instance": {
+      "bind": "127.0.0.1:0",
+      "claude_code_entitled_models": [],
+      "host_endpoint": null,
+      "id": "oauth-broker-native-127.0.0.1:0",
+      "pid": 1,
+      "role": "unknown",
+      "runtime": "native"
+    },
+    "provider_states": {
+      "claude-code": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "claude-code",
+        "ready": true,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "ready"
+      },
+      "claude-code-corp": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "claude-code-corp",
+        "ready": true,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "ready"
+      },
+      "codex": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "codex",
+        "ready": true,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "ready",
+        "worker_grant_fetched_at": 1800000000.0,
+        "worker_grant_fingerprint": "4edcd29c4fda"
+      },
+      "codex-corp": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "codex-corp",
+        "ready": true,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "ready"
+      },
+      "github-app-codex-agent": {
+        "cached_token_time_to_expiry_seconds": 3600.0,
+        "can_serve": true,
+        "kind": "github-app-codex-agent",
+        "ready": true,
+        "refresh_age_measured_from": "broker_start",
+        "refresh_in_flight": false,
+        "seconds_since_last_refresh": 20.0,
+        "state": "ready"
+      }
+    },
+    "providers": {
+      "claude-code": true,
+      "claude-code-corp": true,
+      "codex": true,
+      "codex-corp": true,
+      "github-app-codex-agent": true
+    },
+    "providers_detail": {
+      "claude-code": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "ready",
+        "kind": "claude-code",
+        "state": "ready",
+        "structural": true
+      },
+      "claude-code-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "ready",
+        "kind": "claude-code-corp",
+        "state": "ready",
+        "structural": true
+      },
+      "codex": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "ready",
+        "kind": "codex",
+        "state": "ready",
+        "structural": true
+      },
+      "codex-corp": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "ready",
+        "kind": "codex-corp",
+        "state": "ready",
+        "structural": true
+      },
+      "github-app-codex-agent": {
+        "acceptance": "accepted",
+        "acceptance_reason": "probe_not_supported",
+        "consecutive_rejections": 0,
+        "consecutive_unknowns": 0,
+        "effective": "ready",
+        "kind": "github-app-codex-agent",
+        "state": "ready",
+        "structural": true
+      }
+    },
+    "refresh_in_flight": false,
+    "status": "ready",
+    "store_errors": {}
+  }
+}

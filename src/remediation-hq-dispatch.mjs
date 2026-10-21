@@ -1,3 +1,5 @@
+import { readDispatchReceipt } from './producer-contracts/dispatch-receipt.mjs';
+import { readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
 // Remediation HQ dispatch status/cancel helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave4). This is a
@@ -25,7 +27,8 @@ import { resolveHqRoot } from './remediation-reply-paths.mjs';
 
 const execFileAsync = promisify(execFile);
 
-const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
+// Remediation owns its existing terminal-event policy, including legacy spelling.
+const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => readLaunchRequestStatus(status).terminal).concat('cancelled'));
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'daemon_bounced',
@@ -95,14 +98,17 @@ function parseHqWorkerWorkspaceFromPayload(payload) {
   return null;
 }
 
-function parseHqDispatchStatus(stdout) {
+function parseHqDispatchStatus(stdout, { normalize = true } = {}) {
   const payload = parseHqJsonObject(stdout, 'hq dispatch status');
   const status = String(payload?.status || '').trim().toLowerCase();
   if (!status) {
-    throw new Error('hq dispatch status payload missing status');
+    throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
   }
+  const evidence = readDispatchReceipt(payload);
+  if (!normalize) return { ...payload, ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}) };
   return {
     ...payload,
+    ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}),
     status,
     health: String(payload?.health || '').trim().toLowerCase() || null,
   };
@@ -150,7 +156,7 @@ function parseHqDispatchWorkspaceStatus(stdout) {
   const payload = parseHqDispatchStatus(stdout);
   const workspaceDir = parseHqWorkerWorkspaceFromPayload(payload);
   if (!workspaceDir) {
-    throw new Error('hq dispatch status payload missing workspaceDir/workspacePath/worktreePath');
+    throw new Error('cwp_dispatch.dispatch: $.workspaceDir/$.workspacePath/$.worktreePath missing; hq dispatch status payload missing workspaceDir/workspacePath/worktreePath');
   }
   return {
     ...payload,

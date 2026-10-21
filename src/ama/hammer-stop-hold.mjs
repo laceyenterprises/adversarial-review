@@ -24,9 +24,8 @@ import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // hammer recorded in its terminal audit, falling back per input to the closer's
 // first observation when that audit has no comparable reading. A prior release
 // is also a known baseline for a subsequent stop. Aggregate CI conclusions are
-// not complete check rollups and cannot stand in for them. STOPHOLDREVIEW-01
-// additionally checks review-required predicates against the stop timestamp:
-// first observation must not absorb the exact-head review the hammer requested.
+// not complete check rollups and cannot stand in for them. Historical review
+// handoff stops release for a fresh hammer pass without a new review.
 //   - the PR head SHA,
 //   - the base branch SHA (a dependency merged, main moved),
 //   - mergeability (MERGEABLE / CONFLICTING; UNKNOWN is not a reading), or
@@ -70,7 +69,7 @@ export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
 export const HAMMER_GITHUB_READ_FAILURES = new Set(['github-gate-not-green', 'pr-mergeability-unknown']);
-const REVIEW_REQUIRED_STOPS = new Set(['exact-head-review-required', 'stale-review-head']);
+const LEGACY_REVIEW_HANDOFF_STOPS = new Set(['exact-head-review-required', 'stale-review-head']);
 export const HAMMER_EVIDENCE_RECHECK_INTERVAL_MS = 5 * 60_000;
 // Two ordinary five-minute polling intervals let a transport fault recover
 // before paging. Start at the first failed probe, not the old hammer timestamp.
@@ -129,7 +128,7 @@ function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence })).digest('hex');
   const next = attempt.next || (reasons.includes('primary-change-reverted')
     ? 'Restore the uncited reverted regions, then push the repaired head.'
-    : reasons.includes('stale-review-head') ? 'Obtain an approving review on the current head.'
+    : reasons.includes('stale-review-head') ? 'Revalidate the full range from the last reviewed head under a hammer lease.'
       : reasons.includes('ci-not-green') ? 'Repair the named required check and rerun it on the current head.'
         : `Supply the missing evidence for ${reasons[0]}.`);
   return { key, reasons, missingEvidence, next };
@@ -140,6 +139,11 @@ function stopReasons(attempt) {
     ...(attempt?.eligibilityTrace?.reasons || []), ...(attempt?.githubGate?.reasons || []),
     ...(attempt?.reasons || []),
   ])].sort();
+}
+
+function isLegacyReviewHandoffStop(stop) {
+  return LEGACY_REVIEW_HANDOFF_STOPS.has(stop?.predicate || stop?.reason)
+    && stopReasons(stop).every(reason => LEGACY_REVIEW_HANDOFF_STOPS.has(reason));
 }
 
 function holdStatePath(rootDir, repo, prNumber) {
@@ -256,13 +260,15 @@ export function readHammerStopForHead({
   if (terminal.length === 0) return null;
   terminal.sort((a, b) => (a.at - b.at) || (a.order - b.order));
   let latest = terminal.at(-1);
-  if (latest.outcome === 'deferred' || (STOP_OUTCOMES.has(latest.outcome) && isInfrastructureStop(latest.attempt))) {
-    // A later deferral or packaging failure is not new predicate evidence. It cannot
+  if (latest.outcome === 'deferred' || (STOP_OUTCOMES.has(latest.outcome)
+    && (isInfrastructureStop(latest.attempt) || isLegacyReviewHandoffStop(latest.attempt)))) {
+    // Deferral, packaging failure or a legacy handoff is not new predicate evidence. It cannot
     // erase a deterministic refusal and re-arm dispatch on unchanged inputs.
     let refusal = null;
     for (const item of [...terminal].reverse()) {
       if (item.outcome === 'succeeded') break;
-      if (STOP_OUTCOMES.has(item.outcome) && deterministicRefusal(item.attempt, { repo, prNumber, headSha })) {
+      if (STOP_OUTCOMES.has(item.outcome) && !isLegacyReviewHandoffStop(item.attempt)
+        && deterministicRefusal(item.attempt, { repo, prNumber, headSha })) {
         refusal = item;
         break;
       }
@@ -309,7 +315,7 @@ function recordedStopInputs(attempt) {
   if (mergeability) inputs.mergeability = ['MERGEABLE', 'CONFLICTING'].includes(mergeability) ? mergeability : null;
   // Eligibility traces normalize verdicts and summarize findings differently
   // from closer reviewState. They cannot reconstruct its canonical fingerprint.
-  // Review-required stops instead use the exact-head posting receipt below.
+  // Historical review handoff stops release independently of verdict timestamps.
   return { inputs };
 }
 
@@ -441,6 +447,17 @@ export async function evaluateHammerStopHold({
     return { action: 'release', hammerStop: stop, changed };
   }
 
+  // These historical stops expressed an obsolete review handoff, not a code
+  // or safety refusal. Retire them without waiting for a new verdict. Mixed
+  // refusals still hold for their real evidence (notably HAMINTENT).
+  if (isLegacyReviewHandoffStop(stop)) {
+    const changed = ['hammer-responsibility'];
+    if (prior?.stopKey !== stop.stopKey || !prior?.releasedBy?.includes('hammer-responsibility')) {
+      persist({ stopKey: stop.stopKey, releasedAt: now, releasedBy: changed, paged: false });
+    }
+    return { action: 'release', hammerStop: stop, changed };
+  }
+
   const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
   const sameRefusal = stop.refusal && prior?.refusal?.key === stop.refusal.key;
   const reuseEntry = prior && (stop.refusal ? sameRefusal : prior.stopKey === stop.stopKey)
@@ -465,14 +482,6 @@ export async function evaluateHammerStopHold({
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
     const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(stopBaseline(stop, entry.inputs), inputs);
-    // A review can arrive before the first closer observation. Its posting
-    // time must strictly follow this terminal attempt, never a previous hold.
-    const stoppedAt = Date.parse(stop.recordedAt || '');
-    const reviewedAt = Date.parse(reviewState?.postedAt || '');
-    if (REVIEW_REQUIRED_STOPS.has(stop.predicate)
-      && reviewState?.headSha === headSha && reviewState?.verdict
-      && Number.isFinite(stoppedAt) && reviewedAt > stoppedAt
-      && !changed.includes('review')) changed.push('review');
     // HAMUNKNOWN-02: the first hold snapshot may already have recovered from
     // the hammer's transient read. Re-evaluate the named gate on this pass's
     // live metadata instead of waiting forever for another input change.

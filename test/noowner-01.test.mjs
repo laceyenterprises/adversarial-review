@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 // NOOWNER-01 (SEV1): a PR whose hammer cannot launch or has stopped never sits
 // without an owner. Each case is built from the 2026-10-10 watcher log lines
 // quoted in the ticket; every test here fails on the pre-NOOWNER-01 main.
@@ -237,7 +238,7 @@ for (const reason of INFRA_REASONS) {
     });
   }
 
-  for (const predicate of ['verdict-not-eligible', 'primary-change-reverted', 'stale-review-head']) {
+  for (const predicate of ['verdict-not-eligible', 'primary-change-reverted', 'permanent-merge-rejection']) {
     test(`STOPHOLDINFRA-01 ${reason}: preserves an existing ${predicate} refusal`, async t => {
       const f = infrastructureFixture(t, predicate);
       const deps = { deliverAlertImpl: async () => {},
@@ -1364,52 +1365,29 @@ function reviewStopFixture(t, predicate = 'exact-head-review-required', attempt 
     prNumber: 42, headSha: REVIEW_STOP_HEAD, reviewedSha: REVIEW_STOP_HEAD,
     prMetadata: args.prMetadata, reviewState, now, logger: SILENT,
     execFileImpl: async () => assert.fail('review release needs no new GitHub read'),
+    fetchPrimaryChangeImpl: async () => { throw new Error('synthetic primary evidence unavailable'); },
     deliverAlertImpl: async text => alerts.push(text),
   });
   return { rootDir, args, alerts, evaluate };
 }
 
 for (const predicate of ['exact-head-review-required', 'stale-review-head']) {
-  test(`STOPHOLDREVIEW-01 ${predicate}: stop T0, review T1, first observation T2 releases without a page`, async t => {
-    const f = reviewStopFixture(t, predicate, { eligibilityTrace: { trace: {
-      headMatch: { current: REVIEW_STOP_HEAD, reviewed: REVIEW_STOP_HEAD },
-      verdict: { normalized: 'comment-only', nonBlockingFindings: { state: 'present', count: 16 } },
-    } } });
-    const result = await f.evaluate();
-    assert.equal(result.action, 'release');
-    assert.deepEqual(result.changed, ['review']);
-    assert.equal(f.alerts.length, 0);
-    assert.deepEqual((await f.evaluate()).changed, ['review'], 'release persists');
-  });
-
-  test(`STOPHOLDREVIEW-01 ${predicate}: review after first observation releases even with identical findings`, async t => {
-    const f = reviewStopFixture(t, predicate);
-    const oldReview = { ...f.args.reviewState, postedAt: '2025-12-31T23:59:00Z' };
-    assert.equal((await f.evaluate(oldReview, REVIEW_STOP_T1)).action, 'hold');
-    assert.equal((await f.evaluate(oldReview, REVIEW_STOP_T1)).action, 'hold');
-    assert.equal(f.alerts.length, 1);
-    const result = await f.evaluate();
-    assert.equal(result.action, 'release');
-    assert.deepEqual(result.changed, ['review']);
-    assert.equal(f.alerts.length, 1);
-  });
-
-  for (const [label, patch] of [
-    ['predates stop', { postedAt: '2025-12-31T23:59:00Z' }],
-    ['same timestamp', { postedAt: REVIEW_STOP_T0 }],
-    ['missing timestamp', { postedAt: null }],
-    ['invalid timestamp', { postedAt: 'invalid' }],
-    ['different head', { headSha: 'f'.repeat(40) }],
-    ['no review verdict', { verdict: '' }],
-  ]) {
-    test(`STOPHOLDREVIEW-01 ${predicate}: ${label} remains held and pages once`, async t => {
+  for (const postedAt of [null, 'invalid', '2025-12-31T23:59:00Z', REVIEW_STOP_T1]) {
+    test(`HAMNOREREVIEW-01 legacy ${predicate} releases without a new review (${postedAt})`, async t => {
       const f = reviewStopFixture(t, predicate);
-      for (let i = 0; i < 2; i++) {
-        assert.equal((await f.evaluate({ ...f.args.reviewState, ...patch })).action, 'hold');
-      }
-      assert.equal(f.alerts.length, 1);
+      const result = await f.evaluate({ ...f.args.reviewState, postedAt });
+      assert.equal(result.action, 'release');
+      assert.deepEqual(result.changed, ['hammer-responsibility']);
+      assert.equal(f.alerts.length, 0);
+      assert.deepEqual((await f.evaluate()).changed, ['hammer-responsibility']);
     });
   }
+  test(`HAMNOREREVIEW-01 ${predicate} preserves a real primary-change refusal`, async t => {
+    const f = reviewStopFixture(t, predicate, { reasons: ['primary-change-reverted'] });
+    const result = await f.evaluate();
+    assert.equal(result.action, 'hold');
+    assert.equal(f.alerts.length, 1);
+  });
 }
 
 test('STOPHOLDREVIEW-01 a post-stop review at first observation does not satisfy ci-not-green', async t => {
@@ -1432,7 +1410,7 @@ for (const [dimension, attempt] of [
   });
 }
 
-for (const predicate of ['ci-not-green', 'exact-head-review-required', 'stale-review-head']) {
+for (const predicate of ['ci-not-green']) {
   test(`STOPHOLDREVIEW-01 ${predicate}: unchanged review with eligibility trace remains held and pages once`, async t => {
     const f = reviewStopFixture(t, predicate, { eligibilityTrace: { trace: {
       headMatch: { current: REVIEW_STOP_HEAD, reviewed: REVIEW_STOP_HEAD },
@@ -1487,7 +1465,7 @@ test('STOPHOLDREVIEW-01 release dispatches one remediating hammer for sixteen no
 });
 
 for (const timestamp of [null, 'invalid']) {
-  test(`STOPHOLDREVIEW-01 missing or invalid terminal timestamp cannot prove a later review: ${timestamp}`, async t => {
+  test(`HAMNOREREVIEW-01 legacy handoff releases even without a terminal timestamp: ${timestamp}`, async t => {
     const f = reviewStopFixture(t);
     const result = await evaluateHammerStopHold({ rootDir: f.rootDir, hqRoot: f.args.dispatchContext.hqRoot,
       repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
@@ -1495,20 +1473,20 @@ for (const timestamp of [null, 'invalid']) {
       readAuditImpl: () => ({ attempts: [{ head: REVIEW_STOP_HEAD, path: 'hammer',
         outcome: 'failed-without-merge', reason: 'exact-head-review-required', timestamp }] }),
       deliverAlertImpl: async text => f.alerts.push(text) });
-    assert.equal(result.action, 'hold');
-    assert.equal(f.alerts.length, 1);
+    assert.equal(result.action, 'release');
+    assert.equal(f.alerts.length, 0);
   });
 }
 
-test('STOPHOLDREVIEW-01 the review receipt cannot release a newer terminal attempt', async t => {
+test('STOPHOLDREVIEW-01 a newer legacy review-handoff stop also releases for the hammer', async t => {
   const f = reviewStopFixture(t);
   assert.equal((await f.evaluate()).action, 'release');
   writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot,
     repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
     now: '2026-01-01T00:15:00Z', attempt: { outcome: 'failed-without-merge',
       head: REVIEW_STOP_HEAD, path: 'hammer', reason: 'exact-head-review-required' } });
-  assert.equal((await f.evaluate()).action, 'hold');
-  assert.equal(f.alerts.length, 1);
+  assert.equal((await f.evaluate()).action, 'release');
+  assert.equal(f.alerts.length, 0);
 });
 
 test('STOPHOLDREVIEW-01 a satisfied review predicate cannot bypass the per-PR retry cap', async t => {
@@ -1522,3 +1500,16 @@ test('STOPHOLDREVIEW-01 a satisfied review predicate cannot bypass the per-PR re
   assert.equal(hqLaunches(deps).length, 0);
   assert.ok(f.alerts.every(alert => alert.options.event !== 'ama_closer.hammer_stop_hold'));
 });
+
+for (const legacy of ['exact-head-review-required', 'stale-review-head']) {
+  test(`HAMNOREREVIEW-01 later ${legacy} cannot erase an earlier primary-change refusal`, async t => {
+    const f = reviewStopFixture(t, 'primary-change-reverted');
+    writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot,
+      repo: f.args.dispatchContext.repo, prNumber: 42, headSha: REVIEW_STOP_HEAD,
+      now: REVIEW_STOP_T1, attempt: { head: REVIEW_STOP_HEAD, path: 'hammer',
+        outcome: 'failed-without-merge', reason: legacy } });
+    const result = await f.evaluate();
+    assert.equal(result.action, 'hold');
+    assert.equal(result.hammerStop.predicate, 'primary-change-reverted');
+  });
+}

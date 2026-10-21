@@ -104,6 +104,13 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
 fi
+HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
+if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ]; then
+  HAM_PHASE_OUTCOME=head-changed
+  HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the built head; released for the next hammer pass."
+  ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
+  ham_publish_abort 20; return 20
+fi
 if ! ham_audit_retry "<<RUN_DIR>>/audit-identity.json" "$HAM_AUDIT_PR_VIEW_STDERR" \
   ham_entitled_gh api graphql -f 'query={ viewer { login databaseId } }' --jq '.data.viewer'; then
   ham_publish_abort 1; return 1
@@ -111,7 +118,9 @@ fi
 # Deliver a previous run's exact edge before evaluating starting-base provenance.
 if ! HAM_RECOVERED_BODY=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pending-attestation.mjs read \
   <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" "<<RUN_DIR>>/audit-identity.json"); then
-  HAM_PHASE_OUTCOME=exact-head-review-required
+  HAM_PHASE_OUTCOME=pending-attestation-unavailable
+  HAM_NO_MERGE_NOTE="HAM closing status — no merge. Pending head-bound attestation could not be read or authenticated; released for the next hammer pass."
+  ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
   ham_publish_abort 20; return 20
 fi
 if [ -n "$HAM_RECOVERED_BODY" ]; then
@@ -127,7 +136,7 @@ if [ -n "$HAM_RECOVERED_BODY" ]; then
     current=$(ham_pr --json headRefOid --jq '.headRefOid') || return 1
     [ "$current" = "$POST_REMEDIATION_SHA" ] || {
       HAM_RECOVERY_HEAD_CHANGED=1
-      echo "pending attestation head changed; exact-head review required" >&2
+      echo "pending attestation head changed; releasing for the next hammer pass" >&2
       return 1
     }
     ham_audit_lease_current || { echo "merge lease lost before recovered audit post" >&2; return 1; }
@@ -136,7 +145,9 @@ if [ -n "$HAM_RECOVERED_BODY" ]; then
   if ! ham_audit_retry "<<RUN_DIR>>/audit-recovery.out" "$HAM_AUDIT_COMMENT_POST_STDERR" \
     ham_recover_edge; then
     if [ "$HAM_RECOVERY_HEAD_CHANGED" -eq 1 ]; then
-      HAM_PHASE_OUTCOME=exact-head-review-required
+      HAM_PHASE_OUTCOME=head-changed
+      HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head changed; released for the next hammer pass to validate the new head."
+      ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
       ham_publish_abort 20; return 20
     fi
     HAM_PHASE_OUTCOME=audit-comment-unavailable
@@ -148,20 +159,22 @@ if [ -n "$HAM_RECOVERED_BODY" ]; then
     ham_publish_abort 1; return 1
   fi
 fi
-# Never publish a validation claim before the independent range proof. A
-# failed proof releases ownership; LEASEDEFER-01 recovers the unvalidated head
-# through bounded exact-head review without an ambient-credential label.
-if ! ham_is_full_sha "${HAM_BASE_HEAD:-}"; then
-  HAM_PHASE_OUTCOME=exact-head-review-required
-  ham_publish_abort 20; return 20
-fi
-HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
-if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
-  ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+# HAMNOREREVIEW-01: validation covers the whole built head. A missing round
+# record widens responsibility to the review's own proven head, never review.
+ham_prove_audit_range() {
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-    > "<<RUN_DIR>>/range.json"; then
-  HAM_PHASE_OUTCOME=exact-head-review-required
-  ham_publish_abort 20; return 20
+    > "<<RUN_DIR>>/range.json"
+}
+if ! ham_is_full_sha "${HAM_BASE_HEAD:-}" || ! ham_prove_audit_range; then
+  if ! ham_is_full_sha "<<REVIEWED_SHA>>"; then
+    HAM_PHASE_OUTCOME=reviewed-head-unavailable
+    ham_publish_abort 20; return 20
+  fi
+  export HAM_BASE_HEAD=<<REVIEWED_SHA>>
+  echo "hammer assumes responsibility for the full reviewed-to-built range: $HAM_BASE_HEAD -> $HAM_BUILT_HEAD" >&2
+  # The reviewed-starting-base path needs no remediation ledger or history read.
+  ham_prove_audit_range || { ham_publish_abort 1; return 1; }
 fi
 # REBASEPROV-01: persist the independently proven R -> current edge so daemon
 # reconstruction remains valid after the hammer exits. Keep HAM_BASE_HEAD for CAS.
@@ -249,7 +262,7 @@ ham_existing_terminal_audit_comment_id() {
   # edge is idempotent, and only an entitled App author's comment can be edited.
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
     "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-audit-comment-id.mjs \
-      "$HAM_BASE_HEAD" "$POST_REMEDIATION_SHA" "$HAM_AUDIT_COMMENT_MARKER"
+      "$HAM_AUDIT_BASE_HEAD" "$POST_REMEDIATION_SHA" "$HAM_AUDIT_COMMENT_MARKER"
 
 }
 if [ -z "${HAM_GH_TOKEN:-}" ]; then
@@ -308,8 +321,8 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   HAM_PUSHED_HEAD=""
 
   if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
-    # Preserve the existing lease-protected git route. Range proof below will
-    # request one exact-head review, rather than turning this into an escalation.
+    # Preserve the existing lease-protected git route. Validation and the audit
+    # cover the full reviewed-to-built range when starting-base proof is absent.
     HAM_API_PUBLISH_FALLBACK=1
     export HAM_API_PUBLISH_FALLBACK
     HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')

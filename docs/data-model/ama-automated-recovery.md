@@ -11,6 +11,12 @@ Recovery retains AMA ownership while requesting a current-head re-review or
 retrying the ordinary capped hammer. It grants no merge authority and does not
 waive the closer's safety, identity, CI, grace, or lease gates.
 
+HAMNOREREVIEW-01 binds recognized hammer ownership to the current head through
+`result.ownerProofFacts.headSha` and `liveHeadCloserAuthored`. That head retries
+the ordinary capped hammer instead of requesting review for stale or unknown
+finding evidence. Older-head ownership cannot select this route, and safety
+holds and every merge predicate remain in force.
+
 The directory is relative to the caller's `rootDir`. The key is the lowercase
 hex SHA-256 of the UTF-8 string `${repo}#${prNumber}@${headSha || 'unknown'}`.
 Repository spelling is used verbatim, including case. Each key has:

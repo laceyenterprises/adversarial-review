@@ -13,7 +13,6 @@ import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { createAmaHammerBackgroundQueue, DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS } from '../src/ama-hammer-background-dispatch.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
@@ -568,7 +567,7 @@ for (const handoffHead of [headSha, 'c'.repeat(40)]) {
       .run(repo, prNumber, reviewed, reviewed);
     const identity = { rootDir, repo, prNumber, headSha: handoffHead };
     acquireAmaCloserLease(identity);
-    await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => null });
+    updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
     const result = requestReviewRereview({ rootDir, repo, prNumber, db,
       targetRevisionRef: headSha, reason: 'auto-refresh: PR head moved' });
     assert.equal(result.triggered, handoffHead === headSha);
@@ -752,7 +751,7 @@ for (const [label, rowHead, settledHead] of [
   });
 }
 
-test('STOPHOLDREVIEW-01 live bodies wait for the matching SQLite posting receipt', async t => {
+test('HAMNOREREVIEW-01 a legacy handoff stop releases before SQLite review reconciliation', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'stopholdreview-reconcile-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
@@ -788,10 +787,10 @@ test('STOPHOLDREVIEW-01 live bodies wait for the matching SQLite posting receipt
   };
   await maybeDispatchAmaClosureFor(args);
   assert.equal(liveReads, 1, 'the pending-row pass resolved the live review body');
-  assert.equal(holds[0].action, 'hold', 'live bodies alone cannot prove the review postdates the stop');
+  assert.equal(holds[0].action, 'release', 'hammer responsibility needs no later review receipt');
   reviewStateRow.review_status = 'posted';
   await maybeDispatchAmaClosureFor(args);
   assert.equal(liveReads, 2);
   assert.equal(holds[1].action, 'release', 'a later pass observes the reconciled receipt');
-  assert.deepEqual(holds[1].changed, ['review']);
+  assert.deepEqual(holds[1].changed, ['hammer-responsibility']);
 });

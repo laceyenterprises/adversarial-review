@@ -13,7 +13,6 @@ import { amaCloserDispatchFilePath, maybeDispatchAmaCloser } from '../src/ama/di
 import { closeEmptyPullRequest, EMPTY_PR_COMMENT } from '../src/empty-pr-close.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached } from '../src/hamclose-review-admission.mjs';
-import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
 
 const repo = 'fixture/repo';
@@ -77,7 +76,7 @@ test('HAMCLOSE-03 replay B: delivered ceiling transfers a newer nonempty head to
     } });
   assert.equal(hammers, 1, JSON.stringify(closureStore));
   assert.equal(acquireAmaCloserLease(identity).acquired, false);
-  await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => ({ triggered: true }), logger: quiet });
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
   const reviewRow = { rereview_requested_at: '2026-10-12T06:15:00Z', revision_ref: headSha, rereview_reason: `system-orphan-head-review:${headSha}` };
   assert.equal(hammerHandoffReviewBypass({ ...identity, db, row: reviewRow }), true);
   db.prepare(`INSERT INTO reviewer_passes(pass_id,repo,pr_number,attempt_number,reviewer_class,pass_kind,
@@ -213,7 +212,7 @@ for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes
   const rootDir = root(t), headSha = 'b'.repeat(40), prNumber = 30;
   const identity = { rootDir, repo, prNumber, headSha };
   acquireAmaCloserLease(identity);
-  await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => ({ triggered: true }), logger: quiet });
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
   const store = { merged: false };
   let hammers = 0;
   const args = { ...identity, evidence: { headSha, hasHammerCommits: false }, store, findings,

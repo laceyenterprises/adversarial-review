@@ -16,7 +16,7 @@ const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
-const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
+const { consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
@@ -29,6 +29,8 @@ const { prepareMarkRereviewCiBlocked, prepareMarkAttemptStarted, prepareMarkPost
   prepareReleaseUnsettledPostedReview } = await import('../../src/review-state-statements.mjs');
 const { requeuePostedReviewWithoutHead } = await import('../../src/posted-review-head-repair.mjs');
 const { decideClosureOwner } = await import('../../src/ama/closure-owner.mjs');
+const { isEligibleForAmaClosure } = await import('../../src/ama/eligibility.mjs');
+const { fetchHammerHeadRange } = await import('../../src/ama/hammer-head-validation.mjs');
 const { fleetCommitIdentityMatches } = await import('../../src/ama/hammer-head-validation.mjs');
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
 const quiet = { log() {}, warn() {}, error() {} };
@@ -185,10 +187,30 @@ if (scenario === 'clean') {
   const oldHead = headSha;
   writeFileSync(join(gitDir, 'fixture.txt'), 'synthetic remediated change\n'); git('add', 'fixture.txt'); git('commit', '-q', '-m', 'Synthetic hammer repair'); headSha = git('rev-parse', 'HEAD');
   assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha: oldHead }, currentHead: headSha }).owner, 'review');
-  await handoffHammerReview({ ...identity(), requestBoundedReviewImpl: async () => ({ triggered: true }), logger: quiet });
-  createFollowUpJob({ ...identity(), revisionRef: headSha, reviewerModel: 'gemini', reviewBody: cleanBody, changedFiles: ['fixture.txt'] });
-  const drained = await consumeFollowUpJobsUntilCapacity(drain); assert.equal(drained.stopped, 1);
-  await tick(); assert.equal(store.merged, true); assert.notEqual(headSha, oldHead);
+  const retry = await handoffHammerReview({ ...identity(),
+    requestBoundedReviewImpl: () => assert.fail('hammer heads never request review'), logger: quiet });
+  assert.equal(retry.outcome, 'hammer-retry-required');
+  assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'failed-without-merge');
+  // A fresh hammer assumes responsibility from the reviewed head. Exercise the
+  // same range and predicate used by publication, then merge disposable Git.
+  const range = await fetchHammerHeadRange({ reviewedHead: oldHead, currentHead: headSha,
+    hammerBaseHead: oldHead, get: refuse });
+  const body = `HAM-Base-Head: ${oldHead}\nHAM-Validated-Head: ${headSha}`;
+  const primaryChange = { headSha, hasHammerCommits: false };
+  const verdict = isEligibleForAmaClosure({ headSha: oldHead, verdict: 'comment-only', riskClass: 'low',
+    remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 1, nonBlockingFindingIdentities: ['cleanup'] },
+  { headSha, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [],
+    statusCheckRollup: [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }] },
+  { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+  { primaryChange, hamTerminalRemediation: { active: true, commit: { sha: headSha },
+    auditComment: { body, findings: [{ title: 'Cleanup', blocking: false, addressed: true }] } },
+    hamTerminalRemediationGroundTruth: { range, commit: { sha: headSha, changedFiles: ['fixture.txt'], primaryChange },
+      auditComment: { body, author: 'hammer-worker' } } });
+  assert.equal(verdict.eligible, true, JSON.stringify(verdict));
+  git('checkout', '-q', 'main'); git('merge', '--ff-only', headSha); git('push', '-q', 'origin', 'main');
+  store.merged = true;
+  assert.notEqual(headSha, oldHead);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
   // A finished same-head hammer releases retry ownership and fleet capacity.
   const retrySubject = { ...identity(), prNumber: prNumber + 10 };
@@ -298,10 +320,10 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
-    wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
+    wakeRearmed: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
   const ceilingPr = 8, ceilingLogs = [];

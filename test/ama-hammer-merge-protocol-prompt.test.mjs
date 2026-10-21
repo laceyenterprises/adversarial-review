@@ -5,7 +5,6 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 
 import {
   BRANCH_NOT_PROTECTED_STDERR,
@@ -17,7 +16,6 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
-const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$HAM_RUN_DIR\/range\.json"(?: 2> "\$HAM_RUN_DIR\/range\.stderr")?/;
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
@@ -25,61 +23,14 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
-test('FINALCLOSE-01 publish transfers only a completed negative proof to exact-head review', t => {
+test('HAMNOREREVIEW-01 prompt keeps hammer responsibility through publication and merge', () => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(HAMMER_TEMPLATE, /tree IDs/);
-  const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
-  const end = HAMMER_TEMPLATE.indexOf('\n```', start);
-  const block = HAMMER_TEMPLATE.slice(start, end);
-  assert.match(block, /hammer-head-context\.mjs/);
-  assert.match(block, /--pr <<PR_URL>>/);
-  assert.match(block, RANGE_PROBE);
-  for (const exitCode of [1, 65, 124]) {
-    const dir = mkdtempSync(join(tmpdir(), 'hammer-provenance-abort-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    mkdirSync(join(dir, 'bin'));
-    const runDir = join(dir, 'run');
-    mkdirSync(runDir);
-    const captured = join(dir, 'attempt.json');
-    writeFileSync(join(dir, 'bin', 'ama-audit.mjs'), `import {readFileSync,writeFileSync} from 'node:fs';
-      const args=process.argv.slice(2); writeFileSync(${JSON.stringify(captured)},readFileSync(args[args.indexOf('--attempt-json')+1]));`);
-    writeFileSync(join(dir, 'bin', 'merge-action-receipt.mjs'), '');
-    writeFileSync(join(runDir, 'range.stderr'), 'synthetic provenance read failure\n');
-    writeFileSync(join(runDir, 'hammer-merge.sh'), renderHammerProcedure('hammer-merge', {
-      ROOT_DIR: dir, HQ_ROOT: dir, RUN_DIR: runDir, REPO: 'fixture/repo', PR_NUMBER: '42',
-      REVIEWED_SHA: 'b'.repeat(40), TARGET_REMEDIATION_SHA: 'a'.repeat(40),
-      PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWER: 'synthetic-reviewer',
-      RISK_CLASS: 'low', MERGE_METHOD: 'squash',
-    }));
-    const script = block.replace(RANGE_PROBE, `(exit ${exitCode})`)
-      .replace(/[^\n]*ham_gh pr comment[^\n]+/g, 'echo re-review')
-      .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')
-      .replaceAll('<<ROOT_DIR>>', '"$HAM_TEST_ROOT"')
-      .replaceAll('<<RUN_DIR>>', runDir)
-      .replaceAll('<<REPO>>', 'fixture/repo');
-    const result = spawnSync('bash', ['-c', `
-      ham_release_merge_lease() { echo released; }
-      ham_mark_merge_lease_retryable_abort() { echo "retryable:$1"; }
-      ${script}`],
-      { encoding: 'utf8', timeout: 5000,
-        env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_TEST_ROOT: REPO_ROOT,
-          HAM_RUN_DIR: runDir, HAM_MERGE_LEASE_HELD: '1', HAM_MERGE_LEASE_ID: 'fixture',
-          HAM_VERDICT_FILE: join(dir, 'absent-verdict.json'), POST_REMEDIATION_SHA: 'a'.repeat(40) } });
-    assert.ifError(result.error);
-    if (exitCode === 65) {
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stderr, '');
-      assert.match(result.stdout, /released\nre-review/);
-    } else {
-      assert.equal(result.status, 1, result.stderr);
-      assert.equal(result.stderr, 'synthetic provenance read failure\n');
-      assert.match(result.stdout, /retryable:history-read-failed\nreleased/);
-      assert.doesNotMatch(result.stdout, /re-review/);
-      const attempt = JSON.parse(readFileSync(captured, 'utf8'));
-      assert.equal(attempt.reason, 'history-read-failed');
-      assert.equal(attempt.historyReadError, 'synthetic provenance read failure');
-    }
-  }
+  assert.match(HAMMER_TEMPLATE, /HAM_BASE_HEAD=<<REVIEWED_SHA>>/);
+  assert.match(HAMMER_TEMPLATE, /Failed tests require repair or release for another hammer pass/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /hammer-review-handoff|exact-head-review-required|daemon merges after a clean review|failed proofs request/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /90 "\$HAM_NODE_BIN"[^\n]*hammer-head-context\.mjs/,
+    'the prompt must reuse the range published under lease');
 });
 
 test('hammer terminal evidence producers and predicate inputs use the private run directory', () => {
@@ -99,43 +50,6 @@ test('ordinary remediation publishes before validating the live head', () => {
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
   assert.match(HAMMER_TEMPLATE, /rebased\/multi-commit history uses lease-protected git/);
 });
-
-for (const [worker, handoffStatus] of [['worker', 0], ['canonical', 0], ['worker', 1]]) {
-  test(`review handoff runs as canonical owner from ${worker}, helper exit ${handoffStatus}`, t => {
-    const dir = mkdtempSync(join(tmpdir(), 'hammer-handoff-owner-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    writeFileSync(join(dir, 'id'), `#!/bin/sh\necho ${worker}\n`, { mode: 0o755 });
-    writeFileSync(join(dir, 'sudo'), `#!/bin/sh
-test "$1" = -A && test "$2" = -H && test "$3" = -u && test "$4" = canonical || exit 99
-export HANDOFF_EFFECTIVE_OWNER="$4"
-shift 4
-exec "$@"
-`, { mode: 0o755 });
-    const runtime = join(dir, 'node-runtime');
-    writeFileSync(runtime, `#!${process.execPath}
-process.stdout.write(JSON.stringify({ owner: process.env.HANDOFF_EFFECTIVE_OWNER, args: process.argv.slice(2) }));
-process.exit(${handoffStatus});
-`, { mode: 0o755 });
-    const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
-    const originalBlock = HAMMER_TEMPLATE.slice(start, HAMMER_TEMPLATE.indexOf('\n```', start));
-    assert.match(originalBlock, RANGE_PROBE);
-    const block = originalBlock
-      .replace(RANGE_PROBE, '(exit 65)')
-      .replace(/[^\n]*ham_gh pr comment[^\n]*/, ':')
-      .replace(/<<ROOT_DIR>>/g, '/fixture').replace(/<<REPO>>/g, 'fixture/repo').replace(/<<PR_NUMBER>>/g, '42');
-    const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${block}`], {
-      encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HAM_NODE_BIN: runtime,
-        HAM_HQ_OWNER: 'canonical', HANDOFF_EFFECTIVE_OWNER: worker, POST_REMEDIATION_SHA: 'a'.repeat(40) },
-    });
-    assert.ifError(result.error);
-    assert.equal(result.status, handoffStatus, result.stderr);
-    const call = JSON.parse(result.stdout);
-    assert.equal(call.owner, 'canonical');
-    assert.deepEqual(call.args, ['/fixture/bin/hammer-review-handoff.mjs',
-      '/fixture', 'fixture/repo', '42', 'a'.repeat(40)]);
-  });
-}
 
 test('starting head capture aborts before edits when its retry helper fails', () => {
   const block = HAMMER_TEMPLATE.match(/Before edits,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
@@ -542,7 +456,7 @@ test('hammer audit deduplicates exact edges and preserves earlier App attestatio
   assert.ok(lookup, 'expected the audit-comment lookup function');
   assert.match(lookup, /hammer-audit-comment-id\.mjs/);
   // No longer keyed on the per-rebase head sha (that caused the duplicate posts):
-  assert.match(lookup, /HAM_BASE_HEAD/);
+  assert.match(lookup, /HAM_AUDIT_BASE_HEAD/);
   assert.match(lookup, /POST_REMEDIATION_SHA/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_HEAD=/);
   // An existing audit is refreshed IN PLACE (PATCH edit), not skipped or duplicated:

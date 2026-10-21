@@ -156,20 +156,12 @@ when its authority becomes verifiable or its missing-evidence tuple changes.
 Unchanged or unreadable authority retains the hold.
 
 
-STOPHOLDREVIEW-01 releases `exact-head-review-required` and `stale-review-head`
-when the closer's existing review state proves a review of the held head posted
-strictly after the terminal attempt timestamp (`startedAt`, `timestamp`, or
-`recordedAt`, also carried in the stop key). This releases with `review` even
-when that review predates `firstObservedAt`; a first-observation release sends
-no hold page. Missing/unparseable timestamps, an older review, or another head
-do not satisfy this predicate. The orchestration passes the posted row's
-`posted_at` only when its `reviewer_head_sha` matches the settled reviewed head.
-This posting receipt is admission evidence, separate from the review fingerprint.
-Live review reconciliation supplies bodies without verified submission
-timestamps. A resolved live body therefore cannot substitute for the matching
-local `posted` row's receipt. If no other input changes, a review-required hold
-remains until a later closer pass observes that row after SQLite reconciliation;
-same-tick posting-time release from live bodies is not guaranteed.
+HAMNOREREVIEW-01 supersedes STOPHOLDREVIEW-01. Historical
+`exact-head-review-required` and bare `stale-review-head` stops release with
+`hammer-responsibility`, independent of review timestamps or new verdicts.
+A real co-occurring refusal, including primary-change preservation, keeps its
+hold. Ordinary dispatch leases and retry caps decide whether another hammer
+can run; this release grants no merge authority.
 
 Comparable terminal audit readings (rebased base, live head and mergeability)
 override observed baselines, including holds created before this fix.

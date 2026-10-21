@@ -155,7 +155,7 @@ test('HAMCLOSE-01 builder pushes and pushes above an attested head require revie
   assert.deepEqual(hammerAttestationChain([audit(hammer, next), ...comments], reviewed, next), [hammer, next]);
 });
 
-test('HAMCLOSE-01 forged commit fields and a reusable old App audit never grant authority; review takes ownership', async () => {
+test('HAMCLOSE-01 forged commit fields and a reusable old App audit never grant authority or request review', async () => {
   const primaryChange = { headSha: hammer, hasHammerCommits: false };
   const body = 'An earlier hammer audit without an exact head binding';
   const verdict = isEligibleForAmaClosure(clean, { headSha: hammer, isOpen: true,
@@ -180,7 +180,7 @@ test('HAMCLOSE-01 forged commit fields and a reusable old App audit never grant 
     repo: 'fixture/repo', prNumber: 8139, headSha: hammer, logger: { log() {}, warn() {} },
     probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
     requestBoundedReviewImpl: async () => ({ triggered: true }) });
-  assert.equal(recovery.reason, 'closer-head-exact-review-requested');
+  assert.equal(recovery, null);
 });
 
 test('HAMCLOSE-01 handed review clean merges; comment-only findings acquire exactly one new hammer', t => {

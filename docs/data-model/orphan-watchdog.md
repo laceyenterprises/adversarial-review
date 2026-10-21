@@ -25,7 +25,11 @@ the first PR-wide observation without a proven owner, across head changes. Poll 
 the bound. Held, draft and terminal PRs do not enter recovery.
 
 After the bound, current-head review evidence chooses the next action: request
-review if absent and re-review remains open, otherwise request a hammer. Recovery
+review if absent and re-review remains open, otherwise request a hammer.
+HAMNOREREVIEW-01 carries `ownerProofFacts.liveHeadCloserAuthored` from closure
+orchestration, bound by `ownerProofFacts.headSha`. Recognized current-head hammer
+work selects the hammer even without an exact-head review; older-head evidence
+cannot select that route. This changes ownership only, preserving merge gates. Recovery
 shares review admission's settled Comment-only predicate (captured completed
 passes and follow-up jobs), and reads the terminal final-round ledger even when
 the reviewed head is older. If the readonly captured-pass query fails (including
@@ -76,7 +80,7 @@ unknown summaries. `evidence` retains the latest summary for existing readers.
 Migration adds a singleton `ownership` clock table, nullable `heads.idleSince`, JSON `outcomes` (default `[]`) and the
 legacy reservation column if absent. Old tick and uncertainty columns remain
 readable but no longer control recovery. The independent closer-head review
-helper retains its historical `rereview` guard; ownerless recovery uses the
+helper is retired by HAMNOREREVIEW-01; ownerless recovery uses the
 shared two-attempt budget instead.
 
 Every recovery emits one `ownerless-recovery` log line containing repo, PR,

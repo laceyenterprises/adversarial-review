@@ -564,3 +564,17 @@ test('HAMROUTE-01: observing a proof wait never adds a live ownership read to th
   assert.equal(waiting.amaClosureResult.ownerlessIdleMs, 15 * 60_000);
   assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
 });
+
+for (const factHead of ['current', 'prior']) {
+  test(`HAMNOREREVIEW-01 ownerless hammer head stays with hammer when evidence names ${factHead}`, async t => {
+    const { tick, calls } = setup(t);
+    const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
+      result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head'],
+        ownerProofFacts: { headSha: factHead, reviewedHeadSha: 'reviewed', verdict: 'comment-only',
+          liveHeadCloserAuthored: true } } };
+    await tick(0, overrides);
+    await tick(31, overrides);
+    assert.equal(calls.launches.length, factHead === 'current' ? 1 : 0);
+    assert.equal(calls.reviews.length, factHead === 'current' ? 0 : 1);
+  });
+}

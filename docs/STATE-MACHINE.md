@@ -843,32 +843,23 @@ classification uses check/step names because rollups omit output; the operator
 must inspect the actual failure before applying an override. Unchanged delivered
 receipts skip writes and paging locks.
 
-LEASEDEFER-01 adds `closer-head-exact-review-requested` → `ama-pending` when
-an unheld, unvalidated closer-trailer stale head has only stale/unsettled/unknown-finding
-eligibility misses and its exact-head review request is triggered or already
-pending (`status: already-pending`, `reason: review-already-pending`). Recovery
-first proves no held PR-wide closer lease and no queued/running or uncertain
-launch ownership. Live/uncertain owners retain retry/watchdog routing. Proven
-`hamTerminalRemediationValidated` heads retain merge authority; a failed range
-proof cannot publish a new `HAM-Validated-Head` audit claim.
-Hard refusals retain `needsOperator`; the watcher-owned duplicate-family census
-hold retains its 30-second retry. Refused requests continue to the
-elapsed OWNERPROOF-01 watchdog and its per-head two-attempt exhaustion page.
-A closer tip without a closer-only chain may admit a HAM repair attempt only
-after an authoritative probe proves no live review on the new head. Unknown
-reviewer identity without chain proof leaves resume off. In either case,
-the exact-head terminal-remediation validator retains merge authority.
+HAMNOREREVIEW-01 supersedes the LEASEDEFER-01 review recovery leaf and the
+HAMCLOSE-01 hammer review transfer. A validated hammer head remains the hammer's
+closure responsibility. If the captured remediation-round base cannot be proven,
+publication sets `HAM_BASE_HEAD` to the last reviewed SHA and certifies that whole
+range to the built head. A provable base keeps its existing range. Both routes
+retain the merge lease, live-head CAS, exact-head required checks, HAMINTENT,
+head-bound attestation and signer checks. Head movement or validation failure
+releases for another hammer pass, never an exact-head review.
 
-HAMCLOSE-01 adds `dispatched → handed-to-review`: the completed hammer records
-an exact-head review transfer instead of a terminal failure. The canonical
-daemon owner executes the handoff helper; its bounded local review CAS completes
-before the lease transition. A thrown request retains dispatched ownership for
-normal failure settlement and capped retry. The review CAS
-owns that head while the handed lease stops blocking review/merge. A clean
-review uses daemon merge; any findings use a new, single-claim hammer through
-the existing retry/lifetime caps. App-authored base/head attestation chains
-permit API or git publication to merge in the same run from a trustworthy
-starting base. A push beyond the attested SHA requires exact-head review.
+Historical `exact-head-review-required` and bare `stale-review-head` stops release
+with `hammer-responsibility` without a new review. Mixed safety refusals retain
+their holds. Recognized closer-head evidence is bound to the current head and
+carried into automated and ownerless recovery so both select hammer. These routes
+confer dispatch ownership only; every merge predicate and retry cap still applies.
+The old handoff CLI now terminates its dispatch lease for a hammer retry without
+requesting review. Existing `handed-to-review` records remain readable during
+rolling deployment; new hammer runs never write that state.
 
 The shared `closureOwner` answer names daemon merge, hammer, review,
 remediation, conflict rebase, a bounded named wait, or page. Daemon contention

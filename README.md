@@ -1054,8 +1054,12 @@ charging no-progress counters; the first clear pass resumes dispatch. A stale
 hint expires after five minutes without closer polling and normal backoff
 resumes. Findings dispatch one hammer through the
 real closer, with a durable dispatch record and lease. The fake worker repairs
-local Git, hands off to exact-head review, and an approved review drains through
-the real follow-up consumer and merges through the watcher closure phase.
+local Git. A legacy handoff invocation releases for another hammer without
+requesting review; a fresh hammer validates the full range from the reviewed head
+through the real range and eligibility predicates, then merges disposable Git.
+Publication widens an unprovable remediation base to that reviewed head; live-head
+movement and failed validation release for the next hammer. Lease/CAS, required
+checks, primary-change preservation and authenticated head-bound evidence remain mandatory.
 An in-flight re-review request preserves its claim; settlement records the
 reviewed head or releases without charging, and a legacy headless posted row
 requeues once at its matching live revision without changing retry budgets.

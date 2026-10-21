@@ -103,16 +103,29 @@ for persisted proof and completion fields.
 When the watcher projects `operatorDecisionRequired`, it observes the PR head
 before enqueueing `adversarial_review.operator_decision_required`. A live closer
 lease, active closer dispatch, pending/in-progress remediation job for the PR,
-handoff awaiting review, or recorded available closer route holds the notice,
-even past the 45-minute backstop. After ownership ends, an operator-required
-closer outcome (`needsOperator` or closure owner `page`) sends `no-route`; a
-terminal hammer without a merged/succeeded outcome sends
-`hammer-ended-without-merge`. Otherwise the watcher sends `backstop-45m` after
-45 minutes from its first observation on that head. This observation does not
-change closer eligibility or dispatch.
+handoff awaiting review, or pending re-dispatch holds the notice. Launches across
+all dispatch heads use the shared in-flight ownership check, including automatic
+retry descendants. Requested, admitted, leased and running launches hold at any
+age. Activity resets the idle backstop; a slow hammer cannot spend that budget.
+
+After ownership ends, an operator-required closer outcome (`needsOperator` or
+closure owner `page`) sends `no-route`; retry or lifetime cap suppression sends
+`retry-cap`. A recorded non-retryable hammer outcome sends
+`non-retryable: <outcome>` only when no closer route remains. Retryable stops
+such as a moved head or expired credential keep the notice held while the
+pipeline re-dispatches. An available but idle hammer route eventually sends
+`backstop`: 45 minutes scaled by the existing load-aware timeout policy, measured
+from the beginning of its idle interval. The page text includes the reason.
+This observation does not change closer eligibility or dispatch.
 
 Before delivery, the watcher reads the live PR and requires it to remain open
-at the observed head. The GitHub subject's `terminal` flag represents PR
+at the observed head, then checks again for a new launch or pending re-dispatch.
+It also re-checks the per-head alert marker immediately before enqueue so a
+marker written during those lookups prevents duplicate delivery. Dispatch scans
+skip individual unreadable or malformed records. Series-cap evidence uses the
+reviewed SHA from the review row, current-head dispatch, or newest cross-head
+dispatch, in that order; absent all three, it matches only the observed head.
+The GitHub subject's `terminal` flag represents PR
 closure, not completion of a review or remediation round. A stopped remediation
 job on an open PR therefore remains eligible for notification. PR closure or a
 decision no longer requiring an operator clears the held observation; a new

@@ -85,6 +85,7 @@ if (scenario === 'clean') {
   const { createAgyReviewerIdentityPool } = await import('../../src/agy-reviewer-identities.mjs');
   let cleanupBlocked = false, survivorRunning = false;
   let cleanupGate = null;
+  let probeGate = null, recoveryProbeCalls = 0;
   const cleanupEntered = Promise.withResolvers();
   const makeHolderPool = () => createAgyReviewerIdentityPool({
     env: {}, runStateRootDir: rootDir, log: quiet, leaseWaitMs: 0, hqOwner: 'fixture-owner',
@@ -97,8 +98,9 @@ if (scenario === 'clean') {
     deliverAlertImpl: async () => { throw new Error('unexpected holder alert'); },
     runPinnedImpl: async ({ args }) => {
       if (args[0] === 'cleanup' && cleanupGate) { cleanupEntered.resolve(); await cleanupGate.promise; }
+      if (args[0] === 'probe') { recoveryProbeCalls++; if (probeGate) await probeGate.promise; }
       return { code: cleanupBlocked && args[0] === 'cleanup' ? 75 : 0, stdout: args[0] === 'status'
-        ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+        ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : args[0] === 'probe' ? 'probe.ok=yes\n' : '' };
     },
   });
   const holders = makeHolderPool(), independent = makeHolderPool();
@@ -130,9 +132,19 @@ if (scenario === 'clean') {
   writeReviewerRunRecord(rootDir, { sessionUuid: 'pre-spawn-failure', state: 'failed', pgid: null,
     subjectContext: { agyHolderLease: { user: first.user, reviewId: 'never-spawned' } } });
   assert.equal(await independent.refreshReadiness(), 2);
+  const failedLease = await holders.acquire();
+  probeGate = Promise.withResolvers();
+  try {
+    await holders.release(failedLease, { failed: true });
+    assert.equal(holders.projection().tokens.find(row => row.holderRef === failedLease.user).free, 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(recoveryProbeCalls, 1, 'failed release starts recovery without another readiness pass');
+  } finally { probeGate.resolve(); await holders.settleProbes(); probeGate = null; }
+  assert.equal(holders.readyCount(), 2);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
     leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true,
-    durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true };
+    durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
+    immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');

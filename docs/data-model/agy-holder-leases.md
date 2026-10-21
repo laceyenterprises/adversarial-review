@@ -18,6 +18,8 @@ not grant another slot. Duplicate declared holder aliases fail validation;
 legacy duplicate usernames count once. Concurrency remains one per holder.
 
 An exclusive nonblocking flock serializes read/modify/atomic-write operations.
+Unchanged records skip the atomic write; callback return values do not suppress
+persistence of actual mutations.
 Acquisition persists the claim before spawn. Release compares the unique lease
 generation; a stale release cannot clear a replacement. The local receipt remains
 populated and release is fenced in memory through cleanup and durable persistence,
@@ -43,10 +45,13 @@ retain both `agyHolderLease` and `agyIdentityLease` run-record fields.
 
 Failed reviews require an authenticated probe before reuse. `auth` records
 `needsProbe: true`, `failures` and `retryAt` in local epoch milliseconds. The
-first recovery probe may run immediately; failures back off 1, 2, 4, 8, then
+first recovery probe starts when failed release finishes draining, or acquisition
+discovers the durable auth requirement; failures back off 1, 2, 4, 8, then
 15 minutes, with a 15-minute cap. The holder lock spans the bounded probe,
 preventing concurrent watcher probes. Restart preserves backoff. A successful
-probe clears `auth`; quota cooldown remains in its existing separate store.
+probe for the current declaration clears `auth`. A successful obsolete-generation
+probe keeps `needsProbe` true without incrementing failures or adding backoff;
+quota cooldown remains in its existing separate store.
 
 This adds no session-ledger schema or migration. Rollback requires stopping
 new admissions and draining/adopting running reviews before restoring an older

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgyReviewerIdentityPool, runWithAgyReviewerIdentity } from '../src/agy-reviewer-identities.mjs';
@@ -226,8 +226,12 @@ test('ITP-11: terminal run records retain a live holder process on restart, incl
   writeReviewerRunRecord(root, { sessionUuid: 'timed-out', state: 'failed', pgid: 4242,
     subjectContext: { agyHolderLease: { identity: 'gemini-reviewer', user: owner, reviewId: 'survives-timeout' } } });
   let alive = true;
+  const sessionsRead = [];
+  let recoveryProbes = 0;
   const p = pool(root, { loadTokenPools: () => declarations([owner, users[1]]), loadIdentities: () => [],
     readActiveRunRecordsImpl: undefined, isPgidAliveImpl: () => alive,
+    readRunRecordImpl: session => { sessionsRead.push(session); return { state: 'failed' }; },
+    checkHqOwnerAuthImpl: async () => { recoveryProbes++; return { ok: true }; },
   });
   const lease = await p.acquire();
   assert.equal(lease.user, users[1]);
@@ -235,9 +239,106 @@ test('ITP-11: terminal run records retain a live holder process on restart, incl
   alive = false;
   await p.refreshReadiness();
   await p.settleProbes();
+  assert.deepEqual(sessionsRead, ['timed-out'], 'adoption retains the canonical run session UUID');
+  assert.equal(recoveryProbes, 1, 'the failed survivor requires authenticated recovery');
   const recovered = await p.acquire();
   assert.equal(recovered.user, owner);
   await p.release(recovered);
+});
+
+for (const user of [owner, users[0]]) test(`ITP-11: failed release immediately isolates and probes ${user}`, async t => {
+  const root = fixture(t);
+  const probe = Promise.withResolvers();
+  let probeCalls = 0;
+  const p = pool(root, {
+    loadIdentities: () => [user], loadTokenPools: () => declarations([user]),
+    checkHqOwnerAuthImpl: async () => { probeCalls++; return probe.promise; },
+    runPinnedImpl: async ({ args }) => {
+      if (args[0] === 'probe') { probeCalls++; await probe.promise; return { code: 0, stdout: 'probe.ok=yes\n' }; }
+      return { code: 0, stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+    },
+  });
+  try {
+    const lease = await p.acquire();
+    await p.release(lease, { failed: true });
+    assert.equal(p.readyCount(), 0);
+    assert.equal(p.projection().free, 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(probeCalls, 1, 'release starts recovery without a readiness pass');
+    assert.equal(await p.acquire(), null, 'pending authentication cannot admit work');
+  } finally {
+    probe.resolve({ ok: true });
+    await p.settleProbes();
+  }
+  assert.equal(p.readyCount(), 1);
+  const next = await p.acquire();
+  assert.ok(next);
+  await p.release(next);
+});
+
+test('ITP-11: acquisition synchronizes a peer authentication hold and initiates recovery', async t => {
+  const root = fixture(t);
+  const probe = Promise.withResolvers();
+  let calls = 0;
+  const p = pool(root, { loadTokenPools: () => declarations([owner]), loadIdentities: () => [owner],
+    checkHqOwnerAuthImpl: async () => { calls++; return probe.promise; },
+  });
+  await p.refreshReadiness();
+  const store = createAgyHolderLeaseStore(join(root, 'data'));
+  await store.update(owner, row => { row.auth = { needsProbe: true, failures: 0, retryAt: 0 }; });
+  try {
+    assert.equal(await p.acquire(), null);
+    assert.equal(p.readyCount(), 0);
+    assert.equal(p.projection().free, 0);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 1);
+  } finally {
+    probe.resolve({ ok: true });
+    await p.settleProbes();
+  }
+  const lease = await p.acquire();
+  assert.ok(lease);
+  await p.release(lease);
+});
+
+test('ITP-11: successful stale-generation probe stays fenced without authentication backoff', async t => {
+  const root = fixture(t);
+  const probe = Promise.withResolvers();
+  let model = 'gemini-test';
+  let calls = 0;
+  const p = pool(root, { now: () => 1000,
+    loadTokenPools: () => ({}), loadIdentities: () => [owner], resolveModel: () => model,
+    checkHqOwnerAuthImpl: async () => { calls++; return calls === 1 ? probe.promise : { ok: true }; },
+  });
+  const lease = await p.acquire();
+  await p.release(lease, { failed: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  model = 'gemini-new';
+  probe.resolve({ ok: true });
+  await p.settleProbes();
+  const store = createAgyHolderLeaseStore(join(root, 'data'));
+  assert.deepEqual(store.read(owner).auth, { needsProbe: true, failures: 0, retryAt: 0 });
+  assert.equal(p.readyCount(), 0);
+  await p.refreshReadiness();
+  await p.settleProbes();
+  assert.equal(calls, 2, 'the current generation can retry without advancing the clock');
+  assert.equal(store.read(owner).auth, null);
+  assert.equal(p.readyCount(), 1);
+});
+
+test('ITP-11: unchanged holder updates preserve the file while false-returning mutations persist', async t => {
+  const root = fixture(t);
+  const store = createAgyHolderLeaseStore(join(root, 'data'));
+  await store.update(owner, row => { row.auth = { needsProbe: true, failures: 0, retryAt: 0 }; });
+  const path = join(root, 'data', 'agy-holder-leases', `${owner}.json`);
+  const before = statSync(path, { bigint: true });
+  for (const result of [null, false, undefined, true]) assert.equal(await store.update(owner, () => result), result);
+  const after = statSync(path, { bigint: true });
+  assert.equal(after.ino, before.ino, 'read-only refusals do not replace the atomic record');
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  assert.equal(await store.update(owner, row => { row.auth.failures++; return false; }), false);
+  assert.equal(store.read(owner).auth.failures, 1, 'a false callback result does not discard real mutations');
 });
 
 for (const state of ['failed', 'completed', 'cancelled', 'launching']) {

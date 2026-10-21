@@ -827,7 +827,12 @@ function createAgyReviewerIdentityPool({
       } catch (err) {
         reason = `readiness probe threw: ${err?.message || err}`;
       }
-      if (ok && probeGeneration === currentPlan().generation) {
+      if (ok && probeGeneration !== currentPlan().generation) {
+        // Authentication succeeded, but cannot attest the new declaration.
+        // Keep admission fenced without inventing an authentication failure.
+        row.auth = { needsProbe: true, failures: row.auth?.failures || 0, retryAt: 0 };
+        isolate(state, ['holder declaration changed during authenticated probe']);
+      } else if (ok) {
         row.auth = null;
         state.needsProbe = false;
         if (!state.checkFailed && !state.draining && state.adopted.length === 0) transition(state, true, []);
@@ -1146,7 +1151,10 @@ function createAgyReviewerIdentityPool({
       state.releasing = true;
       try {
         const lease = await holderStore.update(identity.user, async row => {
-          if (row.auth?.needsProbe) return null;
+          if (row.auth?.needsProbe) {
+            isolate(state, ['authenticated holder probe required']);
+            return null;
+          }
           if (row.lease) {
             // A dead watcher can leave a live reviewer. Re-read run/process
             // evidence under the holder lock; heartbeat age grants no release.
@@ -1163,7 +1171,11 @@ function createAgyReviewerIdentityPool({
         if (lease) { state.lease = lease; state.foreignLease = null; return lease; }
       } catch (error) {
         transition(state, false, [`holder lease unavailable: ${error.message}`]);
-      } finally { state.releasing = false; }
+      } finally {
+        state.releasing = false;
+        // Start after update releases the cross-watcher lock.
+        if (state.needsProbe && !state.lease && !state.draining && !state.adopted.length) startProbe(state);
+      }
     }
     return null;
   }
@@ -1242,7 +1254,10 @@ function createAgyReviewerIdentityPool({
         const reasons = [];
         if (failed) reasons.push(`review ${lease.reviewId} failed${reason ? ` (${reason})` : ''}`);
         if (survivors) reasons.push(survivors);
-        if (failed) isolate(state, reasons);
+        if (failed) {
+          isolate(state, reasons);
+          if (cleared && !state.draining && !state.adopted.length) startProbe(state);
+        }
         else if (survivors) transition(state, false, reasons);
       }
     }

@@ -229,8 +229,12 @@ counting inherited work twice.
 
 Failed authentication recovery probes persist exponential backoff: 1, 2, 4,
 8, then 15 minutes, capped at 15 minutes, across watcher restarts. The initial
-recovery probe may run immediately. Sibling holders remain usable. Only a
-successful authenticated probe clears the hold. Quota cooldown stays in the
+recovery probe starts immediately after a failed review releases a drained holder,
+or when acquisition discovers a durable authentication hold. Admission stays
+isolated until recovery succeeds. A successful probe from an obsolete holder/model
+generation keeps admission fenced for a fresh probe without adding failures or
+backoff. Sibling holders remain usable. Only a successful authenticated probe for
+the current generation clears the hold. Quota cooldown stays in the
 existing username-keyed store and does not change role or signing identity.
 
 **Readiness and isolation.** Each drain that has a leasing Gemini candidate

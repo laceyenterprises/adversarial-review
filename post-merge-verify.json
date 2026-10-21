@@ -36,7 +36,7 @@
   "steps": [
     {
       "id": "clean",
-      "description": "Synthetic broker receipt recovery survives a lost acquire response without a delivery row or run record; live processes renew, failed releases retain the journal, and confirmed drain retries release with a positive acknowledgement. ITP-11 also verifies two synthetic ready OS holders carry one canonical gemini-reviewer identity; independent pools cannot acquire a third lease, cleanup/drain failures retain the durable fence until readiness succeeds, an in-flight release retains its local receipt during concurrent readiness, and a terminal pre-spawn record without a PGID allows re-admission. No credentials, live broker, enrollment or live provider calls.",
+      "description": "Synthetic broker receipt recovery survives a lost acquire response without a delivery row or run record; live processes renew, failed releases retain the journal, and confirmed drain retries release with a positive acknowledgement. ITP-11 also verifies two synthetic ready OS holders carry one canonical gemini-reviewer identity; independent pools cannot acquire a third lease, cleanup/drain failures retain the durable fence until readiness succeeds, an in-flight release retains its local receipt during concurrent readiness, a terminal pre-spawn record without a PGID allows re-admission, and failed release immediately isolates its drained holder and starts authenticated recovery. No credentials, live broker, enrollment or live provider calls.",
       "promise": "smv-clean",
       "edges": [
         "review-row.23",

@@ -40,8 +40,10 @@ export function createAgyHolderLeaseStore(stateDir) {
         throw error;
       }
       const row = read(user);
+      const before = JSON.stringify(row);
       const result = await fn(row);
-      writeFileAtomic(path.record, JSON.stringify(row), { mode: 0o600 });
+      const after = JSON.stringify(row);
+      if (after !== before) writeFileAtomic(path.record, after, { mode: 0o600 });
       return result;
     } finally {
       if (locked) fsExt.flockSync(fd, 'un');

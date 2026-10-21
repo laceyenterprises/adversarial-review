@@ -12,8 +12,46 @@ import {
   loadAwareTimeoutSeconds,
   MIN_MULTIPLIER,
   MAX_MULTIPLIER,
+  MAX_TIMER_DELAY_MS,
   DEFAULT_MAX_TIMEOUT_SECONDS,
 } from '../src/load-aware-timeout.mjs';
+
+test('WATCHERTIMER-01: platform cap wins over policy, nominal and huge multipliers', () => {
+  assert.equal(MAX_TIMER_DELAY_MS, 2 ** 31 - 1);
+  const busy = { enabled: true, maxMultiplier: Number.MAX_VALUE,
+    loadAvg1m: Number.MAX_VALUE, cpuCount: 1, cpuBusyPercent: 100 };
+  for (const opts of [busy, { ...busy, enabled: false }, { ...busy, loadAvg1m: 0 }]) {
+    for (const policyCap of [undefined, Infinity, Number.MAX_VALUE]) {
+      assert.equal(loadAwareTimeoutMs(Number.MAX_VALUE, { ...opts, maxMs: policyCap }), MAX_TIMER_DELAY_MS);
+      assert.equal(loadAwareTimeoutSeconds(Number.MAX_VALUE, { ...opts, maxSeconds: policyCap }),
+        Math.floor(MAX_TIMER_DELAY_MS / 1000));
+    }
+  }
+  assert.equal(loadAwareTimeoutMs(1000, { ...busy, maxMs: Infinity }), MAX_TIMER_DELAY_MS);
+  assert.equal(loadAwareTimeoutSeconds(1000, { ...busy, maxSeconds: Infinity }), Math.floor(MAX_TIMER_DELAY_MS / 1000));
+});
+
+test('WATCHERTIMER-01: clamped ms and converted seconds arm real timers without overflow warnings', async t => {
+  const warnings = [];
+  const onWarning = warning => warnings.push(warning);
+  process.on('warning', onWarning);
+  t.after(() => process.off('warning', onWarning));
+  const opts = { enabled: true, maxMultiplier: 20, loadAvg1m: 100,
+    cpuCount: 1, cpuBusyPercent: 100 };
+  for (const delay of [
+    loadAwareTimeoutMs(1e12, { ...opts, maxMs: Infinity }),
+    loadAwareTimeoutSeconds(1e12, { ...opts, maxSeconds: Infinity }) * 1000,
+  ]) {
+    const timeout = setTimeout(() => assert.fail('long timer fired immediately'), delay);
+    const interval = setInterval(() => assert.fail('long interval fired immediately'), delay);
+    t.after(() => { clearTimeout(timeout); clearInterval(interval); });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    clearTimeout(timeout);
+    clearInterval(interval);
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(warnings.filter(warning => warning.name === 'TimeoutOverflowWarning'), []);
+});
 
 test('shared load-aware multiplier parity table', () => {
   // Inputs and expected multipliers match the platform configuration contract.

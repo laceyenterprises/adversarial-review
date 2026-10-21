@@ -17,6 +17,7 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
+import { timerDelayMs } from './load-aware-timeout.mjs';
 
 const REVIEWER_PROCESS_DEADLINE_EXIT_GRACE_MS = 30_000;
 
@@ -34,7 +35,7 @@ function createReviewerProcessDeadline({
   }
   const controller = new AbortController();
   const startedAt = now();
-  let deadlineAt = startedAt + initialMs;
+  let deadlineAt = startedAt + timerDelayMs(initialMs);
   let timer = null;
   let graceTimer = null;
   let disposed = false;
@@ -67,7 +68,7 @@ function createReviewerProcessDeadline({
 
   function arm() {
     if (timer) clearTimeoutImpl(timer);
-    timer = setTimeoutImpl(expire, Math.max(0, deadlineAt - now()));
+    timer = setTimeoutImpl(expire, timerDelayMs(deadlineAt - now()));
     timer?.unref?.();
   }
 
@@ -81,7 +82,7 @@ function createReviewerProcessDeadline({
     extendTo(ms) {
       if (disposed || controller.signal.aborted) return false;
       if (!Number.isFinite(ms) || ms <= 0) return false;
-      const candidate = now() + ms;
+      const candidate = now() + timerDelayMs(ms);
       if (candidate <= deadlineAt) return false;
       deadlineAt = candidate;
       arm();

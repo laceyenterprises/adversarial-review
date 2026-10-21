@@ -19,12 +19,23 @@ import {
   createArgusSecurityDrain,
   isArgusJobClaimable,
   startArgusSecurityDrainForWatcherTick,
+  resolveArgusReviewChildTimeoutMs,
 } from '../src/argus-security-drain.mjs';
+import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 import { ARGUS_VERDICT_STATES, resolveArgusSecurityVerdict } from '../src/argus-security-verdict.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
 const T0 = Date.parse('2026-09-29T10:00:00.000Z');
 const quiet = { log() {}, warn() {}, error() {} };
+
+test('WATCHERTIMER-01: summed model fallback budgets plus slack stay below the timer limit', () => {
+  const env = {
+    ADVERSARIAL_REVIEWER_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_REVIEWER_CEILING_MAX_SECONDS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_ARGUS_REVIEWER_MODELS: 'gemini,claude,codex',
+  };
+  assert.equal(resolveArgusReviewChildTimeoutMs(env), MAX_TIMER_DELAY_MS);
+});
 
 function head(n) {
   return n.toString(16).padStart(40, '0');

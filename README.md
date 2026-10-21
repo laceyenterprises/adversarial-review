@@ -1095,6 +1095,21 @@ Operational budgets, probes, reads and lease deadlines share that policy; see
 the [wait inventory](docs/load-aware-wait-inventory.md) for bases and fixed exceptions. Other blockers and immediate pages retain their
 existing behavior. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
+
+WATCHERTIMER-01: load-aware helpers accept nominal budgets and scale each once.
+Every result is bounded by Node's `2^31 - 1` ms timer limit, including disabled
+scaling, oversized nominal values and `Infinity` policy caps. Seconds round
+down at the platform ceiling so conversion to milliseconds stays safe. Derived
+reviewer timers clamp sums and slack without another multiplier. The poll
+deadline consumes the already-scaled reviewer timeout and retains its 30-minute
+floor, with a fixed 24-hour ceiling for both workload and configured deadlines.
+The ceiling permits a full idle-host single-repo pass (50 × 15 minutes plus
+slack) but treats a pass still running after one day as hung. The existing
+`smv-refusals` sandbox smoke covers the 20-repo/5x-load deadline and timer cap;
+focused poll-guard tests additionally exercise real timers and capture overflow
+warnings. After deployment, confirm org discovery completes without
+`TimeoutOverflowWarning` or immediate `POLL_DEADLINE_EXCEEDED` exits. See the
+[call-site audit](docs/load-aware-wait-inventory.md#watchertimer-01-timer-safety-audit).
 The follow-up graph maps operator-only review holds and preservation-refusal
 failures. A matching refusal sidecar fails an exited worker's round; successful
 publication clears that sidecar before reporting success.
@@ -1212,7 +1227,10 @@ remediation independently of the legacy exhaustion reason/snapshot, keeps the ol
 review identity, and logs only one routing transition.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
-claim; exhaustion selects operator paging. Final-round waits honor a retained
+claim; exhaustion selects operator paging. WATCHERTIMER-01 sizes a 20-repo poll
+from a once-scaled 5x reviewer budget within the fixed 24-hour hang ceiling;
+unbounded-policy milliseconds and converted seconds remain timer-safe.
+Final-round waits honor a retained
 closer's launch timestamp on existing rows and still exhaust when that timestamp
 ages past thirty minutes. Future-dated progress cannot refresh existing rows
 on every poll or suppress their stall page.

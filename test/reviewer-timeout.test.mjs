@@ -9,12 +9,31 @@ import {
   DEFAULT_REVIEWER_TIMEOUT_MS,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
+  resolveAgyChunkTimeoutPlan,
+  resolveGeminiReviewerProcessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveFirstOutputTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { usesStreamedReviewerCeiling } from '../src/reviewer-timeout-model.mjs';
+import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+
+test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe and over-cap chunks refuse', () => {
+  const env = {
+    ADVERSARIAL_REVIEWER_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(Number.MAX_SAFE_INTEGER),
+  };
+  assert.equal(resolveReviewerTimeoutMs(env), MAX_TIMER_DELAY_MS);
+  assert.equal(resolveAgyReviewerSubprocessTimeoutMs(env, {
+    reviewerTimeoutMs: MAX_TIMER_DELAY_MS, printTimeoutMs: MAX_TIMER_DELAY_MS,
+  }), MAX_TIMER_DELAY_MS);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env), MAX_TIMER_DELAY_MS);
+  assert.throws(() => resolveAgyChunkTimeoutPlan({ chunkCount: 1, env }),
+    error => error.name === 'ReviewerChunkBudgetExceededError'
+      && error.plan.capMs === MAX_TIMER_DELAY_MS && error.plan.requiredMs > error.plan.capMs);
+});
 
 test('streamed reviewer model predicate is shared across lease and subprocess budgets', () => {
   assert.equal(usesStreamedReviewerCeiling('claude-sonnet-4'), true);

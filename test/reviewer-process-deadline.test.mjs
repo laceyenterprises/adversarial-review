@@ -4,6 +4,7 @@ import { createGeminiReviewerProcessDeadline, createReviewerProcessDeadline } fr
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from '../src/reviewer-outcomes.mjs';
 import { dispatchReviewerModel } from '../src/reviewer-harness.mjs';
+import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 function fakeClock() {
   let nowMs = 1_000_000;
@@ -30,6 +31,27 @@ function fakeClock() {
 }
 
 const quietLog = { error() {} };
+
+test('WATCHERTIMER-01: process deadline clamps initial and extended chunk budgets after slack', () => {
+  const clock = fakeClock();
+  const scheduled = [];
+  const deadline = createGeminiReviewerProcessDeadline({
+    initialMs: MAX_TIMER_DELAY_MS + 300_000,
+    ...clock,
+    setTimeoutImpl(fn, ms) {
+      scheduled.push(ms);
+      return clock.setTimeoutImpl(fn, ms);
+    },
+    log: quietLog,
+  });
+  const armed = deadline.arm();
+  assert.equal(armed.deadlineAt, clock.now() + MAX_TIMER_DELAY_MS);
+  clock.advance(1000);
+  deadline.extendForPlan({ timeoutMs: MAX_TIMER_DELAY_MS });
+  assert.equal(armed.deadlineAt, clock.now() + MAX_TIMER_DELAY_MS);
+  assert.deepEqual(scheduled, [MAX_TIMER_DELAY_MS, MAX_TIMER_DELAY_MS]);
+  armed.dispose();
+});
 
 test('CHUNKTIME-01 follow-up: the process deadline aborts as a reviewer-timeout and exits after the grace', () => {
   const clock = fakeClock();

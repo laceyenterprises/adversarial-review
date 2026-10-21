@@ -34,6 +34,13 @@ import { loadRoleConfig } from './role-config.mjs';
 export const MIN_MULTIPLIER = 1;
 export const MAX_MULTIPLIER = 6;
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
+// Node coerces larger setTimeout/setInterval delays to 1 ms.
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/** Clamp an already-sized positive delay; never apply another load multiplier. */
+export function timerDelayMs(delayMs) {
+  return Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.ceil(delayMs)));
+}
 export const CPU_BUSY_THRESHOLD_PERCENT = 85;
 const SAMPLE_INTERVAL_MS = 5_000;
 // Sampling blocks daemon event loops; failures already have a safe fallback.
@@ -167,7 +174,7 @@ export function corroboratedLoadAwareMultiplier(
  * @param {number} [opts.cpuCount]    Override CPU count (else os.cpus().length).
  * @param {number} [opts.cpuBusyPercent] Override CPU busy percent (else sampled from ps).
  * @param {number} [opts.maxSeconds]  Absolute clamp (default 3600).
- * @returns {number} Effective timeout in whole seconds, never below the nominal.
+ * @returns {number} Effective timeout (policy caps never shrink the nominal).
  * @throws {Error} when baseSeconds is not a positive finite number.
  */
 function scaledTimeout(baseValue, opts, maxValue) {
@@ -223,12 +230,19 @@ function scaledTimeout(baseValue, opts, maxValue) {
   return Math.min(cap, Math.max(nominal, effective));
 }
 
-/** Scale seconds, rounded up to whole seconds. Explicit opts support synthetic loads. */
+/**
+ * Scale a NOMINAL timeout exactly once. Do not pass an already-scaled timeout
+ * or a deadline composed from scaled inputs back through either load helper.
+ * Policy caps never shrink the nominal; the platform timer limit always wins,
+ * even when scaling is disabled or maxSeconds/maxMs is Infinity. Whole seconds
+ * are capped below that limit so conversion to milliseconds remains safe.
+ */
 export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
-  return scaledTimeout(baseSeconds, opts, opts.maxSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS);
+  return Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000),
+    scaledTimeout(baseSeconds, opts, opts.maxSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS));
 }
 
-/** Scale milliseconds without rounding short per-call budgets to whole seconds. */
+/** Same scale-once/platform-bound contract, rounded up to whole milliseconds. */
 export function loadAwareTimeoutMs(baseMs, opts = {}) {
-  return scaledTimeout(baseMs, opts, opts.maxMs ?? DEFAULT_MAX_TIMEOUT_SECONDS * 1000);
+  return timerDelayMs(scaledTimeout(baseMs, opts, opts.maxMs ?? DEFAULT_MAX_TIMEOUT_SECONDS * 1000));
 }

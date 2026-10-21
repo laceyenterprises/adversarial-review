@@ -300,7 +300,7 @@
     "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/acpx/index.mjs": "6debe24b7efd8a3ddf08b7e7c1dc2be5b09d2956fa7e4e2f25d9663d7490e658",
-    "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "31816c170b23deeaa238723a9769f4c4fd8554a9dfd25a1d5db96f2048480067",
+    "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "219655a3079583677cd6259677670af7280f0daa3bb3e0cf0479f0e79ac1ff1c",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "b70bec4bfe7769e073439682fe3de1311fc4a67fb3e32316aeca12802fbc965a",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",

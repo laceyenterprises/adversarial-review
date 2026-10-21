@@ -117,6 +117,7 @@ function buildLoaderSource({
     [fileUrl('src', 'reviewer-reattach.mjs')]: 'fixture:reviewer-reattach',
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
     [fileUrl('src', 'reviewer-broker-refresh.mjs')]: 'fixture:reviewer-broker-refresh',
+    [fileUrl('src', 'reviewer-token-ledger-lookup.mjs')]: 'fixture:reviewer-token-ledger-lookup',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
@@ -325,6 +326,9 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
+    // Keep the newer worker transport inside the same offline accounting seam.
+    'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
@@ -2287,7 +2291,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready' } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2358,6 +2362,24 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         }
       `,
     };
+    if (pooledAccountStale !== null) {
+      const quotaUrl = fileUrl('src', 'watcher-reviewer-quota.mjs');
+      sources[quotaUrl] = `
+        import * as actual from '${quotaUrl}?actual';
+        export * from '${quotaUrl}?actual';
+        export function createWatcherReviewerQuotaPollFactory(options) {
+          const beginPoll = actual.createWatcherReviewerQuotaPollFactory(options);
+          return (...args) => {
+            const poll = beginPoll(...args);
+            return { ...poll, async getGrounding(options) {
+              return { ...await poll.getGrounding(options), staleIfError: ${pooledAccountStale},
+                claudeAccountSelection: { pooled: true, hold: false, provider: 'claude-code-corp',
+                  identity: 'claude-reviewer', reason: 'declared-preference' } };
+            } };
+          };
+        }
+      `;
+    }
     if (stalePriority) {
       const storeUrl = fileUrl('src', 'watcher-retained-wakes.mjs');
       sources[storeUrl] = `
@@ -2488,6 +2510,15 @@ for (const accountEvidence of ['ready', 'missing', 'held']) test(`primary Claude
   } else {
     assert.equal(summary.reviewerSpawns.length, 0, output);
     assert.equal(summary.claims.length, 2, output);
+    assert.ok(Object.values(summary.rows).every(row => row.review_status === 'pending'), output);
+    assert.equal(summary.reviewerPassRows.length, 0, output);
+  }
+});
+
+for (const pooledAccountStale of [false, true]) test(`Claude pooled account admission rejects stale grounding without a cooldown: stale=${pooledAccountStale}`, () => {
+  const { summary, output } = runDepthDiscoveryScenario({ primaryClaude: true, depthEngaged: false, pooledAccountStale });
+  assert.equal(summary.reviewerSpawns.length, pooledAccountStale ? 0 : 2, output);
+  if (pooledAccountStale) {
     assert.ok(Object.values(summary.rows).every(row => row.review_status === 'pending'), output);
     assert.equal(summary.reviewerPassRows.length, 0, output);
   }

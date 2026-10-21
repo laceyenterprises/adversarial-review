@@ -28,6 +28,28 @@ CCX-08 adds `subjectContext.agyIdentityLease: { user, reviewId }` to a Gemini
 review that holds a lease on an agy reviewer identity (the HQ owner included).
 It is absent on every other review.
 
+ITP-12 adds `subjectContext.reviewerAccountReceipt` for declared Claude/Codex
+reviewer pools. It contains canonical `identity`, opaque `tokenAccountId`,
+`brokerProvider` (`provider` is its routing compatibility spelling), selection
+`reason`, `evidenceGeneration`, the validated version-1 `selection`, and the
+broker's secret-free `lease` (`account_id`, `lease_id`, numeric `generation`,
+`request_id`, `identity`, `broker_provider`, `holder_user`, `expires_at`, `kind`,
+`version`). `pooled: true` and `hold: false` distinguish an admitted binding.
+No token bytes, credential paths or email addresses belong in this object.
+Old records omit it; missing historical attribution stays unknown.
+
+The session UUID is the execution request ID. Native auth preparation consumes
+the receipt's provider; preference changes never rewrite it. Watcher renewal and
+startup reconciliation use the original lease fence. An active record retains
+occupancy even when a duplicate adapter invocation returns. Recovery releases
+only after confirming process drain, and keeps the receipt in the terminal record.
+Expiry cannot authorize a different account or release. A separate
+`data/reviewer-token-leases/` journal survives missing/corrupt run records and
+terminal delivery rows; reconciliation probes the recorded PGID and session UUID
+before releasing. Unknown process evidence retains the journal for retry.
+See [reviewer token leases](reviewer-token-leases.md).
+This adds metadata to the existing states, without a new state or SQL migration.
+
 ## Lease recovery contract (CCX-08)
 
 The identity pool keeps leases in watcher memory. On each readiness pass it

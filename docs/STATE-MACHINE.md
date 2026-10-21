@@ -169,6 +169,12 @@ retry re-probes capacity through the same guarded drain and logs
 to polling; a live reviewer, unavailable credentials, or other deferral does
 not trigger this retry.
 
+Declared-pool account holds release the session claim without a review attempt
+charge, log repo/PR/reason, and engage the existing bounded per-PR cascade backoff
+before another claim. Unreadable configuration preserves legacy routing only for
+roles absent from the durable last-good reviewer enrollment record; enrolled or
+unknown enrollment holds. This does not add a delivery status.
+
 ### Reviewer run-state ledger
 
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
@@ -202,6 +208,25 @@ The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
 also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
 watcher can adopt or settle the subprocess without relying only on SQLite spawn
 columns.
+
+For declared Claude/Codex pools (ITP-12), the run's subject context retains the
+canonical reviewer account receipt and broker execution lease. Renewal and
+reattach keep the original account and generation; confirmed drain releases the
+slot while preserving receipt history. Active or uncertain runs retain capacity.
+The independent `data/reviewer-token-leases/` recovery journal records acquisition
+intent before broker I/O and the original fence before pass/spawn writes. Missing
+or corrupt run records, failed releases and terminal delivery rows cannot erase
+that recovery path. A bounded-concurrency sweep outside the row cap renews live
+processes, recovers lost receipts by session request ID and retries release after
+confirmed PGID/session drain. Transport errors and negative acknowledgements log
+and retain recovery evidence. See `docs/data-model/reviewer-token-leases.md`.
+Unknown account admission releases the existing delivery claim without charging
+retry budgets, using the effective result session after any fallback. An
+unreadable fleet quota snapshot stays unavailable when every pool selection is
+held; selection holds still reach admission. Leased accounts require an explicitly
+supported runtime ID. These rules add no run state or merge-authority transition.
+At the dispatch boundary, stale-if-error grounding holds Claude and Codex pooled
+selections even without a local cooldown; fresh pooled selections remain eligible.
 
 | run-state | Meaning |
 |---|---|

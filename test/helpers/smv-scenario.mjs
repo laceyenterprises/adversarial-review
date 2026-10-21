@@ -60,7 +60,29 @@ if (scenario === 'clean') {
   assert.equal(review.reviewBody, cleanBody); assert.equal(readReviewerRunRecord(rootDir, 'synthetic-review').state, 'completed');
   await tick(); assert.equal(store.merged, true);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
-  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true };
+  const { journalReviewerTokenLease, readReviewerTokenLeases, reconcileReviewerTokenLeases } = await import('../../src/reviewer-token-leases.mjs');
+  journalReviewerTokenLease(rootDir, 'lease-smoke', 'codex-reviewer');
+  let alive = true, failRelease = true;
+  const leaseOps = [];
+  const leaseSweep = () => reconcileReviewerTokenLeases({ rootDir, rows: [], readRecord: () => null,
+    now: new Date(Date.now() + 120_000), log: quiet,
+    probeAlive: () => alive, findProcess: () => alive ? { found: true, pgid: 9001 } : { found: false },
+    ownerImpl: async value => { assert.equal(value.operation, 'recover'); return { ok: true,
+      lease: { account_id: 'synthetic', lease_id: 'synthetic', generation: 1 } }; },
+    updateLease: async (_, operation) => {
+      leaseOps.push(operation);
+      if (operation === 'release' && failRelease) throw new Error('synthetic fence failure');
+    },
+  });
+  await leaseSweep(); // Recovers a receipt lost before stdout, renews a live run.
+  alive = false;
+  await leaseSweep();
+  assert.equal(readReviewerTokenLeases(rootDir).length, 1, 'failed release stays retryable');
+  failRelease = false;
+  await leaseSweep();
+  assert.equal(readReviewerTokenLeases(rootDir).length, 0);
+  assert.deepEqual(leaseOps, ['renew', 'release', 'release']);
+  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true, leaseRecoveryRetried: true };
 } else if (scenario === 'handoff') {
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');

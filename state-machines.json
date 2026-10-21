@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "reviewerAccountPools": "ITP-12: declared Claude/Codex reviewer pools acquire shared broker execution capacity before native spawn through an explicitly supported runtime ID. Secret-free account receipts survive runtime and pass settlement. Renewal and recovery retain the original fence; only confirmed drain releases. Held selections cannot mark unreadable fleet quota available, but still reach admission. Unknown admission evidence releases the effective result session claim without charging retry budgets, including after fallback. Existing states, edges and smoke promises are unchanged; live enrollment is operator-only ITP-19.",
   "commentOnlyFinalRoundCiRepair": "HAMREDCI-01: a proven comment-only final-round handoff resumes hammer terminal validation with failed CI and stale review head, with or without non-blocking findings or strict non-blocking remediation enabled. Non-conflicting pending-only CI and known rollups without external checks retain the bounded wait from the proven push; empty rollups remain non-green and the deadline restores retain-loop charging. Blocking/unknown blocking findings, structural blocks, hard-stop labels and merge leases retain their gates; exact-head green CI is still required for merge. Existing states, transitions and smoke promises are unchanged.",
   "hammerRangeResponsibility": "HAMNOREREVIEW-01: an unprovable starting base widens the audit range to the reviewed SHA. HAMSELFREBASE-01: successful server-side rebases fetch and detach the scratch checkout at the exact produced SHA and synchronize initialized submodules. Changed-surface revalidation, audit publication including recovery, required-check waiting and merge continue in the same run under the merge lease, preserving existing pending-CI release and reacquisition; foreign head changes still release with head-changed. Existing lifecycle states and smoke promises are unchanged. Validated hammer heads retain closure ownership; head movement and validation failures release for a hammer retry, never review. Legacy review handoff stops release without a new verdict; mixed safety refusals hold. Current-head closer evidence selects hammer in automated and ownerless recovery. The compatibility handoff CLI uses the existing terminal failed-without-merge transition; new hammer runs do not produce handed-to-review records. Historical records remain readable during rolling deployment.",
   "hammerAuditRecovery": "HAMATTESTRETRY-01: audit comment delivery retries five times with lease checks and fixed 2/4/8/16-second backoff. Failed delivery records a validated edge in a deferred AMA audit attempt. Recovery posts only for a matching live head, reviewed base and authenticated App identity, before the unchanged provenance predicate. Initial validated-edge delivery failure and recovery delivery failure mark lease release as a retryable audit-comment-unavailable abort; recovery retains the existing pending edge. Existing states, retry caps, merge authority and smoke promises remain unchanged.",
@@ -135,8 +136,18 @@
     },
     {
       "id": "reviewer-run",
+      "capacityRecovery": {
+        "journal": "data/reviewer-token-leases/<sessionUuid>.json",
+        "intentBeforeAcquire": true,
+        "receiptBeforePassAndSpawn": true,
+        "positiveLeaseAcknowledgements": true,
+        "releaseGuard": "confirmed PGID/session drain, independent of run record and delivery state; failed operations retain journal for retry",
+        "recoveryConcurrency": 4,
+        "unlimitedByStaleRowCap": true
+      },
       "owner": "reviewer runtime",
       "codeSources": [
+        "src/reviewer-token-pool.mjs",
         "src/adapters/reviewer-runtime/run-state.mjs",
         "src/adapters/reviewer-runtime/cli-direct/index.mjs",
         "src/adapters/reviewer-runtime/acpx/index.mjs",

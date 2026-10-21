@@ -1,4 +1,5 @@
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
+import { reviewerBrokerProviders } from '../../../reviewer-token-pool.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -404,7 +405,7 @@ function createAcpxReviewerRuntimeAdapter({
         ...process.env,
         REVIEWER_SESSION_UUID: sessionUuid,
       };
-      reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
+      reviewerEnv.CODEX_BROKER_PROVIDER = reviewerBrokerProviders({ reviewerModel: req.model, ...req.subjectContext }).codexBrokerProvider;
       corporateAuth = prepareCorporateCodexReviewerAuthImpl(reviewerEnv, sessionUuid);
       const stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       const acpxCli = await resolveAcpxCliImpl({ env: reviewerEnv, execFileImpl });

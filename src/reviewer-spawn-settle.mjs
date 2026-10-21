@@ -4,6 +4,9 @@ import { openReviewStateDb } from './review-state.mjs';
 import { reviewerCredentialKey, recordCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
+import { selectReviewerTokenAccount, updateReviewerTokenLease, recordReviewerAccountQuotaFailure } from './reviewer-token-pool.mjs';
+import { journalReviewerTokenLease, forgetReviewerTokenLease, markReviewerTokenLeaseActive } from './reviewer-token-leases.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -659,14 +662,97 @@ async function spawnReviewer(args) {
 }
 
 async function spawnReviewerOnce(args) {
+  // Family eligibility precedes account admission, including direct callers.
+  if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
+  const sessionUuid = args.reviewerSessionUuid || randomUUID();
+  const env = args.quotaCheckEnv || process.env;
+  const receipt = await (args.selectReviewerTokenAccountImpl || selectReviewerTokenAccount)({
+    reviewerModel: args.reviewerModel, requestId: sessionUuid, acquire: true, env,
+    rootDir: args.rootDir || ROOT,
+  });
+  if (receipt?.hold) {
+    const result = { ok: false, failureClass: 'reviewer-account-held',
+      effectiveReviewerModel: args.reviewerModel, reviewerSessionUuid: sessionUuid,
+      error: receipt.reason };
+    args.onPostOperationSettled?.(result);
+    return result;
+  }
+  const rootDir = args.rootDir || ROOT;
+  if (receipt) {
+    try { journalReviewerTokenLease(rootDir, sessionUuid, receipt.identity, receipt.lease); }
+    catch (error) {
+      try { await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env }); }
+      catch { console.warn('[watcher] reviewer account release unavailable after journal write failure'); }
+      throw error;
+    }
+  }
+  const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
+  if (receipt && !(args.accountBindingRuntimeIds || ['cli-direct', 'acpx']).includes(runtimeId)) {
+    // These runtimes do not yet carry an execution binding to their credential
+    // owner. Never claim the selected token was used by an unbound dispatch.
+    try {
+      await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env, rootDir });
+      forgetReviewerTokenLease(rootDir, sessionUuid);
+    } catch { console.warn('[watcher] reviewer account release unavailable for unsupported runtime; journal retained'); }
+    const result = { ok: false, failureClass: 'reviewer-account-held', effectiveReviewerModel: args.reviewerModel,
+      reviewerSessionUuid: sessionUuid, error: 'reviewer-runtime-account-binding-unsupported' };
+    args.onPostOperationSettled?.(result);
+    return result;
+  }
+  if (receipt) {
+    args = { ...args, reviewerSessionUuid: sessionUuid, reviewerAccountReceipt: receipt,
+      ...(normalizeReviewerModel(args.reviewerModel) === 'claude'
+        ? { claudeAccountSelection: receipt } : { codexBrokerProvider: receipt.provider }) };
+  }
   const corporateClaude = normalizeReviewerModel(args.reviewerModel) === 'claude'
     && args.claudeAccountSelection?.provider === 'claude-code-corp';
-  const withAccount = result => corporateClaude ? { ...result, claudeBrokerProvider: 'claude-code-corp' } : result;
-  return withAccount(await spawnReviewerOnceWithAccount({ ...args,
-    ...(args.onPostOperationSettled ? {
-      onPostOperationSettled: result => args.onPostOperationSettled(withAccount(result)),
-    } : {}),
-  }));
+  const withAccount = result => ({ ...result,
+    ...(corporateClaude ? { claudeBrokerProvider: 'claude-code-corp' } : {}),
+    ...(receipt ? { reviewerAccountReceipt: receipt } : {}),
+  });
+  let renewal = Promise.resolve();
+  const updateLease = async operation => {
+    const value = await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, operation, { env, rootDir });
+    if (operation === 'release') forgetReviewerTokenLease(rootDir, sessionUuid);
+    return value;
+  };
+  if (receipt) markReviewerTokenLeaseActive(rootDir, sessionUuid, true);
+  const timer = receipt ? setInterval(() => {
+    renewal = renewal.then(() => updateLease('renew')).catch(() => {
+      console.warn('[watcher] reviewer account lease renewal unavailable; retaining original binding');
+    });
+  }, 60_000) : null;
+  try {
+    const result = withAccount(await spawnReviewerOnceWithAccount({ ...args,
+      onReviewerPgid: pgid => {
+        if (receipt) {
+          try { journalReviewerTokenLease(rootDir, sessionUuid, receipt.identity, receipt.lease, pgid); }
+          catch { console.warn('[watcher] reviewer lease PGID journal write unavailable; retaining acquisition intent'); }
+        }
+        args.onReviewerPgid?.(pgid);
+      },
+      ...(args.onPostOperationSettled ? {
+        onPostOperationSettled: result => args.onPostOperationSettled(withAccount(result)),
+      } : {}),
+    }));
+    // Adapter resolution confirms process drain. An exception is uncertain and
+    // deliberately retains occupancy for recovery/operator inspection.
+    if (receipt) {
+      clearInterval(timer);
+      await renewal;
+      try {
+        const record = readReviewerRunRecord(args.rootDir || ROOT, sessionUuid);
+        // Duplicate spawn/reattach responses can resolve while the original
+        // process is still active. Retain its global slot in that case.
+        if (!record || TERMINAL_RUN_STATES.has(record.state)) await updateLease('release');
+      }
+      catch { console.warn('[watcher] reviewer account lease release unavailable; retaining receipt for recovery'); }
+    }
+    return result;
+  } finally {
+    if (timer) clearInterval(timer);
+    if (receipt) markReviewerTokenLeaseActive(rootDir, sessionUuid, false);
+  }
 }
 
 async function spawnReviewerOnceWithAccount({
@@ -695,6 +781,7 @@ async function spawnReviewerOnceWithAccount({
   afhReviewerFallback = null,
   codexBrokerProvider = 'codex',
   claudeAccountSelection = null,
+  reviewerAccountReceipt = null,
   onReviewerPgid = () => {},
   onReviewerRuntimeStarted = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
@@ -775,6 +862,7 @@ async function spawnReviewerOnceWithAccount({
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
     const startedAt = new Date().toISOString();
     const metadata = {
+      ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
       reviewerSessionUuid,
       reviewerModel,
       reviewAttemptNumber,
@@ -825,6 +913,7 @@ async function spawnReviewerOnceWithAccount({
   const reviewerSpawnToken = randomUUID();
   const reviewerIdentity = resolveReviewerIdentity({ reviewerModel, botTokenEnv });
   const spawnRecord = {
+    ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
     spawnToken: reviewerSpawnToken,
     repo,
     pr: prNumber,
@@ -855,6 +944,7 @@ async function spawnReviewerOnceWithAccount({
       // budget counter keys per (repo, pr, head) — a head move re-arms review.
       headSha: reviewerHeadSha || null,
       metadata: {
+        ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
         reviewerBuildId: REVIEWER_BUILD_ID,
         reviewerSessionUuid,
         reviewerModel,
@@ -913,6 +1003,7 @@ async function spawnReviewerOnceWithAccount({
           afhReviewerFallback,
           codexBrokerProvider,
           claudeBrokerProvider,
+          reviewerAccountReceipt,
           ...(agyIdentity ? { agyIdentity } : {}),
           // Persisted in the run record so a restarted watcher keeps this
           // identity out while this review still runs.
@@ -923,6 +1014,11 @@ async function spawnReviewerOnceWithAccount({
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
       });
+      if (reviewerAccountReceipt && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+        try { recordReviewerAccountQuotaFailure(rootDir, reviewerAccountReceipt, { env: quotaCheckEnv,
+          resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) }); }
+        catch (error) { console.warn(`[watcher] reviewer account quota cooldown persistence failed: ${error.message}`); }
+      }
       if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
         && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv,
@@ -1190,6 +1286,7 @@ async function spawnReviewerOnceWithAccount({
         // the writer keeps the column honest rather than storing a wrong id.
         workerRunId: resolvedWorkerRunId,
         metadata: {
+          ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
           reviewerSessionUuid,
           launchRequestId,
           reattachToken: result.reattachToken || null,
@@ -1238,6 +1335,7 @@ async function spawnReviewerOnceWithAccount({
         // tagTokenUsage() normalization drops it (usually null on this path).
         workerRunId: rawErrTokenUsage?.workerRunId || null,
         metadata: {
+          ...(reviewerAccountReceipt ? { reviewerAccountReceipt } : {}),
           reviewerSessionUuid,
           reviewerModel,
           tokenUsageNoUsageReason: tokenUsage
@@ -1389,6 +1487,18 @@ function settleReviewerAttempt({
   markReviewHeartbeat = () => {},
 }) {
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
+  if (result.failureClass === 'reviewer-account-held') {
+    reviewerSessionUuid = result.reviewerSessionUuid || reviewerSessionUuid;
+    log.warn(`[watcher] reviewer-account-held repo=${repoPath} pr=${prNumber} reason=${result.error || 'unknown'}`);
+    try { recordCascadeFailure(rootDir, { repo: repoPath, prNumber, failureClass: 'reviewer-account-held',
+      reviewerModel, headSha: reviewerHeadSha, failureReason: result.error || 'unknown' }); }
+    catch { log.warn('[watcher] reviewer account hold backoff persistence failed'); }
+    withSqliteBusyRetrySync(
+      () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+      { label: `reviewer-account-held:${repoPath}#${prNumber}`, log },
+    );
+    return;
+  }
   if (result.ok) {
     const postedAt = Number.isFinite(result.durablePostedAt)
       ? new Date(result.durablePostedAt).toISOString() : new Date().toISOString();

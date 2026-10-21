@@ -31,6 +31,7 @@ One JSON object per file, `schemaVersion: 1`:
 | `identity`, `botTokenEnv` | Reviewer GitHub identity used to post |
 | `reviewerSessionUuid` | Names the reviewer run record (`data/reviewer-runs/<sessionUuid>.json`) |
 | `spawnedAt` | ISO timestamp the record was written |
+| `reviewerAccountReceipt` | ITP-12, optional: immutable Claude/Codex reviewer account and broker execution lease; same shape as the runtime subject context in `reviewer-run-records.md` |
 
 Additive fields are optional; readers treat a missing `pipelineGeminiSeats` as
 zero.

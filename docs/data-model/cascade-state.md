@@ -49,6 +49,12 @@ Directory: `data/cascade-state/`
 | `operatorDecisionAlertedAt` | string | Optional timestamp for the operator-decision-required alert debounce. |
 | `operatorDecisionAlert` | object | Optional diagnostic payload for the operator-decision-required alert. |
 
+Account admission records `reviewer-account-held` with the reason and effective
+reviewer model. This uses the existing capped 1/2/4/8/15-minute pre-claim backoff
+without charging review attempts or adding a delivery status. The settlement log
+includes repo, PR and reason. Backoff write failures warn while claim release
+still runs.
+
 ## Mixed-State Semantics
 
 - Old files may contain only `consecutiveCascadeFailures`. On the next failure,

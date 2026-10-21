@@ -1,4 +1,5 @@
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
+import { reviewerBrokerProviders } from '../../../reviewer-token-pool.mjs';
 import { execFile } from 'node:child_process';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -414,8 +415,9 @@ function createCliDirectReviewerRuntimeAdapter({
       reviewerEnv[AGY_IDENTITY_USER_ENV] = String(agyIdentity.user);
       reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV] = String(agyIdentity.reviewId || '');
     }
-    reviewerEnv.CLAUDE_BROKER_PROVIDER = req?.subjectContext?.claudeBrokerProvider || 'claude-code';
-    reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
+    const providers = reviewerBrokerProviders({ reviewerModel: req.model, ...req.subjectContext });
+    reviewerEnv.CLAUDE_BROKER_PROVIDER = providers.claudeBrokerProvider;
+    reviewerEnv.CODEX_BROKER_PROVIDER = providers.codexBrokerProvider;
     let corporateAuth = null;
     let stripped = [];
     let preflightResult = null;

@@ -71,6 +71,13 @@ separate budgets. The historical first-pass pager count is unchanged.
 
 ## Claimed reviewer account
 
+ITP-12 records `metadata_json.reviewerAccountReceipt` for declared Claude/Codex
+pools at pass start and completion, including quota skips and error settlement.
+The shape matches `subjectContext.reviewerAccountReceipt` in
+`reviewer-run-records.md`; its identity is the canonical reviewer role, independent
+of the provider account. This is additive JSON metadata; no session-ledger or
+SQLite/Postgres schema is edited. Missing historical receipts remain unknown.
+
 The delivery row in `reviewed_prs` has nullable `codex_broker_provider`.
 Schema convergence adds it to existing databases without rewriting old rows.
 After each successful claim, `UPDATE_REVIEW_ROUTING_SQL` records `codex` or

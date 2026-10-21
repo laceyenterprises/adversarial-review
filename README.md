@@ -918,6 +918,12 @@ lease intact. No operator action is needed.
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.
+ITP-12 account holds settle against the effective result session UUID, including
+after a fallback replaces the original session. Unreadable fleet quota remains
+unavailable when all declared pool selections are held; those holds still reach
+account admission. Runtime adapters with no declared ID hold leased accounts just
+like other unsupported runtimes. These repairs retain the existing smoke promises;
+the offline reviewer-account consumer tests cover these refusal paths.
 Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
 review's commit ID. Settlement requires a non-empty recovered head and retains
 null-safe comparisons against the inspected session and prior head, so a
@@ -1065,8 +1071,10 @@ observations do not rewrite/log another transition, and closeout wakes settle as
 cannot act. Ceiling wake admission is independent of the legacy exhaustion
 dispatch reason or exhaustion snapshot. No review round or merge authority is added.
 
-<a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
-merges autonomously and the bare remote records that SHA. The synthetic commit
+<a id="smv-clean"></a>**smv-clean:** synthetic reviewer lease intents survive a lost
+transport response, failed release stays retryable, and live leases renew until
+process drain is confirmed, independently of delivery rows. An approved
+exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
 <a id="smv-handoff"></a>**smv-handoff:** null same-repository head metadata
@@ -1478,12 +1486,13 @@ projection returns `null`; an explicitly malformed projection refuses.
 Each role's capacity describes shared account slots and must not be summed
 across roles as independent fleet capacity.
 
-This release adds reader APIs only. Existing reviewer corporate-first and
+ITP-10 added reader APIs only. Existing reviewer corporate-first and
 hammer/Codex-remediator personal-first routes, explicit pin provenance, old
 review rows and signed identities retain their current behavior. ITP-12–14
 wire the later routing/receipt consumers; live cutover remains an operator step.
-No runtime reads policy from the project spec directory or requires Python,
-an Agent OS checkout, network access or credentials.
+The standalone Node readers and offline suite require neither Python nor an
+Agent OS checkout, network access or credentials. No runtime reads policy from
+the project spec directory.
 
 The published selection vocabulary and vectors are byte-identical copies from
 agent-os `dee6b8e622e31c64dd500a05abd7e54fab3008b8`; the companion owner also
@@ -1505,3 +1514,88 @@ node test/run-tests.mjs identity-token-snapshot.test.mjs
 The owner verification is an opt-in bounded publication check, not a new CI
 gate or runtime dependency. Keep Node readers deployed before enabling an
 incompatible owner vocabulary. No store, lifecycle or smoke contract changes.
+
+### Reviewer account pools (ITP-12)
+
+When `oauth.identity_token_pools` declares `claude-reviewer` or `codex-reviewer`,
+reviewer admission uses the canonical Python selection owner and broker execution
+semaphore. The declared corporate-first order keeps the reviewer role and GitHub
+identity constant. Fresh refusal can select primary; unknown or stale evidence
+holds. Undeclared roles retain the legacy selectors during migration.
+Claude and Codex admission reject cached pooled selections when the grounding
+refresh fails, including when no local account cooldown is active.
+
+`src/reviewer-token-pool.mjs` transports secret-free requests to
+`src/adapters/reviewer-runtime/token-pool-owner.py`, which reuses worker-pool's
+snapshot collector, registry/model authorization, quota/reserve resolvers and
+broker client. A new session UUID is the broker request ID. Admission revalidates
+and acquires before native CLI spawn; a declaration change during acquisition
+releases the unstarted slot and holds. A capacity CAS loss holds until a later
+dispatch, without an unleased fallback. The deployed Python environment must
+provide `agent_os_core`, `cwp_dispatch` and their quota dependencies. A missing
+owner or unreadable evidence holds rather than reverting to a legacy account.
+Native `cli-direct` and Codex `acpx` consume the binding; other production runtime
+adapters hold until they support account binding. This is inert without declared
+pools; ITP-19 remains the separately approved operator enrollment step.
+
+Account proposals and acquisitions resolve the canonical `<family>-reviewer`
+registry entry with the same model resolver used by the reviewer harness. Reviewer
+roles are valid registry keys; no remediation-class translation is required.
+An admitted account can establish snapshot availability when fleet quota is
+unreadable; a hold descriptor cannot. Held selections remain attached so admission
+can preserve the account hold without treating unavailable quota as healthy.
+
+The immutable receipt travels through spawn records, runtime subject context,
+settlement results and reviewer-pass metadata. Native auth preparation and refresh
+use its provider even if preference recovers or inherited environment changes.
+Renewals use the original account/lease/generation every 60 seconds, and restart
+reconciliation renews the same receipt. Only confirmed drain releases capacity;
+an active process or failed release retains the broker slot for recovery.
+Broker expiry alone never frees it. Before acquisition, a durable journal records
+the session request ID. Any receipt returned is journaled before pass/spawn writes.
+Validation/serialization failures release best-effort; killed transports and
+pre-launch exceptions remain discoverable through broker diagnostics by request
+ID, even without a run record. After a resolved attempt, terminal or missing run
+records permit release; corrupt records defer to the journal's process probes.
+The independent recovery sweep runs before capped row reconciliation with four
+transports at a time, including terminal/missing rows and runs beyond the row cap.
+It renews live bindings and releases only after PGID/session probes confirm drain.
+A 60-second launch grace protects receipts without a PGID. Unknown probes or
+failed operations log a warning and retain the journal for the next sweep.
+Renew/release require explicit positive acknowledgements; transport exceptions,
+fence loss and hold responses cannot count as success.
+Typed quota exhaustion writes a bounded cooldown for the selected account before
+settlement; sibling accounts remain eligible for subsequent attempts.
+
+Unreadable OAuth declarations log the role and routing decision. A durable
+last-good reviewer enrollment record keeps undeclared roles on legacy routing
+through unrelated config errors, while previously enrolled roles hold with
+`pool-configuration-unreadable`. A corrupt enrollment record holds conservatively.
+Account holds log repo, PR and reason, release the claim without charging review
+attempts, and use the existing 1/2/4/8/15-minute per-PR cascade backoff before the
+next claim. Correct the declarations/evidence and allow that bounded backoff to
+expire; no account is silently reselected on a live lease.
+
+There are no new delivery or runtime states. The sandbox smoke checks journal
+recovery and retry with synthetic leases; it does not enroll live accounts. See [run-record data](docs/data-model/reviewer-run-records.md)
+and [lease/enrollment recovery](docs/data-model/reviewer-token-leases.md).
+See also [account cooldowns](docs/data-model/reviewer-account-cooldowns.md). Offline
+consumer checks and opt-in owner integration (temporary fixtures, no live broker):
+
+```sh
+node test/run-tests.mjs reviewer-token-pool.test.mjs reviewer-token-lease-recovery.test.mjs
+python3 -I -B test/verify-reviewer-token-owner.py /path/to/registered/agent-os
+```
+
+The original 36-case consumer acceptance replay against parent `fad3947f` failed
+34 cases; the unchanged same-family refusal and no-account-release compatibility
+invariants passed. ITP-12 coverage includes canonical account receipts,
+immutable renewal bindings, account-local cooldowns, settlement persistence and
+restart renewal/drain release to the already delivered corporate-first selectors.
+The intermediate lease implementation without the active-run guard releases
+capacity incorrectly in 100/100 duplicate-spawn replays; the guarded version
+retains capacity in 100/100 replays. The opt-in owner tests also pin CLC's
+primary reserve refusal to the canonical policy flags, so a generic non-coding
+task exemption cannot silently admit the primary account below its reserve.
+They also run the real `propose` with only registry/evidence/broker boundaries
+injected, verifying the minimal daemon shim and JSON row payload offline.

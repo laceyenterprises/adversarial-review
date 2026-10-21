@@ -1329,6 +1329,7 @@ async function pollOnceWithinBudget(
     watcherHeartbeat?.markPollProgress?.();
     recheckReviewerCleanupFindingsForWatcher(ROOT, console);
     const reattach = await reconcileReviewerSessions({
+      rootDir: ROOT,
       db,
       octokit,
       maxRows: resolveStaleReviewerReconcilePerPoll(),

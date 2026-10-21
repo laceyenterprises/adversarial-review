@@ -1544,3 +1544,13 @@ AMA switch on a deferred head and confirm ordinary backoff resumes; stop
 closer polling and confirm the bypass expires after five minutes. No config change or migration is
 required. The offline handoff smoke and drain regression fixtures cover this
 scheduling contract without dispatching live workers.
+
+LEASELIVE-01: dispatched closer lease reclamation checks the recorded launch and
+retry chain through the shared closure-ownership liveness classifier. In-flight
+launches retain ownership at any age. Known-terminal launches keep the existing
+30-minute age/outcome rule; unknown liveness uses the worker execution timeout
+schema ceiling plus 30 minutes (currently 24.5 hours). Dispatch and periodic
+reclamation share this rule, as do closure arbitration and remediation exclusion.
+Pending reclamation, sticky success, terminal auto-merge holds and retry/lifetime
+caps keep their existing behavior. Status reads cannot retire a replacement lease
+installed during the read.

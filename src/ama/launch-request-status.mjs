@@ -24,3 +24,12 @@ export function withLiveLaunchRetry(probe) {
   return live ? { ...probe, row: { ...live, ticket_ref: live.ticket_ref ?? probe.row?.ticket_ref },
     liveRetryLaunchRequestId: live.launch_request_id } : probe;
 }
+
+// The same tri-state ownership check is used by closure blockers and lease
+// reclamation. Unknown evidence cannot prove that a launch has stopped.
+export function launchRequestInFlight(probe) {
+  const effective = withLiveLaunchRetry(probe);
+  if (!effective?.ok || !effective.row?.status) return null;
+  if (!isTerminalLaunchRequestStatus(effective.row.status)) return true;
+  return effective.retryChainUnreadable ? null : false;
+}

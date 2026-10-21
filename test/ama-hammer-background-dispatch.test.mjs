@@ -1,7 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
-import { acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -685,7 +685,7 @@ for (const headSha of [HEAD, 'previous-head', null]) {
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
     if (headSha) {
       const identity = { repo: args.repoPath, prNumber: args.prNumber, headSha };
-      const now = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+      const now = new Date(Date.now() - AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS - 1).toISOString();
       acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, watcherPid: process.pid, now });
       updateAmaCloserLease({ rootDir: args.rootDir, ...identity,
         status: 'dispatched', lrqId: 'lrq-still-unknown', now });

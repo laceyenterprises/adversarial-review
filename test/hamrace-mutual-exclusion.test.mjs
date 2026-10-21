@@ -19,8 +19,8 @@ test('remediation claim defers on current-head lease, and stale lease expires', 
     jobId: 'job', repo: 'o/r', prNumber: 5, revisionRef: 'head', status: 'pending',
   }));
   assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-27T00:01:00.000Z' }), null);
-  assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-27T00:31:00.000Z' }), false);
-  assert.notEqual(claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-27T00:31:00.000Z' }), null);
+  assert.equal(isHeldAmaCloserLease(rootDir, identity, { now: '2026-09-28T00:31:00.000Z' }), false);
+  assert.notEqual(claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-28T00:31:00.000Z' }), null);
 });
 
 test('legacy pending job without a revision ref defers while a closer owns the PR', (t) => {

@@ -17,7 +17,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
-import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS } from '../src/ama/closer-lease.mjs';
 import { amaAuditFilePath, readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import {
   _resetPrelaunchRefusalPageDebounceForTests,
@@ -329,7 +329,7 @@ for (const reason of INFRA_REASONS) {
     f.recordStop(minutesAfter(f.at, 5));
     const capped = closerDeps({ status: { status: 'succeeded' } });
     let result;
-    for (const minutes of [30, 31]) {
+    for (const minutes of [AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS / 60_000, AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS / 60_000 + 1]) {
       result = await maybeDispatchAmaCloser({ ...f.args, dispatchContext: {
         ...f.args.dispatchContext, dispatchedAt: minutesAfter(f.at, minutes) }, ...capped });
       if (result.reason !== 'stale-dispatched-lease-terminalized') break;
@@ -823,7 +823,8 @@ test('Case 4: a second hammer run on podium#15 is not launched until an input ch
   const capped = closerDeps({ alerts, status: { status: 'succeeded' } });
   let third;
   // The first released tick terminalizes run 2's lease; the next one meets the cap.
-  for (const at of ['2026-10-10T20:30:00Z', '2026-10-10T20:31:00Z']) {
+  for (const elapsedMs of [AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS + 60_000]) {
+    const at = new Date(Date.parse('2026-10-10T20:00:00Z') + elapsedMs).toISOString();
     third = await maybeDispatchAmaCloser({
       ...podiumArgs(rootDir, { at, rollup: ci, baseSha: 'base-1' }),
       ...capped,

@@ -17,9 +17,9 @@
  *      never-reconciled lease blocks the closer from ever re-dispatching the
  *      merge for that head.
  *
- * Everything here is age-gated by config-driven thresholds (sane multi-hour
- * defaults) so it only ever touches genuinely-abandoned state, never a live
- * in-flight review or closer. The decision functions are pure so the gating
+ * Dispatched leases require launch liveness evidence before reclamation; unknown
+ * launches retain ownership through the execution-limit fallback. Other state
+ * uses config-driven age thresholds. The decision functions are pure so the gating
  * is unit-testable without a DB or filesystem.
  *
  * CLR-02 closed three compounding gaps that made this reclaimer a no-op in
@@ -33,7 +33,8 @@
  *   b. The 6h floor was the only tier, so a lease whose holder was *provably*
  *      dead still waited six hours. `holderHost` + `isProcessAlive` now give a
  *      dead-holder-on-this-host tier at the same 30m the health surface pages
- *      at. The 6h floor is unchanged for every lease we cannot prove dead.
+ *      at. LEASELIVE-01 keeps this tier for pending leases; dispatched leases
+ *      require launch evidence and the shared unknown-liveness fallback.
  *
  *   c. Terminal leases were never retired, so a 250-entry/50-read bounded scan
  *      was spent on 50-day-old finished records instead of live ones.
@@ -65,13 +66,19 @@ import {
   updateAmaCloserDispatchRecord,
 } from './ama/dispatch-closer.mjs';
 
+import {
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  isReclaimableDispatchedAmaCloserLease,
+  isCurrentAmaCloserLease,
+} from './ama/closer-lease.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
+
 const HOUR_MS = 60 * 60 * 1000;
-// Defaults are deliberately multi-hour: a healthy reviewer pass or closer
-// dispatch completes in minutes, so a 6h floor never races live work and still
-// recovers same-day after an outage.
+// Generic stale-state defaults; dispatched closer leases also require the
+// shared launch-liveness predicate and its longer unknown-liveness fallback.
 export const DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS = 6 * HOUR_MS;
 export const DEFAULT_STALE_CLOSER_LEASE_MS = 6 * HOUR_MS;
-// Dead-holder tier. Deliberately equal to the health surface's
+// Pending dead-holder tier. Deliberately equal to the health surface's
 // `amaCloserLeaseMaxAgeMs` (30m) and to `AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS`
 // in ama/dispatch-closer.mjs, so detection and remediation stop disagreeing by
 // 12x. It applies ONLY when the lease names this host in `holderHost` AND the
@@ -232,14 +239,19 @@ function holderIsProvablyDeadHere(lease, { isProcessAlive, host }) {
 }
 
 /**
+ * Dispatched leases first require the shared launch-liveness predicate; watcher
+ * death cannot establish that a dispatched hammer is dead. Unknown launches use
+ * the execution-limit fallback even when a shorter reaper threshold is supplied.
+ *
  * Pure — given closer-lease records, return the subset to release: not yet
- * `terminal`, `terminalOutcome` still null, and older than `thresholdMs`. A
+ * `terminal` and `terminalOutcome` still null. Pending leases use the existing
+ * `thresholdMs` / dead-holder tiers; dispatched leases use launch evidence. A
  * lease still owned by this host's live watcher process (`watcherPid ===
  * livePid` and missing/same `holderHost`) is never released. Corrupt lease
  * files are also age-gated by file mtime so a concurrent non-atomic writer is
  * given time to finish before recovery unlinks the lease.
  *
- * Two-tier ageing (CLR-02). `thresholdMs` is the floor for a lease whose holder
+ * Pending two-tier ageing (CLR-02). `thresholdMs` is the floor for a lease whose holder
  * we cannot prove dead — unknown host, unknown pid, or a pid that answers alive.
  * When `deadHolderThresholdMs` is supplied AND the lease is provably dead here
  * (see `holderIsProvablyDeadHere`), the shorter threshold applies instead. The
@@ -259,6 +271,7 @@ export function selectReleasableCloserLeases(leases, {
   isProcessAlive = null,
   host = null,
   isInterruptedInFlightDispatch = null,
+  launchStatusProbes = new Map(),
 } = {}) {
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   if (!Number.isFinite(nowMs) || !Number.isFinite(Number(thresholdMs))) return [];
@@ -280,6 +293,9 @@ export function selectReleasableCloserLeases(leases, {
       && Number(lease.watcherPid) === Number(livePid)
       && (!lease.holderHost || String(lease.holderHost) === String(localHost))
     ) return false;
+    if (lease.status === 'dispatched') return isReclaimableDispatchedAmaCloserLease(lease, {
+      now: nowMs, launchStatusProbe: launchStatusProbes.get(lease.lrqId) ?? null, fallbackAgeMs: thresholdMs,
+    });
     const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
     if (stampMs == null) return false;
     const ageMs = nowMs - stampMs;
@@ -733,6 +749,7 @@ export async function reapStaleCloserLeases({
   readFileImpl = fsPromises.readFile,
   statImpl = fsPromises.stat,
   logger = console,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
 } = {}) {
   if (!rootDir) {
     return {
@@ -750,6 +767,18 @@ export async function reapStaleCloserLeases({
     readFileImpl,
     statImpl,
   });
+  const launchStatusProbes = new Map();
+  const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
+  for (const lease of discovery.records) {
+    if (lease?.status !== 'dispatched' || !lease.lrqId || launchStatusProbes.has(lease.lrqId)) continue;
+    // Even a terminal launch cannot release a dispatched lease before this age.
+    const stampMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
+    if (!Number.isFinite(nowMs) || !Number.isFinite(stampMs)
+      || nowMs - stampMs < AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS) continue;
+    try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
+      launchRequestId: lease.lrqId, rootDir, includeRetryChain: true,
+    })); } catch { launchStatusProbes.set(lease.lrqId, null); }
+  }
   const interruptedDispatchLeasePaths = new Set();
   for (const lease of discovery.records) {
     if (!lease?._path || lease._isCorrupt === true) continue;
@@ -772,12 +801,14 @@ export async function reapStaleCloserLeases({
     isProcessAlive,
     host,
     isInterruptedInFlightDispatch: (lease) => interruptedDispatchLeasePaths.has(lease._path),
+    launchStatusProbes,
   });
   let released = 0;
   let budgetsReset = 0;
   let interruptedDispatchesReclaimed = 0;
   for (const lease of releasable) {
     if (lease._isCorrupt !== true) {
+      if (lease.status === 'dispatched' && !isCurrentAmaCloserLease(rootDir, lease)) continue;
       const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now });
       if (resetStatus === 'failed') {
         continue;

@@ -8,7 +8,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
-import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { launchRequestInFlight } from './launch-request-status.mjs';
 import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { summarizePRRemediationLedger } from '../follow-up-jobs.mjs';
@@ -108,7 +108,8 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       if (!probe?.ok) {
         uncertain(probe?.reason || 'ledger-read-failed'); continue;
       }
-      if (isTerminalLaunchRequestStatus(probe.row?.status)) {
+      const inFlight = launchRequestInFlight(probe);
+      if (inFlight === false) {
         if (terminalLaunches.size >= 1000) terminalLaunches.delete(terminalLaunches.keys().next().value);
         terminalLaunches.set(cacheKey, probe);
       }
@@ -119,8 +120,8 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
           Date.parse(stamp) >= Math.floor(Date.parse(reservationStartedAt) / 1000) * 1000)) {
         result.reservationDispatched = true;
       }
-      if (!probe.row?.status) uncertain('missing-launch-status');
-      else if (!isTerminalLaunchRequestStatus(probe.row.status)) result.owned = true;
+      if (inFlight === null) uncertain('missing-launch-status');
+      else if (inFlight) result.owned = true;
     }
   }
   if (labels.includes('merge-agent-dispatched') && !mergeRecordSeen) uncertain('missing-merge-agent-dispatch-record');

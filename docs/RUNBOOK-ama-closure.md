@@ -3762,8 +3762,21 @@ and still uses atomic single-claim acquisition.
 answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
 remain enforced. LEASEDEADPID-01 shares pending/dispatched reclaim predicates
-with closer dispatch: a dead local watcher's pending lease or an aged reclaimable
-lease is treated as absent on the next ownership evaluation. Local PID probing
+with closer dispatch: a dead local watcher's pending lease or a reclaimable
+lease is treated as absent on the next ownership evaluation. LEASELIVE-01 protects
+dispatched leases while their recorded launch or retry is in flight, regardless
+of age, through the shared launch-status check used for closure ownership.
+Known-terminal launches retain the existing 30-minute age/outcome rule; sticky
+success and retry/lifetime caps are unchanged. Missing launch IDs, failed reads
+and unreadable retry chains use the worker execution timeout schema ceiling
+(`MAX_WORKER_EXEC_TIMEOUT_SECONDS`, currently 24 hours) plus 30 minutes, so the
+fallback covers all allowed worker-class overrides without reading live config.
+Both dispatch reclaim sites, the periodic stale-lease reaper, closure arbitration
+and remediation exclusion use this predicate. The periodic reaper probes launch
+status only once a dispatched lease reaches 30 minutes from `updatedAt` (falling
+back to `acquiredAt`); younger or undatable leases cannot yet be reclaimed and
+skip ledger reads. A dead watcher PID does not prove
+a dispatched hammer stopped; the short dead-PID tier remains pending-only. Local PID probing
 requires `holderHost` to match the current hostname or be absent on a legacy
 lease; foreign-host pending leases rely only on age expiry. Both reclaim
 predicates accept ISO strings or numeric epoch milliseconds for `now`. Ordinary routing

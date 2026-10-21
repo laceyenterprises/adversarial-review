@@ -11,7 +11,6 @@ import { dirname, join } from 'node:path';
 
 import {
   _resetHammerRetryCapAlertDebounceForTests,
-  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_REDISPATCH_BOUND,
   amaCloserDispatchFilePath,
@@ -28,6 +27,7 @@ import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
 import {
   acquireAmaCloserLease,
+  AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS,
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
   updateAmaCloserLease,
@@ -2207,7 +2207,7 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   assert.equal(
     isReclaimableDispatchedAmaCloserLease(
       readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }),
-      { now: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS + 1).toISOString() },
+      { now: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS + 1).toISOString() },
     ),
     true,
   );
@@ -2215,7 +2215,7 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   const result = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
       dispatchContext: {
-        dispatchedAt: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS + 1).toISOString(),
+        dispatchedAt: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS + 1).toISOString(),
       },
     }),
     ...hammerDispatchDeps(),
@@ -3827,3 +3827,34 @@ test('same-head terminal HAM pre-click guard reads the base after default-base a
   assert.equal(guardCalls, 2);
   assert.equal(result.reason, 'current-head-hammer-already-ran-needs-operator');
 });
+
+for (const advanced of [false, true]) {
+  test(`LEASELIVE-01: a 45-minute running launch keeps its ${advanced ? 'target' : 'reviewed'} head lease without another dispatch`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hammer-live-lease-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const headSha = advanced ? ADVANCED_HEAD : REVIEWED_HEAD;
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha };
+    const acquiredAt = '2026-10-01T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now: acquiredAt });
+    updateAmaCloserLease({ rootDir, ...identity, now: acquiredAt, status: 'dispatched', lrqId: 'synthetic-live-launch' });
+    const probes = JSON.parse(fs.readFileSync(new URL('./fixtures/closer-launch-liveness.json', import.meta.url)));
+    const deps = hammerDispatchDeps({ readLaunchRequestStatusImpl: async ({ launchRequestId }) => {
+      assert.equal(launchRequestId, 'synthetic-live-launch');
+      return probes.running;
+    } });
+    const input = { ...hammerDispatchArgs(rootDir, {
+      prMetadata: { headSha },
+      dispatchContext: { dispatchedAt: '2026-10-01T12:45:00Z', ...(advanced ? {
+        targetRemediationSha: headSha, allowStaleReviewHeadHammerResume: true,
+      } : {}) },
+    }), ...deps };
+    for (let tick = 0; tick < 2; tick++) {
+      const result = await maybeDispatchAmaCloser(input);
+      assert.equal(result.dispatched, false, JSON.stringify(result));
+      assert.notEqual(result.reason, 'stale-dispatched-lease-terminalized');
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'synthetic-live-launch');
+    }
+    assert.equal(deps.execCalls.length, 0, 'no second closer is launched');
+  });
+}

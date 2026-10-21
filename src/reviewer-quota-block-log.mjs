@@ -13,7 +13,7 @@ export function createReviewerQuotaBlockLogger() {
     const state = grounding.state || 'unknown';
     const reason = grounding.reason || 'no-allowed-reviewer-available';
     const diagnostic = (grounding.diagnostics || []).join('; ');
-    const signature = JSON.stringify([reviewer, source, state, reason, diagnostic]);
+    const signature = JSON.stringify([reviewer, source, state, reason]);
     if (states.get(key) !== signature) {
       logger.warn?.(`[watcher] reviewer-route DEFERRED repo=${repoPath} pr=${prNumber} `
         + `reviewer=${reviewer} source=${source} state=${state} reason=${reason}${diagnostic ? ` diagnostic=${diagnostic}` : ''}; no review attempt spent`);

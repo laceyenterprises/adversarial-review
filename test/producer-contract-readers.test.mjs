@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readLaunchRequestStatus } from '../src/producer-contracts/launch-status.mjs';
-import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES } from '../src/ama/launch-request-status.mjs';
-import { readDispatchReceipt } from '../src/producer-contracts/dispatch-receipt.mjs';
+import { createHash } from 'node:crypto';
+import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../src/producer-contracts/launch-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
+import { readDispatchReceipt, parseDispatchJsonOutput } from '../src/producer-contracts/dispatch-receipt.mjs';
 import { readBrokerProvider } from '../src/producer-contracts/broker-evidence.mjs';
 import { readAdapterReceipt, readPrCreateReceipt } from '../src/producer-contracts/publication-receipt.mjs';
 import { readReserveFloorWeeklyEvidence, reserveFloorWeeklyMeasurement, parseHqFleetQuotaSnapshot } from '../src/fleet-quota-status.mjs';
@@ -20,15 +21,90 @@ const { parseAdapterJson } = adapterTest;
 
 const capture = path => JSON.parse(readFileSync(new URL(`./fixtures/producer-contracts/${path}.json`, import.meta.url), 'utf8'));
 
-test('refresh CLI rejects missing or extra source arguments with usage, without a traceback', () => {
+test('refresh CLI rejects missing or extra source arguments with usage, without a traceback', t => {
   const script = fileURLToPath(new URL('../scripts/contracts/refresh.py', import.meta.url));
   for (const args of [[], ['unused-source', 'extra']]) {
     const result = spawnSync('python3', [script, ...args], { encoding: 'utf8', timeout: 5000 });
+    if (result.error?.code === 'ENOENT') return t.skip('python3 is optional; required only for producer artifact refresh');
     assert.ifError(result.error);
     assert.equal(result.status, 2);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, 'Usage: python3 scripts/contracts/refresh.py <path-to-agent-os>\n');
   }
+});
+
+test('fleet captures pin shared quota sections and collapsed expired evidence', () => {
+  const ready = capture('quota/fleet-ready');
+  for (const scenario of ['degraded', 'unavailable']) {
+    const other = capture(`quota/fleet-${scenario}`);
+    for (const key of ['providerStatuses', 'reserveFloors']) assert.deepEqual(other[key], ready[key], key);
+  }
+  assert.deepEqual(capture('quota/repaired-expired'), capture('quota/repaired-five-hour-only'),
+    'producer deliberately collapses expired and short-only weekly evidence');
+});
+
+test('real released fleet output admits personal Claude after local corporate exhaustion', () => {
+  const fleet = capture('quota/fleet-released');
+  const floor = fleet.reserveFloors['anthropic-oauth'];
+  assert.equal(floor.released, true);
+  for (const key of ['active', 'paused', 'nearCap']) assert.equal(floor[key], false, key);
+  assert.equal(floor.weeklyMeasurement.status, 'measured');
+  const route = selectClaudeAccountLaneFromSnapshot(fleet, {
+    workerClass: 'claude-reviewer', blockedWorkerClasses: ['claude-reviewer-corp'],
+  });
+  assert.equal(route.workerClass, 'claude-reviewer');
+  assert.equal(route.hold, false);
+  assert.equal(route.reason, 'claude-account-ready');
+  const provenance = capture('released-provenance');
+  const bytes = readFileSync(new URL('./fixtures/producer-contracts/quota/fleet-released.json', import.meta.url));
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), provenance.sha256);
+});
+
+test('dispatch status probes keep worker vocabulary and producer diagnostics', () => {
+  for (const status of ['completed', 'not-found', 'blocked', 'stalled', 'reaped', 'rejected', 'future']) {
+    const payload = { status, diagnostic: 'producer detail' };
+    for (const normalize of [true, false]) {
+      const result = parseHqDispatchStatus(JSON.stringify(payload), { normalize });
+      assert.equal(result.status, status);
+      assert.equal(result.diagnostic, 'producer detail');
+    }
+    assert.equal(parseHqDispatchStatus(JSON.stringify({ status })).diagnostic, undefined);
+  }
+});
+
+test('post-dispatch JSON string evidence stays recordable with null identity', () => {
+  const parsed = parseDispatchJsonOutput('"queued worker"');
+  const result = readDispatchReceipt(parsed, { allowNonObject: true });
+  assert.equal(result.payload, 'queued worker');
+  assert.equal(result.launchRequestId, null);
+  assert.match(result.identityDiagnostic, /\$stdout invalid type/);
+});
+
+test('terminal policies fail loudly on drift and retain legacy capacity aliases', () => {
+  assert.doesNotThrow(() => assertTerminalLaunchPolicy(AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES));
+  assert.throws(() => assertTerminalLaunchPolicy(['future-terminal']), /terminal policy missing/);
+  assert.throws(() => assertTerminalLaunchPolicy(['running']), /terminal policy missing/);
+  const legacy = ['cancelled', 'completed', 'reaped', 'rejected'];
+  for (const status of legacy) assert.equal(isTerminalLaunchRequestStatus(status), true, status);
+  const probe = withLiveLaunchRetry({ ok: true, row: { ticket_ref: 'HAM' }, retryChain: [
+    ...legacy.map((status, index) => ({ status, launch_request_id: `dead-${index}` })),
+    { status: 'running', launch_request_id: 'live' },
+  ] });
+  assert.equal(probe.liveRetryLaunchRequestId, 'live');
+  assert.equal(probe.row.ticket_ref, 'HAM');
+});
+
+test('changing broker diagnostics do not repeat the same quota deferral', () => {
+  const messages = [];
+  const log = createReviewerQuotaBlockLogger();
+  for (const error of ['timeout at 10:00', 'timeout at 10:01']) {
+    log({ repoPath: 'example/repo', prNumber: 1, logger: { warn: text => messages.push(text) },
+      route: { quotaBlocked: true, reviewerModel: 'codex', quotaGrounding: {
+        state: 'unknown', reason: 'broker-unavailable', diagnostics: [`unavailableSections.brokerAuth=${error}`],
+      } } });
+  }
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /timeout at 10:00/);
 });
 
 for (const stdout of ['', 'unavailable', 'banner\n{invalid}']) {

@@ -5,6 +5,15 @@ const vocabulary = JSON.parse(readFileSync(new URL('./launch-request-statuses.js
 export const LAUNCH_REQUEST_STATUSES = new Set(vocabulary.statuses);
 export const TERMINAL_LAUNCH_REQUEST_STATUSES = new Set(vocabulary.terminal);
 
+// Caller-owned policy must fail loudly on producer drift, never silently shrink.
+export function assertTerminalLaunchPolicy(statuses) {
+  for (const status of statuses) {
+    if (!LAUNCH_REQUEST_STATUSES.has(status) || !TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) {
+      throw new Error(`session_ledger: launch_requests.status terminal policy missing from producer vocabulary: ${status}`);
+    }
+  }
+}
+
 /**
  * @param {unknown} value
  * @returns {{status: string|null, terminal: boolean, succeeded: boolean, blockedNeedsDecision: boolean, diagnostic: string|null}}

@@ -44,6 +44,13 @@ retry authority for blocked decisions. Worker-run, dispatch-record and
 reviewer-run statuses remain separate contracts. Unknown launch/receipt statuses
 carry the producer and offending field/value without a new rejection.
 
+Dispatch status probes preserve the dispatch/worker vocabulary and producer
+diagnostics without interpreting them as launch-row statuses. Caller-owned
+terminal policy sets fail loudly at module load if generated producer vocabulary
+no longer recognizes a required terminal status; legacy capacity aliases remain
+explicit caller policy. Quota deferral logs deduplicate on routing state and
+reason, retaining changing diagnostic details only in the emitted message.
+
 Dispatch receipt identity aliases retain each caller's existing precedence and
 permissive compatibility behavior; whitespace-only aliases are skipped so a
 later non-empty identifier can be used. Banners and legacy text parsing remain
@@ -63,7 +70,38 @@ Agent OS revision, source path and SHA-256 for every copied artifact. Definition
 under `test/fixtures/producer-contracts/definitions` are inert verbatim excerpts
 of producer types/readers, not executable policy. The generated runtime launch
 vocabulary comes from the same source module, rather than a handwritten set.
-All captures are byte-identical copies; this repository adds no redactions.
+All copied owner captures are byte-identical; this repository adds no redactions.
+
+Relative links inside copied owner records resolve against their `source` path
+in `provenance.json` at the pinned agent-os revision. The publication directory
+deliberately vendors only six adapter-envelope captures; policy, completion,
+disposition, drift and backfill examples listed in the owner README are
+intentionally not vendored. `repaired-expired` and `repaired-five-hour-only` are
+byte-identical because the producer collapses both to `no-weekly-window`;
+consumer tests assert this equivalence rather than claiming distinct shapes.
+The ready, degraded and unavailable fleet captures share identical
+`providerStatuses` and `reserveFloors`; an equality test makes recapture drift
+explicit.
+
+`quota/fleet-released.json` is an additional consumer-side capture of the pinned
+producer, with its hash and input provenance in `released-provenance.json`.
+It runs the owner's real fleet capture scenario with fresh 20%-used short
+windows, 25%-used weekly windows resetting in six hours, and healthy Anthropic
+status-store inputs. Real reserve release, input publication and fleet
+serialization execute over disposable SQLite/files; external broker/review
+transport stays stubbed and sockets are forbidden. Only scratch path prefixes
+are normalized. A positive personal Claude test uses this output after local
+corporate exhaustion. Reproduce using the producer's Python test dependencies:
+
+```bash
+python3 scripts/contracts/capture-released.py /path/to/pinned-producer-archive
+```
+
+Create that archive with `git archive f54169eb71c6f0b55b51d3025dd435c88652277e
+modules/worker-pool/lib/python platform modules/token-budget/lib/python
+modules/hq-control-plane/server` in agent-os and extract it into a disposable
+directory. This extra capture is maintained separately from the copied owner
+artifacts and is not rewritten by `refresh.py`.
 
 With the declared companion checkout at the pinned revision, run from this
 repository root:
@@ -99,3 +137,10 @@ service restart. Same-user read-only verification is `hq fleet quota status
 --json`: inspect weekly object/reason, provider probe state and the matching
 broker provider fields together. Existing lifecycle transitions, state/smoke
 promises and enforcement policy are unchanged.
+
+Before activating a superproject submodule bump, run that read-only check on
+the deployed producer and require both `openai-oauth` and `openai-oauth-corp`
+floors to contain a non-null `weeklyMeasurement` with `status: "measured"`
+and a finite percentage. If either fails, keep activation held until the
+producer publishes current weekly evidence; a reason key alone must not turn a
+short-window `measurement` into weekly capacity.

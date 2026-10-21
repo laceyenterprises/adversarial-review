@@ -1,5 +1,5 @@
-import { readDispatchReceipt } from './producer-contracts/dispatch-receipt.mjs';
-import { readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
+import { parseHqJsonObject, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
+import { assertTerminalLaunchPolicy } from './producer-contracts/launch-status.mjs';
 // Remediation HQ dispatch status/cancel helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave4). This is a
@@ -12,7 +12,8 @@ import { readLaunchRequestStatus } from './producer-contracts/launch-status.mjs'
 //   - HQ worker-workspace resolution (persisted dir or live status probe);
 //   - the retryable `hq dispatch cancel` wrapper.
 //
-// It imports only node: builtins and ./remediation-reply-paths.mjs and MUST
+// It imports node: builtins, shared producer-contract readers and
+// ./remediation-reply-paths.mjs, and MUST
 // NOT import ./follow-up-remediation.mjs (that would create a cycle — the
 // monolith imports this module, not the other way around). `execFileAsync` is
 // a behavior-preserving private copy of the trivial promisify primitive that
@@ -28,7 +29,8 @@ import { resolveHqRoot } from './remediation-reply-paths.mjs';
 const execFileAsync = promisify(execFile);
 
 // Remediation owns its existing terminal-event policy, including legacy spelling.
-const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => readLaunchRequestStatus(status).terminal).concat('cancelled'));
+const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded', 'cancelled']);
+assertTerminalLaunchPolicy(['succeeded', 'failed', 'canceled', 'superseded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'daemon_bounced',
@@ -57,24 +59,6 @@ function resolveHqBin(env = process.env) {
   return 'hq';
 }
 
-function parseHqJsonObject(text, label) {
-  const raw = String(text || '').trim();
-  if (!raw) {
-    throw new Error(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(raw.slice(start, end + 1)); }
-      catch (cause) { throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON`, { cause }); }
-    }
-    throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON`);
-  }
-}
-
 function normalizeHqWorkspaceDir(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   return normalized ? resolve(normalized) : null;
@@ -97,22 +81,6 @@ function parseHqWorkerWorkspaceFromPayload(payload) {
     return parseHqWorkerWorkspaceFromPayload(nested);
   }
   return null;
-}
-
-function parseHqDispatchStatus(stdout, { normalize = true } = {}) {
-  const payload = parseHqJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload?.status || '').trim().toLowerCase();
-  if (!status) {
-    throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
-  }
-  const evidence = readDispatchReceipt(payload);
-  if (!normalize) return { ...payload, ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}) };
-  return {
-    ...payload,
-    ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}),
-    status,
-    health: String(payload?.health || '').trim().toLowerCase() || null,
-  };
 }
 
 function normalizeWorkerTerminalEvent(topic, event = {}) {

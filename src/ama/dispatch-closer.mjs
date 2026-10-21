@@ -3751,8 +3751,7 @@ function parseAmaCloserDispatchStatusOutput(stdout) {
     ? parsed.status.trim().toLowerCase()
     : null;
   if (!status) return null;
-  const evidence = readDispatchReceipt(parsed);
-  return { status, ...(evidence.status.diagnostic ? { diagnostic: evidence.status.diagnostic } : {}) };
+  return { status, ...(parsed.diagnostic ? { diagnostic: parsed.diagnostic } : {}) };
 }
 
 async function probeAmaCloserDispatchStatus({

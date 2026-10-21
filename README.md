@@ -912,6 +912,12 @@ lease intact. No operator action is needed.
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.
+ITP-12 account holds settle against the effective result session UUID, including
+after a fallback replaces the original session. Unreadable fleet quota remains
+unavailable when all declared pool selections are held; those holds still reach
+account admission. Runtime adapters with no declared ID hold leased accounts just
+like other unsupported runtimes. These repairs retain the existing smoke promises;
+the offline reviewer-account consumer tests cover these refusal paths.
 Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
 review's commit ID. Settlement requires a non-empty recovered head and retains
 null-safe comparisons against the inspected session and prior head, so a
@@ -1522,6 +1528,13 @@ Native `cli-direct` and Codex `acpx` consume the binding; other production runti
 adapters hold until they support account binding. This is inert without declared
 pools; ITP-19 remains the separately approved operator enrollment step.
 
+Account proposals and acquisitions resolve the canonical `<family>-reviewer`
+registry entry with the same model resolver used by the reviewer harness. Reviewer
+roles are valid registry keys; no remediation-class translation is required.
+An admitted account can establish snapshot availability when fleet quota is
+unreadable; a hold descriptor cannot. Held selections remain attached so admission
+can preserve the account hold without treating unavailable quota as healthy.
+
 The immutable receipt travels through spawn records, runtime subject context,
 settlement results and reviewer-pass metadata. Native auth preparation and refresh
 use its provider even if preference recovers or inherited environment changes.
@@ -1529,6 +1542,8 @@ Renewals use the original account/lease/generation every 60 seconds, and restart
 reconciliation renews the same receipt. Only confirmed drain releases capacity;
 an active run record, uncertain exception or failed release retains the broker
 slot for recovery/operator inspection. Broker expiry alone never frees it.
+After a resolved spawn attempt, a missing run record returns `null` and releases
+the lease; an unreadable record retains it because process drain is uncertain.
 Typed quota exhaustion writes a bounded cooldown for the selected account before
 settlement; sibling accounts remain eligible for subsequent attempts.
 
@@ -1543,8 +1558,9 @@ node test/run-tests.mjs reviewer-token-pool.test.mjs
 python3 -I -B test/verify-reviewer-token-owner.py /path/to/registered/agent-os
 ```
 
-Parent `fad3947f` fails 34 of the 36 consumer acceptance cases; the unchanged
-same-family refusal and no-account-release compatibility invariants pass. The new cases add canonical account receipts,
+The original 36-case consumer acceptance replay against parent `fad3947f` failed
+34 cases; the unchanged same-family refusal and no-account-release compatibility
+invariants passed. ITP-12 coverage includes canonical account receipts,
 immutable renewal bindings, account-local cooldowns, settlement persistence and
 restart renewal/drain release to the already delivered corporate-first selectors.
 The intermediate lease implementation without the active-run guard releases

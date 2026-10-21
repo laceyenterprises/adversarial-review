@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -95,6 +95,27 @@ for (const family of ['claude', 'codex']) {
       assert.equal(pool.readReviewerAccountCooldown(root, receipt.tokenAccountId, { env: {}, nowMs: nowMs + 900_001 }), null);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+  test(`ITP-12 ${family} resolves the canonical reviewer registry model without a caller model`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'reviewer-pool-model-'));
+    try {
+      const wire = wireFor(family);
+      const expectedModel = wire.request.requested_models[0];
+      mkdirSync(join(root, 'registry'));
+      writeFileSync(join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+        [`${family}-reviewer`]: { defaultModel: expectedModel },
+      } }));
+      for (const acquire of [false, true]) {
+        let requested;
+        const receipt = await pool.selectReviewerTokenAccount({ reviewerModel: family,
+          oauth: wire.oauth, requestId: 'session', acquire, rootDir: root,
+          env: { HQ_ROOT: root, AGENT_OS_DEPLOY_CHECKOUT: root },
+          ownerImpl: async value => { requested = value; return wire; } });
+        assert.equal(requested.model, expectedModel);
+        assert.equal(requested.operation, acquire ? 'acquire' : 'propose');
+        assert.equal(receipt.hold, false);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 }
 
 test('ITP-12 malformed owner leases and request substitution hold without leaking diagnostics', async () => {
@@ -118,6 +139,7 @@ for (const family of ['claude', 'codex']) test(`ITP-12 ${family} pool evidence c
     const grounding = await readAfhReviewerGrounding({ env: {}, retryDelaysMs: [],
       execFileImpl: async () => ({ stdout: '{"providerStatuses":[]}' }),
       selectReviewerTokenAccountImpl: async request => request.reviewerModel === family ? receipt : null });
+    assert.equal(grounding.available, !receipt.hold);
     const route = applyAfhReviewerFallback({ baseRoute: REVIEWER_ROUTE_BY_MODEL[family],
       builderClass: family === 'codex' ? 'claude-code' : 'codex', grounding, geminiReviewerMode: 'off' });
     assert.equal(route.reviewerModel, family);
@@ -133,13 +155,13 @@ test('ITP-12 undeclared reviewer pools preserve legacy routing without contactin
     ownerImpl: () => assert.fail('undeclared pools must stay offline') }), null);
 });
 
-test('ITP-12 unsupported runtime holds without dispatching a falsely attributed account', async () => {
+for (const describe of [() => ({ id: 'agent-os-hq' }), () => ({}), undefined]) test('ITP-12 unsupported or unidentified runtime holds without dispatching a falsely attributed account', async () => {
   const receipt = await selectWire(wireFor('codex'));
   const operations = [];
   const result = await spawnReviewer({ reviewerModel: 'codex', builderTag: 'claude-code',
     selectReviewerTokenAccountImpl: async () => receipt,
     updateReviewerTokenLeaseImpl: async (_, operation) => operations.push(operation),
-    reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'agent-os-hq' }),
+    reviewerRuntimeAdapterOverride: { describe,
       spawnReviewer: () => assert.fail('runtime cannot propagate binding') } });
   assert.equal(result.failureClass, 'reviewer-account-held');
   assert.equal(result.error, 'reviewer-runtime-account-binding-unsupported');
@@ -218,7 +240,7 @@ for (const family of ['claude', 'codex']) test(`ITP-12 ${family} receipt survive
       completeReviewerPassImpl: (_, value) => metadata.push(value.metadata),
       readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
       onPostOperationSettled: value => { settled = value; },
-      reviewerRuntimeAdapterOverride: { async spawnReviewer(req) {
+      reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'fixture-stub' }), async spawnReviewer(req) {
         requestContext = req.subjectContext;
         writeReviewerRunRecord(root, { sessionUuid: 'session', state: 'completed', subjectContext: req.subjectContext });
         return { ok: false, failureClass: 'unknown', error: 'fixture failed after drain' };
@@ -234,6 +256,32 @@ for (const family of ['claude', 'codex']) test(`ITP-12 ${family} receipt survive
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const recordKind of ['missing', 'unreadable']) test(`ITP-12 ${recordKind} run record after resolved spawn handles lease capacity safely`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-pool-record-'));
+  try {
+    const receipt = await selectWire(wireFor('codex'));
+    const operations = [];
+    if (recordKind === 'unreadable') {
+      writeReviewerRunRecord(root, { sessionUuid: 'session', state: 'spawned' });
+      writeFileSync(join(root, 'data', 'reviewer-runs', 'session.json'), '{');
+    } else {
+      assert.equal(readReviewerRunRecord(root, 'session'), null);
+    }
+    const result = await spawnReviewer({ rootDir: root, repo: 'sample/project', prNumber: 7,
+      reviewerModel: 'codex', builderTag: 'claude-code', reviewerSessionUuid: 'session',
+      selectReviewerTokenAccountImpl: async () => receipt,
+      updateReviewerTokenLeaseImpl: async (_, operation) => operations.push(operation),
+      quotaCheckEnv: {}, readReviewerQuotaDecisionImpl: async () => ({ available: true }),
+      beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+      readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
+      reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'fixture-stub' }),
+        spawnReviewer: async () => ({ ok: false, failureClass: 'unknown', error: 'failed before launch' }) },
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(operations, recordKind === 'missing' ? ['release'] : []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('ITP-12 account hold releases the claim without charging any retry budget', async () => {
   let spawned = 0;
   const result = await spawnReviewer({ reviewerModel: 'codex', builderTag: 'claude-code', reviewerSessionUuid: 'session',
@@ -243,6 +291,11 @@ test('ITP-12 account hold releases the claim without charging any retry budget',
   settleReviewerAttempt({ repoPath: 'sample/project', prNumber: 7, result,
     statements: { releaseReviewerClaim: { run: (...args) => releases.push(args) } } });
   assert.equal(spawned, 0);
+  assert.deepEqual(releases, [['session', 'sample/project', 7]]);
+  releases.length = 0;
+  settleReviewerAttempt({ repoPath: 'sample/project', prNumber: 7, result,
+    reviewerSessionUuid: 'previous-fallback-session',
+    statements: { releaseReviewerClaim: { run: (...args) => releases.push(args) } } });
   assert.deepEqual(releases, [['session', 'sample/project', 7]]);
 });
 

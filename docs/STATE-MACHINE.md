@@ -208,7 +208,10 @@ canonical reviewer account receipt and broker execution lease. Renewal and
 reattach keep the original account and generation; confirmed drain releases the
 slot while preserving receipt history. Active or uncertain runs retain capacity.
 Unknown account admission releases the existing delivery claim without charging
-retry budgets. These rules add no run state or merge-authority transition.
+retry budgets, using the effective result session after any fallback. An
+unreadable fleet quota snapshot stays unavailable when every pool selection is
+held; selection holds still reach admission. Leased accounts require an explicitly
+supported runtime ID. These rules add no run state or merge-authority transition.
 
 | run-state | Meaning |
 |---|---|

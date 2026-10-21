@@ -503,7 +503,7 @@ export async function readAfhReviewerGrounding({
       routingDisabled ? null : selectReviewerTokenAccountImpl({ reviewerModel: 'claude', env }),
     ]);
     return Object.freeze({ ...result,
-      available: Boolean(result.available || codex || claude),
+      available: Boolean(result.available || (codex && !codex.hold) || (claude && !claude.hold)),
       ...(codex ? { codexAccountSelection: codex } : {}),
       ...(claude ? { claudeAccountSelection: claude } : {}),
       ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled',
@@ -877,7 +877,7 @@ export function afhReviewerFallbackDecision({
   // primary + gemini behavior exactly as it is today unless a local runtime
   // probe conclusively grounded the current reviewer itself.
   if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded) {
-    return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`);
+    return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`, { primary });
   }
   if (!primary.grounded) {
     return notApplied('primary-not-grounded', { primary });

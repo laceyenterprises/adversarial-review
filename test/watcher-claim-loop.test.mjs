@@ -117,6 +117,7 @@ function buildLoaderSource({
     [fileUrl('src', 'reviewer-reattach.mjs')]: 'fixture:reviewer-reattach',
     [fileUrl('src', 'reviewer-timeout.mjs')]: 'fixture:reviewer-timeout',
     [fileUrl('src', 'reviewer-broker-refresh.mjs')]: 'fixture:reviewer-broker-refresh',
+    [fileUrl('src', 'reviewer-token-ledger-lookup.mjs')]: 'fixture:reviewer-token-ledger-lookup',
     [fileUrl('src', 'stale-drift.mjs')]: 'fixture:stale-drift',
     [fileUrl('src', 'watcher-fail-loud.mjs')]: 'fixture:watcher-fail-loud',
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
@@ -325,6 +326,9 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
+    // Keep the newer worker transport inside the same offline accounting seam.
+    'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",

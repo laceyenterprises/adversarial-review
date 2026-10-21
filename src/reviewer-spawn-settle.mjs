@@ -677,7 +677,7 @@ async function spawnReviewerOnce(args) {
     return result;
   }
   const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
-  if (receipt && runtimeId && !['cli-direct', 'acpx', 'fixture-stub'].includes(runtimeId)) {
+  if (receipt && !['cli-direct', 'acpx', 'fixture-stub'].includes(runtimeId)) {
     // These runtimes do not yet carry an execution binding to their credential
     // owner. Never claim the selected token was used by an unbound dispatch.
     await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env });
@@ -1459,6 +1459,7 @@ function settleReviewerAttempt({
 }) {
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
   if (result.failureClass === 'reviewer-account-held') {
+    reviewerSessionUuid = result.reviewerSessionUuid || reviewerSessionUuid;
     withSqliteBusyRetrySync(
       () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
       { label: `reviewer-account-held:${repoPath}#${prNumber}`, log },

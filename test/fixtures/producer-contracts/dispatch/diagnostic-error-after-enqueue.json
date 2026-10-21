@@ -1,0 +1,5 @@
+{
+  "exitCode": 0,
+  "stderr": "cwp_dispatch.dispatch: $.diagnostics and $.drain post-enqueue advisory unavailable (OperationalError)\n",
+  "stdout": "{\"dispatchId\": \"<launch-request-id>\", \"launchRequestId\": \"<launch-request-id>\", \"ticketRef\": \"DRAINQUEUE-02\", \"workerClass\": \"codex\", \"taskKind\": \"coding\", \"status\": \"requested\", \"workspaceRepos\": [], \"queuePosition\": 1, \"etaHint\": \"~40s\", \"watch\": {\"card\": \"hq dispatch status <launch-request-id>\", \"logs\": \"hq dispatch logs <launch-request-id>\", \"follow\": \"hq dispatch watch <launch-request-id> --follow\", \"cancel\": \"hq dispatch cancel <launch-request-id>\"}, \"diagnostics\": []}\n"
+}

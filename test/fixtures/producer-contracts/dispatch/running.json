@@ -1,0 +1,5 @@
+{
+  "exitCode": 0,
+  "stderr": "",
+  "stdout": "{\"dispatchId\": \"<launch-request-id>\", \"launchRequestId\": \"<launch-request-id>\", \"ticketRef\": \"DRAINQUEUE-02\", \"workerClass\": \"codex\", \"taskKind\": \"coding\", \"status\": \"running\", \"workspaceRepos\": [], \"queuePosition\": 0, \"etaHint\": \"starting now\", \"watch\": {\"card\": \"hq dispatch status <launch-request-id>\", \"logs\": \"hq dispatch logs <launch-request-id>\", \"follow\": \"hq dispatch watch <launch-request-id> --follow\", \"cancel\": \"hq dispatch cancel <launch-request-id>\"}, \"diagnostics\": [{\"gate\": \"dispatch_idempotency\", \"severity\": \"info\", \"reason\": \"existing launch request returned for duplicate idempotency key\"}]}\n"
+}

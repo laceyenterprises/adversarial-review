@@ -1,0 +1,65 @@
+class ReserveFloor(TypedDict):
+    """One reserveFloors entry; see docs/data-model/02-worker-pool-and-dispatch.md."""
+
+    remainingPct: float
+    protectedClasses: list[str]
+    rerouteHeld: bool
+    pausePct: float
+    releaseBeforeResetHours: float
+    active: bool
+    nearCap: bool
+    measurement: QuotaMeasurement | None
+    weeklyMeasurement: QuotaMeasurement | None
+    weeklyMeasurementReason: str | None
+    reason: str
+    paused: bool
+    released: bool
+    mode: str
+    nextResetAt: str | None
+    releaseAt: str | None
+    releaseKnown: bool
+    releaseStatus: str
+    # Fleet status adds counts; an unavailable ledger read emits null.
+    heldCount: NotRequired[int | None]
+    pauseHeldCount: NotRequired[int | None]
+
+def weekly_evidence(state: Mapping[str, Any], credential: str) -> tuple[dict, str | None]:
+    """Shared weekly reader; diagnostics never substitute short-window evidence.
+
+    Selection policy still checks status alone. Shape diagnostics are evidence,
+    not additional admission conditions.
+    """
+    path = f"reserveFloors.{credential}"
+    prefix = "quota_reserve.snapshot: "
+    floor = state.get(credential)
+    if not isinstance(floor, Mapping):
+        return {}, prefix + path + " missing/invalid object"
+    weekly = floor.get("weeklyMeasurement")
+    if not isinstance(weekly, dict):
+        reason = floor.get("weeklyMeasurementReason")
+        if "weeklyMeasurement" in floor and weekly is None:
+            label = (
+                "unavailable"
+                if reason in ("no-weekly-window", "measurement-unavailable")
+                else "missing/invalid reason"
+            )
+            return (
+                {},
+                prefix
+                + path
+                + f".weeklyMeasurement=null; {path}.weeklyMeasurementReason={reason!r} ({label})",
+            )
+        return {}, prefix + path + ".weeklyMeasurement missing/invalid object"
+    status = weekly.get("status")
+    if status != "measured":
+        return (
+            weekly,
+            prefix
+            + path
+            + f".weeklyMeasurement.status={status!r}; {path}.weeklyMeasurementReason={floor.get('weeklyMeasurementReason')!r}",
+        )
+    for field in ("percentRemaining", "percentConsumed"):
+        value = weekly.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return weekly, prefix + path + f".weeklyMeasurement.{field} missing/invalid number"
+    return weekly, None

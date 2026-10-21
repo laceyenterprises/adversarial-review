@@ -1,0 +1,90 @@
+{
+  "anthropic-oauth": {
+    "active": false,
+    "measurement": null,
+    "mode": "normal",
+    "nearCap": false,
+    "nextResetAt": null,
+    "pausePct": 5.0,
+    "paused": false,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "measurement-unavailable",
+    "releaseAt": null,
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": null,
+    "weeklyMeasurementReason": "measurement-unavailable"
+  },
+  "anthropic-oauth-corp": {
+    "active": false,
+    "measurement": null,
+    "mode": "normal",
+    "nearCap": false,
+    "nextResetAt": null,
+    "pausePct": 5.0,
+    "paused": false,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "measurement-unavailable",
+    "releaseAt": null,
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": null,
+    "weeklyMeasurementReason": "measurement-unavailable"
+  },
+  "openai-oauth": {
+    "active": false,
+    "measurement": null,
+    "mode": "normal",
+    "nearCap": false,
+    "nextResetAt": null,
+    "pausePct": 5.0,
+    "paused": false,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "measurement-unavailable",
+    "releaseAt": null,
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": null,
+    "weeklyMeasurementReason": "measurement-unavailable"
+  },
+  "openai-oauth-corp": {
+    "active": false,
+    "measurement": null,
+    "mode": "normal",
+    "nearCap": false,
+    "nextResetAt": null,
+    "pausePct": 5.0,
+    "paused": false,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "measurement-unavailable",
+    "releaseAt": null,
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": null,
+    "weeklyMeasurementReason": "measurement-unavailable"
+  }
+}

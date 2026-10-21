@@ -1,0 +1,203 @@
+{
+  "files": {
+    "broker/README.md": {
+      "sha256": "312bcb053ede906eadba4a49e3f089b595828ae08c019284b3635d88ca956026",
+      "source": "platform/oauth-broker/tests/fixtures/contracts/README.md"
+    },
+    "broker/readyz-degraded.json": {
+      "sha256": "d700bc6a5bd03b20b3f28b37f852f23035cfffadf212c85d922a49515585b43e",
+      "source": "platform/oauth-broker/tests/fixtures/contracts/readyz-degraded.json"
+    },
+    "broker/readyz-disabled.json": {
+      "sha256": "ae62f57e7742531d43938ec8948601b9e1e277be6e293306f96243a9c139d4e6",
+      "source": "platform/oauth-broker/tests/fixtures/contracts/readyz-disabled.json"
+    },
+    "broker/readyz-ready.json": {
+      "sha256": "bbca556c15fccd116fc78f96a342ede6f857fa12f2f4ac3511b5bb55fdac1c6a",
+      "source": "platform/oauth-broker/tests/fixtures/contracts/readyz-ready.json"
+    },
+    "broker/readyz-unavailable.json": {
+      "sha256": "d3f94c4d29b36ffd3526fc7a78a252a2cf444c3059f5a482ec60e179b7b64c4e",
+      "source": "platform/oauth-broker/tests/fixtures/contracts/readyz-unavailable.json"
+    },
+    "definitions/broker_evidence.py.txt": {
+      "sha256": "de2758e94fc8be7543ec64d70e7ca4f60567fd7acc9d5000314b760150cf5a37",
+      "source": "platform/agent-os-config/src/agent_os_core/broker_evidence.py",
+      "sourceSha256": "ba7d00125ea4c85338c653d394d767b6261029d211032f7a25589649984790a5"
+    },
+    "definitions/cli_fleet.py.txt": {
+      "sha256": "6c6fad69b198b36d53527e14d4f1c81bc14864393134e486db8ef73888b1fe9c",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/cli_fleet.py",
+      "sourceSha256": "84e69c7665dc9281ee3eefa043a147747313bfbb0617bb1500642888d33df46d"
+    },
+    "definitions/codex_quota_snapshots.py.txt": {
+      "sha256": "090da140eb5456fb212f84d1700b21790d58b4c0c0ba1191eb19943014fc6882",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/codex_quota_snapshots.py",
+      "sourceSha256": "42b347b625d68a55468180691f17a9d01ba94666448ed53bbc416f55dd193818"
+    },
+    "definitions/dispatch_refusals.py.txt": {
+      "sha256": "9632c725491646ae6b0d5fd288c7f8dc1d06a7e17db37e52b14689d408047fc2",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/dispatch_refusals.py",
+      "sourceSha256": "708d4059a223131630ea017ccfe5d43c47f3c1a4f42e87f52c7dee55bba31115"
+    },
+    "definitions/envelope.py.txt": {
+      "sha256": "3935a660712d4200964dd42a8553e029124cae05d4f913e08cc7f75f9dbcdc21",
+      "source": "modules/github-adapter/src/agent_os_github_adapter/envelope.py",
+      "sourceSha256": "6fac3bd4e312fe2d987e1a527950c4d889ac933d267235e57007791acb77d286"
+    },
+    "definitions/launch_request_terminal_statuses.py.txt": {
+      "sha256": "590c104bf08fe0200acee006c893268b0eb5f58c19fbb807cb3f9560e99e29d9",
+      "source": "platform/session-ledger/src/session_ledger/launch_request_terminal_statuses.py",
+      "sourceSha256": "590c104bf08fe0200acee006c893268b0eb5f58c19fbb807cb3f9560e99e29d9"
+    },
+    "definitions/pr-publication-contract.md.txt": {
+      "sha256": "a45603408f8256332ed3eb8973f91784591e6a4988998025ab5a9b0bbadeb0eb",
+      "source": "modules/worker-pool/docs/pr-publication-contract.md",
+      "sourceSha256": "a45603408f8256332ed3eb8973f91784591e6a4988998025ab5a9b0bbadeb0eb"
+    },
+    "definitions/publication_receipts.py.txt": {
+      "sha256": "92a1d215b5a959bfd0e43efdee9bb348ec331e5bcc60ccacc18b334d1ac05b71",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/publication_receipts.py",
+      "sourceSha256": "2d0c291e12fd84568d579986a1ea169166bd975d24b1290cd9120f1684a05076"
+    },
+    "definitions/quota-producer-contract.md.txt": {
+      "sha256": "2f6afc0d8cebdfa422b64db852361996ed2c21d2ff2fdfda219765d044a6876c",
+      "source": "modules/worker-pool/docs/quota-producer-contract.md",
+      "sourceSha256": "2f6afc0d8cebdfa422b64db852361996ed2c21d2ff2fdfda219765d044a6876c"
+    },
+    "definitions/quota_reserve.py.txt": {
+      "sha256": "82e721d33223ba17479349bc94429e1c0b1b9a7a353da3eca76ee519a563c002",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/quota_reserve.py",
+      "sourceSha256": "ff16b3fc65ed4ec926a02ca7bc56586d6a519822b15d062214d81b305f32a48a"
+    },
+    "definitions/status_contract.py.txt": {
+      "sha256": "4e694bfbda99befa04388be1b9703fb7d2756ee89090d78b2913b01fa9e8ebeb",
+      "source": "platform/oauth-broker/src/oauth_broker/status_contract.py",
+      "sourceSha256": "9129457def66926f48c963c747418a523723844a66dcc24ac16bdda83856a363"
+    },
+    "definitions/ticket.py.txt": {
+      "sha256": "078c2c59d7ea06e0aea590c88e373a4d740376ffd183bf8352fffecd7ce1fd05",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/ticket.py",
+      "sourceSha256": "96c3f8a8c1c1c6808a46c85786d7db8aa9877e42019e011d28a81e2de8af4844"
+    },
+    "dispatch/README.md": {
+      "sha256": "0bc9177679ee64f479acb1fb90cbfcaf15227abbbee26ddf72dd0ae3ddf9d0b5",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/README.md"
+    },
+    "dispatch/accepted.json": {
+      "sha256": "5f6ad253a0b64340d0ddc12127926efde836d38395eae1a3912cf444d787a973",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/accepted.json"
+    },
+    "dispatch/completed.json": {
+      "sha256": "6c8d18ec36e2e3ea4502a7225ecc7e1c155df0602e79cf7487a40a7765a37585",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/completed.json"
+    },
+    "dispatch/diagnostic-error-after-enqueue.json": {
+      "sha256": "d0da514b6f6abe80312f4891472da99832a2dab59bc723fb0cf9d00921f90bc9",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/diagnostic-error-after-enqueue.json"
+    },
+    "dispatch/dry-run-refused.json": {
+      "sha256": "3a2ba83bd360d311a431d440c63512cfc9a725b9f03ce6293d26a06fd5366e19",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/dry-run-refused.json"
+    },
+    "dispatch/queued.json": {
+      "sha256": "82843fc24f35112e837695e6994630cc641e723c502acda6bbf7f10e2b2a181b",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/queued.json"
+    },
+    "dispatch/refused.json": {
+      "sha256": "6a9f7aedac8cf63efd9dc32dcbdcbda9ef982259f9d27ef310fb7d5a241d0d73",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/refused.json"
+    },
+    "dispatch/running.json": {
+      "sha256": "771945d4dba7bce3c27eb96e5c80eeea8d20610047ab231d7f30ef7828c749c3",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/running.json"
+    },
+    "dispatch/structured-refused.json": {
+      "sha256": "772c83a7ddb13cc3d35a5c7d9e0caada342aa0eb07ef9d2f5045cdc8408f25bf",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/dispatch-receipts/structured-refused.json"
+    },
+    "launch/README.md": {
+      "sha256": "bbb8fda1e1fe6fa0aa8187a5eb92ee8f7f6f6eccb3fbc4acc4bf55fd2a667955",
+      "source": "platform/session-ledger/tests/fixtures/launch-request-status/README.md"
+    },
+    "launch/rows.json": {
+      "sha256": "e596962c1d3e6c9294323a79968ff9e0a23e4395201d5fdb4c9ddd7df2d01f63",
+      "source": "platform/session-ledger/tests/fixtures/launch-request-status/rows.json"
+    },
+    "publication/README.md": {
+      "sha256": "a667e5939b57ed88511106a92166e9a10403f3fcdd8e2f2901590328893ecd64",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/README.md"
+    },
+    "publication/accepted.json": {
+      "sha256": "e87a1a4313b66fffb80701c8c508da68e365ec65c21f6cffd018ef84df4413fc",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/accepted.json"
+    },
+    "publication/capture-failed.json": {
+      "sha256": "6546fd09aa4051c9bd3728f633bdc3869e7132d5d09f77c48094a890f787cc17",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/capture-failed.json"
+    },
+    "publication/missing-url.json": {
+      "sha256": "35b0de0ec7a2bb9beef5c5c50cda17eaeb162ca3ba5897d43b33518e1a4f6363",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/missing-url.json"
+    },
+    "publication/refused.json": {
+      "sha256": "dd8da93ce7e4f4e87a52c1a0cb73b1196229529c8e63f20521e33f27d75d856b",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/refused.json"
+    },
+    "publication/same-head-adopted.json": {
+      "sha256": "d2e7e353bb6d640e332b4d879b3f43525996caf9b060c1bdef4151f7c9833ef3",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/same-head-adopted.json"
+    },
+    "publication/wrong-head-refused.json": {
+      "sha256": "86ce586465342ba2bf0721df613eb4b8d83e852229246152a765c3bb6cde6575",
+      "source": "modules/worker-pool/lib/python/cwp_dispatch/test/fixtures/publication-receipts/wrong-head-refused.json"
+    },
+    "quota/fleet-degraded.json": {
+      "sha256": "779d8730de75d3906a6cbf4ec3db1ec2b6a32dd839c42ffe446e8c4716d93f76",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-degraded.json"
+    },
+    "quota/fleet-disabled.json": {
+      "sha256": "b551dc3f67859d79af6fa1b77c728cd9009912adcf2c5d4276d7eea99369adf2",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-disabled.json"
+    },
+    "quota/fleet-ready.json": {
+      "sha256": "901cd705e8c26ef8436db32d58762dfe10eef4e73d06046f1ffdeb9526850584",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-ready.json"
+    },
+    "quota/fleet-unavailable.json": {
+      "sha256": "bd7f868c1f59c730d3a16476f98a683d6b578addeda527602646f9d52e3d077f",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/fleet-unavailable.json"
+    },
+    "quota/repaired-absent.json": {
+      "sha256": "bb0e54a14a0e3446ad5db7df9d2a7d3d3d3613fef77e73290bf695b468766a27",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-absent.json"
+    },
+    "quota/repaired-disabled.json": {
+      "sha256": "7cec09ed67eedc6aa5d630a3adc58fd60cbf04a926550cbf607da9fe628bc897",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-disabled.json"
+    },
+    "quota/repaired-expired.json": {
+      "sha256": "c5b3c09a3e840ab21f1eacc9ac3c7f6c6be7008b44d8852fb8fa4aba594cb7f9",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-expired.json"
+    },
+    "quota/repaired-five-hour-only.json": {
+      "sha256": "c5b3c09a3e840ab21f1eacc9ac3c7f6c6be7008b44d8852fb8fa4aba594cb7f9",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-five-hour-only.json"
+    },
+    "quota/repaired-measured.json": {
+      "sha256": "3268263cc38ffdeab590d8afd72e7c2677c964b6451578b5b1f4a7ee6a9fbad3",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-measured.json"
+    },
+    "quota/repaired-stale.json": {
+      "sha256": "7a3085242fb0d11f4abdedea9c2c0a642fd416a113153bea8f5eb2cf53b6996d",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-stale.json"
+    },
+    "quota/repaired-unavailable.json": {
+      "sha256": "5c019e59112a6a5c897d7dafc69a3a8d9537d2f5fc58bf1d250a551c6f042337",
+      "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-unavailable.json"
+    }
+  },
+  "refresh": "python3 scripts/contracts/refresh.py ../agent-os",
+  "repository": "agent-os",
+  "revision": "f54169eb71c6f0b55b51d3025dd435c88652277e"
+}

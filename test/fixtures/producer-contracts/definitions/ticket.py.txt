@@ -1,0 +1,112 @@
+class DispatchReceipt(TypedDict):
+    dispatchId: str
+    launchRequestId: str
+    ticketRef: str | None
+    workerClass: str
+    taskKind: str
+    status: LaunchRequestStatus
+    workspaceRepos: list[str]
+    queuePosition: int | None
+    etaHint: str | None
+    watch: dict[str, str]
+    diagnostics: list[dict[str, Any]]
+    packWorkerClassOverride: NotRequired[dict[str, Any]]
+    drain: NotRequired[DrainNotice]
+
+class DispatchReceiptRead:
+    payload: dict[str, Any]
+    launch_request_id: str | None
+    identity_diagnostic: str | None
+    status: LaunchRequestStatusMeaning
+    raw_identity: object = None
+
+    @property
+    def follow_command(self) -> str | None:
+        watch = self.payload.get("watch")
+        if isinstance(watch, Mapping):
+            follow = watch.get("follow")
+            return follow if isinstance(follow, str) else None
+        # Compatibility with older consumers' command-array representation.
+        if isinstance(watch, list) and all(isinstance(part, str) for part in watch):
+            return " ".join(watch)
+        return None
+
+    def require_identity(self) -> str:
+        if self.launch_request_id is None:
+            raise DispatchReceiptError(self.identity_diagnostic)
+        return self.launch_request_id
+
+def read_dispatch_receipt(
+    value: str | Mapping[str, Any],
+    *,
+    identity_fields: tuple[str, ...] = IDENTITY_FIELDS,
+    skip_invalid_aliases: bool = False,
+) -> DispatchReceiptRead:
+    """Read current output and explicit legacy identity aliases in one place.
+
+    Only malformed/non-object JSON raises here. Missing identity/status is
+    evidence, not a new admission rule: callers retain their existing policy.
+    A caller that already requires identity can call ``require_identity``.
+    Do not infer completion, publication, or retry permission from this result.
+    """
+    try:
+        from session_ledger.launch_request_terminal_statuses import read_launch_request_status
+    except ModuleNotFoundError as exc:
+        if exc.name != "session_ledger":
+            raise
+        # Reuse the package's repository resolver; keep the status vocabulary
+        # owned by the dependency-free platform module rather than copying it.
+        from cwp_dispatch.agent_os_config_helper import _repo_root
+
+        ledger_src = str(_repo_root() / "platform" / "session-ledger" / "src")
+        if ledger_src not in sys.path:
+            sys.path.insert(0, ledger_src)
+        from session_ledger.launch_request_terminal_statuses import read_launch_request_status
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise DispatchReceiptError(
+                f"{DISPATCH_RECEIPT_PRODUCER}: $stdout invalid JSON: {exc}"
+            ) from exc
+    if not isinstance(value, Mapping):
+        raise DispatchReceiptError(
+            f"{DISPATCH_RECEIPT_PRODUCER}: $stdout invalid type {type(value).__name__}; expected object"
+        )
+    payload = dict(value)
+    # Preserve each compatibility reader's precedence, including a truthy but
+    # invalid primary field. An alias must not silently repair conflicting data.
+    selected = next(
+        (
+            key
+            for key in identity_fields
+            if payload.get(key) and (not skip_invalid_aliases or isinstance(payload[key], str))
+        ),
+        None,
+    )
+    # raw_identity supports old permissive readers without adding a new hold;
+    # the typed identity and diagnostic still expose invalid producer evidence.
+    raw_identity = payload.get(selected or identity_fields[-1]) if identity_fields else None
+    identity = raw_identity if isinstance(raw_identity, str) and raw_identity.strip() else None
+    diagnostic = None
+    if identity is None:
+        diagnostic = f"{DISPATCH_RECEIPT_PRODUCER}: " + "; ".join(
+            f"$.{key} "
+            + ("missing" if key not in payload else "invalid; expected non-empty string")
+            for key in ((selected,) if selected else identity_fields)
+        )
+    status = read_launch_request_status(payload.get("status"))
+    if status.diagnostic:
+        status = replace(
+            status,
+            diagnostic=(
+                f"{DISPATCH_RECEIPT_PRODUCER}: $.status "
+                + (
+                    "missing"
+                    if "status" not in payload
+                    else f"unrecognized value {payload['status']!r}"
+                )
+            ),
+        )
+    return DispatchReceiptRead(payload, identity, diagnostic, status, raw_identity)

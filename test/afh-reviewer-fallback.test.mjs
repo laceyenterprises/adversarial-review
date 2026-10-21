@@ -66,6 +66,28 @@ test('fleet quota retry completes when its delay is the only remaining event-loo
 
 const HERMETIC = { env: {}, topPath: '/dev/null' };
 
+test('pooled reviewer grounding preserves account selection and producer diagnostics', () => {
+  for (const model of ['codex', 'claude']) {
+    for (const status of ['ready', 'unknown', 'unavailable']) {
+      const account = {
+        pooled: true,
+        status,
+        hold: status !== 'ready',
+        reason: 'pool-proposal',
+        diagnostics: ['producer: account evidence'],
+      };
+      const result = reviewerModelGrounding({
+        available: true,
+        [`${model}AccountSelection`]: account,
+      }, model);
+      assert.equal(result.grounded, status === 'unavailable', `${model}: ${status}`);
+      assert.equal(result.accountHold, account.hold);
+      assert.equal(result.accountSelection, account);
+      assert.deepEqual(result.diagnostics, account.diagnostics);
+    }
+  }
+});
+
 function baseRouteFor(builderClass) {
   return routeSubject({ builderClass }, { ...HERMETIC, geminiReviewerMode: 'off' });
 }

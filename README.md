@@ -865,7 +865,26 @@ writes are best-effort and cannot suppress a page or fail a completed review.
 A new head still re-arms review through the existing REVIEWSTALL-01 policy.
 
 
+## Producer-owned evidence readers
+
+PRM-06 centralizes quota, broker, launch-status, dispatch and publication envelope
+interpretation against pinned producer types and captured examples. Account
+holds and reviewer-route logs identify the producer and exact unavailable field;
+AMA audits retain the same diagnostics in `harnessResolution.diagnostics`.
+Account order, thresholds and retry authority stay unchanged. Weekly evidence
+falls back to short-window `measurement` only when `weeklyMeasurementReason` is
+absent; a present reason key, including null, retains an unknown-evidence hold. See [reader ownership, capture provenance and exact refresh commands](docs/producer-contract-readers.md).
+
 ## State machines and smoke verification (SMV v1)
+
+PRM-06 activation requires a read-only `hq fleet quota status --json` check on
+the deployed producer before a submodule bump or reader deployment: both
+`openai-oauth` and `openai-oauth-corp` floors must contain measured weekly
+objects with finite numeric percentages in [0, 100]. Hold activation otherwise.
+Repeat after deployment, inspecting probe/broker state and account hold reasons.
+Weekly reset/expiry can hold accounts until the next successful weekly probe;
+unknown evidence alone does not trigger AFH fallback. This live check is separate
+from the unchanged offline smoke promises. See the [activation contract](docs/producer-contract-readers.md#activation-and-verification).
 
 OPDECPAGE-01: operator-decision notices observe closure ownership without changing
 lifecycle states or merge authority. In-flight hammer launches and pending retries
@@ -912,6 +931,12 @@ status. Its initial/final node is an evaluation boundary. Lease removal is not
 permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
+
+Producer contract readers preserve each caller’s literal terminal policy and fail
+loudly if its canonical members drift from the producer vocabulary. Legacy aliases
+remain local compatibility policy. Dispatch-status probes have a separate vocabulary;
+parser diagnostics add no lifecycle states or retry authority. The reviewer-run and
+hammer-dispatch state/edge inventory and smoke promises are unchanged.
 
 LEASEDEADPID-01: ownership ignores pending leases whose local watcher is dead or
 whose pending reclaim window expired, using the same predicates as closer dispatch.

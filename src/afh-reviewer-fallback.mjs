@@ -617,10 +617,10 @@ export function createAfhReviewerGroundingCache({
             // account must not turn cached evidence into fresh headroom.
             ...(entry.lastGood.snapshot.claudeAccountSelection ? {
               claudeAccountSelection: { ...entry.lastGood.snapshot.claudeAccountSelection,
-                hold: true, reason: 'claude-account-evidence-unknown' },
+                hold: true, reason: 'claude-account-evidence-unknown', diagnostics: ['cwp_dispatch.cli_fleet: $stdout stale after refresh error'] },
             } : {}),
             ...(entry.lastGood.snapshot.codexAccountSelection ? {
-              codexAccountSelection: { hold: true, reason: 'codex-account-evidence-unknown' },
+              codexAccountSelection: { hold: true, reason: 'codex-account-evidence-unknown', diagnostics: ['cwp_dispatch.cli_fleet: $stdout stale after refresh error'] },
             } : {}),
             staleIfError: Object.freeze({
               reason: snapshot?.reason || 'fleet-quota-status-unavailable',
@@ -710,13 +710,14 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
   }
   if (model === 'codex' && grounding?.codexAccountSelection) {
     const account = grounding.staleIfError
-      ? { hold: true, reason: 'codex-account-evidence-unknown' } : grounding.codexAccountSelection;
+      ? { hold: true, reason: 'codex-account-evidence-unknown', diagnostics: ['cwp_dispatch.cli_fleet: $stdout stale after refresh error'] } : grounding.codexAccountSelection;
     const key = account.provider === 'codex-corp' ? 'openai/oauth-corp' : 'openai';
     const entry = grounding.providers?.[key] || base;
     return { ...base, ...entry, known: true,
       grounded: account.pooled ? account.status === 'unavailable' : account.hold === true && account.reason !== 'codex-account-evidence-unknown',
       accountHold: account.hold === true,
       accountSelection: account,
+      diagnostics: account.diagnostics || [],
       brokerProvider: account.provider || null, source: 'fleet-quota-status' };
   }
   if (model === 'claude' && grounding?.claudeAccountSelection) {
@@ -728,6 +729,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
       grounded: account.pooled ? account.status === 'unavailable' : account.hold === true && account.reason !== 'claude-account-evidence-unknown',
       accountHold: account.hold === true,
       accountSelection: account,
+      diagnostics: account.diagnostics || [],
       brokerProvider: account.provider || null, source: 'fleet-quota-status' };
   }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
@@ -962,7 +964,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
     }
     if (decision?.primary?.model === 'codex' && decision.primary.accountHold) return { ...baseRoute,
       codexAccountHold: true, quotaBlocked: true, quotaGrounding: { reviewer: 'codex',
-        state: 'codex-account-unavailable', reason: decision.reason, source: 'fleet-quota-status' } };
+        state: 'codex-account-unavailable', reason: decision.reason, source: 'fleet-quota-status', diagnostics: decision.primary.diagnostics || [] } };
     if (decision?.primary?.model === 'codex' && decision.primary.accountHold === false && !decision.primary.grounded && decision.primary.brokerProvider) {
       return { ...baseRoute, codexBrokerProvider: decision.primary.brokerProvider, codexAccountHold: false };
     }
@@ -972,7 +974,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
         quotaGrounding: {
           reviewer: decision.primary.model, state: decision.primary.state,
           source: decision.primary.source || decision.primary.softVerdict?.source || 'fleet-quota-status',
-          reason: decision.reason,
+          reason: decision.reason, ...(decision.primary.diagnostics?.length ? { diagnostics: decision.primary.diagnostics } : {}),
         },
       };
     }

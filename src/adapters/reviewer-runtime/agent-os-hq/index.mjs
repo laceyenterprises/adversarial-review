@@ -1,3 +1,5 @@
+import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
+import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../../../producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,7 +29,11 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['codex', 'codex'],
   ['gemini', 'gemini'],
 ]);
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
+// Preserve this runtime's terminal handling and legacy canceled spelling.
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => {
+  assertTerminalLaunchPolicy([status]);
+  return readLaunchRequestStatus(status).terminal;
+}).concat('cancelled'));
 const SUCCESS_STATUSES = new Set(['succeeded']);
 const ACTIVE_RECORD_STATES = new Set(['spawned', 'heartbeating']);
 const DEFAULT_POLL_BASE_MS = 30_000;
@@ -166,29 +172,31 @@ function resolveWorkerClass(model, explicitWorkerClass) {
 
 function parseJsonObject(text, label) {
   const raw = String(text || '').trim();
-  if (!raw) throw new Error(`${label} produced empty output`);
+  if (!raw) throw new Error(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
   try {
     return JSON.parse(raw);
   } catch {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
-    if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1));
-    throw new Error(`${label} did not produce JSON: ${tailText(raw, 1000)}`);
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(raw.slice(start, end + 1)); }
+      catch (cause) { throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not produce JSON`, { cause }); }
+    }
+    throw new Error(`cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not produce JSON: ${tailText(raw, 1000)}`);
   }
 }
 
 function parseDispatchTicket(stdout) {
   const payload = parseJsonObject(stdout, 'hq dispatch');
-  const launchRequestId = String(payload.launchRequestId || payload.dispatchId || '').trim();
-  if (!launchRequestId) throw new Error('hq dispatch ticket missing launchRequestId/dispatchId');
+  const evidence = readDispatchReceipt(payload, { identityFields: ['launchRequestId', 'dispatchId'] });
+  // Keep the historical permissive identity shim; diagnostics never add a hold.
+  const launchRequestId = String(evidence.rawIdentity || '').trim();
+  if (!launchRequestId) throw new Error(`${evidence.identityDiagnostic}; hq dispatch ticket missing launchRequestId/dispatchId`);
   return { ...payload, launchRequestId };
 }
 
 function normalizeStatusPayload(stdout) {
-  const payload = parseJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload.status || '').trim();
-  if (!status) throw new Error('hq dispatch status payload missing status');
-  return payload;
+  return parseHqDispatchStatus(stdout, { normalize: false });
 }
 
 function hqArtifactDir(rootDir) {

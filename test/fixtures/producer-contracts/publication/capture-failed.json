@@ -1,0 +1,64 @@
+{
+  "adapter": [
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "base": "main",
+      "complete": true,
+      "draft": false,
+      "failureClass": null,
+      "head": "branch",
+      "labels": [],
+      "ok": true,
+      "output": "https://github.com/example/repo/pull/2\n",
+      "rateLimit": null,
+      "repo": "example/repo",
+      "retryAfter": null,
+      "source": "gh-cli",
+      "title": "Capture publication",
+      "url": "https://github.com/example/repo/pull/2"
+    }
+  ],
+  "returncode": 3,
+  "sidecar": {
+    "branch": "branch",
+    "changeKind": "bug-fix",
+    "changeKindSource": "plan",
+    "draft": false,
+    "dryRun": false,
+    "fastMergeCategory": "",
+    "fastMergeLabel": "",
+    "fromPlan": "",
+    "fromPlanRawHash": "",
+    "fromPlanRepo": "",
+    "fromPlanRepoRoot": "",
+    "goalLineage": {},
+    "headSha": "<head-sha>",
+    "launchRequestId": "lrq-capture",
+    "openedAt": "2026-10-20T00:00:00Z",
+    "outcome": "opened",
+    "planOwnedPostMergeActions": "",
+    "planOwnedPostMergeActionsCommit": "",
+    "planPostMergeActionsDeferredReason": "",
+    "planTicketId": "PRM-05",
+    "prFinality": "infer",
+    "prUrl": "https://github.com/example/repo/pull/2",
+    "repo": "repo",
+    "riskClass": "medium",
+    "salvage": false,
+    "specRef": "none",
+    "targetBranch": "main",
+    "ticketRef": "PRM-05",
+    "title": "[codex] (fix) PRM-05: Capture publication",
+    "workerClass": "codex",
+    "workerId": "worker",
+    "workspaceRepos": [
+      "repo"
+    ],
+    "worktreePath": "<capture-root>/workspace"
+  },
+  "stderr": "GitHub PR exists: https://github.com/example/repo/pull/2; recording required launch identity\nPR exists but required identity closeout failed: https://github.com/example/repo/pull/2; retry hq pr open before closeout\n",
+  "stdout": "HQ_PR_OPEN_IDENTITY_INCOMPLETE url=https://github.com/example/repo/pull/2 number=2\n"
+}

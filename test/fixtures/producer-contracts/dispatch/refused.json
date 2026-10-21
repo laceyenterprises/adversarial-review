@@ -1,0 +1,5 @@
+{
+  "exitCode": 6,
+  "stderr": "[hq] dispatch refused: refuse_admit_emergency_halt; inspect `hq halt status`.\n",
+  "stdout": ""
+}

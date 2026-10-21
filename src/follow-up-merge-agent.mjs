@@ -1,3 +1,4 @@
+import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
@@ -2054,28 +2055,6 @@ function writeMergeAgentPrompt(rootDir, job, prompt, { dispatchedAt = isoNow() }
   return filePath;
 }
 
-function parseMergeAgentDispatchOutput(stdout) {
-  const text = String(stdout ?? '').trim();
-  if (!text) {
-    throw new Error('hq dispatch returned empty stdout');
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {}
-
-  const lines = text.split('\n');
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const candidate = lines.slice(index).join('\n').trim();
-    if (!candidate.startsWith('{')) continue;
-    try {
-      return JSON.parse(candidate);
-    } catch {}
-  }
-
-  throw new Error('hq dispatch did not return machine-readable JSON');
-}
-
 async function dispatchMergeAgentForPR({
   rootDir,
   repo,
@@ -2748,13 +2727,14 @@ async function dispatchMergeAgentForPR({
     }
   }
   const { stdout } = execResult;
-  const parsed = parseMergeAgentDispatchOutput(stdout);
+  const parsed = parseDispatchJsonOutput(stdout);
+  const receipt = readDispatchReceipt(parsed, { identityFields: ['lrq', 'launchRequestId'], allowNonObject: true });
 
   recordMergeAgentDispatch(rootDir, job, {
     dispatchedAt: now,
     prompt,
     dispatchId: parsed?.dispatchId || null,
-    launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+    launchRequestId: receipt.rawIdentity || null,
     trigger,
     priority: dispatchPriority,
     priorityFlagSupported,
@@ -2823,7 +2803,8 @@ async function dispatchMergeAgentForPR({
     trigger,
     prompt,
     dispatchId: parsed?.dispatchId || null,
-    launchRequestId: parsed?.lrq || parsed?.launchRequestId || null,
+    launchRequestId: receipt.rawIdentity || null,
+    ...(receipt.identityDiagnostic || receipt.status.diagnostic ? { diagnostic: [receipt.identityDiagnostic, receipt.status.diagnostic].filter(Boolean).join('; ') } : {}),
     operatorApprovalLabelRemoved: labelRemoval.operatorApprovalLabelRemoved,
     mergeAgentRequestedLabelRemoved: labelRemoval.mergeAgentRequestedLabelRemoved,
     labelRemovalErrors: labelRemoval.labelRemovalErrors,

@@ -1,0 +1,13 @@
+class QuotaMeasurement(TypedDict):
+    """Provider evidence shared by constrained-window and weekly readings."""
+
+    inferred: bool
+    status: str
+    confidence: str
+    percentRemaining: float
+    percentConsumed: float
+    capSource: str
+    source: str
+    observedAt: str
+    resetsAt: str
+    rateLimits: list[dict[str, Any]]

@@ -1,0 +1,4 @@
+class DispatchRefusalError(TypedDict):
+    code: str
+    message: str
+    field: NotRequired[str]

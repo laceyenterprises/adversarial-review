@@ -1,0 +1,360 @@
+{
+  "anthropic-oauth": {
+    "active": true,
+    "measurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "measured",
+      "inferred": false,
+      "observedAt": "2026-10-20T03:00:00+00:00",
+      "percentConsumed": 95.0,
+      "percentRemaining": 5.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 0.0,
+          "fresh": true,
+          "observedAt": "2026-10-20T03:00:00+00:00",
+          "resetsAt": "2026-10-20T07:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 95,
+          "window": "five_hour",
+          "windowMinutes": 300
+        },
+        {
+          "ageSeconds": 86400.0,
+          "fresh": false,
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "resetsAt": "2026-10-25T03:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 25.0,
+          "window": "seven_day",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-20T07:00:00+00:00",
+      "source": "anthropic-oauth-usage",
+      "status": "measured"
+    },
+    "mode": "paused",
+    "nearCap": false,
+    "nextResetAt": "2026-10-25T03:00:00Z",
+    "pausePct": 5.0,
+    "paused": true,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "quota-reserve-floor",
+    "releaseAt": "2026-10-24T15:00:00Z",
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "stale",
+      "inferred": false,
+      "observedAt": "2026-10-19T03:00:00+00:00",
+      "percentConsumed": 25.0,
+      "percentRemaining": 75.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 86400.0,
+          "fresh": false,
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "resetsAt": "2026-10-25T03:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 25.0,
+          "window": "seven_day",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-25T03:00:00+00:00",
+      "source": "anthropic-oauth-usage",
+      "status": "stale"
+    },
+    "weeklyMeasurementReason": "stale"
+  },
+  "anthropic-oauth-corp": {
+    "active": true,
+    "measurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "measured",
+      "inferred": false,
+      "observedAt": "2026-10-20T03:00:00+00:00",
+      "percentConsumed": 95.0,
+      "percentRemaining": 5.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 0.0,
+          "fresh": true,
+          "observedAt": "2026-10-20T03:00:00+00:00",
+          "resetsAt": "2026-10-20T07:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 95,
+          "window": "five_hour",
+          "windowMinutes": 300
+        },
+        {
+          "ageSeconds": 86400.0,
+          "fresh": false,
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "resetsAt": "2026-10-25T03:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 40.0,
+          "window": "seven_day",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-20T07:00:00+00:00",
+      "source": "anthropic-oauth-usage",
+      "status": "measured"
+    },
+    "mode": "paused",
+    "nearCap": false,
+    "nextResetAt": "2026-10-25T03:00:00Z",
+    "pausePct": 5.0,
+    "paused": true,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "quota-reserve-floor",
+    "releaseAt": "2026-10-24T15:00:00Z",
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "stale",
+      "inferred": false,
+      "observedAt": "2026-10-19T03:00:00+00:00",
+      "percentConsumed": 40.0,
+      "percentRemaining": 60.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 86400.0,
+          "fresh": false,
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "resetsAt": "2026-10-25T03:00:00+00:00",
+          "source": "anthropic-oauth-usage",
+          "usedPercent": 40.0,
+          "window": "seven_day",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-25T03:00:00+00:00",
+      "source": "anthropic-oauth-usage",
+      "status": "stale"
+    },
+    "weeklyMeasurementReason": "stale"
+  },
+  "openai-oauth": {
+    "active": true,
+    "measurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "measured",
+      "inferred": false,
+      "observedAt": "2026-10-20T03:00:00+00:00",
+      "percentConsumed": 95.0,
+      "percentRemaining": 5.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 0,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": true,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-20T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-20T08:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 18000,
+          "usedPercent": 95.0,
+          "window": "primary",
+          "windowMinutes": 300
+        },
+        {
+          "ageSeconds": 86400,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": false,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-27T03:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 604800,
+          "usedPercent": 25.0,
+          "window": "secondary",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-20T08:00:00+00:00",
+      "source": "quota-probe-usage",
+      "status": "measured"
+    },
+    "mode": "paused",
+    "nearCap": false,
+    "nextResetAt": "2026-10-27T03:00:00Z",
+    "pausePct": 5.0,
+    "paused": true,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "quota-reserve-floor",
+    "releaseAt": "2026-10-26T15:00:00Z",
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "stale",
+      "inferred": false,
+      "observedAt": "2026-10-19T03:00:00+00:00",
+      "percentConsumed": 25.0,
+      "percentRemaining": 75.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 86400,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": false,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-27T03:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 604800,
+          "usedPercent": 25.0,
+          "window": "secondary",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-27T03:00:00+00:00",
+      "source": "quota-probe-usage",
+      "status": "stale"
+    },
+    "weeklyMeasurementReason": "stale"
+  },
+  "openai-oauth-corp": {
+    "active": true,
+    "measurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "measured",
+      "inferred": false,
+      "observedAt": "2026-10-20T03:00:00+00:00",
+      "percentConsumed": 95.0,
+      "percentRemaining": 5.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 0,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": true,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-20T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-20T08:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 18000,
+          "usedPercent": 95.0,
+          "window": "primary",
+          "windowMinutes": 300
+        },
+        {
+          "ageSeconds": 86400,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": false,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-27T03:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 604800,
+          "usedPercent": 40.0,
+          "window": "secondary",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-20T08:00:00+00:00",
+      "source": "quota-probe-usage",
+      "status": "measured"
+    },
+    "mode": "paused",
+    "nearCap": false,
+    "nextResetAt": "2026-10-27T03:00:00Z",
+    "pausePct": 5.0,
+    "paused": true,
+    "protectedClasses": [
+      "hammer*"
+    ],
+    "reason": "quota-reserve-floor",
+    "releaseAt": "2026-10-26T15:00:00Z",
+    "releaseBeforeResetHours": 12.0,
+    "releaseKnown": false,
+    "releaseStatus": "release unknown",
+    "released": false,
+    "remainingPct": 10.0,
+    "rerouteHeld": true,
+    "weeklyMeasurement": {
+      "capSource": "provider-rate-limits",
+      "confidence": "stale",
+      "inferred": false,
+      "observedAt": "2026-10-19T03:00:00+00:00",
+      "percentConsumed": 40.0,
+      "percentRemaining": 60.0,
+      "rateLimits": [
+        {
+          "ageSeconds": 86400,
+          "burnPercentPerHour1h": null,
+          "burnPercentPerHour24h": null,
+          "burnPercentPerHour6h": null,
+          "fresh": false,
+          "limitId": "codex",
+          "model": "unknown",
+          "observedAt": "2026-10-19T03:00:00+00:00",
+          "pageEarlyExhaustion": false,
+          "projectedExhaustionAt": null,
+          "projectionRateWindow": null,
+          "resetsAt": "2026-10-27T03:00:00+00:00",
+          "source": "quota-probe-usage",
+          "timeToResetSeconds": 604800,
+          "usedPercent": 40.0,
+          "window": "secondary",
+          "windowMinutes": 10080
+        }
+      ],
+      "resetsAt": "2026-10-27T03:00:00+00:00",
+      "source": "quota-probe-usage",
+      "status": "stale"
+    },
+    "weeklyMeasurementReason": "stale"
+  }
+}

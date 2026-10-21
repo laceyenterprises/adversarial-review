@@ -1,8 +1,10 @@
+import { boundedDiagnostics } from './producer-contracts/diagnostics.mjs';
+import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
-import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMeasurement } from './fleet-quota-status.mjs';
+import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 import { ENUM_CODEX_WORKER_ACCOUNT_ORDER } from './config-loader.mjs';
 
 // Accounts share a model family, but never quota or broker evidence. Keep the
@@ -27,6 +29,7 @@ function selectCodexAccount(payload, order, { model = null,
   statuses = quotaStatusesFromSnapshot(payload), corporateExhausted = false, personalExhausted = false,
 } = {}) {
   const rows = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
+  const diagnostics = [];
   for (const [provider, authPath] of order) {
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
     const row = rows.find(entry => entry?.provider === 'openai'
@@ -34,7 +37,9 @@ function selectCodexAccount(payload, order, { model = null,
     const weekly = reserveFloorWeeklyMeasurement(payload?.reserveFloors?.[`openai-${authPath}`]);
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
       && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
-    const ready = payload?.brokerAuth?.provider_states?.[provider];
+    const broker = readBrokerProvider(payload?.brokerAuth, provider);
+    const ready = { ready: broker.ready, can_serve: broker.canServe };
+    diagnostics.push(...quotaAccountDiagnostics(payload, { provider: 'openai', authPath, cap }), ...broker.diagnostics);
     // Stale quota cannot prove either capacity or exhaustion. Local typed
     // exhaustion and an explicitly unavailable broker are independent evidence.
     const fresh = row?.cachedEvidenceStale !== true;
@@ -46,10 +51,10 @@ function selectCodexAccount(payload, order, { model = null,
       return { provider, authPath, hold: false, reason: 'codex-account-ready' };
     }
     if (!exhausted && ready?.ready !== false && ready?.can_serve !== false) {
-      return { hold: true, reason: 'codex-account-evidence-unknown' };
+      return { hold: true, reason: 'codex-account-evidence-unknown', diagnostics: boundedDiagnostics(diagnostics) };
     }
   }
-  return { hold: true, reason: 'no-ready-codex-account' };
+  return { hold: true, reason: 'no-ready-codex-account', diagnostics: boundedDiagnostics(diagnostics) };
 }
 
 // Only unpinned Codex lanes opt into account substitution. Corporate classes
@@ -77,7 +82,7 @@ export function logCodexWorkerDispatch(log, workerClass, routing = {}, prefix = 
 export function codexReviewerAccountForGrounding(grounding, options = {}) {
   if (grounding?.codexAccountSelection?.pooled && !grounding.staleIfError) return grounding.codexAccountSelection;
   if (grounding?.staleIfError || !grounding?.codexAccountSnapshot) {
-    return { hold: true, reason: 'codex-account-evidence-unknown' };
+    return { hold: true, reason: 'codex-account-evidence-unknown', diagnostics: ['cwp_dispatch.cli_fleet: $stdout missing or stale after refresh error'] };
   }
   return selectCodexReviewerAccount(grounding.codexAccountSnapshot, {
     model: grounding.codexAccountModel, ...options,

@@ -1,3 +1,4 @@
+import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -233,12 +234,12 @@ function normalizePrNumber(prNumber) {
 function parseAdapterJson(stdout, kind) {
   const text = String(stdout || '').trim();
   if (!text) {
-    throw new Error(`GitHub adapter returned empty ${kind} payload`);
+    throw new Error(`agent_os_github_adapter.ResultEnvelope: $stdout empty ${kind} payload`);
   }
   try {
     return JSON.parse(text);
   } catch (err) {
-    const wrapped = new Error(`GitHub adapter returned malformed ${kind} JSON: ${err?.message || err}`);
+    const wrapped = new Error(`agent_os_github_adapter.ResultEnvelope: $stdout malformed ${kind} JSON: ${err?.message || err}`);
     wrapped.cause = err;
     throw wrapped;
   }
@@ -496,8 +497,8 @@ async function runGitHubAdapter(kind, params = {}, {
       env: buildAdapterEnv(env),
     });
     const payload = parseAdapterJson(stdout, kind);
-    if (payload?.ok === false) throw Object.assign(new Error(payload.message || 'GitHub adapter read failed'), { stdout });
-    if (payload?.complete === false) throw new Error('GitHub adapter read is incomplete');
+    if (payload?.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub adapter read failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout });
+    if (payload?.complete === false) throw new Error('GitHub adapter read is incomplete; agent_os_github_adapter.ResultEnvelope: $.complete=false');
     return payload;
   } catch (error) {
     const capability = unsupportedReadCapability(error, kind);
@@ -548,7 +549,7 @@ async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
   try {
     const result = await execFileImpl(adapterBin, args, options);
     const payload = parseAdapterJson(result.stdout, 'pull-request-label');
-    if (payload.ok === false) throw Object.assign(new Error(payload.message || 'GitHub label mutation failed'), { stdout: result.stdout });
+    if (payload.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub label mutation failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout: result.stdout });
     return result;
   } catch (err) {
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
@@ -578,15 +579,17 @@ async function writeGitHubAdapter(kind, params = {}, {
     timeout: ADAPTER_TIMEOUT_MS,
     env: buildAdapterEnv(env),
   });
+  const receipt = readAdapterReceipt(parseAdapterJson(stdout, kind));
   return {
     ran: true,
-    payload: parseAdapterJson(stdout, kind),
+    payload: receipt.payload,
+    ...(receipt.diagnostics.length ? { diagnostic: receipt.diagnostics.join('; ') } : {}),
   };
 }
 
 function asPayloadObject(payload, kind) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error(`GitHub adapter ${kind} payload must be an object`);
+    throw new Error(`agent_os_github_adapter.ResultEnvelope: $ invalid; GitHub adapter ${kind} payload must be an object`);
   }
   return payload;
 }

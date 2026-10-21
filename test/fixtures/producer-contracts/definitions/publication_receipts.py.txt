@@ -1,0 +1,70 @@
+class PrOpenCompletionReceipt(TypedDict):
+    pr_number: int | None
+
+class PrOpenRecord(TypedDict):
+    workerId: str
+    workerClass: str
+    ticketRef: str
+    changeKind: str
+    changeKindSource: str
+    specRef: str
+    riskClass: str
+    title: str
+    repo: str
+    branch: str
+    targetBranch: str
+    worktreePath: str
+    launchRequestId: str
+    goalLineage: dict[str, Any]
+    workspaceRepos: list[str]
+    fromPlan: str
+    planOwnedPostMergeActions: str
+    planOwnedPostMergeActionsCommit: str
+    planPostMergeActionsDeferredReason: str
+    fromPlanRepo: str
+    fromPlanRepoRoot: str
+    fromPlanRawHash: str
+    planTicketId: str
+    salvage: bool
+    draft: bool
+    dryRun: bool
+    prFinality: Literal["infer", "final", "not-final"]
+    outcome: Literal["opened", "opened_url_missing", "dry-run"]
+    prUrl: str
+    headSha: str
+    fastMergeCategory: str
+    fastMergeLabel: str
+    openedAt: str
+    psrAfterAction: NotRequired[dict[str, Any]]
+    backfilledAt: NotRequired[str]
+    backfilledBy: NotRequired[str]
+
+class PublicationReceiptRead:
+    payload: dict[str, Any]
+    opened: bool
+    diagnostics: tuple[str, ...]
+
+def read_pr_open_record(value: object) -> PublicationReceiptRead:
+    """Interpret the historical D1 filter; diagnostics do not grant identity."""
+    if not isinstance(value, dict):
+        return PublicationReceiptRead(
+            {}, False, (f"{PR_OPEN_PRODUCER}: $ invalid; expected object",)
+        )
+    diagnostics = []
+    for key in ("launchRequestId", "repo", "headSha", "prUrl"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            diagnostics.append(f"{PR_OPEN_PRODUCER}: {key} missing/invalid nonempty string")
+    outcome = value.get("outcome")
+    if outcome not in ("opened", "opened_url_missing", "dry-run"):
+        diagnostics.append(f"{PR_OPEN_PRODUCER}: outcome unrecognized {outcome!r}")
+    elif outcome != "opened":
+        diagnostics.append(f"{PR_OPEN_PRODUCER}: outcome={outcome!r} is not captured publication")
+    if "dryRun" in value and type(value["dryRun"]) is not bool:
+        diagnostics.append(f"{PR_OPEN_PRODUCER}: dryRun invalid; expected boolean")
+    elif value.get("dryRun"):
+        diagnostics.append(f"{PR_OPEN_PRODUCER}: dryRun=true is not publication")
+    return PublicationReceiptRead(
+        value,
+        bool(outcome == "opened" and not value.get("dryRun") and value.get("prUrl")),
+        tuple(diagnostics),
+    )

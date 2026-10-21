@@ -488,7 +488,8 @@ export async function resolveReviewerWorkerClassWithFallback({
     nowMs,
   });
   if (quotaStatus.error || quotaStatus.stale) {
-    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage };
+    return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage,
+      diagnostics: [`cwp_dispatch.cli_fleet: $stdout ${quotaStatus.stale ? 'stale' : 'unavailable'}`] };
   }
 
   const stdout = quotaStatus.stdout;
@@ -499,7 +500,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   let codexAccountSelection;
   const accountFields = (harness) => reviewerModelForWorkerClass(harness) === 'claude' && claudeAccountSelection
     ? { claudeAccountSelection } : reviewerModelForWorkerClass(harness) === 'codex'
-      ? { codexBrokerProvider: codexAccountSelection?.provider, codexAccountHoldReason: codexAccountSelection?.hold ? codexAccountSelection.reason : null } : {};
+      ? { ...(codexAccountSelection?.diagnostics?.length ? { diagnostics: codexAccountSelection.diagnostics } : {}), codexBrokerProvider: codexAccountSelection?.provider, codexAccountHoldReason: codexAccountSelection?.hold ? codexAccountSelection.reason : null } : {};
   const availability = (harness) => {
     if (reviewerModelForWorkerClass(harness) === 'codex') {
       if (!codexAccountSelection) return { available: false, state: 'unreadable' };
@@ -528,7 +529,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       workerClass: 'claude-reviewer', blockedWorkerClasses: blockedClaudeWorkerClasses,
     });
     Object.assign(base, accountFields(primaryClass));
-    if (claudeAccountSelection?.hold) base.claudeAccountHoldReason = claudeAccountSelection.reason;
+    if (claudeAccountSelection?.hold) { base.claudeAccountHoldReason = claudeAccountSelection.reason; base.diagnostics = claudeAccountSelection.diagnostics; }
     // A primary with no tracked provider can only be here under depth pressure
     // (the gate above). It has no quota verdict, so it is treated as ungrounded
     // and the quota trigger simply does not fire for it — depth does.
@@ -610,7 +611,8 @@ export async function resolveReviewerWorkerClassWithFallback({
     logger?.error?.(
       `[watcher] review-worker-class-fallback quota-status parse failed; failing open: ${message}`
     );
-    return { ...base, reason: 'fleet-quota-status-parse-error', error: message };
+    return { ...base, reason: 'fleet-quota-status-parse-error', error: message,
+      diagnostics: ['cwp_dispatch.cli_fleet: $stdout invalid JSON or payload'] };
   }
 
   return {
@@ -619,6 +621,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     quotaGrounding: {
       reviewer: reviewerModelForWorkerClass(primaryClass), state: primaryAvail.state,
       source: primaryAvail.source || 'fleet-quota-status', reason: 'no-allowed-reviewer-available',
+      diagnostics: reviewerModelForWorkerClass(primaryClass) === 'codex' ? codexAccountSelection?.diagnostics || [] : claudeAccountSelection?.diagnostics || [],
     },
   };
 }

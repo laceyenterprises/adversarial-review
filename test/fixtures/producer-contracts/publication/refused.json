@@ -1,0 +1,38 @@
+{
+  "adapter": [
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": false,
+      "exitCode": 1,
+      "failureClass": "auth",
+      "message": "HTTP 403: forbidden",
+      "ok": false,
+      "rateLimit": null,
+      "retryAfter": null,
+      "source": "gh-cli"
+    },
+    {
+      "auth": {
+        "mode": "ambient-gh",
+        "selector": "default"
+      },
+      "complete": true,
+      "failureClass": null,
+      "head": "branch",
+      "ok": true,
+      "prs": [],
+      "rateLimit": null,
+      "repo": "example/repo",
+      "retryAfter": null,
+      "source": "gh-cli",
+      "state": null
+    }
+  ],
+  "returncode": 1,
+  "sidecar": null,
+  "stderr": "agent_os_github_adapter.create_pr: ok=False; failureClass='auth'\nHTTP 403: forbidden\ngithub adapter pr-create failed and no open PR exists for branch \u2192 main; no sidecar written (stderr: <capture-root>/workers/worker/logs/pr-open-2026-10-20T00-00-00Z_abcdef.adapter-stderr.log)\n",
+  "stdout": ""
+}

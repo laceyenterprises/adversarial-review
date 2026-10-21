@@ -1,3 +1,4 @@
+import { readBrokerProvider } from './producer-contracts/broker-evidence.mjs';
 import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Per-worker-class OAuth pre-flight assertions for remediation workers.
 //
@@ -240,12 +241,8 @@ function resolveBrokerReadyzUrls(env = process.env) {
 // absent provider is not serviceable at all. Fall back to the boolean readiness
 // verdict in `providers` when the richer `provider_states` map is unavailable.
 function claudeCodeServiceableFromReadyz(body, provider = 'claude-code') {
-  if (!body || typeof body !== 'object') return false;
-  const state = body.provider_states?.[provider];
-  if (state && typeof state === 'object' && typeof state.can_serve === 'boolean') {
-    return state.can_serve === true;
-  }
-  return body.providers?.[provider] === true;
+  const evidence = readBrokerProvider(body, provider);
+  return typeof evidence.canServe === 'boolean' ? evidence.canServe : evidence.legacyReady === true;
 }
 
 async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'claude-code', timeoutMs = BROKER_READYZ_TIMEOUT_MS }) {
@@ -266,7 +263,7 @@ async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'clau
     try {
       body = await res.json();
     } catch (err) {
-      return { ok: false, reason: `${url}/readyz body not JSON (http ${res.status}): ${err.message}` };
+      return { ok: false, reason: `${url}/readyz oauth_broker.server.readyz: $body invalid JSON (http ${res.status}): ${err.message}` };
     }
     if (claudeCodeServiceableFromReadyz(body, provider)) {
       return { ok: true };
@@ -274,9 +271,9 @@ async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'clau
     const state = body?.provider_states?.[provider];
     const known = body?.providers && provider in body.providers;
     const detail = state?.kind || (known ? 'not-ready' : 'provider-absent');
-    return { ok: false, reason: `${url}/readyz reports claude-code not serviceable (${detail})` };
+    return { ok: false, reason: `${url}/readyz reports claude-code not serviceable (${detail}); ${readBrokerProvider(body, provider).diagnostics.join('; ')}` };
   } catch (err) {
-    return { ok: false, reason: `${url}/readyz unreachable: ${err.message}` };
+    return { ok: false, reason: `${url}/readyz oauth_broker.server.readyz: $body unavailable: ${err.message}` };
   } finally {
     clearTimeout(timer);
   }

@@ -1,0 +1,19 @@
+{
+  "producerRepository": "laceyenterprises/agent-os",
+  "producerRevision": "f54169eb71c6f0b55b51d3025dd435c88652277e",
+  "source": "modules/worker-pool/lib/python/tests/test_quota_reserve_weekly.py::test_fleet_producer_capture_parity",
+  "sourceSha256": "3eb5c87f9ab6e6c9d1683d5af491ae78311a0cc1250b570a0711ccbf90e14eff",
+  "generator": "scripts/contracts/capture-released.py",
+  "generatorSha256": "f68b3fb83e406558f4aa27e6fcba7fa439acbcdfb80e6a3a61a6d50794339167",
+  "command": "python3 scripts/contracts/capture-released.py <pinned-producer-archive>",
+  "inputs": {
+    "scenario": "ready",
+    "shortUsedPercent": 20,
+    "weeklyUsedPercent": 25,
+    "weeklyResetHours": 6,
+    "anthropicProbeState": "ok"
+  },
+  "normalization": "temporary root replaced with <scratch>; JSON sorted and indented",
+  "file": "test/fixtures/producer-contracts/quota/fleet-released.json",
+  "sha256": "ddd0aa69dc0f35bf2ec2888bc159b896dafbf1987938ea46bcf20bb2077dc65f"
+}

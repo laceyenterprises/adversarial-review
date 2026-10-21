@@ -33,6 +33,7 @@ function pool(root, options = {}) {
     referenceSettings: () => [], readBootstrapRecordImpl: () => null,
     checkHqOwnerAuthImpl: async () => ({ ok: true }),
     readQuotaCooldownImpl: () => null, readActiveRunRecordsImpl: () => [],
+    verifyPgidIdentityImpl: async () => ({ match: true }),
     listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
     runPinnedImpl: async ({ args }) => ({ code: 0, stdout: args[0] === 'status'
       ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n'
@@ -236,4 +237,107 @@ test('ITP-11: terminal run records retain a live holder process on restart, incl
   const recovered = await p.acquire();
   assert.equal(recovered.user, owner);
   await p.release(recovered);
+});
+
+for (const state of ['failed', 'completed', 'cancelled', 'launching']) {
+  test(`ITP-11: ${state} run without a PGID ${state === 'launching' ? 'holds' : 'releases'} holder admission`, async t => {
+    const root = fixture(t);
+    writeReviewerRunRecord(root, { sessionUuid: 'pre-spawn', state, pgid: null,
+      subjectContext: { agyHolderLease: { user: users[0], reviewId: 'pre-spawn-review' } } });
+    const p = pool(root, { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]),
+      readActiveRunRecordsImpl: undefined, isPgidAliveImpl: () => { throw new Error('no PGID to probe'); } });
+    const lease = await p.acquire();
+    assert.equal(Boolean(lease), state !== 'launching');
+    await p.release(lease);
+  });
+}
+
+for (const identity of [{ match: false, startedAt: '2026-10-21T00:00:00Z' },
+  { match: false, gone: true, reason: 'leader exited; descendants may survive' },
+  { match: false, reason: 'ps unavailable' }]) {
+  test(`ITP-11: terminal PGID identity ${identity.startedAt ? 'mismatch releases' : 'uncertainty holds'} admission (${identity.reason || 'recycled PID'})`, async t => {
+    const root = fixture(t);
+    const record = { state: 'failed', pgid: 4242, spawnedAt: '2000-01-01T00:00:00Z',
+      subjectContext: { agyHolderLease: { user: users[0], reviewId: 'historical-review' } } };
+    const p = pool(root, { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]),
+      readActiveRunRecordsImpl: () => [record], isPgidAliveImpl: () => true,
+      verifyPgidIdentityImpl: async (pgid, spawnedAt) => {
+        assert.equal(pgid, record.pgid);
+        assert.equal(spawnedAt, record.spawnedAt);
+        return identity;
+      } });
+    const lease = await p.acquire();
+    assert.equal(Boolean(lease), Boolean(identity.startedAt));
+    await p.release(lease);
+  });
+}
+
+for (const failure of ['cleanup', 'survivor', 'unknown-processes']) {
+  test(`ITP-11: ${failure} retains the durable release fence across watchers until readiness drains`, async t => {
+    const root = fixture(t);
+    let dirty = false;
+    const options = { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]),
+      listUserProcessesImpl: async () => ({ ok: !(dirty && failure === 'unknown-processes'),
+        processes: dirty && failure === 'survivor' ? [{ pid: 4242, pgid: 4242, comm: 'agy' }] : [] }),
+      runPinnedImpl: async ({ args }) => ({ code: dirty && failure === 'cleanup' && args[0] === 'cleanup' ? 75 : 0,
+        stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n'
+          : args[0] === 'probe' ? 'probe.ok=yes\n' : '' }),
+    };
+    const first = pool(root, options);
+    const lease = await first.acquire({ reviewId: 'dirty-review' });
+    dirty = true;
+    await first.release(lease, { failed: true, reason: 'timeout' });
+    const read = () => JSON.parse(readFileSync(join(root, 'data', 'agy-holder-leases', `${users[0]}.json`)));
+    assert.equal(read().lease.generation, lease.generation);
+    assert.equal(read().auth.needsProbe, true, 'failed-review auth requirement survives restart during drain');
+    const other = pool(root, options);
+    assert.equal(await other.acquire(), null, 'independent watcher cannot reuse a dirty slot');
+    assert.equal(await first.refreshReadiness(), 0);
+    assert.equal(read().lease.generation, lease.generation);
+    dirty = false;
+    await first.refreshReadiness();
+    await first.settleProbes();
+    assert.equal(read().lease, null);
+    assert.equal(first.readyCount(), 1);
+    await other.refreshReadiness();
+    await other.settleProbes();
+    const next = await other.acquire();
+    assert.ok(next);
+    await other.release(next);
+  });
+}
+
+test('ITP-11: dead-watcher reclaim reconstructs pending workspace cleanup from its durable claim', async t => {
+  const root = fixture(t);
+  const options = { loadIdentities: () => [users[0]], loadTokenPools: () => declarations([users[0]]) };
+  const first = pool(root, options);
+  const lease = await first.acquire({ reviewId: 'abandoned-workspace' });
+  let dirty = true;
+  let cleanupCalls = 0;
+  const restarted = pool(root, { ...options, isLeaseOwnerAliveImpl: () => false,
+    runPinnedImpl: async ({ args }) => {
+      if (args[0] === 'cleanup') {
+        assert.equal(args[1], lease.reviewId);
+        cleanupCalls++;
+        return { code: dirty ? 75 : 0, stdout: '' };
+      }
+      return { code: 0, stdout: args[0] === 'status' ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' };
+    } });
+  assert.equal(await restarted.acquire(), null);
+  assert.ok(cleanupCalls > 0);
+  const read = () => JSON.parse(readFileSync(join(root, 'data', 'agy-holder-leases', `${users[0]}.json`)));
+  assert.equal(read().lease.generation, lease.generation);
+  dirty = false;
+  await restarted.refreshReadiness();
+  const replacement = await restarted.acquire();
+  assert.ok(replacement);
+  await first.release(lease);
+  assert.equal(read().lease.generation, replacement.generation);
+  await restarted.release(replacement);
+});
+
+test('ITP-11: conflicting legacy/new holder declarations hold admission', async t => {
+  const p = pool(fixture(t), { loadIdentities: () => [...users].reverse() });
+  assert.equal(await p.acquire(), null);
+  assert.equal(p.readyCount(), 0);
 });

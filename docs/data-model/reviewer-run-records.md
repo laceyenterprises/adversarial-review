@@ -63,6 +63,10 @@ reads run records, preferring `agyHolderLease` and falling back to
 `agyIdentityLease`. A live process group retains the holder even with an old
 heartbeat or terminal run state. A launching record without a PGID is ambiguous
 and holds too. Neither heartbeat expiry nor a terminal status proves exit.
+Terminal records without a PGID do not hold admission. For terminal records
+with a live PGID, the pool verifies the leader's start time against `spawnedAt`;
+a proven mismatch releases that historical record's occupancy. Unknown start-time
+evidence holds, including a missing leader while its process group remains alive.
 The strict scanner's `includeTerminalAgyLeases` option includes these terminal
 holder records; its default and the other runtime recovery readers retain
 their existing active-state filtering.

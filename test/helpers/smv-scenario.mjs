@@ -10,7 +10,7 @@ net.Socket.prototype.connect = () => { throw new Error('SMV network boundary ref
 globalThis.fetch = () => { throw new Error('SMV fetch boundary refused'); };
 syncBuiltinESMExports();
 const { createFixtureStubReviewerRuntimeAdapter } = await import('../../src/adapters/reviewer-runtime/fixture-stub/index.mjs');
-const { readReviewerRunRecord } = await import('../../src/adapters/reviewer-runtime/run-state.mjs');
+const { readReviewerRunRecord, writeReviewerRunRecord } = await import('../../src/adapters/reviewer-runtime/run-state.mjs');
 const { createNoProgressLaneGate } = await import('../../src/posted-review-row.mjs');
 const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.mjs');
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
@@ -83,15 +83,17 @@ if (scenario === 'clean') {
   assert.equal(readReviewerTokenLeases(rootDir).length, 0);
   assert.deepEqual(leaseOps, ['renew', 'release', 'release']);
   const { createAgyReviewerIdentityPool } = await import('../../src/agy-reviewer-identities.mjs');
+  let cleanupBlocked = false, survivorRunning = false;
   const makeHolderPool = () => createAgyReviewerIdentityPool({
     env: {}, runStateRootDir: rootDir, log: quiet, leaseWaitMs: 0, hqOwner: 'fixture-owner',
     resolveRuntime: () => 'antigravity', resolveModel: () => 'synthetic-model',
     loadTokenPools: () => ({}), loadIdentities: () => ['fixture-login-a', 'fixture-login-b'],
     referenceSettings: () => [], readBootstrapRecordImpl: () => null,
-    readQuotaCooldownImpl: () => null, readActiveRunRecordsImpl: () => [],
-    listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
+    readQuotaCooldownImpl: () => null,
+    listUserProcessesImpl: async () => ({ ok: true, processes: survivorRunning
+      ? [{ pid: 4242, pgid: 4242, comm: 'agy' }] : [] }),
     deliverAlertImpl: async () => { throw new Error('unexpected holder alert'); },
-    runPinnedImpl: async ({ args }) => ({ code: 0, stdout: args[0] === 'status'
+    runPinnedImpl: async ({ args }) => ({ code: cleanupBlocked && args[0] === 'cleanup' ? 75 : 0, stdout: args[0] === 'status'
       ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' }),
   });
   const holders = makeHolderPool(), independent = makeHolderPool();
@@ -99,10 +101,25 @@ if (scenario === 'clean') {
   assert.equal(first.identity, 'gemini-reviewer'); assert.equal(second.identity, first.identity);
   assert.notEqual(first.user, second.user);
   assert.equal(await independent.acquire(), null);
-  await holders.release(first); await holders.release(second);
+  cleanupBlocked = true;
+  await holders.release(first);
+  const holderRecord = () => JSON.parse(readFileSync(join(rootDir, 'data', 'agy-holder-leases', `${first.user}.json`)));
+  assert.equal(holderRecord().lease.generation, first.generation);
+  assert.equal(await independent.acquire(), null);
+  cleanupBlocked = false; survivorRunning = true;
+  await holders.refreshReadiness();
+  assert.equal(holderRecord().lease.generation, first.generation);
+  assert.equal(await independent.acquire(), null);
+  survivorRunning = false;
+  await holders.refreshReadiness();
+  assert.equal(holderRecord().lease, null);
+  await holders.release(second);
+  writeReviewerRunRecord(rootDir, { sessionUuid: 'pre-spawn-failure', state: 'failed', pgid: null,
+    subjectContext: { agyHolderLease: { user: first.user, reviewId: 'never-spawned' } } });
   assert.equal(await independent.refreshReadiness(), 2);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
-    leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true };
+    leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true,
+    durableCleanupAndDrainFence: true, terminalWithoutPgidReadmitted: true };
 } else if (scenario === 'handoff') {
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');

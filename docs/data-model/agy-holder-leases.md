@@ -1,6 +1,6 @@
 # agy execution holder leases
 
-Owner: `src/agy-reviewer-identities.mjs`, using `src/agy-holder-leases.mjs`.
+**Source of truth:** `src/agy-reviewer-identities.mjs`, using `src/agy-holder-leases.mjs`.
 Store: `<resolved adversarial review state directory>/agy-holder-leases/<user>.json`
 and a persistent `<user>.lock` inode. The existing state-directory resolver
 and override apply. Files are mode 0600; the directory is created mode 0700.
@@ -19,14 +19,23 @@ legacy duplicate usernames count once. Concurrency remains one per holder.
 
 An exclusive nonblocking flock serializes read/modify/atomic-write operations.
 Acquisition persists the claim before spawn. Release compares the unique lease
-generation; a stale release cannot clear a replacement. Busy release writes
-remain pending and retry on readiness, while admission stays held. Lock files
+generation; a stale release cannot clear a replacement. Failed added-user workspace
+cleanup, surviving processes, unknown process evidence, and busy release writes
+retain the durable claim and retry on readiness, while admission stays held.
+Failed-review auth requirements are persisted even while release is pending.
+After owner exit, reclaim reconstructs workspace cleanup from the durable
+lease's `reviewId` and must complete cleanup and process draining under the lock.
+Lock files
 are never unlinked. Unreadable or malformed records isolate only that holder.
 
 There is no heartbeat-expiry reclaim. A live watcher PID retains ownership;
 after its exit, strict reviewer-run scans and the existing survivor check must
 prove the holder unused under the lock. Live process groups in terminal as
-well as active holder run records retain occupancy. Unknown evidence holds.
+well as active holder run records retain occupancy. Only `launching` records
+hold without a PGID; terminal records without one cannot represent a live group.
+Terminal live PGIDs are checked against `spawnedAt`: a proven start-time mismatch
+does not hold occupancy, while unavailable identity evidence retains the hold.
+Unknown evidence holds.
 The runtime still writes its launch intent before forking, and rolling readers
 retain both `agyHolderLease` and `agyIdentityLease` run-record fields.
 

@@ -44,7 +44,7 @@ import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from './gemini-quota-cooldown.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
-import { isPgidAlive } from './process-group-identity.mjs';
+import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
 import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveIdentityTokenPools } from './role-config.mjs';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
 import { createAgyHolderLeaseStore, agyLeaseOwnerAlive } from './agy-holder-leases.mjs';
@@ -644,6 +644,7 @@ function createAgyReviewerIdentityPool({
   readActiveRunRecordsImpl = () => scanActiveReviewerRunRecords(runStateRootDir, { includeTerminalAgyLeases: true }),
   readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
   isPgidAliveImpl = isPgidAlive,
+  verifyPgidIdentityImpl = verifyPgidIdentity,
   isLeaseOwnerAliveImpl = agyLeaseOwnerAlive,
   deliverAlertImpl = deliverAlert,
   alertAfterMs = IDENTITY_ALERT_AFTER_MS,
@@ -688,9 +689,9 @@ function createAgyReviewerIdentityPool({
     try {
       const runtime = resolveRuntime();
       if (runtime !== 'antigravity') return resolveAgyReviewerIdentityPlan({ runtime, hqOwner, env });
-      const oauth = readIdentityTokenPools(loadTokenPools());
-      const members = oauth.identity_token_pools['gemini-reviewer'];
       const legacy = loadIdentities() || [];
+      const oauth = readIdentityTokenPools(loadTokenPools(), { legacyGeminiHolders: legacy.length ? legacy : undefined });
+      const members = oauth.identity_token_pools['gemini-reviewer'];
       const users = members ? members.map(id => oauth.token_accounts[id].holder_user) : (legacy.length ? legacy : [hqOwner]);
       const plan = resolveAgyReviewerIdentityPlan({ identities: users, runtime, hqOwner, env });
       // Antigravity always has one slot per holder, including an owner-only
@@ -934,7 +935,7 @@ function createAgyReviewerIdentityPool({
   // reviewer child can be between extraction and starting agy, where the
   // survivor check sees nothing. The identities stay out until the record is
   // repaired or removed.
-  function leasesFromRunRecords() {
+  async function leasesFromRunRecords() {
     let records;
     try {
       const scan = readActiveRunRecordsImpl() || [];
@@ -958,7 +959,13 @@ function createAgyReviewerIdentityPool({
       if (states.get(held.user)?.lease?.reviewId === held.reviewId) continue;
       let running;
       try {
-        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : true;
+        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : record.state === 'launching';
+        if (running && ['completed', 'failed', 'cancelled'].includes(record.state)) {
+          const identity = await verifyPgidIdentityImpl(record.pgid, record.spawnedAt);
+          // A proven recycled leader is not this review. Unreadable identity
+          // evidence (including an exited leader with live descendants) holds.
+          if (!identity.match && identity.startedAt) running = false;
+        }
       } catch {
         running = true;
       }
@@ -1029,11 +1036,14 @@ function createAgyReviewerIdentityPool({
         log.error?.(`[agy-identities] identity=${refused.user} ${refused.reason}`);
       }
     }
-    const runningLeases = leasesFromRunRecords();
+    const runningLeases = await leasesFromRunRecords();
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
       if (state.releasing) return;
-      if (state.pendingRelease) { await release(state.lease, state.pendingRelease); return; }
+      if (state.pendingRelease) {
+        await release(state.lease, state.pendingRelease);
+        if (state.pendingRelease) return;
+      }
       try {
         const durable = holderStore.read(state.user);
         state.foreignLease = durable.lease && durable.lease.generation !== state.lease?.generation ? durable.lease : null;
@@ -1118,8 +1128,11 @@ function createAgyReviewerIdentityPool({
 
   async function canReclaimHolder(state, lease) {
     if (isLeaseOwnerAliveImpl(lease.ownerPid)) return false;
-    const records = leasesFromRunRecords();
+    const records = await leasesFromRunRecords();
     if (records === null || records.get(state.user)?.length) return false;
+    // The old watcher's in-memory cleanup queue did not survive its exit.
+    // Recover it from the durable claim before clearing the cross-watcher fence.
+    if (!state.hqOwner) state.pendingCleanup.add(lease.reviewId);
     return state.hqOwner || (await checkDrained(state)).drained;
   }
 
@@ -1199,6 +1212,7 @@ function createAgyReviewerIdentityPool({
       if (!lease.hqOwner) setDraining(state, true);
     }
     let survivors = null;
+    let drained = lease.hqOwner;
     try {
       if (!lease.hqOwner) {
         const cleanup = await cleanupAgyReviewWorkspace({ user: lease.user, reviewId: lease.reviewId, runPinnedImpl: runHelper, log });
@@ -1206,14 +1220,19 @@ function createAgyReviewerIdentityPool({
           state.pendingCleanup.add(lease.reviewId);
           setDraining(state, true);
           survivors = `workspace cleanup for ${lease.reviewId} failed; not leased until cleanup succeeds`;
-        } else if (state) survivors = (await checkDrained(state)).reason;
+        } else if (state) {
+          const result = await checkDrained(state);
+          drained = result.drained;
+          survivors = result.reason;
+        }
       }
     } finally {
       let cleared = false;
       try { cleared = await holderStore.update(lease.user, row => {
         if (row.lease?.generation !== lease.generation) return true;
-        row.lease = null;
         if (failed) row.auth = { needsProbe: true, failures: 0, retryAt: 0 };
+        if (!drained) return false;
+        row.lease = null;
         return true;
       }); } catch (error) { log.warn?.(`[agy-identities] holder release persistence failed: ${error.message}`); }
       if (!cleared) {

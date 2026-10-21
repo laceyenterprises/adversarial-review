@@ -217,7 +217,10 @@ Every holder claim is durable before spawn. An OS-user-scoped flock prevents
 independent watchers from granting the same slot. Release compares a unique
 lease generation. A live owner PID, a live reviewer process group (even in a
 terminal run record), unknown process evidence, or an undrained added-user
-process retains the slot. Heartbeat age never frees it. See
+process retains the slot. Failed workspace cleanup or process draining retains
+the durable claim until a readiness retry succeeds; after owner exit, reclaim
+retries cleanup using the durable review ID before clearing the claim. Failed-review
+auth requirements persist during that hold. Heartbeat age never frees it. See
 [holder lease data model](data-model/agy-holder-leases.md). Existing drain logs
 also emit `[agy-holders]` with canonical identity, per-account holder references,
 capacity/active/free/held and generation; host and reviewer-pool caps still apply.
@@ -338,7 +341,11 @@ Every lease is therefore also written into the reviewer run record
 readers and written before the reviewer child is spawned). Every readiness pass reads the
 run records, including terminal holder records with live process groups. It keeps a holder out while a review that this watcher
 does not hold in memory still runs on it: the record is `launching` with no
-process group yet, or its process group is alive. For example, a review
+process group yet, or its process group is alive. A terminal record without a
+PGID does not hold admission. Terminal live groups also require a start-time
+identity check against `spawnedAt`: a proven mismatch cannot hold the slot;
+unknown identity evidence still holds. Strict scans continue reading historical
+records; no age cutoff may free a live review. For example, a review
 leased by the watcher before a restart:
 
 ```text

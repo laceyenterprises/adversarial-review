@@ -875,9 +875,13 @@ See [operator decision notices](docs/follow-up-runbook.md#operator-decision-noti
 
 ITP-11: Gemini logins are token holders for `gemini-reviewer`. Durable holder
 claims fence independent watcher admission, retain live processes across
-restart and terminal run states, and preserve auth-probe backoff. The clean
-smoke exercises two synthetic holders under one identity and refuses a third
-lease from an independent pool. Operator cutover still requires ITP-19 approval;
+restart and terminal run states, and preserve auth-probe backoff. Cleanup or drain
+failures retain the durable claim; dead-owner recovery retries workspace cleanup.
+Terminal records without PGIDs do not hold admission, and proven recycled PGIDs
+are excluded by start-time identity checks. The clean smoke exercises two synthetic
+holders under one identity, refuses a third independent lease, verifies durable
+cleanup/drain fencing and re-admits a terminal pre-spawn failure.
+Operator cutover still requires ITP-19 approval;
 model-ID/display-name declaration compatibility must be resolved first. See the
 [Gemini holder runbook](docs/RUNBOOK-antigravity-gemini-reviewer.md#gemini-reviewer-token-holders-itp-11-ccx-08-compatibility).
 

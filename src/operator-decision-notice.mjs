@@ -3,9 +3,11 @@ import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { findLiveAmaCloserLease, readAmaCloserLease } from './ama/closer-lease.mjs';
-import { readAmaCloserDispatchRecord, isActiveAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
-import { isHammerWorkerClass } from './ama/hammer-worker-class.mjs';
+import { readAmaCloserLease } from './ama/closer-lease.mjs';
+import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
+import { operatorNoticeInFlight, operatorNoticeNonRetryableStop,
+  operatorNoticePendingRetry, operatorNoticeRetryCapReached } from './ama/operator-notice-route.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { hasOperatorDecisionRequiredAlerted, markOperatorDecisionRequiredAlerted } from './reviewer-cascade.mjs';
 
@@ -32,7 +34,8 @@ export function recordOperatorNoticeCloserOutcome(rootDir, identity, result) {
 
 export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumber, headSha,
   decision, reviewRow, terminal = false, handoffAwaitingReview = false,
-  now = Date.now(), deliverAlertFn, readLivePR, logger = console }) {
+  now = Date.now(), deliverAlertFn, readLivePR, logger = console,
+  readLaunchRequestStatusImpl, timeoutOptions = {} }) {
   const identity = { repo, prNumber, headSha };
   // Keep observation cleanup on non-alerting polls without blocking the watcher
   // on synchronous file reads (including the usual missing-state lookup).
@@ -50,6 +53,9 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   }
   let state = readState(rootDir, identity);
   if (hasOperatorDecisionRequiredAlerted(rootDir, identity)) return;
+  const inFlight = await operatorNoticeInFlight(rootDir, identity, { readLaunchRequestStatusImpl, now });
+  // A dispatch outcome may have settled while the launch read yielded.
+  state = readState(rootDir, identity);
   const observationChanged = state.observation?.headSha !== headSha;
   if (observationChanged) {
     state = { ...state, observation: { headSha, startedAt: now } };
@@ -57,51 +63,72 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   const record = readAmaCloserDispatchRecord(rootDir, identity);
   const lease = readAmaCloserLease(rootDir, identity);
   const outcome = state.closer?.headSha === headSha ? state.closer.result : null;
+  const retryCap = operatorNoticeRetryCapReached(rootDir, identity, outcome,
+    reviewRow?.reviewer_head_sha || record?.reviewedSha);
   const operatorNeeded = outcome?.needsOperator || outcome?.closureOwner?.owner === 'page'
-    || ['dispatch-retry-exhausted', 'hammer-retry-cap'].includes(outcome?.reason);
-  const ended = Boolean(record?.launchRequestId) && isHammerWorkerClass(record?.workerClass)
-    && ['failed', 'failed-without-merge', 'cancelled', 'canceled', 'stopped', 'aborted', 'succeeded', 'completed', 'terminal', 'unverified-terminal-success', 'operator_triage_required', 'reaped_stuck_requested'].includes(record?.lastObservedStatus)
-    && !['merged', 'succeeded'].includes(record?.outcome);
+    || retryCap;
+  const nonRetryable = operatorNoticeNonRetryableStop(record);
+  const backstopMs = loadAwareTimeoutMs(OPERATOR_DECISION_NOTICE_BACKSTOP_MS,
+    { maxMs: Infinity, ...timeoutOptions });
+  const pendingRetry = !operatorNeeded && operatorNoticePendingRetry(outcome, record);
   const activeJob = [...listFollowUpJobsInDir(rootDir, 'pending', identity), ...listFollowUpJobsInDir(rootDir, 'inProgress', identity)]
     .some(({ job }) => job?.repo === repo && Number(job.prNumber) === Number(prNumber));
-  const held = findLiveAmaCloserLease(rootDir, identity) ? 'live-closer-lease'
-    : isActiveAmaCloserDispatchRecord(record, { lease, now: new Date(now).toISOString() }) ? 'closer-in-flight'
-    : activeJob ? 'remediation-active'
+  const active = inFlight || (activeJob ? 'remediation-active'
     : handoffAwaitingReview || (lease?.status === 'handed-to-review'
       && ['pending', 'pending-upstream', 'reviewing'].includes(reviewRow?.review_status)) ? 'handoff-review-active'
-    : outcome && !operatorNeeded && ((!ended && outcome.dispatched) || outcome.inFlight
-      || outcome.recoveryWait || outcome.retryAfterMs || outcome.backgroundDispatch
-      || (['hammer', 'conflict-rebase'].includes(outcome.closureOwner?.owner)
-        && now - state.observation.startedAt < OPERATOR_DECISION_NOTICE_BACKSTOP_MS)) ? 'closer-route-available'
-    : null;
-  const reason = held ? null : operatorNeeded ? 'no-route'
-    : ['hammer', 'conflict-rebase'].includes(outcome?.closureOwner?.owner)
-      && now - state.observation.startedAt >= OPERATOR_DECISION_NOTICE_BACKSTOP_MS ? 'backstop-45m'
-    : ended ? 'hammer-ended-without-merge'
-    : now - state.observation.startedAt >= OPERATOR_DECISION_NOTICE_BACKSTOP_MS ? 'backstop-45m' : null;
+    : pendingRetry ? 'closer-route-available'
+    : null);
+  // Only an idle route accrues backstop age. Keep legacy observations readable.
+  const idleSince = active ? null : state.observation.idleSince === null
+    ? now : state.observation.idleSince ?? state.observation.startedAt;
+  const idleChanged = state.observation.idleSince !== idleSince
+    && (active || Object.hasOwn(state.observation, 'idleSince'));
+  if (idleChanged) state.observation = { ...state.observation, idleSince };
+  const backstopDue = !active && now - idleSince >= backstopMs;
+  const routeAvailable = outcome && !operatorNeeded
+    && ['hammer', 'conflict-rebase'].includes(outcome.closureOwner?.owner);
+  const held = active || (!backstopDue && (routeAvailable || (record?.outcome && !nonRetryable))
+    && !operatorNeeded ? 'closer-route-available' : null);
+  const reason = held ? null : retryCap ? 'retry-cap' : operatorNeeded ? 'no-route'
+    : nonRetryable && !routeAvailable ? `non-retryable: ${nonRetryable}`
+    : backstopDue ? 'backstop' : null;
   if (!reason) {
     const firstHold = !state.heldHeads?.[headSha];
     if (firstHold) {
       state.heldHeads = { ...state.heldHeads, [headSha]: true };
     }
-    if (observationChanged || firstHold) writeState(rootDir, identity, state);
+    if (observationChanged || idleChanged || firstHold) writeState(rootDir, identity, state);
     if (firstHold) {
       logger.log(`[watcher] operator-decision notice held for ${repo}#${prNumber}@${headSha}: ${held || 'awaiting-route-outcome'}`);
     }
     return;
   }
   // Persist the observation before yielding to live PR lookup or delivery.
-  if (observationChanged) writeState(rootDir, identity, state);
+  if (observationChanged || idleChanged) writeState(rootDir, identity, state);
   if (readLivePR) {
     const live = await readLivePR();
     if (String(live?.state).toUpperCase() !== 'OPEN' || live?.headRefOid !== headSha) return;
+    // Live lookup yields: a replacement launch admitted meanwhile holds delivery.
+    const latestInFlight = await operatorNoticeInFlight(rootDir, identity, { readLaunchRequestStatusImpl, now });
+    const latest = readState(rootDir, identity);
+    const latestOutcome = latest.closer?.headSha === headSha ? latest.closer.result : null;
+    const restoredRoute = latestOutcome && !latestOutcome.needsOperator
+      && ['hammer', 'conflict-rebase'].includes(latestOutcome.closureOwner?.owner)
+      && JSON.stringify(latest.closer) !== JSON.stringify(state.closer);
+    if (latestInFlight || restoredRoute
+      || operatorNoticePendingRetry(latestOutcome, readAmaCloserDispatchRecord(rootDir, identity))) {
+      if (latest.observation?.headSha === headSha) {
+        writeState(rootDir, identity, { ...latest, observation: { ...latest.observation, idleSince: null } });
+      }
+      return;
+    }
   }
   await deliverAlertFn(
     `Adversarial review needs an operator decision for ` +
     `${repo}#${prNumber}: ${decision.state || 'unknown state'} ` +
-    `(${decision.reason || 'no reason provided'}). Findings are unresolved and ` +
-    `remediation will not run again on this head. The PR will not merge ` +
-    `until someone remediates or explicitly approves.`,
+    `(${decision.reason || 'no reason provided'}). Reason: ${reason}. Findings are unresolved and ` +
+    `no closer route is currently making progress. Inspect the closure outcome ` +
+    `and restore a closer route or resolve the blockers.`,
     { event: 'adversarial_review.operator_decision_required', payload: {
       repo, pr_number: prNumber, head_sha: headSha || null,
       gate_state: decision.state || null, gate_reason: decision.reason || null, reason,

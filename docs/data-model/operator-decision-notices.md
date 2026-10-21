@@ -15,7 +15,8 @@ unreadable, or unparseable files are treated as empty observation state.
 |---|---|---|
 | `observation` | object or null | Current held head and the beginning of its backstop window; cleared when the PR is terminal or the projected decision no longer requires an operator. |
 | `observation.headSha` | string | A different observed head replaces the observation and starts a fresh window. |
-| `observation.startedAt` | number | Epoch milliseconds at first operator-required observation, used for the 45-minute backstop. |
+| `observation.startedAt` | number | Epoch milliseconds at first operator-required observation; legacy fallback when `idleSince` is absent. |
+| `observation.idleSince` | optional number or null | Beginning of the current idle interval in epoch milliseconds. Null while ownership or re-dispatch is active; the next idle poll starts a fresh load-scaled backstop. Legacy idle observations use `startedAt` until activity resets the window. |
 | `closer` | object | Latest recorded closer result, independent of the observation. |
 | `closer.headSha` | string | Pins the closer result to the head; other heads cannot inherit its outcome. |
 | `closer.result` | object or null | Observation of the closure orchestrator result, including `needsOperator`, `closureOwner`, dispatch, recovery, and retry evidence. Does not grant merge or dispatch authority. |
@@ -30,8 +31,20 @@ Operator-required observation and closer outcome persistence use synchronous
 reads and writes. Closer leases and dispatch records,
 follow-up jobs, and handoff review state remain their own sources of authority;
 the notice store only observes them. Active ownership holds delivery even after
-the backstop expires. With no active ownership, an operator-required outcome or
-ended hammer selects immediate delivery, otherwise the backstop applies.
+the backstop expires. Launch observation scans every dispatch head for the PR
+and uses the shared `launchRequestInFlight` predicate, including retry descendants.
+Requested, admitted, leased and running launches hold delivery regardless of age;
+an unreadable retry chain cannot retire ownership. A replacement being admitted
+or a queued re-dispatch also holds delivery and resets the idle interval.
+
+With no active ownership, `needsOperator` or owner `page` selects `no-route`;
+recorded retry/lifetime/target suppression or exhausted dispatch retries selects
+`retry-cap`. A recorded non-retryable hammer outcome without an available closer
+route selects `non-retryable: <outcome>`. Worker exit status alone is insufficient.
+Retryable outcomes and available hammer routes remain held until the idle
+backstop: nominally 45 minutes, scaled by `loadAwareTimeoutMs` using existing load
+policy, without the command-timeout helper's default one-hour clamp. The page
+text and payload both name the reason; an idle expiry uses `backstop`.
 
 PR closure and review completion are distinct: the GitHub subject adapter sets
 `terminal` only for a non-open PR. Delivery additionally verifies live open PR

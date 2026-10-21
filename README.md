@@ -867,6 +867,12 @@ A new head still re-arms review through the existing REVIEWSTALL-01 policy.
 
 ## State machines and smoke verification (SMV v1)
 
+OPDECPAGE-01: operator-decision notices observe closure ownership without changing
+lifecycle states or merge authority. In-flight hammer launches and pending retries
+hold delivery at any age; the idle backstop scales from 45 minutes with host load.
+Pages name `no-route`, `retry-cap`, `non-retryable: <outcome>` or `backstop`.
+See [operator decision notices](docs/follow-up-runbook.md#operator-decision-notices-reviewnotice-01).
+
 HAMMERQUOTAREAD-01: quota status retries may use a snapshot under ten minutes old.
 Missing usable evidence defers before launch with the resolver's hold reason in
 AMA audits; no new launch state is introduced. After deployment, inspect

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
+import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 
 // Leaf reader shared by closer admission and event-driven hammer wakes.
 export function amaCloserDispatchDir(rootDir) {
@@ -22,4 +23,16 @@ export function readAmaCloserDispatchRecord(rootDir, identity) {
   } catch {
     return null;
   }
+}
+
+// Launches stay keyed to their dispatch head after the hammer rebases.
+export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber }) {
+  const sample = basename(amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha: 'H' }));
+  const prefix = sample.slice(0, -'H.json'.length);
+  return listSettledJsonNames(amaCloserDispatchDir(rootDir))
+    .filter(name => name.startsWith(prefix))
+    .flatMap(name => {
+      const record = JSON.parse(readFileSync(join(amaCloserDispatchDir(rootDir), name), 'utf8'));
+      return record?.repo === repo && Number(record.prNumber) === Number(prNumber) ? [record] : [];
+    });
 }

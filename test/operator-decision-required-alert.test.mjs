@@ -1,4 +1,4 @@
-import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 // Non-budget remediation stops still require a visible operator decision.
 // Budget exhaustion is handed to the hammer instead.
 import { test } from 'node:test';
@@ -35,6 +35,7 @@ import { maybeDeliverOperatorDecisionNotice, recordOperatorNoticeCloserOutcome,
   OPERATOR_DECISION_NOTICE_BACKSTOP_MS } from '../src/operator-decision-notice.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-closer.mjs';
+import { markHammerRetryCapExhausted } from '../src/ama/hammer-retry-cap.mjs';
 
 const HEAD = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const REPO = 'o/r';
@@ -231,6 +232,7 @@ function noticeFixture(rootDir) {
   const alerts = [], logs = [];
   return { alerts, logs, options: { rootDir, ...identity, decision, now: 0,
     deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
+    readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-unavailable' }),
     logger: { log: line => logs.push(line) } } };
 }
 
@@ -292,7 +294,7 @@ test('immediate delivery persists the observation before live lookup without ove
   });
 });
 
-for (const route of ['no-route', 'backstop-45m']) {
+for (const route of ['no-route', 'backstop']) {
   test(`watcher delivers once on an open PR with stopped remediation after ${route}`, async () => {
     await withRootAsync(async root => {
       const alerts = [];
@@ -372,14 +374,15 @@ for (const route of ['lease', 'eligible', 'pending', 'in-progress', 'handoff', '
   });
 }
 
-for (const reason of ['no-route', 'hammer-ended-without-merge', 'backstop-45m']) {
-  test(`notice delivers once for ${reason} with identical wording`, async () => {
+for (const reason of ['no-route', 'retry-cap', 'non-retryable: failed-without-merge', 'backstop']) {
+  test(`notice delivers once for ${reason} with its reason in the page`, async () => {
     await withRootAsync(async root => {
       const { alerts, options } = noticeFixture(root);
-      if (reason === 'no-route') recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true, reason: 'hammer-retry-cap' });
-      if (reason === 'hammer-ended-without-merge') fixtureJSON(amaCloserDispatchFilePath(root, identity), {
+      if (reason === 'no-route') recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+      if (reason === 'retry-cap') recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true, reason: 'hammer-retry-cap' });
+      if (reason === 'non-retryable: failed-without-merge') fixtureJSON(amaCloserDispatchFilePath(root, identity), {
         ...identity, state: 'dispatched', workerClass: 'hammer', launchRequestId: 'synthetic-launch', lastObservedStatus: 'failed', outcome: 'failed-without-merge', lastError: 'synthetic-stop' });
-      if (reason === 'backstop-45m') {
+      if (reason === 'backstop') {
         await maybeDeliverOperatorDecisionNotice(options);
         await maybeDeliverOperatorDecisionNotice({ ...options, now: 44 * 60_000 });
         assert.equal(alerts.length, 0);
@@ -388,8 +391,8 @@ for (const reason of ['no-route', 'hammer-ended-without-merge', 'backstop-45m'])
       await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS + 1 });
       assert.equal(alerts.length, 1);
       assert.equal(alerts[0].meta.payload.reason, reason);
-      if (reason === 'hammer-ended-without-merge') assert.equal(alerts[0].meta.payload.hammer_stop_reason, 'synthetic-stop');
-      assert.equal(alerts[0].text, 'Adversarial review needs an operator decision for o/r#1: success (remediation-stopped). Findings are unresolved and remediation will not run again on this head. The PR will not merge until someone remediates or explicitly approves.');
+      if (reason === 'non-retryable: failed-without-merge') assert.equal(alerts[0].meta.payload.hammer_stop_reason, 'synthetic-stop');
+      assert.equal(alerts[0].text, 'Adversarial review needs an operator decision for o/r#1: success (remediation-stopped). Reason: ' + reason + '. Findings are unresolved and no closer route is currently making progress. Inspect the closure outcome and restore a closer route or resolve the blockers.');
       assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), true);
     });
   });
@@ -459,7 +462,7 @@ test('a new head does not inherit the previous head operator outcome', async () 
     assert.equal(alerts.length, 0);
     await maybeDeliverOperatorDecisionNotice({ ...options, headSha, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS });
     assert.equal(alerts.length, 1);
-    assert.equal(alerts[0].meta.payload.reason, 'backstop-45m');
+    assert.equal(alerts[0].meta.payload.reason, 'backstop');
   });
 });
 
@@ -494,9 +497,182 @@ for (const owner of ['hammer', 'conflict-rebase']) {
           assert.match(logs[0], /closer-route-available/);
           await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS });
           assert.equal(alerts.length, 1);
-          assert.equal(alerts[0].meta.payload.reason, 'backstop-45m');
+          assert.equal(alerts[0].meta.payload.reason, 'backstop');
         }
       });
     });
   }
+}
+
+for (const stop of [
+  { outcome: 'superseded', stopReason: 'head-changed', backgroundDispatch: { state: 'queued' } },
+  { outcome: 'deferred', stopReason: 'github-gate-read-failed: HTTP 401 expired credential' },
+  { outcome: 'failed-without-merge', stopReason: 'history-read-failed', retryAfterMs: 30_000 },
+]) {
+  test(`retryable ${stop.stopReason} keeps the closer route without paging`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, logs, options } = noticeFixture(root);
+      fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+        launchRequestId: 'synthetic-stopped-launch', state: 'launch-terminal',
+        lastObservedStatus: 'failed', outcome: stop.outcome, stopReason: stop.stopReason });
+      recordOperatorNoticeCloserOutcome(root, identity, { dispatched: false,
+        closureOwner: { owner: 'hammer' }, backgroundDispatch: stop.backgroundDispatch,
+        retryAfterMs: stop.retryAfterMs });
+      const polls = stop.backgroundDispatch || stop.retryAfterMs ? [0, 55 * 60_000, 180 * 60_000] : [0, 44 * 60_000];
+      for (const now of polls) await maybeDeliverOperatorDecisionNotice({ ...options, now });
+      assert.equal(alerts.length, 0);
+      assert.match(logs[0], /closer-route-available/);
+    });
+  });
+}
+
+for (const lifetime of [false, true]) {
+  test(`recorded ${lifetime ? 'lifetime' : 'series'} retry cap pages with retry-cap`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      markHammerRetryCapExhausted(root, identity, { jobKey: HEAD, headSha: HEAD,
+        attemptCount: lifetime ? 6 : 2, lifetime });
+      fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+        launchRequestId: 'synthetic-stopped-launch', state: 'launch-terminal',
+        lastObservedStatus: 'failed', outcome: 'deferred', reviewedSha: HEAD });
+      recordOperatorNoticeCloserOutcome(root, identity, { closureOwner: { owner: 'hammer' } });
+      await maybeDeliverOperatorDecisionNotice(options);
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].meta.payload.reason, 'retry-cap');
+      assert.match(alerts[0].text, /Reason: retry-cap/);
+    });
+  });
+}
+
+for (const reason of ['hammer-retry-cap-exhausted', 'hammer-lifetime-ceiling-reached',
+  'hammer-target-redrive-cap-exhausted']) {
+  test(`closer result ${reason} names retry-cap even without a readable ledger`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true, reason });
+      await maybeDeliverOperatorDecisionNotice(options);
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].meta.payload.reason, 'retry-cap');
+    });
+  });
+}
+
+for (const status of ['requested', 'admitted', 'leased', 'starting', 'running']) {
+  test(`55-minute ${status} hammer on another head holds even an operator outcome at multiplier 1`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      const launchHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      fixtureJSON(amaCloserDispatchFilePath(root, { ...identity, headSha: launchHead }), {
+        ...identity, headSha: launchHead, workerClass: 'hammer', launchRequestId: 'synthetic-live-launch',
+        state: 'dispatched', lastObservedStatus: 'running', dispatchedAt: new Date(0).toISOString(),
+        lastObservedAt: new Date(0).toISOString() });
+      fixtureJSON(amaCloserLeaseFilePath(root, identity), { ...identity, status: 'terminal', terminalOutcome: 'superseded' });
+      recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+      const readLaunchRequestStatusImpl = async args => {
+        assert.equal(args.launchRequestId, 'synthetic-live-launch');
+        assert.equal(args.includeRetryChain, true);
+        return { ok: true, row: { status } };
+      };
+      for (const now of [0, 55 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...options, now,
+        readLaunchRequestStatusImpl });
+      assert.equal(alerts.length, 0);
+    });
+  });
+}
+
+test('a live retry descendant holds a terminal ancestor dispatch beyond the backstop', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+      launchRequestId: 'synthetic-ancestor', state: 'launch-terminal',
+      lastObservedStatus: 'failed', outcome: 'failed-without-merge' });
+    recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: 55 * 60_000,
+      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed' },
+        retryChain: [{ launch_request_id: 'synthetic-retry', status: 'leased' }] }) });
+    assert.equal(alerts.length, 0);
+  });
+});
+
+test('an unreadable retry chain cannot retire a terminal ancestor whose retry may be live', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+      launchRequestId: 'synthetic-ancestor', state: 'launch-terminal',
+      lastObservedStatus: 'failed', outcome: 'failed-without-merge' });
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: 55 * 60_000,
+      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed' },
+        retryChainUnreadable: true }) });
+    assert.equal(alerts.length, 0);
+  });
+});
+
+for (const multiplier of [2, 6]) {
+  test(`idle hammer route pages only after the ${multiplier}x load-aware backstop`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      const timeoutOptions = { enabled: true, maxMultiplier: multiplier,
+        loadAvg1m: 3, cpuCount: 1, cpuBusyPercent: 85 };
+      recordOperatorNoticeCloserOutcome(root, identity, { closureOwner: { owner: 'hammer' } });
+      for (const now of [0, 55 * 60_000, OPERATOR_DECISION_NOTICE_BACKSTOP_MS * multiplier - 1]) {
+        await maybeDeliverOperatorDecisionNotice({ ...options, now, timeoutOptions });
+      }
+      assert.equal(alerts.length, 0);
+      await maybeDeliverOperatorDecisionNotice({ ...options, timeoutOptions,
+        now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS * multiplier,
+        readLivePR: async () => ({ state: 'OPEN', headRefOid: HEAD }) });
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].meta.payload.reason, 'backstop');
+      assert.match(alerts[0].text, /Reason: backstop/);
+    });
+  });
+}
+
+test('a busy hammer earns a fresh idle backstop after it ends', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+      launchRequestId: 'synthetic-launch', state: 'dispatched', lastObservedStatus: 'running' });
+    recordOperatorNoticeCloserOutcome(root, identity, { closureOwner: { owner: 'hammer' } });
+    for (const now of [0, 55 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...options, now,
+      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'running' } }) });
+    const stopped = { ...options,
+      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) };
+    for (const now of [56 * 60_000, 100 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...stopped, now });
+    assert.equal(alerts.length, 0);
+    await maybeDeliverOperatorDecisionNotice({ ...stopped, now: 101 * 60_000 });
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].meta.payload.reason, 'backstop');
+  });
+});
+
+test('a failed process without a recorded terminal outcome waits for the backstop', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+      launchRequestId: 'synthetic-launch', state: 'launch-terminal', lastObservedStatus: 'failed' });
+    await maybeDeliverOperatorDecisionNotice(options);
+    assert.equal(alerts.length, 0);
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS });
+    assert.equal(alerts[0].meta.payload.reason, 'backstop');
+  });
+});
+
+for (const pending of ['dispatching', 'queued', 'eligible']) {
+  test(`a ${pending} replacement appearing during the live PR lookup prevents delivery`, async () => {
+    await withRootAsync(async root => {
+      const { alerts, options } = noticeFixture(root);
+      recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+      await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR: async () => {
+        if (pending === 'dispatching') fixtureJSON(amaCloserDispatchFilePath(root, identity), {
+          ...identity, state: 'dispatching', lastAttemptedAt: new Date(0).toISOString() });
+        else recordOperatorNoticeCloserOutcome(root, identity, {
+          ...(pending === 'queued' ? { backgroundDispatch: { state: 'queued' } } : {}),
+          closureOwner: { owner: 'hammer' } });
+        return { state: 'OPEN', headRefOid: HEAD };
+      } });
+      assert.equal(alerts.length, 0);
+      assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), false);
+    });
+  });
 }

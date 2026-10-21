@@ -61,6 +61,7 @@ test('REMLABEL-01: publication CLI persists the refusal before exiting with the 
   const failure = JSON.parse(readFileSync(failurePath));
   assert.equal(failure.code, 'remediation-empties-pr-diff');
   assert.equal(failure.previousHead, f.previousHead);
+  assert.equal(failure.localCommit, f.git('rev-parse', 'HEAD'));
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 
@@ -113,7 +114,7 @@ test('REMLABEL-01: refusal artifact marks a remediation round failed without req
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   } });
   const head = 'a'.repeat(40);
-  createFollowUpJob({ rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
     reviewBody: '## Blocking issues\n- **Fix feature** — fix it.\n## Verdict\nRequest changes',
     reviewerModel: 'claude', reviewPostedAt: '2026-10-16T12:00:00Z' });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-10-16T12:01:00Z' });
@@ -241,4 +242,23 @@ test('publication CLI clears a prior refusal after a corrected publication and t
     assert.equal(JSON.parse(result.stdout).published, true);
     assert.equal(existsSync(failurePath), false);
   }
+});
+
+
+test('REMEDBRANCH-01: a branchless publisher resolves the fake PR head and publishes the guarded commit', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix synthetic retry');
+  let reads = 0;
+  const result = await publishRemediation({ ...f.publish, branch: null, repo: 'fixture/repo', prNumber: 42,
+    execFileImpl: async (command, args, options) => {
+      if (command === 'gh') {
+        reads++;
+        return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'topic' } }) };
+      }
+      return execAsync(command, args, options);
+    } });
+  assert.equal(reads, 1);
+  assert.equal(result.published, true);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], result.headSha);
 });

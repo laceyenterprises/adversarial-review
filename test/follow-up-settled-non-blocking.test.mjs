@@ -92,7 +92,7 @@ test('second non-blocking review stops at one round while blocking review restor
   const rootDir = mkdtempSync(join(tmpdir(), 'remwaste-'));
   try {
     const input = { rootDir, repo: 'example/repo', prNumber: 72, reviewerModel: 'codex' };
-    const first = createFollowUpJob({ ...input, reviewBody: review({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }) });
+    const first = createFollowUpJob({ branch: 'fixture/remediation', ...input, reviewBody: review({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }) });
     assert.equal(first.job.nonBlockingOnly, true);
     rmSync(first.jobPath);
     const completedDir = getFollowUpJobDir(rootDir, 'completed');
@@ -102,11 +102,11 @@ test('second non-blocking review stops at one round while blocking review restor
       remediationWorker: { state: 'completed', model: 'codex' },
       remediationPlan: { ...first.job.remediationPlan, currentRound: 1 },
     });
-    const second = createFollowUpJob({ ...input, priorCompletedRounds: 1, reviewPostedAt: '2026-09-27T12:00:00Z', reviewBody: review({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }) });
+    const second = createFollowUpJob({ branch: 'fixture/remediation', ...input, priorCompletedRounds: 1, reviewPostedAt: '2026-09-27T12:00:00Z', reviewBody: review({ verdict: 'Comment only', nonBlocking: A_NON_BLOCKING_FINDING }) });
     assert.equal(second.job.nonBlockingRoundsBefore, 1);
     const stopped = claimNextFollowUpJob({ rootDir, returnStopped: true });
     assert.equal(stopped.reason, 'max-rounds-reached');
-    const blocking = createFollowUpJob({ ...input, priorCompletedRounds: 1, reviewPostedAt: '2026-09-27T12:01:00Z', reviewBody: review({ verdict: 'Request changes', blocking: A_BLOCKING_FINDING }) });
+    const blocking = createFollowUpJob({ branch: 'fixture/remediation', ...input, priorCompletedRounds: 1, reviewPostedAt: '2026-09-27T12:01:00Z', reviewBody: review({ verdict: 'Request changes', blocking: A_BLOCKING_FINDING }) });
     assert.equal(blocking.job.nonBlockingOnly, false);
     assert.equal(claimNextFollowUpJob({ rootDir }).job.remediationPlan.currentRound, 2);
   } finally {

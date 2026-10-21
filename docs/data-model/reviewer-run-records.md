@@ -89,3 +89,11 @@ Gemini lane left with no ready identity pages the operator after the normal
 alert interval. Startup recovery keeps using the lenient
 `readActiveReviewerRunRecords`, which skips a corrupt record so one bad file
 does not block recovery of the others.
+
+## Follow-up subject fields (REMEDBRANCH-01)
+
+The watcher supplies the PR head `branch` and original title-prefix `builderTag`
+in `subjectContext` for every reviewer runtime. Agent-runtime records preserve
+these alongside the runtime identity; watcher pass metadata retains both for
+post recovery. The pass reaper forwards these fields into follow-up creation,
+which holds and retries unresolved branches before any remediation worker starts.

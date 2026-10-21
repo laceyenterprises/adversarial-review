@@ -240,7 +240,7 @@ test('cascade state keeps the class instead of collapsing it into cascade', () =
 
 async function reconcileDeadWorker(logText) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'nodepin-job-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir, repo: REPO, prNumber: PR,
     reviewerModel: 'claude', reviewBody: '## Summary\nFix the finding.',
     reviewPostedAt: '2026-09-28T06:00:00.000Z', critical: true,

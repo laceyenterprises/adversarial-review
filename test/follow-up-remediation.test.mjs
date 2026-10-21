@@ -199,7 +199,7 @@ test('createQuotaHoldRevalidator does not run hq synchronously on cache miss', (
 
 test('consumeFollowUpJobsUntilCapacity prefetches quota holds before synchronous claiming', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const created = createFollowUpJob({ rootDir, ...makeJob({ repo: 'laceyenterprises/clio', prNumber: 107 }) });
+  const created = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...makeJob({ repo: 'laceyenterprises/clio', prNumber: 107 }) });
   writeFollowUpJob(created.jobPath, {
     ...created.job,
     pendingAt: '2026-04-21T10:05:00.000Z',
@@ -340,6 +340,7 @@ function makeJob(overrides = {}) {
     repo: 'laceyenterprises/clio',
     prNumber: 7,
     baseBranch: 'main',
+    branch: 'fixture/remediation',
     linearTicketId: 'LAC-207',
     reviewerModel: 'claude',
     critical: true,
@@ -6111,7 +6112,7 @@ test('isHarnessIdentityEnforcementEnabled defaults to true and honors the env ki
 });
 
 function makeQueuedJob(rootDir, overrides = {}) {
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 7,
@@ -6158,7 +6159,7 @@ function markActiveInProgressJob(rootDir, overrides = {}) {
 }
 
 function createPendingRemediationJob(rootDir, overrides = {}) {
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 7,
@@ -7038,7 +7039,7 @@ test('consumeNextFollowUpJob keeps a persisted medium maxRounds=2 budget and spa
     'utf8'
   );
 
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 7,
@@ -7117,7 +7118,7 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 wi
     'utf8'
   );
 
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 8,
@@ -7192,7 +7193,7 @@ test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk jo
     'utf8'
   );
 
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 8,
@@ -7249,7 +7250,7 @@ test('consumeNextFollowUpJob logs a structured deny decision when a remediation 
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const logs = [];
 
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 88,
@@ -7685,7 +7686,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
   const created = (() => {
     // Build a minimal pending job using the same path createFollowUpJob writes to.
     // The function under test claims pending jobs via claimNextFollowUpJob.
-    return createFollowUpJob({
+    return createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
@@ -7802,7 +7803,7 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
   const previousScript = process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
   process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
   try {
-    const created = createFollowUpJob({
+    const created = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 74,
@@ -7915,7 +7916,7 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
   const previousScript = process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
   process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
   try {
-    const created = createFollowUpJob({
+    const created = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 75,
@@ -7998,7 +7999,7 @@ test('consumeNextFollowUpJob rolls back workspace when oss-readiness apply crash
   const previousScript = process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
   process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
   try {
-    const created = createFollowUpJob({
+    const created = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 76,
@@ -8085,7 +8086,7 @@ test('consumeNextFollowUpJob skips oss-readiness --apply when the audit did not 
   const previousScript = process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
   process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
   try {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 76,
@@ -8161,10 +8162,11 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
 
   try {
     await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async (hqRoot) => {
-      createFollowUpJob({
+      createFollowUpJob({ branch: 'fixture/remediation',
         rootDir,
         repo: 'laceyenterprises/clio',
         prNumber: 71,
+        branch: 'codex/fix-pr-71',
         reviewerModel: 'claude',
         linearTicketId: 'LAC-271',
         reviewBody: '## Summary\nFix the worker-pool dispatch path.\n\n## Verdict\nRequest changes',
@@ -8278,10 +8280,11 @@ test('consumeNextFollowUpJob applies and pushes oss-readiness remediation before
 
   try {
     await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async () => {
-      createFollowUpJob({
+      createFollowUpJob({ branch: 'fixture/remediation',
         rootDir,
         repo: 'laceyenterprises/clio',
         prNumber: 72,
+        branch: 'codex/fix-pr-72',
         reviewerModel: 'claude',
         linearTicketId: 'LAC-272',
         reviewBody: [
@@ -8406,7 +8409,7 @@ test('consumeNextFollowUpJob rolls back local oss-readiness commit when pre-disp
 
   try {
     await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async () => {
-      const created = createFollowUpJob({
+      const created = createFollowUpJob({ branch: 'fixture/remediation',
         rootDir,
         repo: 'laceyenterprises/clio',
         prNumber: 73,
@@ -8550,7 +8553,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
 
   try {
     await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async (hqRoot) => {
-      createFollowUpJob({
+      createFollowUpJob({ branch: 'fixture/remediation',
         rootDir,
         repo: 'laceyenterprises/clio',
         prNumber: 73,
@@ -9489,7 +9492,7 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
   delete process.env.ADV_WITH_HQ_INTEGRATION;
 
   try {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 73,
@@ -9546,7 +9549,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async () => {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 76,
@@ -10083,7 +10086,7 @@ test('consumeNextFollowUpJob keeps native remediation on the bare spawner withou
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async () => {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 77,
@@ -10141,10 +10144,11 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   await withOAuthTestEnv(rootDir, async () => {
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 78,
+        branch: 'codex/fix-pr-78',
       reviewerModel: 'claude',
       linearTicketId: 'LAC-278',
       reviewBody: '## Summary\nNative mode with legacy HQ override.\n\n## Verdict\nRequest changes',
@@ -10554,7 +10558,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
 
   try {
     const legacy = markActiveInProgressJob(rootDir, { prNumber: 74, processId: 8174 });
-    const samePrPending = createFollowUpJob({
+    const samePrPending = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: legacy.job.repo,
       prNumber: legacy.job.prNumber,
@@ -10564,7 +10568,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
       reviewPostedAt: '2026-04-21T08:02:00.000Z',
       critical: false,
     });
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 75,
@@ -11291,7 +11295,7 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
     // to exercise the config-blocked requeue path.
     process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'mistral';
 
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
@@ -11348,7 +11352,7 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
 test('consumeNextFollowUpJob requeues a claimed job when orchestration_mode is invalid', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 79,
@@ -11426,7 +11430,7 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
     process.env.CODEX_HOME = path.join(rootDir, '.codex');
     process.env.HOME = rootDir;
 
-    const created = createFollowUpJob({
+    const created = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
@@ -11516,7 +11520,7 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
     process.env.HQ_ROOT = path.join(rootDir, 'hq');
     mkdirSync(process.env.HQ_ROOT, { recursive: true });
 
-    createFollowUpJob({
+    createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
@@ -11708,7 +11712,7 @@ test('consumeNextFollowUpJob marks lifecycle-stop for a closed PR with never-spa
   // path reconcile uses, so the terminal record carries a delivery
   // record and the public PR comment is posted (or queued for retry).
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 81,

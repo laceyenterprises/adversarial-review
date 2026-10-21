@@ -289,3 +289,12 @@ starting it, the watcher atomically transfers the existing `reviewed_prs` claim
 from the original UUID to the fallback UUID and persists the effective reviewer
 and broker. Logical review/remediation round counters are unchanged; recovery
 uses the fallback reviewer identity if the watcher restarts before settlement.
+
+## Recovered follow-up subject metadata (REMEDBRANCH-01)
+
+Watcher reviewer passes preserve `metadata_json.branch` (the PR head ref) and
+`metadata_json.builderTag` (the original title prefix) at start and settlement.
+The agent-runtime run record carries the same fields in `subjectContext`.
+The pass reaper forwards them into follow-up creation; historical missing
+branches use the bounded live PR lookup and pending branch-resolution hold
+documented in [follow-up jobs](follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).

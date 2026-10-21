@@ -94,7 +94,7 @@ test('HAMCLOSE-03 replay C: a clean handoff drains in one follow-up tick and mer
     lastObservedStatus: 'running', lastObservedAt: '2026-10-12T09:54:36Z' }));
   acquireAmaCloserLease({ ...launchIdentity, acquiredAt: '2026-10-12T09:46:23Z' });
   updateAmaCloserLease({ ...launchIdentity, status: 'dispatched', lrqId: 'hammer-8149' });
-  createFollowUpJob({ rootDir, repo, prNumber: 8149, revisionRef: headSha, reviewerModel: 'gemini',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo, prNumber: 8149, revisionRef: headSha, reviewerModel: 'gemini',
     reviewBody: cleanBody, reviewPostedAt: '2026-10-12T09:54:36Z', changedFiles: ['src/a.mjs'] });
   const drainArgs = { rootDir, maxConcurrent: 8, now: () => '2026-10-12T09:55:00Z', promptTemplate: 'fixture',
     quotaHoldRevalidator: () => ({ available: true }), logger: quiet, log: quiet,
@@ -133,7 +133,7 @@ for (const status of ['succeeded', 'failed', 'cancelled', 'completed', 'terminal
     writeFileSync(path, JSON.stringify({ ...identity, state: 'dispatched', launchRequestId: 'terminal-hammer',
       lastObservedStatus: status, lastObservedAt: '2026-10-12T09:54:36Z' }));
     acquireAmaCloserLease(identity); updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'terminal-hammer' });
-    createFollowUpJob({ rootDir, repo, prNumber: 8149, revisionRef: headSha, reviewerModel: 'gemini',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo, prNumber: 8149, revisionRef: headSha, reviewerModel: 'gemini',
       reviewBody: cleanBody, reviewPostedAt: '2026-10-12T09:54:36Z', changedFiles: ['src/a.mjs'] });
     const drained = await consumeFollowUpJobsUntilCapacity({ rootDir, maxConcurrent: 8,
       now: () => '2026-10-12T09:55:00Z', promptTemplate: 'fixture', log: quiet,

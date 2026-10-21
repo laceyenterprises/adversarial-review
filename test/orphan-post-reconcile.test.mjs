@@ -338,7 +338,7 @@ test('apply resumes from a linked pass artifact after follow-up queue failure', 
 test('apply skips recovered follow-up queueing when the same revision already has a job', async () => {
   const db = fixture({ attempts: 4, passStatus: 'failed' });
   const rootDir = temporaryRoot();
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 1078,

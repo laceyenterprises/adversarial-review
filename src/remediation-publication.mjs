@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
-import { runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
+import { fetchPRBranchMetadata, runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
@@ -20,12 +20,18 @@ function defaultPushCommand(env) {
 }
 
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
-  branch, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
+  branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
   pushCommand, env = process.env } = {}) {
-  if (typeof baseBranch !== 'string' || !baseBranch || typeof branch !== 'string' || !branch
-    || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) {
-    throw Object.assign(new Error('Remediation publication requires the previous head and exact remote lease.'), { code: 'remediation-publication-unproven' });
+  const unproven = () => Object.assign(new Error('Remediation publication requires the previous head, PR branch and exact remote lease.'), { code: 'remediation-publication-unproven' });
+  if (typeof baseBranch !== 'string' || !baseBranch.trim()
+    || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) throw unproven();
+  if (typeof branch !== 'string' || !branch.trim()) {
+    if (!repo || !prNumber) throw unproven();
+    try { ({ branch } = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl })); }
+    catch { throw unproven(); }
   }
+  if (typeof branch !== 'string' || !branch.trim()) throw unproven();
+  branch = branch.trim();
   const git = async args => (await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, ...args],
     { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 })).stdout.replace(/\n$/, '');
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);

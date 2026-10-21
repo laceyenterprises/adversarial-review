@@ -1,3 +1,4 @@
+import { resolveFollowUpBranch } from './follow-up-branch.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
@@ -1553,6 +1554,7 @@ function reapTerminalFollowUpWorkspaces({
         }
         if (decision?.veto) { skipped += 1; return; }
         const { terminalJob } = lookup;
+        if (terminalJob?.unpublishedWork?.commitSha) { skipped += 1; return; }
         if (!terminalJob && !decision?.reap) {
           skipped += 1;
           missingTerminalJob += 1;
@@ -2243,7 +2245,7 @@ function isSingleReviewStop(job) {
     && job?.remediationPlan?.stop?.code === 'max-rounds-reached';
 }
 
-function createFollowUpJob({ rootDir, ...jobInput }) {
+function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
   const baseJob = buildFollowUpJob(jobInput);
   // COMMENTCLOSE-01: the reviewer and the reviewer-pass reaper can both queue a
   // follow-up for the same posted review; only the first creates a job. A
@@ -2257,7 +2259,7 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
     return { job: null, jobPath: null, duplicateOf: reviewClaim.duplicateOf };
   }
   try {
-    return writeNewFollowUpJob(rootDir, baseJob, jobInput);
+    return writeNewFollowUpJob(rootDir, resolveFollowUpBranch(baseJob, { readPRHeadImpl }), jobInput);
   } finally {
     reviewClaim.release();
   }
@@ -2488,6 +2490,7 @@ function claimNextFollowUpJob({
   onDelayedPendingJob = null,
   quotaHoldRevalidator = null,
   closerReconciliationOptions = {},
+  readPRHeadImpl,
 } = {}) {
   const reconciliation = { probed: new Set(), options: closerReconciliationOptions };
   ensureFollowUpJobDirs(rootDir);
@@ -2539,6 +2542,9 @@ function claimNextFollowUpJob({
       continue;
     }
 
+    if (pendingJob.branchResolution?.state === 'blocked'
+      && Date.parse(pendingJob.branchResolution.retryAfter) > Date.parse(claimedAt)) continue;
+
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 
     try {
@@ -2556,6 +2562,15 @@ function claimNextFollowUpJob({
       continue;
     }
 
+    // Resolve under the atomic queue claim, before charging any remediation round.
+    if (pendingJob.branchResolution?.state === 'blocked') {
+      pendingJob = resolveFollowUpBranch(pendingJob, { readPRHeadImpl, now: claimedAt });
+      writeFollowUpJob(inProgressPath, pendingJob);
+      if (pendingJob.branchResolution?.state === 'blocked') {
+        renameSync(inProgressPath, pendingPath);
+        continue;
+      }
+    }
     const job = pendingJob;
     const budgetResolution = resolveRoundBudgetForJob(job, { rootDir, preferPersisted: true });
     if (Number(job?.remediationPlan?.maxRounds) < budgetResolution.roundBudget) {

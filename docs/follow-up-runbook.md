@@ -1566,3 +1566,18 @@ The Node config mirror accepts `worker_pool.quota.fallback_reroute_horizon_secon
 (default 21600, nonnegative integer), owned by the Agent OS admission quota gate.
 This allows the shared checked-in configuration to declare the horizon without
 a strict-schema watcher startup failure. See Agent OS PR #7346.
+
+## Missing branches and unpublished commits (REMEDBRANCH-01)
+
+A pending job with `branchResolution.reason = branch-unresolved` waits for its
+60-second branch retry; no remediation worker or round is charged. Inspect the
+PR read/credentials if it persists. Both reviewer runtimes now preserve the
+head branch and builder tag through pass recovery.
+
+A stopped `committed-unpublished` job has publication debt. Its `unpublishedWork`
+record and PR comment identify the job and local commit; the workspace survives
+the terminal TTL. Inspect the retained work and publish through
+`bin/remediation-publish.mjs` with its original previous head, base, PR identity
+and exact remote lease. Missing branch metadata is resolved from the live PR;
+never substitute an empty branch or bypass the publisher's diff/lease checks.
+The gate reports failed publication without an operator-decision-required notice.

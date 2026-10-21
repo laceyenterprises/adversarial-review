@@ -1,3 +1,4 @@
+import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -81,7 +82,7 @@ import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
 import { drainPendingNoRemediationJobs } from './no-remediation-follow-up.mjs';
 import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { cancellationSettlesStop, sendWorkerSignal, workerCancelHandle } from './follow-up-worker-cancel.mjs';
-import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
+import { findGithubAuthOperationalBlocker, classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from './github-auth-recovery.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
   applyMergeAgentBrokerEnv,
@@ -2487,7 +2488,7 @@ async function reconcileFollowUpJob({
         });
       }
 
-      if (!rereview.requested) {
+      if (!rereview.requested && findGithubAuthOperationalBlocker(parsedReply)) {
         const recovery = await recoverGithubAuthOperationalBlocker({
           reply: parsedReply,
           hqRoot: resolveHqRoot(process.env),
@@ -2611,14 +2612,18 @@ async function reconcileFollowUpJob({
       if (resumed) return resumed;
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
-      const stopCode = maxRounds > 0 && currentRound >= maxRounds
+      const unpublishedWork = await findCommittedUnpublishedWork({ reply: parsedReply || { summary: finalMessage.text }, job, workspaceDir: paths.workspaceDir, execFileImpl });
+      const stopCode = unpublishedWork ? 'committed-unpublished' : maxRounds > 0 && currentRound >= maxRounds
         ? 'max-rounds-reached'
         : 'no-progress';
-      const stopReason = stopCode === 'max-rounds-reached'
+      const stopReason = unpublishedWork
+        ? `Remediation job ${job.jobId} committed work locally (${unpublishedWork.commitSha}) but publication failed; retained work awaits publication.`
+        : stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
       const projectedStopJob = {
         ...job,
+        ...(unpublishedWork ? { unpublishedWork } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2650,7 +2655,8 @@ async function reconcileFollowUpJob({
             ? (worker.dispatchMode === 'hq' ? 'worker-pool-workspace-not-reusable' : 'retry-budget-exhausted')
             : operationalBlockerRecovery.rescue?.reason || 'commit-not-preserved',
         } : null,
-        jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
+        jobUpdates: { ...(operationalBlockerRecovery ? { operationalBlockerRecovery } : {}),
+          ...(unpublishedWork ? { unpublishedWork } : {}) },
       });
 
       await postReconcileOutcomeCommentSafe({
@@ -3357,7 +3363,7 @@ async function consumeNextFollowUpJob({
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
-      requireBranch: hqDispatchEnabled,
+      requireBranch: true,
       execFileImpl,
     });
     claimed.job = branchReadyJob.job;

@@ -92,7 +92,7 @@ beforeEach((context) => {
 });
 
 function createJob({ builderTag = 'claude-code', reviewerModel = 'gemini' } = {}) {
-  return createFollowUpJob({
+  return createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: REPO,
     prNumber: PR,

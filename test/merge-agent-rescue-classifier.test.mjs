@@ -423,7 +423,7 @@ test('parsed findings retain multi-line nested fields', () => {
 test('watcher smoke: merge-eligible fixture still dispatches', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   try {
-    const { jobPath } = createFollowUpJob({
+    const { jobPath } = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/adversarial-review',
       prNumber: 2201,
@@ -472,7 +472,7 @@ test('watcher smoke: merge-eligible fixture still dispatches', () => {
 test('watcher smoke: remediation-eligible fixture still waits while budget remains', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   try {
-    const { jobPath } = createFollowUpJob({
+    const { jobPath } = createFollowUpJob({ branch: 'fixture/remediation',
       rootDir,
       repo: 'laceyenterprises/adversarial-review',
       prNumber: 2202,

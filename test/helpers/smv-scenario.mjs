@@ -15,7 +15,7 @@ const { createNoProgressLaneGate } = await import('../../src/posted-review-row.m
 const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.mjs');
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
-const { buildFollowUpJob, createFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
+const { buildFollowUpJob, createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
@@ -146,6 +146,20 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  // REMEDBRANCH-01: unresolved creation cannot hand a branchless job to a worker.
+  const branchRoot = join(rootDir, 'branch-contract');
+  const blocked = createFollowUpJob({ rootDir: branchRoot, repo, prNumber,
+    reviewerModel: 'gemini', builderTag: 'codex', reviewBody: '## Verdict\nRequest changes',
+    readPRHeadImpl: () => ({ branch: null }) });
+  assert.equal(blocked.job.branchResolution.reason, 'branch-unresolved');
+  assert.equal(claimNextFollowUpJob({ rootDir: branchRoot,
+    claimedAt: blocked.job.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: null }) }), null);
+  const branchHeld = readFollowUpJob(blocked.jobPath);
+  assert.equal(branchHeld.remediationPlan.currentRound, 0);
+  const branchReady = claimNextFollowUpJob({ rootDir: branchRoot,
+    claimedAt: branchHeld.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: 'fixture/head' }) });
+  assert.equal(branchReady.job.branch, 'fixture/head');
+
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');
   const leaseClock = Date.parse('2026-10-01T12:00:00Z');
@@ -673,12 +687,12 @@ if (scenario === 'clean') {
   const signed = { author: 'synthetic-app', committer: 'web-flow', commit: { verification: { verified: true, reason: 'valid' } } };
   assert.equal(fleetCommitIdentityMatches(signed, ['synthetic-app']), true);
   assert.equal(fleetCommitIdentityMatches({ ...signed, commit: { verification: { verified: false, reason: 'unsigned' } } }, ['synthetic-app']), false);
-  const created = createFollowUpJob({ ...identity(), revisionRef: headSha, reviewerModel: 'gemini', reviewBody: cleanBody.replace('Approved', 'Request changes'), changedFiles: ['fixture.txt'] });
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...identity(), revisionRef: headSha, reviewerModel: 'gemini', reviewBody: cleanBody.replace('Approved', 'Request changes'), changedFiles: ['fixture.txt'] });
   created.job.singleReview = { applied: true }; created.job.remediationPlan.currentRound = created.job.remediationPlan.maxRounds;
   writeFollowUpJob(created.jobPath, created.job);
   const result = await consumeNextFollowUpJob(drain);
   assert.equal(result.reason, 'max-rounds-reached'); assert.equal(result.job.status, 'stopped');
-  createFollowUpJob({ ...identity(), prNumber: prNumber + 1, revisionRef: headSha, reviewerModel: 'gemini',
+  createFollowUpJob({ branch: 'fixture/remediation', ...identity(), prNumber: prNumber + 1, revisionRef: headSha, reviewerModel: 'gemini',
     reviewBody: '## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Verdict\nRequest changes' });
   let holdPages = 0, holdComments = 0;
   const held = await consumeNextFollowUpJob({ ...drain,

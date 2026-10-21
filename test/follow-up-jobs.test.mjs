@@ -374,7 +374,7 @@ test('buildFollowUpJob rejects advisory-only verdict mode', () => {
 test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pending', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writePlanMappingFixture(rootDir, { linearTicketId: 'LAC-207', riskClass: 'high' });
-  const { job, jobPath } = createFollowUpJob({
+  const { job, jobPath } = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     baseBranch: 'release/2026.05',
     linearTicketId: 'LAC-207',
@@ -394,7 +394,7 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
 
 test('createFollowUpJob persists settled-clean follow-up text for comment-only reviews with zero blocking findings', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const { job } = createFollowUpJob({
+  const { job } = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     reviewBody: [
       '## Summary',
@@ -419,7 +419,7 @@ test('createFollowUpJob persists settled-clean follow-up text for comment-only r
 
 test('comment-only findings create a final remediation job; blocking findings do not', (t) => {
   const rootDir = makeTempRoot(t);
-  const commentOnly = createFollowUpJob({
+  const commentOnly = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- Fix documentation.\n## Verdict\nComment only',
     critical: false,
@@ -1274,8 +1274,8 @@ test('createFollowUpJob does not overwrite an existing job file when ids collide
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const input = makeJobInput(rootDir);
 
-  const first = createFollowUpJob(input);
-  const second = createFollowUpJob(input);
+  const first = createFollowUpJob({ branch: 'fixture/remediation', ...input });
+  const second = createFollowUpJob({ branch: 'fixture/remediation', ...input });
 
   assert.notEqual(first.jobPath, second.jobPath);
   assert.notEqual(first.job.jobId, second.job.jobId);
@@ -1613,8 +1613,8 @@ test('readFollowUpJob normalizes persisted remediation stop metadata through tru
 
 test('claimNextFollowUpJob moves the oldest pending file into in-progress metadata', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     prNumber: 8,
     reviewPostedAt: '2026-04-21T09:00:00.000Z',
@@ -1639,7 +1639,7 @@ test('claimNextFollowUpJob moves the oldest pending file into in-progress metada
 
 test('rekeyed active closer defers a reviewed-head job after the lease age threshold', (t) => {
   const rootDir = makeTempRoot(t);
-  const created = createFollowUpJob({ ...makeJobInput(rootDir), revisionRef: 'reviewed' });
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), revisionRef: 'reviewed' });
   const job = readFollowUpJob(created.jobPath);
   writeFollowUpJob(created.jobPath, { ...job, revisionRef: 'reviewed' });
   acquireAmaCloserLease({ rootDir, repo: job.repo, prNumber: job.prNumber,
@@ -1659,7 +1659,7 @@ test('rekeyed active closer defers a reviewed-head job after the lease age thres
 
 test('claimNextFollowUpJob records clean review jobs without spawning remediation', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     critical: false,
     reviewBody: [
@@ -1698,12 +1698,12 @@ test('claimNextFollowUpJob records clean review jobs without spawning remediatio
 
 test('claimNextFollowUpJob treats excluded repo/pr keys as case-insensitive', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     repo: 'LaceyEnterprises/Clio',
     prNumber: 7,
   });
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     repo: 'laceyenterprises/clio',
     prNumber: 8,
@@ -1723,7 +1723,7 @@ test('claimNextFollowUpJob treats excluded repo/pr keys as case-insensitive', ()
 
 test('claimNextFollowUpJob honors explicit operator requeues for settled reviews', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     critical: false,
     reviewBody: [
@@ -1775,12 +1775,12 @@ test('claimNextFollowUpJob honors explicit operator requeues for settled reviews
 
 test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fails', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const settled = createFollowUpJob({
+  const settled = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     critical: false,
     reviewBody: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only',
   });
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     prNumber: 8,
     reviewPostedAt: '2026-04-21T09:00:00.000Z',
@@ -1814,13 +1814,13 @@ test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fa
 
 test('claimNextFollowUpJob skips exhausted pending jobs after moving them to stopped', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const exhausted = createFollowUpJob({
+  const exhausted = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     prNumber: 7,
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
     maxRemediationRounds: 1,
   });
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     prNumber: 8,
     reviewPostedAt: '2026-04-21T09:00:00.000Z',
@@ -1856,11 +1856,11 @@ test('claimNextFollowUpJob skips exhausted pending jobs after moving them to sto
 
 test('claimNextFollowUpJob continues past an exhausted job when stopped-marking fails', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 1,
   });
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     prNumber: 8,
     reviewPostedAt: '2026-04-21T09:00:00.000Z',
@@ -1905,7 +1905,7 @@ test('claimNextFollowUpJob continues past an exhausted job when stopped-marking 
 
 test('markFollowUpJobFailed moves an in-progress job into failed with error context', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const failed = markFollowUpJobFailed({
@@ -1926,7 +1926,7 @@ test('markFollowUpJobFailed moves an in-progress job into failed with error cont
 
 test('markFollowUpJobFailed is idempotent when the failed record already exists', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const failed = markFollowUpJobFailed({
@@ -1951,7 +1951,7 @@ test('markFollowUpJobFailed is idempotent when the failed record already exists'
 
 test('markFollowUpJobFailed preserves remediationWorker metadata for existing callers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   writeFollowUpJob(claimed.jobPath, {
     ...claimed.job,
@@ -1979,7 +1979,7 @@ test('markFollowUpJobFailed preserves remediationWorker metadata for existing ca
 
 test('markFollowUpJobFailed preserves the supplied failureCode even when failure metadata has its own code field', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const failed = markFollowUpJobFailed({
@@ -2005,7 +2005,7 @@ test('markFollowUpJobFailed preserves the supplied failureCode even when failure
 // owed-delivery shape and embed it atomically with the move.
 test('markFollowUpJobFailed embeds commentDelivery atomically with the terminal write', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const owed = {
@@ -2038,7 +2038,7 @@ test('markFollowUpJobFailed embeds commentDelivery atomically with the terminal 
 
 test('markFollowUpJobCompleted embeds commentDelivery atomically with the terminal write', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const owed = {
@@ -2065,7 +2065,7 @@ test('markFollowUpJobCompleted embeds commentDelivery atomically with the termin
 
 test('markFollowUpJobSpawned records the expected remediation reply artifact path', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const spawned = markFollowUpJobSpawned({
@@ -4247,7 +4247,7 @@ test('salvagePartialRemediationReply drops malformed entries inside arrays', () 
 
 test('markFollowUpJobCompleted moves an in-progress job into completed with reconciliation context', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const completed = markFollowUpJobCompleted({
@@ -4269,7 +4269,7 @@ test('markFollowUpJobCompleted moves an in-progress job into completed with reco
 
 test('markFollowUpJobCompleted preserves metadata for finishedAt/completionPreview callers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   writeFollowUpJob(claimed.jobPath, {
     ...claimed.job,
@@ -4294,7 +4294,7 @@ test('markFollowUpJobCompleted preserves metadata for finishedAt/completionPrevi
 
 test('markFollowUpJobCompleted is idempotent when the completed record already exists', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const completed = markFollowUpJobCompleted({
@@ -4319,7 +4319,7 @@ test('markFollowUpJobCompleted is idempotent when the completed record already e
 
 test('markFollowUpJobCompleted preserves an existing terminal record even if a stale in-progress source still exists', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const completed = markFollowUpJobCompleted({
@@ -4354,7 +4354,7 @@ test('markFollowUpJobCompleted preserves an existing terminal record even if a s
 
 test('markFollowUpJobFailed preserves an existing terminal record even if a stale in-progress source still exists', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const failed = markFollowUpJobFailed({
@@ -4389,7 +4389,7 @@ test('markFollowUpJobFailed preserves an existing terminal record even if a stal
 
 test('requeueFollowUpJobForNextRound moves a completed job back to pending for the next bounded round', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -4429,7 +4429,7 @@ for (const maxRounds of [1, 3]) {
   test(`requeue refuses a completed comment-only final handoff without mutation (budget ${maxRounds})`, (t) => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'final-round-requeue-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 42, reviewerModel: 'codex',
+    createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'fixture/repo', prNumber: 42, reviewerModel: 'codex',
       revisionRef: 'a'.repeat(40), reviewBody: '## Verdict\nComment only', maxRemediationRounds: maxRounds });
     const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-01T10:00:00.000Z' });
     const completed = markFollowUpJobCompleted({ rootDir, jobPath: claimed.jobPath,
@@ -4452,7 +4452,7 @@ for (const maxRounds of [1, 3]) {
 test('suppression without finalRound retains ordinary no-progress handling', (t) => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'partial-final-round-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 3 });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), maxRemediationRounds: 3 });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-01T10:00:00.000Z' });
   const completed = markFollowUpJobCompleted({ rootDir, jobPath: claimed.jobPath,
     reReview: { requested: false, suppressed: 'comment-only-final-round' },
@@ -4465,7 +4465,7 @@ test('suppression without finalRound retains ordinary no-progress handling', (t)
 
 test('requeueFollowUpJobForNextRound stops a completed job when no durable re-review request was recorded', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -4502,7 +4502,7 @@ test('requeueFollowUpJobForNextRound stops a completed job when no durable re-re
 
 test('requeueFollowUpJobForNextRound stops the job once the round cap is reached', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 1,
   });
@@ -4529,7 +4529,7 @@ test('requeueFollowUpJobForNextRound stops the job once the round cap is reached
 
 test('requeueFollowUpJobForNextRound rejects non-terminal source statuses', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const created = createFollowUpJob(makeJobInput(rootDir));
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
 
   assert.throws(
     () => requeueFollowUpJobForNextRound({
@@ -4549,7 +4549,7 @@ test('requeueFollowUpJobForNextRound rejects in_progress source statuses with th
   // Pin the underscore form so the active-guard branch is the one
   // that fires.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-31T08:09:04.440Z' });
   // claimNextFollowUpJob writes status='in_progress' (underscore).
   // Sanity-check that assumption so this regression test stays
@@ -4568,7 +4568,7 @@ test('requeueFollowUpJobForNextRound rejects in_progress source statuses with th
 
 test('requeueFollowUpJobForNextRound accepts failed terminal jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -4602,7 +4602,7 @@ async function activeStopCode(job) {
 
 test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs after a budget bump', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 1,
   });
@@ -4637,7 +4637,7 @@ test('requeueFollowUpJobForNextRound accepts stopped:max-rounds-reached jobs aft
 
 test('claiming a pending job clears a stale max-rounds stop left by an earlier requeue', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -4662,7 +4662,7 @@ test('claiming a pending job clears a stale max-rounds stop left by an earlier r
 
 test('stopping a spawned remediation worker keeps its partial Codex usage', (t) => {
   const rootDir = makeTempRoot(t);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-27T03:00:00Z' });
   const logPath = path.join(rootDir, 'worker.jsonl');
   writeFileSync(logPath, JSON.stringify({ type: 'event_msg', payload: { type: 'token_count',
@@ -4689,7 +4689,7 @@ test('stopping a spawned remediation worker keeps its partial Codex usage', (t) 
 
 test('computeFollowUpJobStoppedState applies the same stop defaults as markFollowUpJobStopped', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: undefined,
   });
@@ -4717,7 +4717,7 @@ test('computeFollowUpJobStoppedState applies the same stop defaults as markFollo
 
 test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs after a budget bump', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 1,
   });
@@ -4747,7 +4747,7 @@ test('requeueFollowUpJobForNextRound accepts stopped:round-budget-exhausted jobs
 
 test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const stopped = markFollowUpJobStopped({
     rootDir,
@@ -4774,7 +4774,7 @@ test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
 
 test('requeueInProgressFollowUpJobForRetry retains the active round so re-claim reuses it without duplicates', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -4826,7 +4826,7 @@ test('requeueInProgressFollowUpJobForRetry retains the active round so re-claim 
 
 test('retry closes the cancelled remediation pass with its cause before log replacement', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'remwaste-pass-'));
-  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 2 });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), maxRemediationRounds: 2 });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const spawned = markFollowUpJobSpawned({
     rootDir,
@@ -4867,7 +4867,7 @@ test('retry closes the cancelled remediation pass with its cause before log repl
 
 test('claimNextFollowUpJob skips transiently requeued jobs until retryAfter elapses', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   requeueInProgressFollowUpJobForRetry({
     rootDir,
@@ -4892,7 +4892,7 @@ function createQuotaHeldPendingJob(rootDir, {
   requeuedAt = '2026-04-21T10:05:00.000Z',
   retryAfterOverride = '2026-04-25T10:05:00.000Z',
 } = {}) {
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   return requeueInProgressFollowUpJobForRetry({
     rootDir,
@@ -5053,7 +5053,7 @@ test('claimNextFollowUpJob records cached quota revalidation error decisions', (
 
 test('requeueInProgressFollowUpJobForRetry rejects non-HQ remediation workers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   assert.throws(
@@ -5070,7 +5070,7 @@ test('requeueInProgressFollowUpJobForRetry rejects non-HQ remediation workers', 
 
 test('stopFollowUpJob moves a non-terminal job to stopped with operator-visible metadata', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
 
   const stopped = stopFollowUpJob({
@@ -5372,7 +5372,7 @@ for (const scenario of [
 ]) {
   test(`CLOSERLEASE-01: follow-up claims with ${scenario.name}`, t => {
     const rootDir = makeTempRoot(t);
-    const created = createFollowUpJob({ ...makeJobInput(rootDir), repo: 'example/repo', prNumber: 42 });
+    const created = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), repo: 'example/repo', prNumber: 42 });
     const job = readFollowUpJob(created.jobPath);
     const identity = { rootDir, repo: job.repo, prNumber: job.prNumber, headSha: 'synthetic-head' };
     const now = '2026-04-21T10:00:00.000Z';

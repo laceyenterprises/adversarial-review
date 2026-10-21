@@ -116,7 +116,7 @@ function greenCiGate() {
 
 test('reconcileFollowUpJob stops a finished spawned round for no-progress when no re-review is requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     maxRemediationRounds: 2,
   });
@@ -166,7 +166,7 @@ test('reconcileFollowUpJob stops a finished spawned round for no-progress when n
 
 test('reconcileFollowUpJob holds a Claude account 429 from the final artifact when the log is empty', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 2 });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), maxRemediationRounds: 2 });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -209,7 +209,7 @@ test('reconcileFollowUpJob holds a Claude account 429 from the final artifact wh
 
 async function reconcileWorkerWithPartialReply({ stderr = '', finalText = '' } = {}) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob({ ...makeJobInput(rootDir), maxRemediationRounds: 2 });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), maxRemediationRounds: 2 });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const artifactDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
@@ -262,8 +262,8 @@ test('quota words echoed from source code do not hide an invalid reply', async (
 test('reconcileFollowUpJob resets watcher review state when remediation reply requests re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -342,7 +342,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
 test('reconcileFollowUpJob waits for external CI before requesting re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -422,7 +422,7 @@ test('reconcileFollowUpJob waits for external CI before requesting re-review', a
 // routes to the hammer.
 async function completeRoundWithCiPendingAtTimeout(rootDir, { priorCompletedRounds = 0 } = {}) {
   writeReviewRow(rootDir);
-  createFollowUpJob({ ...makeJobInput(rootDir), priorCompletedRounds });
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), priorCompletedRounds });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -558,14 +558,14 @@ test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI 
 
 function buildProbeRounds() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const created = createFollowUpJob(makeJobInput(rootDir));
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   return created.job.remediationPlan.maxRounds;
 }
 
 test('reconcileFollowUpJob requeues remediation when the pushed head has failed CI', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -647,7 +647,7 @@ test('reconcileFollowUpJob requeues remediation when the pushed head has failed 
 test('reconcileFollowUpJob wakes the watcher on remediation closeout', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -735,7 +735,7 @@ test('reconcileFollowUpJob wakes the watcher even with the retired handoff flag 
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeFileSync(path.join(rootDir, 'config.yaml'), 'version: 1\nhandoff:\n  remediation_to_rereview: false\n', 'utf8');
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -818,7 +818,7 @@ test('reconcileFollowUpJob wakes the watcher even with the retired handoff flag 
 
 test('reconcileFollowUpJob wakes watcher when re-review was already pending', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -914,7 +914,7 @@ test('reconcileFollowUpJob wakes watcher when re-review was already pending', as
 test('reconcileFollowUpJob refuses to request rereview when the workspace is contaminated with already-merged commits', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     baseBranch: 'release/2026.05',
   });
@@ -1018,7 +1018,7 @@ test('reconcileFollowUpJob refuses to request rereview when the workspace is con
 test('reconcileFollowUpJob fails closed when the server-side contamination audit cannot prove cleanliness', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     ...makeJobInput(rootDir),
     baseBranch: 'release/2026.05',
   });
@@ -1105,7 +1105,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
     reviewer: 'malformed-title',
     reviewStatus: 'malformed',
   });
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1172,7 +1172,7 @@ test('reconcileFollowUpJob records a blocked re-review request when the watcher 
 
 test('reconcileFollowUpJob fails a finished spawned round when output is missing', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1209,7 +1209,7 @@ test('reconcileFollowUpJob fails a finished spawned round when output is missing
 test('reconcileFollowUpJob fails when the remediation reply artifact is invalid', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1259,7 +1259,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   // SPEC.md §5.1.2) decides completed vs stopped, NOT `outcome`.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1330,7 +1330,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
 test('reconcileFollowUpJob honors a valid LEGACY-shape reply (no addressed[]) as the durable success signal when stdout is empty', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1399,7 +1399,7 @@ test('reconcileFollowUpJob completes when stdout is empty and reply has reReview
   // have wrongly fallen through to `artifact-empty-completion` here.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1471,7 +1471,7 @@ test('reconcileFollowUpJob fails as invalid-remediation-reply when stdout is emp
   // to `invalid-remediation-reply` regardless of stdout state.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1521,7 +1521,7 @@ test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json ex
   // before producing any durable success record, and we must keep
   // routing to failed/ — the operator needs to inspect the worker log.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1560,7 +1560,7 @@ test('reconcileFollowUpJob still fails when stdout is empty AND no reply.json ex
 
 test('reconcileFollowUpJob fails a finished spawned round when outputPath escapes the repo root', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1598,7 +1598,7 @@ test('reconcileFollowUpJob rejects a replyPath that lexically escapes the worksp
   // pending reset), we must refuse to read replies from outside the
   // worker workspace, the same way we already refuse for outputPath.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1648,7 +1648,7 @@ test('reconcileFollowUpJob rejects a replyPath that resolves through a symlink t
   // the forged reply becomes the durable success signal that drives
   // completed/stopped + the watcher pending reset.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
@@ -1718,7 +1718,7 @@ test('reconcileFollowUpJob completes when codex-last-message.md is missing entir
   // silently break this branch without any test failing.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
-  createFollowUpJob(makeJobInput(rootDir));
+  createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-05-02T13:00:00.000Z' });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');

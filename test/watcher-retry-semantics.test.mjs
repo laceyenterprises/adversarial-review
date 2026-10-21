@@ -623,7 +623,7 @@ test('watcher defers a pending review while a requeued follow-up job is active (
     'pending',
     2,
   );
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 48,
@@ -663,7 +663,7 @@ test('watcher defers a pending review while a requeued follow-up job is active (
 
 test('watcher releases a budget-exhausted pending follow-up job instead of deferring forever', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-budget-release-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5120,
@@ -704,7 +704,7 @@ test('watcher releases a budget-exhausted pending follow-up job instead of defer
 
 test('watcher releases a settled-clean pending follow-up job orphaned by a head move before deferring', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-settled-stale-release-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5142,
@@ -764,7 +764,7 @@ test('watcher releases a settled-clean pending follow-up job orphaned by a head 
 
 test('watcher releases a settled-clean pending follow-up job on the current head so gate evaluation can converge', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-settled-current-release-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5143,
@@ -803,7 +803,7 @@ test('watcher releases a settled-clean pending follow-up job on the current head
 
 test('watcher does not synthesize settled-clean from a blocking review action summary', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-blocking-summary-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5144,
@@ -848,7 +848,7 @@ test('watcher does not synthesize settled-clean from a blocking review action su
 
 test('watcher releases a pending follow-up job whose revisionRef is superseded even when under budget', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-revision-superseded-'));
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5144,
@@ -918,7 +918,7 @@ test('watcher defers a pending review while the active follow-up job has status=
     'pending',
     1,
   );
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 1165,
@@ -963,7 +963,7 @@ test('watcher defers a pending review while the active follow-up job has status=
 
 test('watcher still defers a genuinely active in-progress remediation job on the current head', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-current-live-defers-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5145,
@@ -1015,7 +1015,7 @@ test('watcher still defers a genuinely active in-progress remediation job on the
 
 test('watcher keeps a fresh in-progress follow-up job even when the PR head moved', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-superseded-in-progress-held-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 1023,
@@ -1076,7 +1076,7 @@ test('watcher keeps a fresh in-progress follow-up job even when the PR head move
 
 test('watcher releases stale in-progress follow-up claims through the stuck-claim sweep before deferring', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-release-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5111,
@@ -1126,7 +1126,7 @@ test('watcher releases stale in-progress follow-up claims through the stuck-clai
 
 test('watcher stale follow-up release uses the newest liveness timestamp before stopping', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-fresh-heartbeat-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5112,
@@ -1171,7 +1171,7 @@ test('watcher stale follow-up release uses the newest liveness timestamp before 
 
 test('watcher stale follow-up release signals the local remediator before unblocking review', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-signal-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5605,
@@ -1471,7 +1471,7 @@ test('stale follow-up signal skips reused watcher pid metadata', () => {
 
 test('watcher stale follow-up release defers when a live worker cannot be signalled', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-signal-fail-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5605,
@@ -1532,7 +1532,7 @@ test('watcher stale follow-up release defers when a live worker cannot be signal
 test('watcher active follow-up defer defaults to the repository root, not process cwd', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-default-root-'));
   const previousCwd = process.cwd();
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5113,
@@ -1718,7 +1718,7 @@ test('evaluateRoundBudgetForReview preserves elevated legacy caps above the curr
   // not silently truncated after consuming more rounds than the new tier.
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 6,
@@ -1799,7 +1799,7 @@ test('evaluateRoundBudgetForReview always allows rereview after a completed reme
     'utf8'
   );
 
-  const created = createFollowUpJob({
+  const created = createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 5,

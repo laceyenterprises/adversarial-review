@@ -566,7 +566,7 @@ test('a genuinely settled review is NOT flagged as needing an operator decision'
 
 test('pickAdversarialGateStatus settles clean re-review jobs after remediation is suppressed', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-gate-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 53,

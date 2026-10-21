@@ -245,7 +245,7 @@ async function fetchPRBranchMetadata({
     execFileImpl,
     command: 'gh',
     args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
-    options: { maxBuffer: 2 * 1024 * 1024 },
+    options: { timeout: 8000, maxBuffer: 2 * 1024 * 1024 },
   });
   const parsed = JSON.parse(String(stdout || '{}'));
   const baseBranch = normalizeBaseBranch(parsed?.base?.ref);

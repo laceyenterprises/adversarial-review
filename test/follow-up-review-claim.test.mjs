@@ -60,10 +60,10 @@ function tempRoot(t) {
 
 test('a second request for the same review (reviewer, then reaper) creates no second job', (t) => {
   const rootDir = tempRoot(t);
-  const first = createFollowUpJob({ rootDir, ...input() });
+  const first = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input() });
   assert.ok(first.jobPath);
   // The reaper recovers the same pass: same head, same body, its own timestamp and model label.
-  const second = createFollowUpJob({ rootDir, ...input({ reviewPostedAt: '2026-09-28T21:34:17.895Z', reviewerModel: 'Gemini 3.1 Pro (High)' }) });
+  const second = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input({ reviewPostedAt: '2026-09-28T21:34:17.895Z', reviewerModel: 'Gemini 3.1 Pro (High)' }) });
   assert.equal(second.jobPath, null);
   assert.deepEqual(second.duplicateOf, { jobId: first.job.jobId, status: 'pending' });
   assert.equal(pendingFiles(rootDir).length, 1);
@@ -74,23 +74,23 @@ test('a second request for the same review (reviewer, then reaper) creates no se
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');
   mkdirSync(stoppedDir, { recursive: true });
   renameSync(first.jobPath, join(stoppedDir, `${first.job.jobId}.json`));
-  assert.equal(createFollowUpJob({ rootDir, ...input() }).duplicateOf.status, 'stopped');
+  assert.equal(createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input() }).duplicateOf.status, 'stopped');
 
   // And after the daemon's archive sweep moves it to stopped-archived/<month>/.
   const sweep = archiveStoppedFollowUpJobs({ rootDir, nowMs: Date.now() + 2 * 24 * 60 * 60 * 1000 });
   assert.equal(sweep.archived, 1);
-  assert.deepEqual(createFollowUpJob({ rootDir, ...input() }).duplicateOf,
+  assert.deepEqual(createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input() }).duplicateOf,
     { jobId: first.job.jobId, status: 'stopped-archived' });
   assert.equal(pendingFiles(rootDir).length, 0);
 });
 
 test('a different review of the same head, or an unkeyed review, still gets its own job', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob({ rootDir, ...input() });
-  const other = createFollowUpJob({ rootDir, ...input({ reviewBody: BODY.replace('Comment only', 'Request changes') }) });
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input() });
+  const other = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input({ reviewBody: BODY.replace('Comment only', 'Request changes') }) });
   assert.ok(other.jobPath);
-  const unkeyedA = createFollowUpJob({ rootDir, ...input({ revisionRef: null }) });
-  const unkeyedB = createFollowUpJob({ rootDir, ...input({ revisionRef: null }) });
+  const unkeyedA = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input({ revisionRef: null }) });
+  const unkeyedB = createFollowUpJob({ branch: 'fixture/remediation', rootDir, ...input({ revisionRef: null }) });
   assert.ok(unkeyedA.jobPath && unkeyedB.jobPath);
 });
 

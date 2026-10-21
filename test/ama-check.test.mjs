@@ -207,7 +207,7 @@ roles:
 }
 
 function writeCompletedLedgerJob(rootDir, { currentRound, maxRounds }) {
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir,
     repo: REPO,
     prNumber: 1234,

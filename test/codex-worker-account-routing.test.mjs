@@ -243,7 +243,7 @@ for (const account of ['personal', 'corporate', 'unknown']) test(`real remediati
   };
   restore(overrides);
   t.after(() => { restore(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   const snapshot = account === 'unknown' ? {} : codexAccountFixture({ corp: account === 'personal' ? 'exhausted' : 'ok' });

@@ -198,6 +198,8 @@
       "accountProposalField": "harnessResolution.accountProposal and attempts[].harnessResolution.accountProposal; diagnostic only, dispatcher binding is authoritative",
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
+        "src/follow-up-branch.mjs",
+        "src/remediation-unpublished.mjs",
         "src/worker-token-pool.mjs",
         "bin/ama-audit.mjs",
         "bin/hammer-publish.sh",
@@ -241,6 +243,9 @@
     },
     {
       "id": "follow-up-jobs",
+      "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000 },
+      "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],
+      "unpublishedWorkRetention": "retained workspace; committed-unpublished stop and failed publication gate",
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",
       "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids,missing-label-events}/*.json",
@@ -269,6 +274,7 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "publicationFailureCommitField": "localCommit",
       "publicationFailureRetention": "Successful guarded publication removes the supplied failure sidecar; retained failures follow reply-artifact storage",
       "missingLabelEventObservationFields": ["firstSeenAt"],
       "missingLabelEventRetention": "no automatic expiry; operator cleanup after PR closure or head supersession",

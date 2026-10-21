@@ -130,6 +130,7 @@ test('a 12-line fix on 2 files: one review, findings hand to the hammer with no 
   assert.match(lines.join('\n'), /single-review: super-small laceyenterprises\/agent-os#8123 super-small \(small-change; 2 file\(s\), 12 changed line\(s\)\).*prompt stage=last/);
 
   const queued = queueFollowUpForPostedReview({
+    branch: 'fixture/remediation',
     rootDir, repo: REPO, prNumber: PR, baseBranch: 'main', reviewerModel: 'claude', revisionRef: HEAD,
     reviewText: FINDINGS_BODY, reviewPostedAt: '2026-09-29T10:00:00.000Z', singleReview: decision,
     resolveHandoffConfigImpl: () => ({ enabled: false }),
@@ -169,7 +170,7 @@ test('a 12-line fix on 2 files: one review, findings hand to the hammer with no 
 
 test('the same findings without single review take normal rounds', (t) => {
   const rootDir = tempRoot(t);
-  const created = createFollowUpJob(jobInput(rootDir));
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir) });
   assert.equal(created.job.remediationPlan.currentRound, 0);
   assert.equal(created.job.singleReview, undefined);
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
@@ -184,7 +185,7 @@ test('the same findings without single review take normal rounds', (t) => {
 
 test('a clean single review takes the normal clean path and spends no rounds', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob(jobInput(rootDir, { reviewBody: CLEAN_BODY, singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { reviewBody: CLEAN_BODY, singleReview: APPLIED }) });
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
   assert.equal(claimed.stopped, true);
   assert.equal(claimed.reason, 'no-remediation-required');
@@ -194,7 +195,7 @@ test('a clean single review takes the normal clean path and spends no rounds', (
 
 test('an unapplied single-review record leaves the job on normal rounds', (t) => {
   const rootDir = tempRoot(t);
-  const created = createFollowUpJob(jobInput(rootDir, { singleReview: { ...APPLIED, applied: false } }));
+  const created = createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { singleReview: { ...APPLIED, applied: false } }) });
   assert.equal(created.job.remediationPlan.currentRound, 0);
   assert.equal(created.job.singleReview, undefined);
 });
@@ -308,7 +309,7 @@ test('the reviewer-pass reaper carries the dead reviewer\'s single-review decisi
 
 test('a later head that grows into a gate-keeper path voids the single-review credit and gets its budget back', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { singleReview: APPLIED }) });
   const stopped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
   assert.equal(isSingleReviewStop(stopped.job), true);
   const maxRounds = stopped.job.remediationPlan.maxRounds;
@@ -346,6 +347,7 @@ test('a later head that grows into a gate-keeper path voids the single-review cr
 
   // The follow-up for that review gets the full tier budget.
   const queued = queueFollowUpForPostedReview({
+    branch: 'fixture/remediation',
     rootDir, repo: REPO, prNumber: PR, baseBranch: 'main', reviewerModel: 'claude', revisionRef: laterHead,
     reviewText: FINDINGS_BODY, reviewPostedAt: '2026-09-29T11:00:00.000Z', singleReview: grown.singleReview,
     resolveHandoffConfigImpl: () => ({ enabled: false }),
@@ -358,7 +360,7 @@ test('a later head that grows into a gate-keeper path voids the single-review cr
 
 test('a later head that is still super-small keeps the budget spent; a first review never voids', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { singleReview: APPLIED }) });
   claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
   const voids = [];
   const voidSingleReviewCreditImpl = (args) => { voids.push(args); return { voided: false }; };
@@ -382,7 +384,7 @@ test('a later head that is still super-small keeps the budget spent; a first rev
 
 test('a single-review job created after a void spends budget again', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { singleReview: APPLIED }) });
   claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
   selectReviewMode({
     rootDir, repo: REPO, prNumber: PR, headSha: 'b'.repeat(40), attemptNumber: 2, env: {},
@@ -391,7 +393,7 @@ test('a single-review job created after a void spends budget again', (t) => {
   });
   assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).completedRoundsForPR, 0);
   const later = new Date(Date.now() + 60_000).toISOString();
-  createFollowUpJob(jobInput(rootDir, { revisionRef: 'c'.repeat(40), reviewPostedAt: later, singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { revisionRef: 'c'.repeat(40), reviewPostedAt: later, singleReview: APPLIED }) });
   const stopped = claimNextFollowUpJob({ rootDir, claimedAt: later, launcherPid: 4242, returnStopped: true });
   assert.equal(isSingleReviewStop(stopped.job), true);
   assert.equal(
@@ -402,7 +404,7 @@ test('a single-review job created after a void spends budget again', (t) => {
 
 test('the stopped-job archive sweep does not hand a single-review PR its spent budget back', (t) => {
   const rootDir = tempRoot(t);
-  createFollowUpJob(jobInput(rootDir, { singleReview: APPLIED }));
+  createFollowUpJob({ branch: 'fixture/remediation', ...jobInput(rootDir, { singleReview: APPLIED }) });
   const stopped = claimNextFollowUpJob({ rootDir, claimedAt: '2026-09-29T10:01:00.000Z', launcherPid: 4242, returnStopped: true });
   const maxRounds = stopped.job.remediationPlan.maxRounds;
   const before = summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR });

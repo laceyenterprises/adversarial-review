@@ -27,7 +27,7 @@ afterEach(() => {
 
 async function reconcileDeadWorker(logText, { artifactText = null } = {}) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'capacity-job-'));
-  createFollowUpJob({
+  createFollowUpJob({ branch: 'fixture/remediation',
     rootDir, repo: 'laceyenterprises/clio', prNumber: 7,
     reviewerModel: 'claude', reviewBody: '## Summary\nFix the finding.',
     reviewPostedAt: '2026-06-16T08:00:00.000Z', critical: true,

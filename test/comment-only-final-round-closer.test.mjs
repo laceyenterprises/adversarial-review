@@ -17,7 +17,7 @@ import {
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { findCommentOnlyFinalRoundPushJob } from '../src/comment-only-final-round.mjs';
 
-const REPO = 'laceyenterprises/adversarial-review';
+const REPO = 'fixture/project';
 const PR = 265;
 const REVIEWED = '1'.repeat(40);
 const PUSHED = '2'.repeat(40);
@@ -35,7 +35,7 @@ const REQUEST_CHANGES_BODY = COMMENT_ONLY_BODY
 function seedFinalRound(rootDir, { status = 'completed', pushed = PUSHED } = {}) {
   const dir = join(rootDir, 'data', 'follow-up-jobs', status);
   mkdirSync(dir, { recursive: true });
-  const jobId = `laceyenterprises__adversarial-review-pr-${PR}-2026-09-28T22-33-55-502Z`;
+  const jobId = `fixture__project-pr-${PR}-2026-09-28T22-33-55-502Z`;
   writeFileSync(join(dir, `${jobId}.json`), JSON.stringify({
     schemaVersion: 1, kind: 'adversarial-review-follow-up', jobId, status,
     repo: REPO, prNumber: PR, domainId: 'code-pr', revisionRef: REVIEWED, riskClass: 'low',
@@ -149,48 +149,74 @@ function closureArgs(rootDir, overrides = {}) {
   };
 }
 
-test('AMA hands a proven final-round head to hammer terminal validation, reading the reviewed head live', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  seedFinalRound(rootDir);
-  const liveHeads = [];
-  let payload = null;
-  const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
-    fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => { liveHeads.push(head); return [COMMENT_ONLY_BODY]; },
-    maybeDispatchAmaCloserImpl: async (args) => { payload = args; return { dispatched: true, launchRequestId: 'lrq_hammer' }; },
-  }));
-  assert.equal(result.dispatched, true);
-  assert.deepEqual(liveHeads, [REVIEWED], 'live reconcile reads the reviewed head, not the pushed one');
-  assert.equal(payload.reviewState.verdict, 'comment-only');
-  assert.equal(payload.reviewState.headSha, REVIEWED);
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
-  assert.equal(payload.dispatchContext.targetRemediationSha, PUSHED);
+for (const { name, conclusion, mergeable, mergeStateStatus, blocker } of [
+  { name: 'green', conclusion: 'SUCCESS' },
+  { name: 'red', conclusion: 'FAILURE' },
+  { name: 'red BLOCKED', conclusion: 'FAILURE', mergeable: '', mergeStateStatus: 'BLOCKED' },
+  { name: 'red with blocking findings', conclusion: 'FAILURE', blocker: 'present' },
+  { name: 'red with unknown blocking findings', conclusion: 'FAILURE', blocker: 'unknown' },
+]) {
+  test(`AMA final-round handoff: ${name} CI retains terminal validation gates`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    seedFinalRound(rootDir);
+    const liveHeads = [];
+    let payload = null;
+    const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+      candidate: { ...closureArgs(rootDir).candidate,
+        ...(mergeable !== undefined ? { mergeable, mergeStateStatus } : {}),
+        statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion }],
+      },
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => { liveHeads.push(head); return [COMMENT_ONLY_BODY]; },
+      maybeDispatchAmaCloserImpl: async (args) => { payload = args; return { dispatched: true, launchRequestId: 'lrq_hammer' }; },
+    }));
+    assert.equal(result.dispatched, true);
+    assert.deepEqual(liveHeads, [REVIEWED], 'live reconcile reads the reviewed head, not the pushed one');
+    assert.equal(payload.reviewState.verdict, 'comment-only');
+    assert.equal(payload.reviewState.headSha, REVIEWED);
+    assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
+    assert.equal(payload.dispatchContext.targetRemediationSha, PUSHED);
+    assert.equal(payload.reviewState.nonBlockingFindingCount, 1);
+    assert.notEqual(payload.reviewState.headSha, payload.prMetadata.headSha);
+    assert.equal(result.commentOnlyFinalRoundAwaitingCi, undefined);
 
-  // The real closer admits exactly that payload as terminal remediation.
-  const execCalls = [];
-  const dispatched = await maybeDispatchAmaCloser({
-    ...payload,
-    cfg: { ...payload.cfg, workerClass: 'hammer', eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
-    dispatchContext: {
-      ...payload.dispatchContext, rootDir, hqRoot: join(rootDir, 'hq-root'),
-      hqOwnerUser: userInfo().username, currentUser: userInfo().username,
-    },
-    execFileImpl: async (cmd, args) => {
-      execCalls.push({ cmd, args });
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
-    },
-    readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
-    writeFileImpl: () => {},
-    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
-    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
-    logger: { log() {}, info() {}, warn() {}, error() {} },
+    // The real closer admits exactly that payload as terminal remediation.
+    const execCalls = [];
+    const dispatched = await maybeDispatchAmaCloser({
+      ...payload,
+      reviewState: { ...payload.reviewState,
+        ...(blocker === 'present' ? { blockingFindingCount: 1 } : {}),
+        ...(blocker === 'unknown' ? { blockingFindingState: 'unknown', blockingFindingCount: null } : {}),
+      },
+      cfg: { ...payload.cfg, workerClass: 'hammer', eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
+      dispatchContext: {
+        ...payload.dispatchContext, rootDir, hqRoot: join(rootDir, 'hq-root'),
+        hqOwnerUser: userInfo().username, currentUser: userInfo().username,
+      },
+      execFileImpl: async (cmd, args) => {
+        execCalls.push({ cmd, args });
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      },
+      readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
+      writeFileImpl: () => {},
+      resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+      logger: { log() {}, info() {}, warn() {}, error() {} },
+    });
+    if (blocker) {
+      assert.equal(dispatched.dispatched, false);
+      assert.equal(dispatched.reason, 'not-eligible');
+      assert.ok(dispatched.reasons.includes(`blocking-findings-${blocker}`));
+      assert.equal(execCalls.length, 0, 'blocking findings never launch the hammer');
+      return;
+    }
+    assert.equal(dispatched.dispatched, true);
+    const hammerDispatches = execCalls.filter(({ args }) => args[0] === 'dispatch' && args.includes('hammer'));
+    assert.equal(hammerDispatches.length, 1, 'exactly one hammer dispatch');
+    assert.ok(!execCalls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge'), 'no merge is attempted on the proof alone');
   });
-  assert.equal(dispatched.dispatched, true);
-  const hammerDispatches = execCalls.filter(({ args }) => args[0] === 'dispatch' && args.includes('hammer'));
-  assert.equal(hammerDispatches.length, 1, 'exactly one hammer dispatch');
-  assert.ok(!execCalls.some(({ cmd, args }) => cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge'), 'no merge is attempted on the proof alone');
-});
+}
 
 test('a human push on top of the final round fails closed: no verdict, no hand-off', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-human-'));
@@ -220,7 +246,7 @@ test('pending CI on a proven final-round head waits without spending the retain-
       return { dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] };
     },
   }));
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false, 'the hammer waits for green CI');
+  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false, 'pending CI retains its bounded wait');
   assert.equal(closure.commentOnlyFinalRoundAwaitingCi, true);
 
   const logs = [];

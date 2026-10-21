@@ -397,17 +397,11 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   const closerStaleHeadResume =
     options?.allowStaleReviewHeadHammerResume === true &&
     reasons.includes('stale-review-head');
-  // COMMENTCLOSE-01 proven final-round push (see HMR-01 below for the rest).
-  // DIRTYOWN-02: red CI beside a conflict does not hold the resume. The hammer
-  // must rebase the conflicting head, and CI on that head is what counts. The
-  // caller proves the conflict from GitHub's raw mergeability; `pr-not-mergeable`
-  // alone also covers a BLOCKED head whose only problem is red CI.
-  const finalRoundConflicting = options?.commentOnlyFinalRoundConflicting === true &&
-    reasons.includes('pr-not-mergeable');
+  // HAMREDCI-01: a proven final-round push hands CI repair to the hammer too.
+  // Exact-head green checks remain mandatory at merge, after terminal validation.
   const commentOnlyFinalRoundResume = options?.commentOnlyFinalRoundResume === true &&
     !reasons.includes('blocking-findings-present') &&
     !reasons.includes('blocking-findings-unknown') &&
-    (!reasons.includes('ci-not-green') || finalRoundConflicting) &&
     hasCommentOnlyTerminalResumeReason(
       reasons.filter((reason) => reason !== 'stale-review-head'),
     );

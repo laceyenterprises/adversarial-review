@@ -220,36 +220,8 @@ test('replay #7332: a hard-stop label still blocks, and both background log line
   }
 });
 
-test('replay #7332 without the conflict: red CI alone still holds the final-round resume', async (t) => {
-  const rootDir = tempRoot(t, '7332-mergeable');
-  const input = setup7332(rootDir, { mergeable: 'MERGEABLE', mergeStateStatus: 'UNSTABLE' });
-  const run = await replay(rootDir, input);
-  assert.equal(run.closerPayloads[0].dispatchContext.commentOnlyFinalRoundResume, false);
-  assert.equal(run.closerResults[0].reason, 'not-eligible');
-  assert.deepEqual(run.closerResults[0].reasons, INCIDENT_7332_REASONS.filter((r) => r !== 'pr-not-mergeable'));
-  assert.equal(run.hammerDispatches.length, 0);
-});
-
-test('replay #7332 with BLOCKED and no raw mergeable: red CI still holds, because BLOCKED is not a conflict', async (t) => {
-  // A red required check reports mergeStateStatus=BLOCKED. With the raw
-  // `mergeable` field empty that normalizes to `pr-not-mergeable`, which must
-  // not read as the conflict that lifts the CI hold.
-  for (const mergeable of ['', null]) {
-    const rootDir = tempRoot(t, `7332-blocked-${mergeable === null ? 'null' : 'empty'}`);
-    const input = setup7332(rootDir, { mergeable, mergeStateStatus: 'BLOCKED' });
-    const run = await replay(rootDir, input);
-    const [payload] = run.closerPayloads;
-    assert.deepEqual(
-      isEligibleForAmaClosure(payload.reviewState, payload.prMetadata, CFG, { env: {} }).reasons,
-      INCIDENT_7332_REASONS,
-      'BLOCKED still reads as pr-not-mergeable',
-    );
-    assert.equal(payload.dispatchContext.commentOnlyFinalRoundConflicting, false);
-    assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false);
-    assert.equal(run.closerResults[0].reason, 'not-eligible');
-    assert.equal(run.hammerDispatches.length, 0);
-  }
-});
+// Non-conflicting red-CI variants use synthetic fixtures in
+// comment-only-final-round-closer.test.mjs (HAMREDCI-01).
 
 const PENDING_7332_ROLLUP = [
   ...rollup({ 'submodule-pointer-gate': 'SUCCESS', 'release-freeze-gate': 'SUCCESS' }),
@@ -362,16 +334,6 @@ test('a proven final-round resume covers a conflict with red CI, and never a blo
       reviewCycleExhausted, commentOnlyFinalRoundResume: true, commentOnlyFinalRoundConflicting: true,
     };
     assert.equal(isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, options), true, `exhausted=${reviewCycleExhausted}`);
-    assert.equal(
-      isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, { ...options, commentOnlyFinalRoundConflicting: false }),
-      false,
-      `pr-not-mergeable without a proven conflict still waits on red CI (exhausted=${reviewCycleExhausted})`,
-    );
-    assert.equal(
-      isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS.filter((r) => r !== 'pr-not-mergeable'), options),
-      false,
-      `red CI alone still waits (exhausted=${reviewCycleExhausted})`,
-    );
     for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown']) {
       assert.equal(isHammerRemediableEligibilityMiss([...INCIDENT_7332_REASONS, blocker], options), false, blocker);
     }

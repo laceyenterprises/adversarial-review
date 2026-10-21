@@ -1304,18 +1304,23 @@ current-head wake rule. Verify after deployment that the next suppressed
 comment-only worker push wakes and reaches the hammer on the first green-CI
 watcher pass, without a manual re-review request.
 
-A proven final-round head that conflicts with base reaches the hammer even with
-red or pending CI (DIRTYOWN-02), because the hammer must rebase before any CI on
-it counts. The conflict is proven only from GitHub's raw signal
-(`mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`) beside the
-`pr-not-mergeable` gate. A `pr-not-mergeable` head that is only `BLOCKED` by a
-red required check, `UNSTABLE` or `BEHIND` still parks on red CI or waits for
-pending CI as before. A conflicting head never gets the final-round CI-wait
-exemption from the retain-loop cap. When a final-round PR parks with
-`reasons=[...,pr-not-mergeable,...,ci-not-green]` in the dispatch log lines
-above, read `gh pr view <n> --json mergeable,mergeStateStatus`: a conflict
-there should have resumed the hammer, while a `BLOCKED` head needs its red
-check fixed first.
+A proven comment-only final-round handoff also resumes when CI fails
+(HAMREDCI-01), including when the reviewed head is stale and non-blocking findings
+remain. The hammer owns CI repair before exact-head green checks and merge;
+it does not need a conflict to take ownership. This includes heads reported as
+`BLOCKED`, `UNSTABLE` or `BEHIND`. Blocking or unknown blocking findings,
+structural blocks, hard-stop labels and merge-lease rules retain their gates.
+The hammer prompt already requires fixing failing checks before merge.
+
+A proven final-round head that conflicts with base also reaches the hammer with
+pending CI (DIRTYOWN-02), because it must rebase first. The conflict is proven
+only from GitHub's raw signal (`mergeable=CONFLICTING` or
+`mergeStateStatus=DIRTY`) beside the `pr-not-mergeable` gate. Non-conflicting
+heads with only pending CI keep their existing bounded wait. A conflicting head
+never gets the final-round CI-wait exemption from the retain-loop cap. After
+deployment, verify a proven final-round head with failed CI dispatches the
+hammer on the next eligible watcher pass, and merges only after its check
+repair and terminal validation pass the exact-head merge predicates.
 
 Normal `posted` rows are different. `stale-review-head`,
 `blocking-findings-present`, and `verdict-not-settled-success` remain AMA/HAM

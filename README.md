@@ -904,6 +904,10 @@ replacement claim cannot be posted by an older reconciliation.
 The suppressed comment-only final round hands its recorded worker-pushed head
 to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
+HAMREDCI-01 also resumes that proven final-round handoff when CI fails: the
+hammer owns check repair before exact-head green CI and merge. Non-conflicting
+heads with only pending CI keep their bounded wait; blocking or unknown blocking
+findings, structural blocks, hard-stop labels and merge leases retain their gates.
 Ownerless recovery routes settled final rounds and exhausted review cycles to
 the hammer even after head movement, using shared review-admission evidence.
 Transient quota-status (including explicit `holdReason` without an outer reason)

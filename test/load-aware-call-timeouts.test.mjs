@@ -42,7 +42,7 @@ test('millisecond and second forms share the curve, corroboration and bounds', (
   }
   assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, maxMultiplier: 2 }), 200);
   assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, cpuBusyPercent: 42.5 }), 350);
-  assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, cpuBusyPercent: null }), 100);
+  assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, cpuBusyPercent: null }), 600);
   assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, maxMs: 250 }), 250);
   assert.equal(loadAwareTimeoutMs(100, { ...busyLoad, loadAvg1m: 12, maxMs: 50 }), 100);
   assert.throws(() => loadAwareTimeoutMs(0), /positive number/);
@@ -61,7 +61,7 @@ test('CPU sample, including failure, is reused for five seconds', () => {
   assert.equal(sample(), 20);
   assert.equal(calls, 2);
   let failures = 0;
-  const failedSample = createCpuBusySampler({ nowMs: () => now,
+  const failedSample = createCpuBusySampler({ nowMs: () => now, warn() {},
     execFileSyncImpl: () => { failures++; throw new Error('synthetic ps failure'); } });
   assert.equal(failedSample(), null);
   now += 4999;
@@ -70,6 +70,29 @@ test('CPU sample, including failure, is reused for five seconds', () => {
   now++;
   assert.equal(failedSample(), null);
   assert.equal(failures, 2);
+});
+
+test('host timeout scaling survives ps failure with fresh evidence, then the load curve', t => {
+  syntheticBusyHost(t);
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  t.mock.method(childProcess, 'execFileSync', () => { throw new Error('synthetic ps timeout'); });
+  syncBuiltinESMExports();
+  const opts = { enabled: true, maxMultiplier: 6 };
+  assert.equal(loadAwareTimeoutMs(100, opts), 600, 'no good sample uses full load curve');
+  t.mock.method(childProcess, 'execFileSync', () => `${os.cpus().length * 42.5}\n`);
+  syncBuiltinESMExports();
+  now = 5000;
+  assert.equal(loadAwareTimeoutMs(100, opts), 350);
+  t.mock.method(childProcess, 'execFileSync', () => { throw new Error('synthetic ps timeout'); });
+  syncBuiltinESMExports();
+  now = 10000;
+  assert.equal(loadAwareTimeoutMs(100, opts), 350, 'fresh CPU evidence keeps graded scaling');
+  now = 65000;
+  assert.equal(loadAwareTimeoutMs(100, opts), 600, 'stale CPU evidence uses full load curve');
+  assert.equal(warnings.length, 2);
 });
 
 test('reset discards a cached default CPU sample without waiting for expiry', t => {

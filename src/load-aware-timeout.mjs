@@ -20,7 +20,8 @@
  *
  * `loadAwareMultiplier` / `loadAwareTimeoutSeconds(base, {loadAvg1m, cpuCount})`
  * support synthetic load inputs. CPU samples and config policy are cached for
- * five seconds; the default call reads current os.loadavg().
+ * five seconds; the last good CPU sample survives failures for up to 60 seconds.
+ * The default call reads current os.loadavg().
  *
  * @module load-aware-timeout
  */
@@ -35,6 +36,9 @@ export const MAX_MULTIPLIER = 6;
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
 export const CPU_BUSY_THRESHOLD_PERCENT = 85;
 const SAMPLE_INTERVAL_MS = 5_000;
+const CPU_SAMPLE_TIMEOUT_MS = 5_000;
+const LAST_GOOD_CPU_MAX_AGE_MS = 60_000;
+const SUBSTITUTION_LOG_INTERVAL_MS = 60_000;
 const HOST_CPU_COUNT = os.cpus()?.length || 1;
 
 // Cache failures too: an unreadable ps must not spawn again on every call.
@@ -42,31 +46,52 @@ export function createCpuBusySampler({
   execFileSyncImpl = (...args) => execFileSync(...args),
   nowMs = () => performance.now(),
   cpuCount = HOST_CPU_COUNT,
+  warn = message => console.warn(message),
 } = {}) {
   let sampledAt = -Infinity;
   let cached = null;
+  let lastGood = null;
+  let lastGoodAt = -Infinity;
+  let warnedAt = -Infinity;
   return function sample() {
-    const now = nowMs();
-    if (now - sampledAt < SAMPLE_INTERVAL_MS) return cached;
-    sampledAt = now;
-    cached = null;
-    try {
-      const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000,
-      });
-      let total = 0;
-      let seen = false;
-      for (const line of out.split(/\r?\n/)) {
-        const raw = line.trim().replace(',', '.');
-        if (!raw) continue;
-        const value = Number(raw);
-        if (!Number.isFinite(value)) return null;
-        total += value;
-        seen = true;
+    let now = nowMs();
+    if (now - sampledAt >= SAMPLE_INTERVAL_MS) {
+      cached = null;
+      try {
+        const out = execFileSyncImpl('/bin/ps', ['-A', '-o', '%cpu='], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: CPU_SAMPLE_TIMEOUT_MS,
+        });
+        let total = 0;
+        let seen = false;
+        for (const line of out.split(/\r?\n/)) {
+          const raw = line.trim().replace(',', '.');
+          if (!raw) continue;
+          const value = Number(raw);
+          if (!Number.isFinite(value)) throw new Error('Invalid CPU sample');
+          total += value;
+          seen = true;
+        }
+        const busy = total / cpuCount;
+        if (seen && Number.isFinite(busy)) cached = Math.max(0, Math.min(100, busy));
+      } catch { /* Reuse fresh evidence, otherwise grant full load-based patience. */ }
+      // Cache attempts from completion so a slow failure cannot cause a hot retry loop.
+      now = nowMs();
+      sampledAt = now;
+      if (cached !== null) {
+        lastGood = cached;
+        lastGoodAt = now;
       }
-      if (seen) cached = Math.max(0, Math.min(100, total / cpuCount));
-    } catch { /* No corroboration until the next sample. */ }
-    return cached;
+    }
+    if (cached !== null) return cached;
+    // Check age on every read: cached failures must not prolong stale evidence.
+    const fresh = lastGood !== null && now - lastGoodAt < LAST_GOOD_CPU_MAX_AGE_MS;
+    if (now - warnedAt >= SUBSTITUTION_LOG_INTERVAL_MS) {
+      warnedAt = now;
+      warn(`[load-aware-timeout] CPU sample unavailable; ${fresh
+        ? 'reusing last good sample (under 60s old)'
+        : 'using full load-based corroboration'}`);
+    }
+    return fresh ? lastGood : null;
   };
 }
 
@@ -117,7 +142,7 @@ export function loadAwareMultiplier(loadPerCore, maxMultiplier = MAX_MULTIPLIER)
   return Math.min(Math.max(MIN_MULTIPLIER, maxMultiplier), Math.max(MIN_MULTIPLIER, multiplier));
 }
 
-/** Pure load-aware multiplier; unavailable CPU readings supply no corroboration. */
+/** Pure load-aware multiplier; unavailable CPU readings grant full corroboration. */
 export function corroboratedLoadAwareMultiplier(
   loadPerCore,
   cpuBusyPercent,
@@ -128,7 +153,7 @@ export function corroboratedLoadAwareMultiplier(
   const rawMultiplier = loadAwareMultiplier(loadPerCore, maxMultiplier);
   const corroboration = Number.isFinite(cpuBusyPercent)
     ? Math.min(1, Math.max(0, cpuBusyPercent / CPU_BUSY_THRESHOLD_PERCENT))
-    : 0;
+    : 1;
   return MIN_MULTIPLIER + (rawMultiplier - MIN_MULTIPLIER) * corroboration;
 }
 
@@ -184,8 +209,8 @@ function scaledTimeout(baseValue, opts, maxValue) {
   //
   // So scale the extension by how far CPU has actually climbed toward the
   // threshold. Both endpoints are unchanged: at or above the threshold the
-  // full multiplier still applies, and an unreadable CPU still yields no
-  // extension at all.
+  // full multiplier still applies. If CPU evidence is unavailable, the sampler
+  // reuses a fresh successful sample; without one, use the full load curve.
   const multiplier = corroboratedLoadAwareMultiplier(
     loadPerCore, busy, policy.maxMultiplier, policy.enabled,
   );

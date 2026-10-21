@@ -17,6 +17,12 @@ import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
 const subprocessTimeout = loadAwareTimeoutSeconds(45) * 1000;
+// Extensionless Node stubs use CommonJS even when TMPDIR is inside this ESM repo.
+function commonJsFixtureDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}\n');
+  return dir;
+}
 function run(command, args, env = {}) {
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
   return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: { ...cleanEnv, ...env } });
@@ -39,6 +45,9 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   });
   const bin = join(dir, 'bin');
   mkdirSync(bin);
+  // The phase captures its produced head even when the lease is parked. Keep
+  // this boundary synthetic so the fixture also works outside a Git checkout.
+  writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$*" = "rev-parse HEAD" ]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; else exit 1; fi\n', { mode: 0o755 });
   const gh = join(bin, 'gh');
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
@@ -63,7 +72,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
     const rendered = renderPhase(phase, env);
     assert.equal(rendered.status, 0, rendered.stderr);
     writeFileSync(join(dir, `${phase}.sh`), rendered.stdout, { mode: 0o600 });
-    const shell = `PHASE=${phase}\n${wrapper.replaceAll('<<RUN_DIR>>', dir)}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
+    const shell = `cd "$TMPDIR" || exit 1\nPHASE=${phase}\n${wrapper.replaceAll('<<RUN_DIR>>', dir)}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
     const result = run('/bin/bash', ['-c', shell], env);
     assert.equal(result.status, status, `${phase}: ${result.stdout} ${result.stderr}`);
     assert.match(result.stdout, new RegExp(diagnostic));
@@ -380,7 +389,7 @@ test('versioned merge helpers are parseable and reject missing dispatch values',
   }
 });
 test('one-shot context snapshot is bounded and describes fixture PR head', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'hammer-context-'));
+  const dir = commonJsFixtureDir('hammer-context-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -432,7 +441,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
 });
 
 test('context bounds real primary patches and survives a failed compare', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'hammer-context-patches-'));
+  const dir = commonJsFixtureDir('hammer-context-patches-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin'); mkdirSync(bin);
   const head = 'c'.repeat(40), primary = 'b'.repeat(40), base = 'a'.repeat(40);
@@ -931,7 +940,7 @@ echo "PUSHED=$HAM_PUSHED_HEAD FROM=$HAM_PUSHED_FROM_HEAD CHECK_START=\${HAM_REMO
 }
 
 test('GHBUDGET-01: rendered pending CI uses at most eleven REST check snapshots in five minutes', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'hammer-budget-'));
+  const dir = commonJsFixtureDir('hammer-budget-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const head = 'a'.repeat(40);
   const env = {
@@ -1003,7 +1012,7 @@ test('GHBUDGET-01: REST hammer checks preserve latest reruns and commit statuses
 });
 
 test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t => {
-  const dir = mkdtempSync(join(tmpdir(), 'hammer-common-budget-'));
+  const dir = commonJsFixtureDir('hammer-common-budget-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const sharedTmp = dir;
   const legacyPath = join(sharedTmp, 'ham-42-pr-after.json');

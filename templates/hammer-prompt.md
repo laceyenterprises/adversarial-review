@@ -481,11 +481,18 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    `gh pr update-branch --rebase` loop (bounded cap, default 3 attempts) runs
    while holding the lease and honors the stop-chasing guard above; if `gh`
    reports the branch is already up to date that confirms it is on the latest
-   `main`. After
-   the rebase, fetch the base, capture the exact current base SHA, and run
+   `main`. After a successful server-side rebase, verify-head fetches the exact
+   resulting SHA, detaches the scratch checkout at it, synchronizes initialized
+   submodules, and records `HAM_PRODUCED_HEAD`. Keep this identity through
+   validation, audit publication (including recovery), and merge under the lease.
+   Preserve the existing lease release/reacquisition during pending-CI waits.
+   A later foreign push still stops with `head-changed`; the hammer's own rebase
+   continues in this run. After the rebase, fetch the base, capture the exact
+   current base SHA, and run
    `<<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
-   changed-surface tests (mandate step 2b) and required checks only when
-   `needsRevalidation` is true; otherwise trust the parallel-phase validation.
+   changed-surface tests (mandate step 2b) in that synchronized checkout when
+   `needsRevalidation` is true; otherwise trust the parallel-phase local validation.
+   Always use the existing bounded required-check wait on that exact produced head.
    Do not parse this boolean with a jq fallback such as
    `.needsRevalidation // true`: jq treats JSON `false` as fallback-worthy, so
    that expression converts a safe `needsRevalidation:false` decision into a
@@ -621,6 +628,11 @@ Refresh and validate the live head:
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
 In the same shell with dispatch values exported, `source "<<RUN_DIR>>/hammer-verify-head.sh"`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
+
+On success, if `HAM_NEEDS_REVALIDATION=true`, run the changed-surface tests from
+step 2b against the synchronized `HAM_PRODUCED_HEAD` before sourcing publish.
+Keep the lease held and continue with the existing exact-head required-check
+wait and merge in this run. Never treat the hammer's own rebase as `head-changed`.
 
 
 ## Resolving merge conflicts

@@ -547,6 +547,14 @@ head and merge lease survive between phases. The wrapper prints each phase's
 bounded diagnostic tail, status, outcome, and lease state. A blocked phase
 stops the flow; a rebase-conflict outcome returns control for local resolution.
 
+HAMSELFREBASE-01 keeps a successful server-side rebase in this flow: verify-head
+fetches the exact resulting SHA, detaches the scratch checkout and synchronizes
+initialized submodules before changed-surface revalidation. Publish and recovered
+attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
+merge remain bound to that head under the merge lease. The existing pending-CI
+release and reacquisition stay unchanged. Foreign pushes still stop
+with `head-changed`. Existing lifecycle states and smoke promises are unchanged.
+
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
    non-blocking.

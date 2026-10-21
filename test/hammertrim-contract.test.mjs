@@ -39,6 +39,9 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   });
   const bin = join(dir, 'bin');
   mkdirSync(bin);
+  // The phase captures its produced head even when the lease is parked. Keep
+  // this boundary synthetic so the fixture also works outside a Git checkout.
+  writeFileSync(join(bin, 'git'), '#!/bin/sh\nif [ "$*" = "rev-parse HEAD" ]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; else exit 1; fi\n', { mode: 0o755 });
   const gh = join(bin, 'gh');
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
@@ -63,7 +66,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
     const rendered = renderPhase(phase, env);
     assert.equal(rendered.status, 0, rendered.stderr);
     writeFileSync(join(dir, `${phase}.sh`), rendered.stdout, { mode: 0o600 });
-    const shell = `PHASE=${phase}\n${wrapper.replaceAll('<<RUN_DIR>>', dir)}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
+    const shell = `cd "$TMPDIR" || exit 1\nPHASE=${phase}\n${wrapper.replaceAll('<<RUN_DIR>>', dir)}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
     const result = run('/bin/bash', ['-c', shell], env);
     assert.equal(result.status, status, `${phase}: ${result.stdout} ${result.stderr}`);
     assert.match(result.stdout, new RegExp(diagnostic));

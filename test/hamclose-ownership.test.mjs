@@ -97,9 +97,9 @@ test('LEASEDEADPID-01 numeric now preserves pending and dispatched expiry bounda
   ]) {
     for (const now of [Date.parse(leaseNow), 0]) {
       for (const age of [boundary - 1, boundary, boundary + 1]) {
-        const lease = { status, acquiredAt: new Date(now - age).toISOString() };
-        assert.equal(reclaim(lease, { now }), age >= boundary, `${status} age ${age} at ${now}`);
-        assert.equal(reclaim(lease, { now: new Date(now).toISOString() }), age >= boundary);
+        const lease = { status, lrqId: 'synthetic-terminal', acquiredAt: new Date(now - age).toISOString() };
+        assert.equal(reclaim(lease, { now, launchStatusProbe: { ok: true, row: { status: 'failed' } } }), age >= boundary, `${status} age ${age} at ${now}`);
+        assert.equal(reclaim(lease, { now: new Date(now).toISOString(), launchStatusProbe: { ok: true, row: { status: 'failed' } } }), age >= boundary);
       }
     }
     for (const now of [NaN, Infinity, -Infinity]) {
@@ -122,9 +122,9 @@ test('LEASEDEADPID-01 dispatched ownership follows existing age/outcome reclamat
       const lease = { status: 'dispatched', lrqId: 'synthetic-closer', terminalOutcome,
         acquiredAt: leaseAtAge(age + 10_000), updatedAt: leaseAtAge(age) };
       const reclaimable = age >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS && terminalOutcome !== 'succeeded';
-      assert.equal(isReclaimableDispatchedAmaCloserLease(lease, { now: leaseNow }), reclaimable);
+      assert.equal(isReclaimableDispatchedAmaCloserLease(lease, { now: leaseNow, launchStatusProbe: { ok: true, row: { status: 'failed' } } }), reclaimable);
       for (const waitExhausted of [false, true]) {
-        const result = decideClosureOwner({ ...finalCommentOwner, lease, waitExhausted,
+        const result = decideClosureOwner({ ...finalCommentOwner, lease, waitExhausted, launchStatusProbe: { ok: true, row: { status: 'failed' } },
           processKillImpl() { throw new Error('dispatched liveness never probes the watcher'); } });
         assert.equal(result.owner, reclaimable ? 'hammer' : waitExhausted ? 'page' : 'wait');
         assert.equal(result.reason, reclaimable ? 'review-findings' : waitExhausted ? 'in-flight-lease-expired' : 'in-flight:synthetic-closer');

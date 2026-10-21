@@ -22,7 +22,7 @@
     "recovery": "All-infrastructure holds release once; closer preflight evaluates cleanup without audit history, returning none without a current stop so it cannot widen admission. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain deterministic refusal reasons. Release write failures log and preserve the current decision.",
     "lifecycleChange": "Existing refusal fence restored; no new dispatch statuses or lifecycle edges"
   },
-  "closureOwnerLeaseReclaim": "LEASEDEADPID-01: closure-owner arbitration shares pending/dispatched reclaim predicates with dispatch in closer-lease.mjs. Dead local watcher PIDs (matching holderHost or legacy hostless leases) and pending-age expiry release pending ownership on the next evaluation without lease writes; dispatched age/outcome semantics and sticky succeeded remain intact. Foreign-host pending leases use age only, without local PID probes. Both reclaim predicates accept ISO or numeric epoch-millisecond clocks. Live ownership retains bounded wait/page. Existing evaluation edges are unchanged.",
+  "closureOwnerLeaseReclaim": "LEASEDEADPID-01: closure-owner arbitration shares pending/dispatched reclaim predicates with dispatch in closer-lease.mjs. Dead local watcher PIDs (matching holderHost or legacy hostless leases) and pending-age expiry release pending ownership on the next evaluation without lease writes; LEASELIVE-01 retains in-flight launches and live retries regardless of age through the shared closure-ownership status check. Known-terminal age/outcome semantics and sticky succeeded remain intact; unknown launch liveness uses the worker execution timeout schema ceiling plus 30 minutes. Periodic reclaim and remediation exclusion share the predicate; dead watcher PID tiers apply only to pending leases. Foreign-host pending leases use age only, without local PID probes. Both reclaim predicates accept ISO or numeric epoch-millisecond clocks. Live ownership retains bounded wait/page. Existing evaluation edges are unchanged.",
   "terminalSemantics": "Quiescent for this attempt or decision, not irreversible PR completion. Explicit recovery edges may reopen terminal attempts. Closure owner is a recomputed projection; [*] is its evaluation boundary. Lease deletion is record removal, not merge authority. Transitions describe owned lifecycle routes, not arbitrary low-level patch calls. Certified HAM contention parks with UNKNOWN mergeability, alone or with pending CI, retain bounded deferral backoff and expiry rather than immediate operator escalation; red CI still routes to bounded repair. Retryable UNKNOWN deferral requires the PR to remain open at the validated head; moved heads and closed PRs retain terminal refusals.",
   "knownDeadEnds": [
     {"state": "closer-lease.pending", "condition": "Malformed timestamp or unreadable liveness/ownership evidence", "proposedExitOwner": "watcher / closer operator", "proposedMaxDurationSeconds": 1800, "overdueRecipient": "adversarial-review operator", "enforcement": "missing"},
@@ -180,7 +180,7 @@
       ],
       "states": [
         {"name": "pending","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
-        {"name": "dispatched","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
+        {"name": "dispatched","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 88200,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Live launch evidence retains ownership regardless of age; unknown liveness has the execution-ceiling fallback, malformed timestamps require operator recovery."},
         {"name": "handed-to-review","terminal": false,"exitOwner": "watcher / closer","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
         {"name": "terminal","terminal": true}
       ],
@@ -194,7 +194,7 @@
         {"id": "closer-lease.07","from": "handed-to-review","to": "pending","trigger": "review completed; locked reclaim","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.08","from": "handed-to-review","to": "terminal","trigger": "external terminal outcome","codeSource": "src/ama/closer-lease.mjs"},
         {"id": "closer-lease.09","from": "pending","to": "[*]","trigger": "expired pending lease reclaimed","codeSource": "src/ama/closer-lease.mjs"},
-        {"id": "closer-lease.10","from": "dispatched","to": "[*]","trigger": "expired dispatched lease reconciled","codeSource": "src/ama/closer-lease.mjs"}
+        {"id": "closer-lease.10","from": "dispatched","to": "[*]","trigger": "terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained","codeSource": "src/ama/closer-lease.mjs"}
       ]
     },
     {
@@ -291,9 +291,9 @@
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "b70bec4bfe7769e073439682fe3de1311fc4a67fb3e32316aeca12802fbc965a",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
     "src/ama-closure-orchestration.mjs": "0d136cfde606709609c191f21acab127a386ead5713853fc1cf1e346fb3089f4",
-    "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
+    "src/ama/closer-lease.mjs": "5a30142468a65291ab5a202df8fdac49311126b8bb718b40744b8d3a6c5c7bfb",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "dbd7e952faa9747e1543ff62cd963472d877d7b751d977c9874ce5f90aca62c5",
+    "src/ama/dispatch-closer.mjs": "3ba9e0ee96416c9145bdbd8da109d0fe7ce1a2fe3b96323001a56e2a0df58b5d",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",

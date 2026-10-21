@@ -30,6 +30,7 @@ import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
+import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 
 export const __testYamlHooks = {
@@ -2519,9 +2520,9 @@ function schemaV1() {
                 safety_load_per_core: { __type: TYPE_FLOAT, __default: 32.0, __min: 1.0, __max: 128.0, __enforceMax: true },
               } },
               codex_exec_mode: { __type: TYPE_BOOL, __default: false },
-              codex_exec_timeout_seconds: { __type: TYPE_INT, __default: 14400, __min: 1, __max: 86400, __enforceMax: true },
+              codex_exec_timeout_seconds: { __type: TYPE_INT, __default: 14400, __min: 1, __max: MAX_WORKER_EXEC_TIMEOUT_SECONDS, __enforceMax: true },
               codex_exec_stall_timeout_seconds: { __type: TYPE_INT, __default: 1800, __min: 1, __max: 86400, __enforceMax: true },
-              codex_exec_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforceMax: true } },
+              codex_exec_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: MAX_WORKER_EXEC_TIMEOUT_SECONDS, __enforceMax: true } },
               codex_exec_stall_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforceMax: true } },
               fleet_launch_health: {
                 __type: TYPE_DICT,

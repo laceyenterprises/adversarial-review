@@ -22,12 +22,12 @@ import {
 // SPEC 4.4 rule #5 makes only `succeeded` sticky. `failed-without-merge` records
 // that one attempt did not merge, not that closure authority is spent.
 
-const base = { status: 'dispatched', updatedAt: '2026-09-05T20:00:00Z' };
+const base = { status: 'dispatched', lrqId: 'synthetic-terminal', updatedAt: '2026-09-05T20:00:00Z' };
 const AGED = '2026-09-05T21:00:00Z';   // > 30m past updatedAt
 const FRESH = '2026-09-05T20:05:00Z';  // < 30m past updatedAt
 
 const reclaim = (terminalOutcome, now, extra = {}) =>
-  isReclaimableDispatchedAmaCloserLease({ ...base, ...extra, terminalOutcome }, { now });
+  isReclaimableDispatchedAmaCloserLease({ ...base, ...extra, terminalOutcome }, { now, launchStatusProbe: { ok: true, row: { status: 'failed' } } });
 
 test('a failed-without-merge lease is reclaimable once aged', () => {
   assert.equal(reclaim(AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME, AGED), true);

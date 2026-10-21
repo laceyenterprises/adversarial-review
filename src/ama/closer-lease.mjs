@@ -36,6 +36,9 @@
  */
 
 import fsExt from 'fs-ext';
+import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from '../worker-execution-limits.mjs';
+import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { launchRequestInFlight } from './launch-request-status.mjs';
 import { closeSync, openSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -79,6 +82,10 @@ const AMA_CLOSER_LAUNCH_OVERHEAD_MS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS
   + AMA_CLOSER_LAUNCH_ATTEMPTS * AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
 export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 600_000 * AMA_CLOSER_LAUNCH_ATTEMPTS + AMA_CLOSER_LAUNCH_OVERHEAD_MS;
 export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
+// Use the schema ceiling, rather than a default that a worker-class override
+// can exceed. This also covers unreadable configuration without new settings.
+export const AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS = MAX_WORKER_EXEC_TIMEOUT_SECONDS * 1000
+  + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
 
 export function isAmaCloserPidAlive(pid, processKillImpl = process.kill) {
   const numericPid = Number(pid);
@@ -108,20 +115,56 @@ export function isReclaimablePendingAmaCloserLease(lease, { now = null, processK
     && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
 }
 
-export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}) {
+export function isReclaimableDispatchedAmaCloserLease(lease, {
+  now = null, launchStatusProbe, readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
+  fallbackAgeMs = AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, ...readOptions
+} = {}) {
   if (lease?.status !== DISPATCHED) return false;
-  // Success stays sticky; other recorded outcomes retain the existing age
-  // bound and the separate hammer retry/lifetime limits.
+  // Success stays sticky; launch liveness precedes the age fallback and the
+  // separate hammer retry/lifetime limits.
   const terminalOutcome = lease.terminalOutcome ?? null;
   if (terminalOutcome !== null && !AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(terminalOutcome)) {
     return false;
   }
 
+  let probe = launchStatusProbe;
+  if (lease.lrqId && probe === undefined) {
+    try { probe = readLaunchRequestStatusImpl({ ...readOptions, launchRequestId: lease.lrqId, includeRetryChain: true }); }
+    catch { probe = null; }
+  }
+  const inFlight = lease.lrqId ? launchRequestInFlight(probe) : null;
+  if (inFlight === true) return false;
+  const reclaimAgeMs = inFlight === false ? AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS
+    : Math.max(AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, Number(fallbackAgeMs) || 0);
   const updatedAtMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
   const nowMs = typeof now === 'number' ? now : Date.parse(String(now || new Date().toISOString()));
   return Number.isFinite(updatedAtMs)
     && Number.isFinite(nowMs)
-    && nowMs - updatedAtMs >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+    && nowMs - updatedAtMs >= reclaimAgeMs;
+}
+
+// Async dispatch/reaper paths yield during the existing bounded ledger read.
+export async function isReclaimableDispatchedAmaCloserLeaseAsync(lease, {
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync, ...options
+} = {}) {
+  if (lease?.status !== DISPATCHED) return false;
+  let launchStatusProbe = null;
+  if (lease.lrqId) {
+    try { launchStatusProbe = await readLaunchRequestStatusImpl({ ...options, launchRequestId: lease.lrqId, includeRetryChain: true }); }
+    catch { /* Unreadable liveness retains the full execution window. */ }
+  }
+  if (options.rootDir && lease.repo && lease.headSha && !isCurrentAmaCloserLease(options.rootDir, lease)) return false;
+  return isReclaimableDispatchedAmaCloserLease(lease, { ...options, launchStatusProbe });
+}
+
+// A status read must not retire a replacement owner installed while it yielded.
+export function isCurrentAmaCloserLease(rootDir, lease) {
+  try {
+    const current = readAmaCloserLease(rootDir, lease);
+    return current?.status === lease.status && current?.lrqId === lease.lrqId
+      && current?.updatedAt === lease.updatedAt && current?.acquiredAt === lease.acquiredAt
+      && current?.terminalOutcome === lease.terminalOutcome;
+  } catch { return false; }
 }
 
 export function amaCloserPendingLeaseExpiryMs(dispatchTimeoutMs) {
@@ -249,10 +292,14 @@ export function readAmaCloserDispatchLease(rootDir, record, names = null) {
 export function isHeldAmaCloserLease(rootDir, identity, {
   now = new Date().toISOString(),
   pendingExpiryMs = AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
-  dispatchedExpiryMs = AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  dispatchedExpiryMs = AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS,
+  ...livenessOptions
 } = {}) {
   const lease = readAmaCloserLease(rootDir, identity);
   if (!lease || [TERMINAL, HANDED_TO_REVIEW].includes(lease.status)) return false;
+  if (lease.status === DISPATCHED) return !isReclaimableDispatchedAmaCloserLease(lease, {
+    ...livenessOptions, rootDir, now, fallbackAgeMs: dispatchedExpiryMs,
+  });
   const age = Date.parse(now) - Date.parse(lease.updatedAt || lease.acquiredAt);
   const expiry = lease.status === PENDING
     ? (lease.dispatchTimeoutMs ? amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs) : pendingExpiryMs)

@@ -1,0 +1,11 @@
+{
+  "running": { "ok": true, "row": { "status": "running" } },
+  "terminal": { "ok": true, "row": { "status": "failed" } },
+  "unreadable": { "ok": false, "reason": "synthetic-read-failure" },
+  "liveRetry": {
+    "ok": true,
+    "row": { "status": "failed" },
+    "retryChain": [{ "launch_request_id": "synthetic-retry", "status": "queued" }]
+  },
+  "unreadableRetry": { "ok": true, "row": { "status": "failed" }, "retryChainUnreadable": true }
+}

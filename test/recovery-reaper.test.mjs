@@ -166,10 +166,10 @@ test('config resolvers honor env aliases and fall back to defaults', () => {
 
 test('selectStaleRunningReviewerPasses: only running + un-ended + aged rows', () => {
   const rows = [
-    { pass_id: 1, status: 'running', ended_at: null, started_at: hoursAgo(20) }, // stale
+    { pass_id: 1, status: 'running', ended_at: null, started_at: hoursAgo(30) }, // stale
     { pass_id: 2, status: 'running', ended_at: null, started_at: hoursAgo(1) }, // fresh
-    { pass_id: 3, status: 'completed', ended_at: hoursAgo(20), started_at: hoursAgo(21) }, // done
-    { pass_id: 4, status: 'running', ended_at: hoursAgo(19), started_at: hoursAgo(20) }, // has ended_at
+    { pass_id: 3, status: 'completed', ended_at: hoursAgo(30), started_at: hoursAgo(21) }, // done
+    { pass_id: 4, status: 'running', ended_at: hoursAgo(19), started_at: hoursAgo(30) }, // has ended_at
     { pass_id: 5, status: 'running', ended_at: null, started_at: 'not-a-date' }, // unparseable -> skip
   ];
   const stale = selectStaleRunningReviewerPasses(rows, { now: NOW, thresholdMs: 6 * 60 * 60 * 1000 });
@@ -190,7 +190,7 @@ test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-rev
   // Stale zombie running pass (started 20h ago, never ended).
   beginReviewerPass(rootDir, {
     repo: 'acme/zombie', prNumber: 10, attemptNumber: 1, reviewerClass: 'codex',
-    passKind: 'first-pass', startedAt: hoursAgo(20),
+    passKind: 'first-pass', startedAt: hoursAgo(30),
   });
   // Fresh running pass (must be left alone).
   beginReviewerPass(rootDir, {
@@ -226,7 +226,7 @@ test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-rev
 
 test('selectReleasableCloserLeases: aged non-terminal leases, never live or terminal', () => {
   const leases = [
-    { repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null, updatedAt: hoursAgo(20), watcherPid: 111, _path: 'p1' }, // release
+    { repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null, updatedAt: hoursAgo(30), watcherPid: 111, _path: 'p1' }, // release
     { repo: 'a/y', prNumber: 2, headSha: 'h2', status: 'pending', terminalOutcome: null, updatedAt: hoursAgo(1), watcherPid: 222, _path: 'p2' }, // fresh -> keep
     { repo: 'a/z', prNumber: 3, headSha: 'h3', status: 'terminal', terminalOutcome: 'succeeded', updatedAt: hoursAgo(40), watcherPid: 333, _path: 'p3' }, // terminal -> keep
     { repo: 'a/w', prNumber: 4, headSha: 'h4', status: 'dispatched', terminalOutcome: null, updatedAt: hoursAgo(40), watcherPid: 999, _path: 'p4' }, // owned by live pid -> keep
@@ -262,7 +262,7 @@ test('selectReleasableCloserLeases: interrupted dispatch callback can release be
 test('selectReleasableCloserLeases: corrupt lease records are age-gated by file mtime', () => {
   const releasable = selectReleasableCloserLeases([
     { _path: 'fresh.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(1)), status: 'corrupt', terminalOutcome: null },
-    { _path: 'stale.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(20)), status: 'corrupt', terminalOutcome: null },
+    { _path: 'stale.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(30)), status: 'corrupt', terminalOutcome: null },
   ], {
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
@@ -283,7 +283,7 @@ test('reapStaleCloserLeases releases stale lease AND resets transient-exhausted 
   const identity = { repo: 'acme/repo', prNumber: 77, headSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' };
   const leasePath = writeLease(rootDir, {
     ...identity, status: 'dispatched', terminalOutcome: null,
-    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
 
   // A dispatch record whose budget was exhausted by a TRANSIENT (rate-limit) failure.
@@ -313,7 +313,7 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
   const identity = { repo: 'acme/repo', prNumber: 88, headSha: 'feedfacefeedfacefeedfacefeedfacefeedface' };
   writeLease(rootDir, {
     ...identity, status: 'dispatched', terminalOutcome: null,
-    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
   const recordPath = amaCloserDispatchFilePath(rootDir, identity);
   mkdirSync(dirname(recordPath), { recursive: true });
@@ -383,7 +383,7 @@ test('reapStaleCloserLeases unlinks corrupt lease files', async (t) => {
   mkdirSync(dir, { recursive: true });
   const corruptPath = join(dir, 'acme__repo-pr-99-deadbeef.json');
   writeFileSync(corruptPath, '');
-  const stale = new Date(Date.parse(hoursAgo(20)));
+  const stale = new Date(Date.parse(hoursAgo(30)));
   utimesSync(corruptPath, stale, stale);
 
   const result = await reapStaleCloserLeases({
@@ -463,7 +463,7 @@ test('reapStaleCloserLeases does not starve stale leases behind many active leas
   }
   const stalePath = writeLease(rootDir, {
     repo: 'zzz/stale', prNumber: 999, headSha: 'stale', status: 'dispatched',
-    terminalOutcome: null, updatedAt: hoursAgo(20),
+    terminalOutcome: null, updatedAt: hoursAgo(30),
   });
 
   let released = 0;
@@ -535,7 +535,7 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
   const identity = { repo: 'acme/repo', prNumber: 101, headSha: 'badc0ffeebadc0ffeebadc0ffeebadc0ffeebadc0f' };
   const leasePath = writeLease(rootDir, {
     ...identity, status: 'dispatched', terminalOutcome: null,
-    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
 
   const recordPath = amaCloserDispatchFilePath(rootDir, identity);
@@ -581,8 +581,8 @@ test('reapStaleCloserLeases processes more than two opendir pages across watcher
       headSha: `lease${i}`,
       status: 'dispatched',
       terminalOutcome: null,
-      acquiredAt: hoursAgo(20),
-      updatedAt: hoursAgo(20),
+      acquiredAt: hoursAgo(30),
+      updatedAt: hoursAgo(30),
       watcherPid: 31337,
     });
     leaseNames.push(path.split('/').at(-1));
@@ -628,8 +628,8 @@ test('reapStaleCloserLeases does not advance cursor past unread JSON when read l
       headSha: `boundary${i}`,
       status: 'dispatched',
       terminalOutcome: null,
-      acquiredAt: hoursAgo(20),
-      updatedAt: hoursAgo(20),
+      acquiredAt: hoursAgo(30),
+      updatedAt: hoursAgo(30),
       watcherPid: 31337,
     });
     leaseNames.push(path.split('/').at(-1));
@@ -669,8 +669,8 @@ test('reapStaleCloserLeases handles insertion and deletion around the saved curs
       headSha: `mutate${name}`,
       status: 'dispatched',
       terminalOutcome: null,
-      acquiredAt: hoursAgo(20),
-      updatedAt: hoursAgo(20),
+      acquiredAt: hoursAgo(30),
+      updatedAt: hoursAgo(30),
       watcherPid: 31337,
     });
     paths.set(name, path);
@@ -697,8 +697,8 @@ test('reapStaleCloserLeases handles insertion and deletion around the saved curs
     headSha: 'mutateaa',
     status: 'dispatched',
     terminalOutcome: null,
-    acquiredAt: hoursAgo(20),
-    updatedAt: hoursAgo(20),
+    acquiredAt: hoursAgo(30),
+    updatedAt: hoursAgo(30),
     watcherPid: 31337,
   });
   rmSync(paths.get('c'), { force: true });
@@ -730,8 +730,8 @@ test('reapStaleCloserLeases resumes by saved position when the saved cursor targ
       headSha: `missing${i}`,
       status: 'dispatched',
       terminalOutcome: null,
-      acquiredAt: hoursAgo(20),
-      updatedAt: hoursAgo(20),
+      acquiredAt: hoursAgo(30),
+      updatedAt: hoursAgo(30),
       watcherPid: 31337,
     }));
   }
@@ -771,8 +771,8 @@ test('reapStaleCloserLeases retains only a bounded lexical page while scanning d
       headSha: `budget${i}`,
       status: 'dispatched',
       terminalOutcome: null,
-      acquiredAt: hoursAgo(20),
-      updatedAt: hoursAgo(20),
+      acquiredAt: hoursAgo(30),
+      updatedAt: hoursAgo(30),
       watcherPid: 31337,
     }));
   }
@@ -817,7 +817,7 @@ test('reapStaleCloserLeases advances beyond a persistently unreadable page', asy
   });
   const stalePath = writeLease(rootDir, {
     repo: 'acme/stale-ccc', prNumber: 3, headSha: 'stale', status: 'dispatched',
-    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    terminalOutcome: null, acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
   const listing = [
     join(dir, 'acme__aaa-broken-pr-1-bad.json'), freshPath, stalePath,
@@ -847,11 +847,11 @@ test('reapStaleCloserLeases continues when a discovered lease completes concurre
 
   const vanished = writeLease(rootDir, {
     repo: 'acme/concurrent-a', prNumber: 1, headSha: 'gone', status: 'dispatched',
-    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    terminalOutcome: null, acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
   const remaining = writeLease(rootDir, {
     repo: 'acme/concurrent-b', prNumber: 2, headSha: 'present', status: 'dispatched',
-    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+    terminalOutcome: null, acquiredAt: hoursAgo(30), updatedAt: hoursAgo(30), watcherPid: 31337,
   });
   const listing = [vanished, remaining].map((path) => path.split('/').at(-1));
   rmSync(vanished);
@@ -927,7 +927,7 @@ test('CLR-02 thresholds: dead-holder tier matches the 30m health surface; prune 
 
 test('selectReleasableCloserLeases: a provably-dead same-host holder releases at the short tier', () => {
   const lease = {
-    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,
     updatedAt: minutesAgo(45), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
   };
   const releasable = selectReleasableCloserLeases([lease], {
@@ -941,7 +941,7 @@ test('selectReleasableCloserLeases: a provably-dead same-host holder releases at
 
 test('selectReleasableCloserLeases: a LIVE same-host holder is never released at the short tier', () => {
   const lease = {
-    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,
     updatedAt: minutesAgo(45), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
   };
   const releasable = selectReleasableCloserLeases([lease], {
@@ -964,7 +964,7 @@ test('selectReleasableCloserLeases: a LIVE same-host holder is never released at
 
 test('selectReleasableCloserLeases: a lease younger than the dead-holder tier is never released', () => {
   const lease = {
-    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,
     updatedAt: minutesAgo(5), watcherPid: DEAD_PID, holderHost: THIS_HOST, _path: 'p1',
   };
   const releasable = selectReleasableCloserLeases([lease], {
@@ -978,7 +978,7 @@ test('selectReleasableCloserLeases: a lease younger than the dead-holder tier is
 
 test('selectReleasableCloserLeases: a dead pid on another host still waits the full floor', () => {
   const base = {
-    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,
     watcherPid: DEAD_PID, _path: 'p1',
   };
   const opts = {
@@ -998,7 +998,7 @@ test('selectReleasableCloserLeases: a dead pid on another host still waits the f
     'a pre-CLR-02 lease with no holderHost gets the floor, not the short tier',
   );
   assert.equal(
-    selectReleasableCloserLeases([{ ...base, updatedAt: hoursAgo(20), holderHost: 'some-other-host' }], opts).length,
+    selectReleasableCloserLeases([{ ...base, updatedAt: hoursAgo(30), holderHost: 'some-other-host' }], opts).length,
     1,
     'the 6h floor still reclaims it, exactly as before',
   );
@@ -1006,8 +1006,8 @@ test('selectReleasableCloserLeases: a dead pid on another host still waits the f
 
 test('selectReleasableCloserLeases: livePid guard is scoped to local or legacy leases', () => {
   const base = {
-    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null,
-    updatedAt: hoursAgo(20), watcherPid: process.pid,
+    repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'pending', terminalOutcome: null,
+    updatedAt: hoursAgo(30), watcherPid: process.pid,
   };
   const opts = {
     now: NOW,
@@ -1114,13 +1114,13 @@ test('reapStaleCloserLeases: dead same-host holder is reclaimed at 45m, live hol
 
   const deadHolder = writeLease(rootDir, {
     repo: 'acme/dead-holder', prNumber: 5910, headSha: 'aaa',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });
   const liveHolder = writeLease(rootDir, {
     repo: 'acme/live-holder', prNumber: 5911, headSha: 'bbb',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
     watcherPid: DEAD_PID + 1, holderHost: THIS_HOST,
   });
@@ -1142,7 +1142,7 @@ test('reapStaleCloserLeases: dead same-host holder is reclaimed at 45m, live hol
   t.after(() => rmSync(noProbeRoot, { recursive: true, force: true }));
   const unproven = writeLease(noProbeRoot, {
     repo: 'acme/unproven', prNumber: 5912, headSha: 'ccc',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });
@@ -1181,7 +1181,7 @@ test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a
   const orphanedMs = startupMs + 60_000;
   const orphaned = writeLease(rootDir, {
     repo: 'acme/orphaned-after-startup', prNumber: 5931, headSha: 'ddd',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: new Date(orphanedMs).toISOString(),
     updatedAt: new Date(orphanedMs).toISOString(),
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
@@ -1244,7 +1244,7 @@ test('createStaleStateReaperTicker never throws and never blocks a poll', async 
   // A real lease so the exploding liveness probe is actually reached.
   const lease = writeLease(rootDir, {
     repo: 'acme/probe-explodes', prNumber: 400, headSha: 'boom',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });
@@ -1340,7 +1340,7 @@ test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loo
 
   const startupOrphan = writeLease(rootDir, {
     repo: 'acme/startup-orphan', prNumber: 5910, headSha: 'eee',
-    status: 'dispatched', terminalOutcome: null,
+    status: 'pending', terminalOutcome: null,
     acquiredAt: minutesAgo(45), updatedAt: minutesAgo(45),
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });

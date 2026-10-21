@@ -116,6 +116,7 @@ import {
   isAmaCloserPidAlive as isPidAlive,
   isReclaimablePendingAmaCloserLease,
   isReclaimableDispatchedAmaCloserLease,
+  isReclaimableDispatchedAmaCloserLeaseAsync,
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
@@ -1038,7 +1039,7 @@ export function hammerScratchLeaseHeld(rootDir, record, options = {}) {
   // A different launch's live lease must never authorize predecessor removal.
   return lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
     && lease.lrqId !== record.launchRequestId
-    && !isReclaimableDispatchedAmaCloserLease(lease, options);
+    && !isReclaimableDispatchedAmaCloserLease(lease, { ...options, rootDir });
 }
 
 export function cleanupHammerScratchDir(record, logger = console, options = {}) {
@@ -5474,7 +5475,8 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
   if (!ownerProofRecovery && targetLeaseBeforeDispatch) {
-    if (isReclaimableDispatchedAmaCloserLease(targetLeaseBeforeDispatch, {
+    if (await isReclaimableDispatchedAmaCloserLeaseAsync(targetLeaseBeforeDispatch, {
+      rootDir, hqRoot, readLaunchRequestStatusImpl, signal,
       now: dispatchContext.dispatchedAt,
     })) {
       const terminalizedLease = {
@@ -5515,7 +5517,8 @@ async function maybeDispatchAmaCloserAttempt({
       });
     }
   }
-  if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+  if (await isReclaimableDispatchedAmaCloserLeaseAsync(existingLeaseBeforeDispatch, {
+    rootDir, hqRoot, readLaunchRequestStatusImpl, signal,
     now: dispatchContext.dispatchedAt,
   })) {
     const terminalizedLease = {
@@ -5871,9 +5874,10 @@ async function maybeDispatchAmaCloserAttempt({
         // an exit without close from an OPEN PR whose merge may be queued.
         && !(mergedSignalUnknown && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
           && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
-          && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
+          && !(await isReclaimableDispatchedAmaCloserLeaseAsync(terminalSuccessHoldLease, {
+            rootDir, hqRoot, readLaunchRequestStatusImpl, signal,
             now: dispatchContext.dispatchedAt,
-          }))
+          })))
       ) {
         const terminalLivePr = await probeAmaLivePrForMergeDispatch({
           dispatchContext,
@@ -6344,9 +6348,10 @@ async function maybeDispatchAmaCloserAttempt({
         && mergedSignalUnknown
         && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
         && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
-        && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
+        && !(await isReclaimableDispatchedAmaCloserLeaseAsync(terminalSuccessHoldLease, {
+          rootDir, hqRoot, readLaunchRequestStatusImpl, signal,
           now: dispatchContext.dispatchedAt,
-        })
+        }))
       ) {
         updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),

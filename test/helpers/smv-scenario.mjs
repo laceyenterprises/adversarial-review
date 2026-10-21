@@ -62,6 +62,19 @@ if (scenario === 'clean') {
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true };
 } else if (scenario === 'handoff') {
+  const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
+    AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');
+  const leaseClock = Date.parse('2026-10-01T12:00:00Z');
+  const agedLease = { status: 'dispatched', lrqId: 'synthetic-live',
+    updatedAt: new Date(leaseClock - 45 * 60_000).toISOString() };
+  assert.equal(reclaimLease(agedLease, { now: leaseClock,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }) }), false);
+  assert.equal(reclaimLease(agedLease, { now: leaseClock,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) }), true);
+  assert.equal(reclaimLease({ ...agedLease, lrqId: null }, { now: leaseClock }), false);
+  assert.equal(reclaimLease({ ...agedLease, lrqId: null,
+    updatedAt: new Date(leaseClock - fallbackMs).toISOString() }, { now: leaseClock }), true);
+
   const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref)
     VALUES (?,?,'2026-01-01','gemini','pending',?)`).run(repo, prNumber, headSha);

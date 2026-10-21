@@ -15,7 +15,8 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
   waitExhausted = false, primaryChange = null, reviewCeilingReached = false,
   diffEmpty = false, followUpJob = null, strictMode = true, strictNonBlockingRemediation = true,
-  ciBlockedHammerOwner = false, now = null, processKillImpl = process.kill } = {}) {
+  ciBlockedHammerOwner = false, now = null, processKillImpl = process.kill,
+  rootDir = null, launchStatusProbe, readLaunchRequestStatusImpl } = {}) {
   const action = (owner, reason, extra = {}) => ({ owner, reason, ...extra });
   if (diffEmpty) return action('close', 'empty-diff');
   if (primaryChange) {
@@ -27,7 +28,7 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   }
   // Reclaimability is shared with dispatch; only acquisition mutates the lease.
   if (isReclaimablePendingAmaCloserLease(lease, { now, processKillImpl })
-    || isReclaimableDispatchedAmaCloserLease(lease, { now })) lease = null;
+    || isReclaimableDispatchedAmaCloserLease(lease, { now, rootDir, launchStatusProbe, readLaunchRequestStatusImpl })) lease = null;
   if (lease && ['pending', 'dispatched'].includes(lease.status)) {
     return waitExhausted
       ? action('page', 'in-flight-lease-expired')

@@ -886,8 +886,15 @@ whose pending reclaim window expired, using the same predicates as closer dispat
 PID probes require a matching `holderHost` or a legacy hostless lease; foreign
 hosts use only age expiry. Both reclaim predicates accept ISO time or numeric
 epoch milliseconds (including zero) for `now`.
-Dispatched leases retain their existing age/outcome rule, including sticky
-success. Live pending leases still wait and page at the existing bound.
+LEASELIVE-01: dispatched leases retain a recorded in-flight launch at any age,
+using the same launch-status check as closure ownership, including live retries.
+Known-terminal launches retain the 30-minute age/outcome rule and sticky success.
+Missing launch IDs or unreadable status use the existing worker execution timeout
+schema ceiling (24 hours) plus a 30-minute margin. Dispatch, periodic reclamation,
+closure arbitration and remediation exclusion share this rule. Dead watcher PIDs
+only shorten pending-lease recovery. Offline launch fixtures cover both dispatch
+sites and the periodic reaper. After deployment, a running launch older than
+30 minutes must retain its lease without another closer being dispatched. Live pending leases still wait and page at the existing bound.
 The next evaluation routes a reclaimable lease through ordinary arbitration;
 the acquisition path owns reclamation. The offline `ci-blocked` smoke verifies
 dead-watcher final comment findings route to hammer, live watchers wait, foreign
@@ -1291,7 +1298,7 @@ stateDiagram-v2
     s2 --> s0: closer-lease.07 review completed; locked reclaim
     s2 --> s3: closer-lease.08 external terminal outcome
     s0 --> [*]: closer-lease.09 expired pending lease reclaimed
-    s1 --> [*]: closer-lease.10 expired dispatched lease reconciled
+    s1 --> [*]: closer-lease.10 terminal launch aged out or unknown launch exceeded execution ceiling plus margin; live launch retained
     s3 --> [*]
 ```
 

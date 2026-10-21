@@ -5365,8 +5365,10 @@ for (const scenario of [
   { name: 'pending lease', pending: true, claimed: false },
   { name: 'terminal merged run', status: 'succeeded', merged: true, claimed: true, outcome: 'succeeded' },
   { name: 'terminal rekeyed merged run', status: 'succeeded', rekeyed: true, merged: true, claimed: true, outcome: 'succeeded' },
-  { name: 'expired success hold', status: 'succeeded', old: true, claimed: true },
-  { name: 'old lease with no terminal report', status: 'running', old: true, claimed: true },
+  { name: 'old success with unreadable PR evidence', status: 'succeeded', old: true, claimed: false },
+  { name: 'old open success after settle delay', status: 'succeeded', old: true, liveState: 'OPEN', age: 61, claimed: true, outcome: 'failed-without-merge' },
+  { name: 'old failed run', status: 'failed', old: true, claimed: true, outcome: 'failed-without-merge' },
+  { name: 'old running lease with no terminal report', status: 'running', old: true, claimed: false },
 ]) {
   test(`CLOSERLEASE-01: follow-up claims with ${scenario.name}`, t => {
     const rootDir = makeTempRoot(t);

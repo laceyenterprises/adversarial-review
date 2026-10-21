@@ -1101,10 +1101,11 @@ Key control points:
   Leading range lists stop before explanatory notes; numbers in prose or symbol
   suffixes supply no coverage. Legacy symbol-qualified entries require a complete
   parenthesized numeric list, optionally prefixed by `post-diff`. Harness diff-line
-  indices supply no file-line coverage, with or without a side annotation. Unreadable coordinates
-  allow file-level coverage only for the matching file's reviewed changed segment,
-  with the same HAM patch/content and provenance proofs. Other unreadable text
-  remains a refusal with that text in the reason.
+  indices supply no file-line coverage, with or without a side annotation.
+  Unreadable, missing or `unknown` coordinates refuse reversal authority; there
+  is no file-level fallback. `L`/`line`/`lines` prefixes, matching file-path
+  prefixes and `10..11` retain precise line coverage. Inputs over 512 characters
+  are refused before regex parsing; unreadable text is in the bounded reason.
   All three evaluators receive the effective policy: closure eligibility
   (`bin/ama-check.mjs`), daemon pre-lease and in-lease merge checks, and the hammer's
   in-lease GitHub gate (`bin/hammer-merge.sh`). The hammer gate reloads the same

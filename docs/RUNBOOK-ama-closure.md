@@ -2433,14 +2433,13 @@ In harness output `N (RIGHT side, diff line M)`, only `N` cites a file line;
 `M` is metadata, including when the annotation omits `RIGHT side,` or uses
 `RIGHT,` instead.
 New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
-If no file-line number is readable, file-level coverage requires a matching
-finding file and a region inside that file's reviewed changed segment. The
-segment lookup uses half-open merge-base spans and the original pre-rename path;
-the finding file is compared to the reviewed head's resolved filename. Head line
-shifts and renames do not change those segment lookup coordinates. The HAM
-patch must still prove coverage of that region's parent-state content. Otherwise
-the refusal names the unreadable `Lines:` text. Invalid numeric ranges still
-refuse authorization. All identity, ancestry, reviewed-head, worker-ticket,
+Unreadable, missing or `unknown` coordinates refuse reversal authority; there is
+no file-level fallback. Precise `L10-L11`, `line 10`, `lines 10-11`, `#L10`,
+`10..11` and matching `File:` path-prefixed ranges retain line-level coverage.
+Inputs over 512 characters are refused before parsing, rather than truncated
+into a potentially authorizing prefix. Invalid numeric ranges also refuse
+authorization. The refusal includes the unreadable `Lines:` text (bounded).
+All identity, ancestry, reviewed-head, worker-ticket,
 original-authorization and segment/content proofs remain required.
 API-published HAM commits with GitHub's `web-flow` committer retain the shared
 identity requirement: a linked HAM author and `verified: true` / `reason: valid`.

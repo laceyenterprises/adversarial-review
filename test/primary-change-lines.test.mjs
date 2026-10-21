@@ -8,7 +8,8 @@ import { __test__ as harness } from '../src/reviewer-harness.mjs';
 const head = 'c'.repeat(40);
 
 async function reversal(lines, { single = false, file = 'src/a.mjs', rebased = true } = {}) {
-  const body = review().body.replace('`10-11`', lines).replace('`src/a.mjs`', `\`${file}\``);
+  let body = review().body.replace('`10-11`', lines ?? '').replace('`src/a.mjs`', `\`${file}\``);
+  if (lines === undefined) body = body.replace(/  - \*\*Lines:\*\*.*\n/, '');
   const { evidence } = await collect({ reviews: [review({ body })],
     ...(rebased ? {} : { shift: 0 }) });
   if (!rebased) evidence.reversalAuthorizations[0].rebased = false;
@@ -35,6 +36,7 @@ function refused(evidence, reason) {
 }
 
 for (const lines of [
+  'L10-L11', 'lines 10-11', 'line 10-11', 'src/a.mjs:10-11', '10..11',
   '10-11', '`10-11`', '10–11', '`~10-11`', '~10–11',
   '2-4; 10-11; 30-40', '2-4, 10-11, 30-40',
   '`_budget_step` (post-diff ~30-40); `run_budget` re-raise (~10-11); `run_phase` (~50-60)',
@@ -57,7 +59,7 @@ for (const lines of [
   });
 }
 
-for (const lines of ['10', '`10`', '~10', '10: bug', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)',
+for (const lines of ['L10', '#L10', 'line 10', 'src/a.mjs:10', '10', '`10`', '~10', '10: bug', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)',
   '10 (diff line 90)', '10 (RIGHT, diff line 90)', '10 (diff lines 90-100)']) {
   test(`HAMLINES-01: single file-line citation authorizes a single-line reversal: ${lines}`, async () => {
     assert.equal(checkPrimaryChange(await reversal(lines, { single: true }), head).ok, true);
@@ -106,51 +108,54 @@ test('HAMLINES-01: invalid ranges remain rejected', async () => {
   }
 });
 
-test('HAMLINES-01: unreadable lines allow only the matching reviewed changed code', async () => {
+test('HAMLINES-01: unreadable and oversized coordinates refuse reversal authority', async () => {
   for (const rebased of [false, true]) {
-    const result = checkPrimaryChange(await reversal('unknown', { rebased }), head);
-    assert.equal(result.ok, true, JSON.stringify({ rebased, result }));
-    refused(await reversal('unknown', { file: 'src/other.mjs', rebased }),
-      'finding-lines-unreadable: "unknown"');
-  }
-  const evidence = await reversal('unknown', { rebased: false });
-  evidence.reversalAuthorizations[0].reviewedFiles = [];
-  refused(evidence, 'finding-lines-unreadable: "unknown"');
-});
-
-test('HAMLINES-01: unreadable fallback uses base spans and original paths across head shifts and renames', async () => {
-  const prefix = '@@ -0,0 +1,5 @@\n+one()\n+two()\n+three()\n+four()\n+five()';
-  for (const rebased of [false, true]) {
-    for (const renamed of [false, true]) {
-      const evidence = await reversal('unknown', { rebased });
-      const authorization = evidence.reversalAuthorizations[0];
-      const filename = renamed ? 'src/renamed.mjs' : 'src/a.mjs';
-      const metadata = { filename, status: renamed ? 'renamed' : 'modified',
-        ...(renamed ? { previous_filename: 'src/a.mjs' } : {}) };
-      for (const files of new Set([evidence.primaryFiles, authorization.parentFiles, authorization.reviewedFiles])) {
-        const file = files[0];
-        Object.assign(file, metadata, { additions: file.additions + 5,
-          patch: `${prefix}\n${file.patch.replace(/(\+)(\d+)(,2 @@)/, (_, plus, line, suffix) =>
-            `${plus}${Number(line) + 5}${suffix}`)}` });
-      }
-      evidence.finalFiles = [{ ...metadata, additions: 5, deletions: 0, patch: prefix }];
-      const file = authorization.commit.files[0];
-      file.filename = filename;
-      file.patch = file.patch.replace(/@@ -(\d+),2 \+(\d+) @@/, (_, old, next) =>
-        `@@ -${Number(old) + 5},2 +${Number(next) + 5} @@`);
-      authorization.review.body = authorization.review.body.replace('`src/a.mjs`', `\`${filename}\``);
-      // The changed base unit is half-open (10..11, or 15..16 after a
-      // rebase). Its inclusive reviewed head span is 15..16. Segment lookup
-      // must use the base unit and the pre-rename path, not that head span.
-      assert.equal(checkPrimaryChange(evidence, head).ok, true, JSON.stringify({ rebased, renamed }));
-      authorization.review.body = authorization.review.body.replace(`\`${filename}\``, '`src/other.mjs`');
-      refused(evidence, 'finding-lines-unreadable: "unknown"');
+    for (const lines of ['unknown', 'N/A', 'entire function', '', undefined,
+      'unknown (RIGHT side, diff line 10)', 'src/other.mjs:10-11',
+      'a'.repeat(50000), ' '.repeat(50000), `10-11; ${'x'.repeat(512)}; 0`]) {
+      refused(await reversal(lines, { rebased }),
+        `finding-lines-unreadable: ${JSON.stringify(String(lines || '').trim().slice(0, 200))}`);
     }
   }
 });
 
-test('HAMLINES-01: file-level fallback retains the HAM content coverage proof', async () => {
-  const evidence = await reversal('unknown');
+test('HAMLINES-01: a citation never authorizes a second uncited segment in the same file', async () => {
+  const retained = '@@ -10 +10 @@\n-safe()\n+fixed()';
+  for (const lines of ['10', 'L10', '#L10', 'lines 10-11', 'src/a.mjs:10-11',
+    '10..11', 'unknown', '', undefined]) {
+    for (const rebased of [false, true]) {
+      const evidence = await reversal(lines, { rebased });
+      const authorization = evidence.reversalAuthorizations[0];
+      // Two changed segments: HAM keeps line 10 and reverts line 300.
+      for (const files of new Set([evidence.primaryFiles, authorization.reviewedFiles,
+        authorization.parentFiles, authorization.commit.files])) {
+        const file = files[0];
+        file.patch = file.patch.replace(/@@ -(\d+)(,?\d*) \+(\d+)(,?\d*) @@/g,
+          (_, old, oldCount, next, nextCount) =>
+            `@@ -${Number(old) + 290}${oldCount} +${Number(next) + 290}${nextCount} @@`);
+        if (files !== authorization.commit.files) {
+          file.patch = `${retained}\n${file.patch}`;
+          file.additions++;
+          file.deletions++;
+        }
+      }
+      evidence.finalFiles = [{ filename: 'src/a.mjs', status: 'modified',
+        additions: 1, deletions: 1, patch: retained }];
+      // A correct citation must succeed, so refusal cannot be a broken fixture.
+      const originalBody = authorization.review.body;
+      authorization.review = { ...authorization.review,
+        body: review().body.replace('`10-11`', '`300-301`') };
+      assert.equal(checkPrimaryChange(evidence, head).ok, true);
+      authorization.review = { ...authorization.review, body: originalBody };
+      refused(evidence, ['unknown', '', undefined].includes(lines)
+        ? `finding-lines-unreadable: ${JSON.stringify(lines || '')}`
+        : 'not-covered-by-cited-finding');
+    }
+  }
+});
+
+test('HAMLINES-01: precise citations retain the HAM content coverage proof', async () => {
+  const evidence = await reversal('10-11');
   evidence.reversalAuthorizations[0].commit.files[0].patch = '@@ -15,2 +15 @@\n-start_unsafe()\n+start()\n log_startup()';
   evidence.reversalAuthorizations[0].commit.files[0].deletions = 1;
   refused(evidence, 'hammer-patch-does-not-touch-region');

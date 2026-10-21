@@ -529,7 +529,10 @@ test('reconcileProactivePhantomHandoffs starts grace for a terminal current-head
     }],
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     ghExecFileImpl: async () => {
       throw new Error('grace start should not post or label');
     },
@@ -604,7 +607,10 @@ test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the l
     }],
     runtimeEnv: { HQ_ROOT: hqRoot, GHA_ADAPTER_BIN: '/test/github-adapter' },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     ghExecFileImpl: async (cmd, args) => {
       if (args[0] === 'api') return { stdout: '' };
       if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
@@ -663,7 +669,10 @@ test('reconcileProactivePhantomHandoffs respects merge-agent-recovery-in-flight 
     }],
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     // Recovery label was added 10 minutes before NOW — well under the
     // 120-min ceiling. The watcher must suppress the grace timer.
     ghExecFileImpl: stubGhExecFileForLabelLookup({
@@ -718,7 +727,10 @@ test('reconcileProactivePhantomHandoffs escalates past recovery-in-flight after 
     }],
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     // Label was added 121min before NOW — 1 min past the ceiling.
     ghExecFileImpl: stubGhExecFileForLabelLookup({
       headSha: 'aaaa11112222333344445555666677778888aaaa',
@@ -764,7 +776,10 @@ test('reconcileProactivePhantomHandoffs suppresses grace even when original disp
     }],
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     // Recovery label was added 5 minutes ago — the recovery worker is
     // alive and working. Old (broken) logic would have escalated
     // because dispatched-at age = 180min > 120min ceiling.
@@ -810,7 +825,10 @@ test('reconcileProactivePhantomHandoffs falls through to grace when the recovery
     }],
     runtimeEnv: { HQ_ROOT: hqRoot },
     hqPath: '/bin/hq-unused',
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
+    execFileImpl: async (_command, args) => {
+      assert.ok(args.includes('--json'));
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
     // gh fails for ALL invocations — both the label-event lookup
     // AND the grace-path label/comment delivery.
     ghExecFileImpl: async () => {

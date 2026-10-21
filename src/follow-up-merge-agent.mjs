@@ -1,3 +1,4 @@
+import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
@@ -804,8 +805,8 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
   // watcher runs as a different account — without it the probe is blind to its
   // own worker. It's a read; HQ filesystem perms already gate cross-account.
   const args = asOwner
-    ? ['dispatch', 'status', lrq, '--as-owner', asOwner]
-    : ['dispatch', 'status', lrq];
+    ? ['dispatch', 'status', lrq, '--json', '--as-owner', asOwner]
+    : ['dispatch', 'status', lrq, '--json'];
   let result;
   try {
     result = observeSynchronousChild('hq', () => spawnSync(hqPath, args, {
@@ -831,10 +832,9 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
     return null;
   }
   const stdout = String(result.stdout || '').trim();
-  if (!stdout) return null;
   let parsed;
   try {
-    parsed = JSON.parse(stdout);
+    parsed = parseHqDispatchStatusOutput(stdout, args, JSON.parse, logger);
   } catch {
     return null;
   }
@@ -857,15 +857,15 @@ async function probeDispatchStatusViaHq({
   // _probeDispatchStatusViaHq). Without it the placey watcher gets "no dispatch
   // with id" for its airlock-owned merge-agent and can never see `failed`.
   const args = asOwner
-    ? ['dispatch', 'status', lrq, '--as-owner', asOwner]
-    : ['dispatch', 'status', lrq];
+    ? ['dispatch', 'status', lrq, '--json', '--as-owner', asOwner]
+    : ['dispatch', 'status', lrq, '--json'];
   try {
     const { stdout } = await execFileImpl(hqPath, args, {
       env: { ...env },
       maxBuffer: 1024 * 1024,
       timeout: 5_000,
     });
-    const parsed = JSON.parse(String(stdout || '{}'));
+    const parsed = parseHqDispatchStatusOutput(String(stdout || '').trim(), args, JSON.parse, logger);
     const status = typeof parsed?.status === 'string'
       ? parsed.status.trim().toLowerCase()
       : null;
@@ -1084,6 +1084,7 @@ function scanStuckMergeAgentDispatches({
   runtimeEnv = process.env,
   dispatchStateProbe = null,
   listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
+  logger = console,
 } = {}) {
   if (!hqRoot) return [];
   let lifecycleCleanups = [];
@@ -1119,6 +1120,7 @@ function scanStuckMergeAgentDispatches({
               lrq: lrqArg,
               asOwner: resolveHqOwner(hqRoot)?.ownerUser || null,
               env: runtimeEnv,
+              logger,
             })
           : null
       ),
@@ -1220,6 +1222,7 @@ async function reconcileProactivePhantomHandoffs({
       asOwner: statusProbeAsOwner,
       execFileImpl,
       env: runtimeEnv,
+      logger,
     });
     if (!isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) continue;
     inspected += 1;
@@ -2196,6 +2199,7 @@ async function dispatchMergeAgentForPR({
         asOwner: statusProbeAsOwner,
         execFileImpl,
         env: runtimeEnv,
+        logger,
       })
     : null;
   let latestRecordedDispatch = recordedDispatch;
@@ -2425,7 +2429,7 @@ async function dispatchMergeAgentForPR({
       });
       if (stuckDetail && hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)) {
         const statusProbe = await probeDispatchStatusViaHq({ hqPath, lrq: latestRecordedDispatch.launchRequestId,
-          asOwner: statusProbeAsOwner, execFileImpl, env: runtimeEnv });
+          asOwner: statusProbeAsOwner, execFileImpl, env: runtimeEnv, logger });
         if (_NON_STUCK_DISPATCH_STATUSES.has(statusProbe?.status)) stuckDetail = null;
       }
       if (stuckDetail) {

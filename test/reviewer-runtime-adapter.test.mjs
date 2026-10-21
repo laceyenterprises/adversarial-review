@@ -392,6 +392,7 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
           };
         }
         if (args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
         }
         throw new Error(`unexpected hq call: ${args.join(' ')}`);
@@ -432,7 +433,7 @@ test('agent-os-hq dispatches via hq with artifact completion and stripped fallba
     assert.equal(calls[0].env.HQ_ROOT, hqRoot);
     assert.equal(calls[0].env.HQ_PARENT_SESSION, TEST_HQ_PARENT_SESSION);
     assert.equal(calls[0].env.HQ_PROJECT, TEST_HQ_PROJECT);
-    assert.deepEqual(calls[1].args, ['dispatch', 'status', 'lrq_lac_566', '--root', hqRoot]);
+    assert.deepEqual(calls[1].args, ['dispatch', 'status', 'lrq_lac_566', '--json', '--root', hqRoot]);
     assert.equal(Object.hasOwn(calls[1].env, 'OPENAI_API_KEY'), false);
     assert.equal(Object.hasOwn(calls[1].env, 'ANTHROPIC_API_KEY'), false);
     const record = readReviewerRunRecord(rootDir, 'agent-hq-dispatch-session');
@@ -677,6 +678,7 @@ test('agent-os-hq polling uses 30s cadence plus jitter', async () => {
         if (args[0] === 'dispatch' && args[1] !== 'status') {
           return { stdout: JSON.stringify({ launchRequestId: 'lrq_polling' }), stderr: '' };
         }
+        assert.ok(args.includes('--json'));
         statusCount += 1;
         if (statusCount < 3) {
           return { stdout: JSON.stringify({ status: 'running', health: 'ok', lastProgressAt: `t${statusCount}` }), stderr: '' };
@@ -718,6 +720,7 @@ test('agent-os-hq sustained lease_expired is surfaced with trace guidance', asyn
         if (args[0] === 'dispatch' && args[1] !== 'status') {
           return { stdout: JSON.stringify({ launchRequestId: 'lrq_lease_expired' }), stderr: '' };
         }
+        assert.ok(args.includes('--json'));
         return {
           stdout: JSON.stringify({
             status: 'running',
@@ -764,6 +767,7 @@ test('agent-os-hq recovers a valid review from durable dispatch stdout when arti
           );
           return { stdout: JSON.stringify({ launchRequestId: 'lrq_stdout_fallback' }), stderr: '' };
         }
+        assert.ok(args.includes('--json'));
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
       },
     });
@@ -807,6 +811,7 @@ test('agent-os-hq validates missing and malformed artifacts', async () => {
           }
           return { stdout: JSON.stringify({ launchRequestId: 'lrq_bad_artifact' }), stderr: '' };
         }
+        assert.ok(args.includes('--json'));
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
       },
     });
@@ -858,6 +863,7 @@ test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async 
           return { stdout: JSON.stringify({ launchRequestId: 'lrq_timeout' }), stderr: '' };
         }
         if (args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return { stdout: JSON.stringify({ status: 'running', health: 'ok' }), stderr: '' };
         }
         if (args[0] === 'dispatch' && args[1] === 'cancel') {
@@ -881,8 +887,8 @@ test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async 
     const timeoutPromptArg = calls[0].args[calls[0].args.indexOf('--prompt') + 1];
     assert.deepEqual(calls.map(({ args }) => args), [
       ['dispatch', '--ticket', 'LAC-566', '--worker-class', 'codex', '--prompt', timeoutPromptArg, '--completion-shape', 'artifact', '--parent-session', TEST_HQ_PARENT_SESSION, '--project', TEST_HQ_PROJECT, '--task-kind', 'analysis', '--root', hqRoot],
-      ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
-      ['dispatch', 'status', 'lrq_timeout', '--root', hqRoot],
+      ['dispatch', 'status', 'lrq_timeout', '--json', '--root', hqRoot],
+      ['dispatch', 'status', 'lrq_timeout', '--json', '--root', hqRoot],
       ['dispatch', 'cancel', 'lrq_timeout', '--root', hqRoot],
     ]);
     assert.equal(calls[0].timeout, 50_000);
@@ -957,7 +963,7 @@ test('agent-os-hq reattaches by polling persisted launch request id', async () =
       hqBin: '/bin/hq',
       env: makeHqEnv(hqRoot),
       execFileImpl: async (_command, args) => {
-        assert.deepEqual(args, ['dispatch', 'status', 'lrq_reattach', '--root', hqRoot]);
+        assert.deepEqual(args, ['dispatch', 'status', 'lrq_reattach', '--json', '--root', hqRoot]);
         return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
       },
     });

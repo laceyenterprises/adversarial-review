@@ -7651,6 +7651,7 @@ test('reconcileFollowUpJob reaps over-cap HQ remediators when dispatch status is
     execFileImpl: async (_cmd, args) => {
       calls.push(args);
       if (args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         const err = new Error('hq dispatch status unavailable');
         err.stderr = 'launch daemon down';
         throw err;
@@ -8192,6 +8193,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
             };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'queued',
@@ -8583,6 +8585,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
             };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'queued',
@@ -8669,6 +8672,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       now: () => '2026-04-21T10:10:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
               status: 'running',
@@ -8694,6 +8698,7 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
               status: 'succeeded',
@@ -8851,6 +8856,7 @@ test('health.worker.terminal succeeded topic waits for durable reply before trea
     now: () => '2026-04-21T10:25:00.000Z',
     execFileImpl: async (command, args) => {
       if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusPolls += 1;
         return {
           stdout: JSON.stringify({
@@ -8911,6 +8917,7 @@ test('health.worker.terminal failed topic event polls HQ status when failureClas
     now: () => '2026-04-21T10:25:00.000Z',
     execFileImpl: async (command, args) => {
       if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusPolls += 1;
         return {
           stdout: JSON.stringify({
@@ -9230,6 +9237,7 @@ test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch s
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
               status: 'failed',
@@ -9304,6 +9312,7 @@ test('reconcileFollowUpJob fails HQ transient dispatches once the retry budget i
         now: () => '2026-04-21T10:25:00.000Z',
         execFileImpl: async (command, args) => {
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'failed',
@@ -9374,6 +9383,7 @@ test('reconcileFollowUpJob still terminalizes non-transient HQ dispatch failures
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
               status: 'failed',
@@ -9436,6 +9446,7 @@ test('reconcileFollowUpJob resolves the HQ workspace from dispatch status when t
       now: () => '2026-04-21T10:25:00.000Z',
       execFileImpl: async (command, args) => {
         if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.ok(args.includes('--json'), 'status probes must request JSON');
           return {
             stdout: JSON.stringify({
               status: 'succeeded',
@@ -9583,6 +9594,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
             };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'queued',
@@ -9643,6 +9655,7 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
     const execFileImpl = async (command, args) => {
       commands.push([command, ...args]);
       if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return {
           stdout: JSON.stringify({
             status: 'queued',
@@ -10178,6 +10191,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
             };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'queued',
@@ -10312,6 +10326,7 @@ test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR l
     execFileImpl: async (command, args) => {
       commands.push([command, ...args]);
       if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
       }
       if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'cancel') {
@@ -10597,6 +10612,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
             };
           }
           if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+            assert.ok(args.includes('--json'), 'status probes must request JSON');
             return {
               stdout: JSON.stringify({
                 status: 'queued',

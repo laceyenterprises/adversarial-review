@@ -117,6 +117,7 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusCalls.push(args);
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
@@ -153,6 +154,7 @@ test('phantom completion: re-dispatches a terminal succeeded worker when PR is s
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'succeeded' }) };
       }
       dispatchCalls.push(args);
@@ -202,6 +204,7 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusCalls.push(args);
         return { stdout: '{}' };
       }
@@ -254,6 +257,7 @@ test('terminal succeeded dispatch younger than stuck threshold is not re-actione
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'succeeded' }) };
       }
       dispatchCalls.push(args);
@@ -281,6 +285,7 @@ test('non-terminal running dispatch with marker is not re-actioned', async () =>
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'running' }) };
       }
       dispatchCalls.push(args);
@@ -309,6 +314,7 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);
@@ -350,6 +356,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);
@@ -374,6 +381,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);
@@ -418,6 +426,7 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -434,6 +443,7 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -476,6 +486,7 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -511,6 +522,7 @@ test('phantom handoff persists owed comment before label add and later converges
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -527,6 +539,7 @@ test('phantom handoff persists owed comment before label add and later converges
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -561,6 +574,7 @@ test('phantom handoff persists owed comment before label add and later converges
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -605,6 +619,7 @@ test('phantom handoff is idempotent: does not re-escalate when merge-agent-stuck
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -635,6 +650,7 @@ test('bounded: at the re-dispatch bound, hands off to operator via merge-agent-s
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);
@@ -666,6 +682,7 @@ test('not-found dispatch (reaped) is treated as re-dispatchable under watcher ow
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         // mirror `hq dispatch status` for a reaped id: exit 1 + not-found stderr
         const err = new Error('Command failed');
         err.code = 1;
@@ -698,6 +715,7 @@ test('not-found fails closed when HQ owner resolution degraded and --as-owner ca
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         const err = new Error('Command failed');
         err.code = 1;
         err.stderr = '[hq] no dispatch with id: lrq_94ae724b-9546-4e0c-afd3-a752304a1138 (or owned by another account)\n';
@@ -747,6 +765,7 @@ test('failed worker is still reclaimed when dispatched-label add cleanup is pend
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);
@@ -793,6 +812,7 @@ test('malformed dispatched-label cleanup state fails closed into watcher recover
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
+        assert.ok(args.includes('--json'), 'status probes must request JSON');
         return { stdout: JSON.stringify({ status: 'failed' }) };
       }
       dispatchCalls.push(args);

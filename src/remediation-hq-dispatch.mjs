@@ -1,3 +1,4 @@
+import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { parseHqJsonObject, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
 import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from './producer-contracts/launch-status.mjs';
 // Remediation HQ dispatch status/cancel helpers.
@@ -164,6 +165,7 @@ function classifyHqDispatchFailure(dispatchStatus = {}) {
 
 async function resolveHqWorkerWorkspace({
   worker,
+  logger = console,
   execFileImpl = execFileAsync,
   env = process.env,
 } = {}) {
@@ -177,20 +179,22 @@ async function resolveHqWorkerWorkspace({
     return null;
   }
   const hqBin = resolveHqBin(env);
-  const { stdout } = await execFileImpl(hqBin, [
+  const args = [
     'dispatch',
     'status',
     dispatchId,
+    '--json',
     '--root',
     hqRoot,
-  ], {
+  ];
+  const { stdout } = await execFileImpl(hqBin, args, {
     env: {
       ...env,
       HQ_ROOT: hqRoot,
     },
     maxBuffer: 5 * 1024 * 1024,
   });
-  return parseHqDispatchWorkspaceStatus(stdout).workspaceDir;
+  return parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir;
 }
 
 function isHqCancelRetryable(err) {

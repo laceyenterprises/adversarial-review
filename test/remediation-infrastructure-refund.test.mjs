@@ -93,7 +93,10 @@ for (const terminal of [
       } });
       const comments = [];
       const result = await reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
-        execFileImpl: async () => ({ stdout: JSON.stringify({ ...terminal, workspacePath: workspaceDir }) }),
+        execFileImpl: async (_command, args) => {
+          assert.ok(args.includes('--json'));
+          return { stdout: JSON.stringify({ ...terminal, workspacePath: workspaceDir }) };
+        },
         resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
         auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
         inspectRemediationCiRegressionImpl: async () => ({ state: 'green', conclusion: 'SUCCESS',
@@ -131,7 +134,10 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
       const comments = [];
       const reconcile = () => reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
         isWorkerRunning: () => false,
-        execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed', failureReason: reason }) }),
+        execFileImpl: async (_command, args) => {
+          assert.ok(args.includes('--json'));
+          return { stdout: JSON.stringify({ status: 'failed', failureReason: reason }) };
+        },
         resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
         postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false, error: 'offline fixture' }; },
         log: { log() {}, warn() {}, error() {} },
@@ -215,7 +221,8 @@ test('failed infrastructure terminal events confirm HQ status before settling, i
       let polls = 0;
       const result = await assessWorkerLivenessDetailed(job, {
         workerTerminalEvent: { lrq: 'lrq_fixture', status: 'failed', recoveryAttempt: 1, ...outcome },
-        execFileImpl: async () => {
+        execFileImpl: async (_command, args) => {
+          assert.ok(args.includes('--json'));
           polls += 1;
           return { stdout: JSON.stringify({ status, ...outcome }) };
         },
@@ -274,6 +281,7 @@ for (const declined of ['cap-used', 'already-refunded', 'unknown-live-head']) {
       const result = await reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
         execFileImpl: async (_cmd, args) => {
           assert.deepEqual(args.slice(0, 3), ['dispatch', 'status', 'fixture']);
+          assert.ok(args.includes('--json'));
           return { stdout: JSON.stringify({ status: 'failed', failureClass: 'daemon_bounced', exitCode: 143,
             failureReason: 'publish-blocked' }) };
         },

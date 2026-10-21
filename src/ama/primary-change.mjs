@@ -321,23 +321,29 @@ function contentIdentity(lines) {
   return JSON.stringify([...lineMultiset(lines)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
 }
 
+function segmentContentIdentity(segment) {
+  return segment.changedIdentity ??= contentIdentity(segment.lines);
+}
+
 function protectedSegment(files, path, region, cache) {
   return patchSegments(files, path, cache).segments.find(entry =>
     region.start === region.end ? entry.old === region.start && entry.oldEnd === region.end
       : entry.old <= region.start && region.end <= entry.oldEnd && entry.old < entry.oldEnd);
 }
 
-function rebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
-  const primarySegments = patchSegments(primaryFiles, path, cache).segments;
-  const segment = protectedSegment(primaryFiles, path, region, cache);
-  if (!segment) throw new Error('protected region outside the primary patch');
+function rebasedRegion(parentFiles, reviewedFiles, path, region, cache) {
+  // REVAUTHVERIFY-01: the parent and primary use the same merge-base lines.
+  // Select the protected lines there, then match their *parent-state* segment
+  // to the reviewed patch. Earlier HAM repairs need not retain author text.
+  const parentSegments = patchSegments(parentFiles, path, cache).segments;
+  const segment = protectedSegment(parentFiles, path, region, cache);
+  if (!segment) throw new Error('region-moved');
   const removed = entry => entry.removals ??= entry.lines.filter(line => line.startsWith('-'));
-  const identity = entry => entry.changedIdentity ??= contentIdentity(entry.lines);
-  const sameContent = entry => identity(entry) === identity(segment);
+  const sameContent = entry => segmentContentIdentity(entry) === segmentContentIdentity(segment);
   const matches = patchSegments(reviewedFiles, path, cache).segments.filter(sameContent);
-  if (matches.length !== 1 || primarySegments.filter(sameContent).length !== 1) {
-    throw new Error('rebased protected region patch differs or is ambiguous');
-  }
+  if (!matches.length) throw new Error('content-changed-by-author');
+  const candidates = Math.max(matches.length, parentSegments.filter(sameContent).length);
+  if (candidates > 1) throw new Error(`ambiguous:${candidates}`);
   if (region.start === region.end) return { start: matches[0].old, end: matches[0].old };
   // Map each removed occurrence, even when equal-content lines were reordered.
   segment.rebasedPositions ??= new Map();
@@ -359,8 +365,8 @@ function rebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
   return { start: Math.min(...positions), end: Math.max(...positions) + 1 };
 }
 
-function projectRebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
-  return projectRegion(reviewedFiles, path, rebasedRegion(primaryFiles, reviewedFiles, path, region, cache), cache);
+function projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache) {
+  return projectRegion(reviewedFiles, path, rebasedRegion(parentFiles, reviewedFiles, path, region, cache), cache);
 }
 
 function regionUnits(region) {
@@ -433,19 +439,25 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         if (!lines) return reject('finding-lines-unreadable');
         const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
         if (cited.start < 1 || cited.end < cited.start) return reject('finding-lines-invalid');
-        if (rebased && reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('rebased protected region patch differs or is ambiguous');
         const reviewed = rebased === true
-          ? projectRebasedRegion(evidence.primaryFiles, reviewedFiles, path, region, cache)
+          ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
+        if (rebased) {
+          if (reversalPatchIdentity(reviewedFiles, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
+        }
+        // Direct ancestry already establishes shared base coordinates. Earlier
+        // HAM repairs may change the segment; whole-segment equality cannot
+        // attribute those changes to the author. Retain finding coverage and
+        // the authorizing HAM patch's parent-state content proof below.
         if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) {
-          return reject('finding-does-not-cover-region');
+          return reject('not-covered-by-cited-finding');
         }
         if (authorization.originalAuthorization) {
           // Evaluate the same unit against the immutable original HAM patch,
           // in the reviewed merge-base coordinates, with the ordinary guards.
           const originalFiles = authorization.originalAuthorization.rebased
             ? authorization.originalAuthorization.parentFiles : reviewedFiles;
-          const originalRegion = rebasedRegion(evidence.primaryFiles, originalFiles, path, region, cache);
+          const originalRegion = rebasedRegion(parentFiles, originalFiles, path, region, cache);
           if (!reversalAuthorized({ primaryFiles: originalFiles, reversalAuthorizations: [authorization.originalAuthorization] },
             path, originalRegion, new Map(), strictNonBlockingRemediation, restoringDeletion)) {
             return reject('original-authorization-does-not-cover-region');

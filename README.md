@@ -1751,3 +1751,12 @@ backfill, reviewed signatures, exact-head merge eligibility and fixture ledger
 lookups. The watcher claim-loop suite also passes all 127 tests, and the runtime
 and state/smoke contract suites pass all 100 tests. No companion ledger migrations
 or concurrency algorithm changed.
+
+### OSG configuration declarations
+
+The strict loader accepts `osg.version: 1`, `osg.mode` (`off`, `shadow`, `apply`)
+and `osg.arms`. Defaults are mode `off` and an empty arm catalog. Each arm
+requires role, harness, worker class, model, effort and a non-secret account ID.
+`src/osg-config-schema.v1.json` is the versioned schema mirror; synthetic shared
+vectors live in `test/fixtures/osg-config.v1.json`. These declarations do not
+change reviewer or remediation routing.

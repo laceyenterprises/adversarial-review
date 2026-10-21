@@ -13,7 +13,7 @@ export function readDispatchReceipt(value, { identityFields = ['launchRequestId'
     if (!allowNonObject) throw new Error(diagnostic);
     return { payload: value, rawIdentity: null, launchRequestId: null, identityDiagnostic: diagnostic, status: readLaunchRequestStatus(null) };
   }
-  const selected = identityFields.find(key => value[key]);
+  const selected = identityFields.find(key => typeof value[key] === 'string' ? value[key].trim() : value[key]);
   const rawIdentity = value[selected || identityFields.at(-1)];
   const launchRequestId = typeof rawIdentity === 'string' && rawIdentity.trim() ? rawIdentity : null;
   const identityDiagnostic = launchRequestId ? null : `${producer}: ${(selected ? [selected] : identityFields)

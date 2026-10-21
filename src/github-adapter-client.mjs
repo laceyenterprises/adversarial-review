@@ -237,7 +237,7 @@ function parseAdapterJson(stdout, kind) {
     throw new Error(`agent_os_github_adapter.ResultEnvelope: $stdout empty ${kind} payload`);
   }
   try {
-    return readAdapterReceipt(JSON.parse(text)).payload;
+    return JSON.parse(text);
   } catch (err) {
     const wrapped = new Error(`agent_os_github_adapter.ResultEnvelope: $stdout malformed ${kind} JSON: ${err?.message || err}`);
     wrapped.cause = err;

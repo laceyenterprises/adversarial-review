@@ -13,6 +13,10 @@ import shutil
 import subprocess
 import sys
 
+if len(sys.argv) != 2:
+    print("Usage: python3 scripts/contracts/refresh.py <path-to-agent-os>", file=sys.stderr)
+    sys.exit(2)
+
 source = Path(sys.argv[1]).resolve()
 root = Path(__file__).resolve().parents[2]
 dest = root / "test/fixtures/producer-contracts"

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { readLaunchRequestStatus } from '../src/producer-contracts/launch-status.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES } from '../src/ama/launch-request-status.mjs';
 import { readDispatchReceipt } from '../src/producer-contracts/dispatch-receipt.mjs';
@@ -17,6 +19,17 @@ import { __test__ as adapterTest } from '../src/github-adapter-client.mjs';
 const { parseAdapterJson } = adapterTest;
 
 const capture = path => JSON.parse(readFileSync(new URL(`./fixtures/producer-contracts/${path}.json`, import.meta.url), 'utf8'));
+
+test('refresh CLI rejects missing or extra source arguments with usage, without a traceback', () => {
+  const script = fileURLToPath(new URL('../scripts/contracts/refresh.py', import.meta.url));
+  for (const args of [[], ['unused-source', 'extra']]) {
+    const result = spawnSync('python3', [script, ...args], { encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'Usage: python3 scripts/contracts/refresh.py <path-to-agent-os>\n');
+  }
+});
 
 for (const stdout of ['', 'unavailable', 'banner\n{invalid}']) {
   test(`negative stdout mutation: ${JSON.stringify(stdout)} names producer and transport field`, () => {
@@ -151,6 +164,25 @@ for (const scenario of ['accepted', 'queued', 'running', 'completed', 'diagnosti
     assert.equal(parseHqDispatchStatus(sample.stdout).status, result.status.status);
   });
 }
+
+test('dispatch identity fallback skips whitespace aliases and retains caller precedence', () => {
+  for (const blank of ['', '   ', '\t\r\n']) {
+    for (const [payload, options, expected] of [
+      [{ launchRequestId: blank, dispatchId: 'disp-1', lrq: 'lrq-1' }, {}, 'disp-1'],
+      [{ launchRequestId: blank, dispatchId: blank, lrq: 'lrq-1' }, {}, 'lrq-1'],
+      [{ launchRequestId: 'launch-1', dispatchId: blank, lrq: 'lrq-1' },
+        { identityFields: ['dispatchId', 'lrq', 'launchRequestId'] }, 'lrq-1'],
+    ]) {
+      const result = readDispatchReceipt({ ...payload, status: 'running' }, options);
+      assert.equal(result.launchRequestId, expected);
+      assert.equal(result.rawIdentity, expected);
+      assert.equal(result.identityDiagnostic, null);
+    }
+  }
+  const invalid = readDispatchReceipt({ launchRequestId: ' ', dispatchId: '\t', lrq: '\n' });
+  assert.equal(invalid.launchRequestId, null);
+  assert.match(invalid.identityDiagnostic, /\$\.launchRequestId invalid;.*\$\.dispatchId invalid;.*\$\.lrq invalid/);
+});
 
 for (const [label, mutate, field] of [
   ['missing identity', p => { delete p.launchRequestId; delete p.dispatchId; }, '$.launchRequestId'],

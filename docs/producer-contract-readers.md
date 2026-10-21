@@ -45,7 +45,8 @@ reviewer-run statuses remain separate contracts. Unknown launch/receipt statuses
 carry the producer and offending field/value without a new rejection.
 
 Dispatch receipt identity aliases retain each caller's existing precedence and
-permissive compatibility behavior. Banners and legacy text parsing remain
+permissive compatibility behavior; whitespace-only aliases are skipped so a
+later non-empty identifier can be used. Banners and legacy text parsing remain
 transport shims. Neither exit zero nor a requested/running/succeeded receipt
 proves delivered publication. GitHub envelope acceptance and complete reads are
 separate facts; diagnostics do not add requirements to legacy responses.
@@ -70,6 +71,9 @@ repository root:
 ```bash
 python3 scripts/contracts/refresh.py ../agent-os
 ```
+
+The refresh command requires exactly one source checkout path; missing or extra
+arguments print usage to stderr and exit with status 2 before copying artifacts.
 
 This copies artifacts only. To recapture, first use the exact commands and
 inputs in the copied owner records below in the producer checkout, review the

@@ -2423,8 +2423,13 @@ HAMLINES-01: `Lines:` accepts single lines, hyphen/en-dash ranges, approximate
 `~N-M` ranges, several ranges separated by `;` or `,`, and symbol-qualified ranges
 in parentheses. Any one range must cover the complete projected span; gaps between
 ranges confer no coverage. Approximate endpoints are treated as exact, without
-extra tolerance, to avoid waiving uncited code. In harness output
-`N (RIGHT side, diff line M)`, only `N` cites a file line; `M` is metadata.
+extra tolerance, to avoid waiving uncited code. A leading range list ends at the
+first explanatory note; numbers in later prose, symbols or parentheses supply
+no coverage and cannot invalidate that list. Legacy symbol-qualified entries
+must end with a parenthesized numeric list (optionally prefixed by `post-diff`).
+In harness output `N (RIGHT side, diff line M)`, only `N` cites a file line;
+`M` is metadata, including when the annotation omits `RIGHT side,` or uses
+`RIGHT,` instead.
 New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
 If no file-line number is readable, file-level coverage requires a matching
 finding file and a region inside that file's reviewed changed segment. The HAM

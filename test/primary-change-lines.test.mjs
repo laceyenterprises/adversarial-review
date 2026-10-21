@@ -39,6 +39,13 @@ for (const lines of [
   '2-4; 10-11; 30-40', '2-4, 10-11, 30-40',
   '`_budget_step` (post-diff ~30-40); `run_budget` re-raise (~10-11); `run_phase` (~50-60)',
   '`_handoff` `walk` injection (~30-40); `classify_results` (~10-11)',
+  'handler_v2 (10-11)',
+  'handler_v2 (2-4; 10-11; 30-40)', 'handler_v2 (2-4, 10-11, 30-40)',
+  '10-11 (tested with exit code 0)', '10-11 (step-0)',
+  '10-11 (regression from 2026-10-18)', '10-11; tested with exit code 0',
+  '10-11; step-0; regression from 2026-10-18',
+  '10-11 (caused by step-1, task-2 or LAC-1559)',
+  '10-11 notes: exit code 0, attempt 3',
 ]) {
   test(`HAMLINES-01: cited range covers the reversed span: ${lines}`, async () => {
     for (const rebased of [false, true]) {
@@ -48,7 +55,8 @@ for (const lines of [
   });
 }
 
-for (const lines of ['10', '`10`', '~10', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)']) {
+for (const lines of ['10', '`10`', '~10', 'handler_v2 (~10)', '10 (RIGHT side, diff line 90)',
+  '10 (diff line 90)', '10 (RIGHT, diff line 90)', '10 (diff lines 90-100)']) {
   test(`HAMLINES-01: single file-line citation authorizes a single-line reversal: ${lines}`, async () => {
     assert.equal(checkPrimaryChange(await reversal(lines, { single: true }), head).ok, true);
   });
@@ -58,6 +66,20 @@ test('HAMLINES-01: uncovered ranges, gaps and approximate endpoints confer no ex
   for (const lines of ['2-4; 30-40', '2-4, 30-40', '9; 12', '~9', '~11-12',
     '`handler` (~30-40)', '10 (RIGHT side, diff line 11)', '90 (RIGHT side, diff line 10)']) {
     refused(await reversal(lines), 'not-covered-by-cited-finding');
+  }
+});
+
+test('HAMLINES-01: explanatory numbers and symbol suffixes confer no coverage', async () => {
+  for (const rebased of [false, true]) {
+    for (const note of ['step-10', 'task-10', 'LAC-10', 'exit code 10', 'attempt 10',
+      'diff line 10', 'RIGHT, diff line 10', 'RIGHT side, diff line 10', 'diff lines 10-11',
+      'handler (~10)', 'range 10-11']) {
+      refused(await reversal(`30-40 (${note})`, { single: true, rebased }), 'not-covered-by-cited-finding');
+      refused(await reversal(`30-40; ${note}`, { single: true, rebased }), 'not-covered-by-cited-finding');
+    }
+    // Legacy qualifiers may contain digits; only their parenthesized list cites lines.
+    refused(await reversal('handler_v2 step-10 (30-40)', { single: true, rebased }),
+      'not-covered-by-cited-finding');
   }
 });
 

@@ -1098,7 +1098,10 @@ Key control points:
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
   base line. HAMLINES-01 reads all cited ranges, including legacy approximate,
   multi-range and symbol-qualified forms; approximate endpoints stay exact.
-  Harness diff-line indices supply no file-line coverage. Unreadable coordinates
+  Leading range lists stop before explanatory notes; numbers in prose or symbol
+  suffixes supply no coverage. Legacy symbol-qualified entries require a complete
+  parenthesized numeric list, optionally prefixed by `post-diff`. Harness diff-line
+  indices supply no file-line coverage, with or without a side annotation. Unreadable coordinates
   allow file-level coverage only for the matching file's reviewed changed segment,
   with the same HAM patch/content and provenance proofs. Other unreadable text
   remains a refusal with that text in the reason.

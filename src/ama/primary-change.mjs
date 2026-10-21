@@ -399,9 +399,31 @@ function firstSupersedingReview(review, reviews) {
 // harness's diff-line index is metadata, never a file-line citation. Approximate
 // (~) ranges use their exact endpoints: tolerance must not waive uncited code.
 function findingLineRanges(text) {
-  const fileLines = String(text || '').replace(/\([^()]*\bside,\s*diff line\s+\d+\s*\)/gi, '');
-  return [...fileLines.matchAll(/(?<![\w.])~?(-?\d+)(?:\s*[-–]\s*(-?\d+))?(?![\w.])/g)]
-    .map(match => ({ start: Number(match[1]), end: Number(match[2] || match[1]) }));
+  const fileLines = String(text || '').replace(/`/g, '').trim();
+  const readList = (value) => {
+    const ranges = [];
+    let rest = value;
+    while (true) {
+      const match = /^\s*~?(-?\d+)(?:\s*[-–]\s*(-?\d+))?(?=$|[\s;,()])/.exec(rest);
+      if (!match) break;
+      ranges.push({ start: Number(match[1]), end: Number(match[2] || match[1]) });
+      rest = rest.slice(match[0].length);
+      const separator = /^\s*[;,]\s*/.exec(rest);
+      if (!separator) break;
+      rest = rest.slice(separator[0].length);
+    }
+    return { ranges, rest };
+  };
+  // Modern citations start with a list. Everything after it is a note, even
+  // when the note contains parentheses, identifiers, dates or diff indices.
+  const leading = readList(fileLines);
+  if (leading.ranges.length) return leading.ranges;
+  // Legacy symbol-qualified citations put the entire list in parentheses.
+  // Require a complete numeric list, rather than searching prose for numbers.
+  return [...fileLines.matchAll(/(?:^|;)\s*[\w.]+[^();]*\((?:post-diff\s+)?([^()]*)\)\s*(?=;|$)/g)].flatMap((match) => {
+    const { ranges, rest } = readList(match[1]);
+    return rest.trim() ? [] : ranges;
+  });
 }
 
 function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {

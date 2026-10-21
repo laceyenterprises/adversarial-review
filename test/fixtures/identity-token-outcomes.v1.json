@@ -1,0 +1,2872 @@
+{
+  "version": 1,
+  "ownerRevision": "dee6b8e622e31c64dd500a05abd7e54fab3008b8",
+  "cases": [
+    {
+      "name": "codex-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "codex-reviewer",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "hammer",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-codex",
+        "account_id": "openai-corporate",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "claude-code",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-declared-preference",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-a",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-quota-exhausted",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-not-ready",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "not-ready",
+            "component": "readiness"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-reserve-refused",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-model-denied",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-capacity-saturated",
+      "result": {
+        "status": "selected",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-b",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "agy-login-b",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "declaration-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "readiness-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "quota-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reserve-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "model-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-expires_at-100",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-generation-cfg-6",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-state-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-state-contradictory",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-observed_at-101",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "capacity-missing",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "missing-account-is-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "declaration"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "snapshot-generation-hold",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [],
+        "version": 1
+      }
+    },
+    {
+      "name": "snapshot-role-hold",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "evidence-request-mismatch",
+        "generation": "cfg-7",
+        "considered": [],
+        "version": 1
+      }
+    },
+    {
+      "name": "snapshot-model-hold",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "evidence-request-mismatch",
+        "generation": "cfg-7",
+        "considered": [],
+        "version": 1
+      }
+    },
+    {
+      "name": "explicit-disabled",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "disabled",
+            "component": "declaration"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "explicit-absent",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "absent",
+            "component": "declaration"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "fallback-unknown-holds",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "stale-refusal-holds",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "fresh-refusal-does-not-hide-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "all-exhausted",
+      "result": {
+        "status": "unavailable",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "all-saturated",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "capacity-saturated",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "saturated-and-exhausted-still-transient",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "capacity-saturated",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "over-limit-occupancy-is-saturation",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "capacity-saturated",
+            "component": "capacity"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "configured-model-denial",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "all-account-models-deny",
+      "result": {
+        "status": "unavailable",
+        "identity": "codex",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "model-denied",
+            "component": "model"
+          },
+          {
+            "account_id": "openai-primary",
+            "reason": "model-denied",
+            "component": "model"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "explicit-corporate-lane-exemption",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "corporate-floor-without-exemption",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "exemption-does-not-transfer-roles",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "exemption-does-not-bypass-pause",
+      "result": {
+        "status": "selected",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-primary",
+        "reason": "fallback-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "primary-floor-remains",
+      "result": {
+        "status": "unavailable",
+        "identity": "claude-reviewer",
+        "account_id": null,
+        "reason": "accounts-unavailable",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "quota-exhausted",
+            "component": "quota"
+          },
+          {
+            "account_id": "anthropic-primary",
+            "reason": "reserve-refused",
+            "component": "reserve"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "primary-exemption-rejected",
+      "error": "reserve_exemptions: expected corporate account"
+    },
+    {
+      "name": "family-rejected",
+      "error": "family: identity family mismatch"
+    },
+    {
+      "name": "identity-model-rejected",
+      "error": "requested_models: identity model denied"
+    },
+    {
+      "name": "empty-model-rejected",
+      "error": "requested_models: expected bounded model IDs"
+    },
+    {
+      "name": "unknown-role-rejected",
+      "error": "identity: expected canonical role"
+    },
+    {
+      "name": "snapshot-version-rejected",
+      "error": "snapshot.version: unsupported version"
+    },
+    {
+      "name": "unknown-snapshot-field-rejected",
+      "error": "snapshot: unknown field"
+    },
+    {
+      "name": "negative-occupancy-rejected",
+      "error": "capacity.active_leases: expected bounded nonnegative integer"
+    },
+    {
+      "name": "boolean-occupancy-rejected",
+      "error": "capacity.active_leases: expected bounded nonnegative integer"
+    },
+    {
+      "name": "boolean-time-rejected",
+      "error": "now: expected finite nonnegative Unix seconds"
+    },
+    {
+      "name": "missing-time-holds",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "reversed-time-holds",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-contradictory",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-contradictory",
+            "component": "quota"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "recovery-next-attempt",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "codex",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "codex-reviewer",
+        "account_id": "openai-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "codex-reviewer",
+        "account_id": "openai-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "codex-reviewer-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "codex-reviewer",
+        "account_id": "openai-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "hammer",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "hammer",
+        "account_id": "openai-primary",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "hammer",
+        "account_id": "openai-primary",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-codex",
+        "account_id": "openai-primary",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-codex",
+        "account_id": "openai-primary",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-codex-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-codex",
+        "account_id": "openai-primary",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "claude-code",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "claude-code",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-code-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "claude-code",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "claude-reviewer-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "claude-reviewer",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "hammer-claude-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "hammer-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "remediator-claude-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "remediator-claude",
+        "account_id": "anthropic-corporate",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "anthropic-corporate",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-unknown",
+      "result": {
+        "status": "hold",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-a",
+        "reason": "evidence-unknown",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "evidence-unknown",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-stale",
+      "result": {
+        "status": "hold",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-a",
+        "reason": "evidence-stale",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "evidence-stale",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "gemini-reviewer-preferred-wrong-generation",
+      "result": {
+        "status": "hold",
+        "identity": "gemini-reviewer",
+        "account_id": "agy-login-a",
+        "reason": "evidence-generation-mismatch",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "agy-login-a",
+            "reason": "evidence-generation-mismatch",
+            "component": "readiness"
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "order-is-declared-not-inferred",
+      "result": {
+        "status": "selected",
+        "identity": "codex",
+        "account_id": "openai-primary",
+        "reason": "preferred-ready",
+        "generation": "cfg-7",
+        "considered": [
+          {
+            "account_id": "openai-primary",
+            "reason": "ready",
+            "component": null
+          }
+        ],
+        "version": 1
+      }
+    },
+    {
+      "name": "snapshot-boolean-version",
+      "error": "snapshot.version: unsupported version"
+    },
+    {
+      "name": "unknown-account",
+      "error": "snapshot.accounts: unknown account"
+    },
+    {
+      "name": "unknown-evidence-state",
+      "error": "quota: unknown evidence state"
+    },
+    {
+      "name": "duplicate-exemption",
+      "error": "reserve_exemptions: duplicate exemption"
+    }
+  ]
+}

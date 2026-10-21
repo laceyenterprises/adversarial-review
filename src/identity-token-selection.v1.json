@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "generation_pattern": "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+  "snapshot_fields": ["version", "identity", "requested_models", "generation", "accounts", "reserve_exemptions"],
+  "evidence_fields": ["state", "generation", "observed_at", "expires_at"],
+  "components": {
+    "declaration": ["enabled", "disabled", "absent", "unknown", "contradictory"],
+    "readiness": ["ready", "not-ready", "unknown", "contradictory"],
+    "quota": ["available", "exhausted", "unknown", "contradictory"],
+    "reserve": ["admit", "floor-refused", "paused", "unknown", "contradictory"],
+    "model": ["authorized", "denied", "unknown", "contradictory"],
+    "capacity": ["measured", "unknown", "contradictory"]
+  },
+  "corporate_providers": ["codex-corp", "claude-code-corp"],
+  "max_active_leases": 2147483647,
+  "max_timestamp": 253402300799,
+  "result_fields": ["version", "status", "identity", "account_id", "reason", "generation", "considered"],
+  "result_statuses": ["selected", "hold", "unavailable"]
+}

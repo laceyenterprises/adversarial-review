@@ -1405,3 +1405,64 @@ fixture tests pin the same version. The canonical cross-loader contract lives
 in the agent-os superproject (`projects/cfg/LOADER-CONTRACT.md`); its ITP rollout
 documentation must carry this deployment ordering alongside the Python schema PR.
 No persistent store, lifecycle state or post-deploy smoke promise changes here.
+
+### Common account snapshot readers (ITP-10)
+
+`src/identity-token-snapshot.mjs` reads the version 1 declarations, evidence
+snapshots and selection results owned by `agent_os_core`. It validates family,
+identity/account model intersection, generation binding, ordered candidates,
+bounded stamps/counts and exact metadata fields, returning detached frozen
+values. Unknown or stale evidence remains representable; the reader consumes
+the owner's `selected`, `hold` or `unavailable` outcome without running a
+second selection policy. A selection result is a proposal for a new attempt,
+not an execution lease, an attestation or merge authority. Consumers must still
+acquire/revalidate through the existing lease/admission owner before dispatch.
+
+`readAccountSelection(result, { oauth, request })` consumes the Python
+`SelectionResult.to_dict()` wire value alongside its original request and
+effective declarations. Unavailable and pool-level capacity-saturated results
+must contain only refusing candidates; `accounts-unavailable` must cover every
+declared pool member. `readSelectionSnapshot(snapshot, oauth)` validates raw
+evidence without upgrading missing components to readiness. Unsupported
+versions, unknown fields and credential-bearing extensions refuse without
+echoing their values. Credential storage and refresh remain with existing owners.
+
+`resolveIdentityTokenPools(options)` uses the existing role config cascade.
+An explicitly configured `reviewer.gemini.identities` list is normalized to
+strings, as in the legacy reviewer resolver, and must agree with the
+new Gemini pool's ordered holders; conflicting declarations and duplicate
+provider/holder bindings refuse. Legacy-only config remains readable and does
+not invent account attribution. `identityPoolsFromSnapshot(payload, oauth)`
+reads the existing fleet quota `identityPools` projection, preserving null
+occupancy and verifying account bindings and capacity totals. An absent
+projection returns `null`; an explicitly malformed projection refuses.
+Each role's capacity describes shared account slots and must not be summed
+across roles as independent fleet capacity.
+
+This release adds reader APIs only. Existing reviewer corporate-first and
+hammer/Codex-remediator personal-first routes, explicit pin provenance, old
+review rows and signed identities retain their current behavior. ITP-12–14
+wire the later routing/receipt consumers; live cutover remains an operator step.
+No runtime reads policy from the project spec directory or requires Python,
+an Agent OS checkout, network access or credentials.
+
+The published selection vocabulary and vectors are byte-identical copies from
+agent-os `dee6b8e622e31c64dd500a05abd7e54fab3008b8`; the companion owner also
+produced all 155 complete outcomes in
+`test/fixtures/identity-token-outcomes.v1.json`. Offline tests consume those
+outcomes, including every unknown hold and account-model denial. When updating
+the contract, verify the copies and replay the Python owner from its registered
+read-only workspace explicitly:
+
+The argument is the source root containing both `agent_os_config` and
+`agent_os_core`; in the companion layout both packages live under
+`platform/agent-os-config/src`.
+
+```sh
+node test/verify-identity-token-owner.mjs /path/to/registered/agent-os/platform/agent-os-config/src
+node test/run-tests.mjs identity-token-snapshot.test.mjs
+```
+
+The owner verification is an opt-in bounded publication check, not a new CI
+gate or runtime dependency. Keep Node readers deployed before enabling an
+incompatible owner vocabulary. No store, lifecycle or smoke contract changes.

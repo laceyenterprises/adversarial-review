@@ -1,3 +1,5 @@
+import { readIdentityPoolProjection } from './identity-token-snapshot.mjs';
+
 /** Shared nominal budget; scale at each quota-status call. */
 export const FLEET_QUOTA_STATUS_TIMEOUT_MS = 45_000;
 
@@ -155,6 +157,13 @@ function normalizeModelRows(raw) {
 
 export function parseHqFleetQuotaSnapshot(stdout) {
   return extractJsonObject(stdout, 'hq fleet quota status');
+}
+
+// Additive ITP-08 account diagnostics. Old state has no projection; do not
+// infer a primary account from provider/class names or change route policy.
+export function identityPoolsFromSnapshot(payload, oauth) {
+  if (!payload || typeof payload !== 'object' || !Object.hasOwn(payload, 'identityPools')) return null;
+  return readIdentityPoolProjection(payload.identityPools, oauth);
 }
 
 export function parseHqFleetQuotaStatus(stdout) {

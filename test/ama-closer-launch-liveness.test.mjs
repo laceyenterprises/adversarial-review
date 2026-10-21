@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS as FALLBACK,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS as TERMINAL_AGE,
+  amaCloserLeaseFilePath,
   acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease,
   isReclaimableDispatchedAmaCloserLease as reclaim,
   isReclaimableDispatchedAmaCloserLeaseAsync as reclaimAsync,
@@ -84,6 +86,53 @@ test('LEASELIVE-01: periodic missing/unreadable launch fallback ignores dead wat
   }
 });
 
+test('LEASELIVE-01: periodic reaper probes only leases at the terminal reclaim age', async t => {
+  const stamp = age => new Date(now - age).toISOString();
+  const cases = [
+    { updatedAt: stamp(TERMINAL_AGE - 1), probe: false },
+    { updatedAt: stamp(TERMINAL_AGE), probe: true },
+    { updatedAt: stamp(TERMINAL_AGE + 1), probe: true },
+    { updatedAt: stamp(1), acquiredAt: stamp(FALLBACK + 1), probe: false },
+    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE), probe: true },
+    { updatedAt: null, acquiredAt: stamp(TERMINAL_AGE - 1), probe: false },
+    { updatedAt: 'unreadable', acquiredAt: stamp(FALLBACK + 1), probe: false },
+    { updatedAt: null, acquiredAt: null, probe: false },
+    { updatedAt: stamp(-1), probe: false },
+  ];
+  for (const clock of [now, new Date(now).toISOString()]) {
+    for (const { probe, ...timestamps } of cases) {
+      const rootDir = mkdtempSync(join(tmpdir(), 'closer-probe-age-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const identity = { repo: 'acme/repo', prNumber: 9, headSha: 'synthetic-head' };
+      acquireAmaCloserLease({ rootDir, ...identity, now: stamp(FALLBACK + 1) });
+      const { lease } = updateAmaCloserLease({ rootDir, ...identity,
+        now: stamp(FALLBACK + 1), status: 'dispatched', lrqId: 'synthetic-launch' });
+      writeFileSync(amaCloserLeaseFilePath(rootDir, identity), JSON.stringify({ ...lease, ...timestamps }));
+      const calls = [];
+      const result = await reapStaleCloserLeases({ rootDir, now: clock, livePid: null,
+        logger: { info() {}, warn() {}, error() {} },
+        readLaunchRequestStatusImpl: async args => { calls.push(args); return probes.terminal; } });
+      assert.equal(calls.length, probe ? 1 : 0, JSON.stringify({ clock, timestamps }));
+      assert.equal(result.released, probe ? 1 : 0);
+      if (probe) assert.deepEqual(calls[0], {
+        launchRequestId: 'synthetic-launch', rootDir, includeRetryChain: true,
+      });
+    }
+  }
+});
+
+test('LEASELIVE-01: async reclaim checks disk currency only with a numeric PR identity', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-partial-identity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const prNumber of [undefined, null, 'unreadable', NaN, Infinity, 9, '9']) {
+    const hasNumericPr = prNumber != null && Number.isFinite(Number(prNumber));
+    const lease = leaseAt(TERMINAL_AGE, { repo: 'acme/repo', headSha: 'synthetic-head', prNumber });
+    const result = await reclaimAsync(lease, { rootDir, now,
+      readLaunchRequestStatusImpl: async () => probes.terminal });
+    assert.equal(result, !hasNumericPr, `PR ${String(prNumber)}`);
+  }
+});
+
 test('LEASELIVE-01: an awaited probe cannot reclaim a replacement lease', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-replaced-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -92,6 +141,8 @@ test('LEASELIVE-01: an awaited probe cannot reclaim a replacement lease', async 
   acquireAmaCloserLease({ rootDir, ...identity, now: stamp });
   updateAmaCloserLease({ rootDir, ...identity, now: stamp, status: 'dispatched', lrqId: 'synthetic-launch' });
   const oldLease = readAmaCloserLease(rootDir, identity);
+  assert.equal(await reclaimAsync(oldLease, { rootDir, now,
+    readLaunchRequestStatusImpl: async () => probes.terminal }), true);
   const replaceDuringRead = async () => {
     updateAmaCloserLease({ rootDir, ...identity, now: new Date(now).toISOString(),
       status: 'dispatched', lrqId: 'synthetic-replacement' });

@@ -3772,7 +3772,10 @@ and unreadable retry chains use the worker execution timeout schema ceiling
 (`MAX_WORKER_EXEC_TIMEOUT_SECONDS`, currently 24 hours) plus 30 minutes, so the
 fallback covers all allowed worker-class overrides without reading live config.
 Both dispatch reclaim sites, the periodic stale-lease reaper, closure arbitration
-and remediation exclusion use this predicate. A dead watcher PID does not prove
+and remediation exclusion use this predicate. The periodic reaper probes launch
+status only once a dispatched lease reaches 30 minutes from `updatedAt` (falling
+back to `acquiredAt`); younger or undatable leases cannot yet be reclaimed and
+skip ledger reads. A dead watcher PID does not prove
 a dispatched hammer stopped; the short dead-PID tier remains pending-only. Local PID probing
 requires `holderHost` to match the current hostname or be absent on a legacy
 lease; foreign-host pending leases rely only on age expiry. Both reclaim

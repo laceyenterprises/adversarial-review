@@ -153,7 +153,8 @@ export async function isReclaimableDispatchedAmaCloserLeaseAsync(lease, {
     try { launchStatusProbe = await readLaunchRequestStatusImpl({ ...options, launchRequestId: lease.lrqId, includeRetryChain: true }); }
     catch { /* Unreadable liveness retains the full execution window. */ }
   }
-  if (options.rootDir && lease.repo && lease.headSha && !isCurrentAmaCloserLease(options.rootDir, lease)) return false;
+  if (options.rootDir && lease.repo && lease.headSha && lease.prNumber != null
+    && Number.isFinite(Number(lease.prNumber)) && !isCurrentAmaCloserLease(options.rootDir, lease)) return false;
   return isReclaimableDispatchedAmaCloserLease(lease, { ...options, launchStatusProbe });
 }
 

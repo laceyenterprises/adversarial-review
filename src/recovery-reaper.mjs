@@ -66,7 +66,11 @@ import {
   updateAmaCloserDispatchRecord,
 } from './ama/dispatch-closer.mjs';
 
-import { isReclaimableDispatchedAmaCloserLease, isCurrentAmaCloserLease } from './ama/closer-lease.mjs';
+import {
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  isReclaimableDispatchedAmaCloserLease,
+  isCurrentAmaCloserLease,
+} from './ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -764,8 +768,13 @@ export async function reapStaleCloserLeases({
     statImpl,
   });
   const launchStatusProbes = new Map();
+  const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   for (const lease of discovery.records) {
     if (lease?.status !== 'dispatched' || !lease.lrqId || launchStatusProbes.has(lease.lrqId)) continue;
+    // Even a terminal launch cannot release a dispatched lease before this age.
+    const stampMs = Date.parse(String(lease.updatedAt || lease.acquiredAt || ''));
+    if (!Number.isFinite(nowMs) || !Number.isFinite(stampMs)
+      || nowMs - stampMs < AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS) continue;
     try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
       launchRequestId: lease.lrqId, rootDir, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }

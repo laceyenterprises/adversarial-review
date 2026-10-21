@@ -37,8 +37,11 @@ export const DEFAULT_MAX_TIMEOUT_SECONDS = 3600;
 // Node coerces larger setTimeout/setInterval delays to 1 ms.
 export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
-/** Clamp an already-sized positive delay; never apply another load multiplier. */
+/** Clamp an already-sized numeric delay; reject NaN and never scale again. */
 export function timerDelayMs(delayMs) {
+  if (typeof delayMs !== 'number' || Number.isNaN(delayMs)) {
+    throw new TypeError('timerDelayMs requires a numeric delay that is not NaN');
+  }
   return Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.ceil(delayMs)));
 }
 export const CPU_BUSY_THRESHOLD_PERCENT = 85;

@@ -10,11 +10,32 @@ import {
   loadAwareMultiplier,
   loadAwareTimeoutMs,
   loadAwareTimeoutSeconds,
+  timerDelayMs,
   MIN_MULTIPLIER,
   MAX_MULTIPLIER,
   MAX_TIMER_DELAY_MS,
   DEFAULT_MAX_TIMEOUT_SECONDS,
 } from '../src/load-aware-timeout.mjs';
+
+test('timerDelayMs rejects invalid arithmetic and non-numeric inputs before arming timers', () => {
+  for (const value of [NaN, undefined, null, '100', {}, true]) {
+    assert.throws(() => timerDelayMs(value), {
+      name: 'TypeError',
+      message: 'timerDelayMs requires a numeric delay that is not NaN',
+    });
+  }
+});
+
+test('timerDelayMs rounds and saturates numeric delays without scaling, including arithmetic overflow', () => {
+  for (const [value, expected] of [
+    [-Infinity, 1], [-1, 1], [0, 1], [0.1, 1], [1.1, 2], [1000, 1000],
+    [MAX_TIMER_DELAY_MS, MAX_TIMER_DELAY_MS],
+    [MAX_TIMER_DELAY_MS + 1, MAX_TIMER_DELAY_MS],
+    [Number.MAX_VALUE * 2, MAX_TIMER_DELAY_MS],
+  ]) {
+    assert.equal(timerDelayMs(value), expected);
+  }
+});
 
 test('WATCHERTIMER-01: platform cap wins over policy, nominal and huge multipliers', () => {
   assert.equal(MAX_TIMER_DELAY_MS, 2 ** 31 - 1);

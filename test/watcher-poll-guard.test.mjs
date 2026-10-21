@@ -323,19 +323,13 @@ test('buildSafePollOnce throws if pollOnceImpl is missing', () => {
   );
 });
 
-test('buildSafePollOnce rejects a non-positive deadlineMs', () => {
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: 0 }),
-    /positive numeric deadlineMs/
-  );
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: -1 }),
-    /positive numeric deadlineMs/
-  );
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: Number.NaN }),
-    /positive numeric deadlineMs/
-  );
+test('buildSafePollOnce rejects non-positive and non-finite numeric deadlines', () => {
+  for (const deadlineMs of [0, -1, NaN, Infinity, -Infinity]) {
+    assert.throws(
+      () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs }),
+      /positive numeric deadlineMs/
+    );
+  }
 });
 
 test('DEFAULT_POLL_DEADLINE_MS is exported and is large enough for a multi-PR org-wide scan', () => {
@@ -374,17 +368,26 @@ test('safePollOnce accepts a deadlineMs function and resolves it per call', asyn
   assert.deepEqual(observed, ['startup pollOnce', 'scheduled pollOnce']);
 });
 
-test('safePollOnce throws when deadlineMs function returns a non-positive value', () => {
+test('safePollOnce rejects invalid dynamic deadlines before scheduling timers or poll work', async t => {
+  const scheduled = [];
+  t.mock.method(globalThis, 'setTimeout', (...args) => { scheduled.push(args); });
+  let pollCalls = 0;
+  let deadline = 0;
   const safePollOnce = buildSafePollOnce({
-    pollOnceImpl: async () => {},
+    pollOnceImpl: async () => { pollCalls++; },
     octokit: 'stub',
-    deadlineMs: () => 0,
+    deadlineMs: () => deadline,
     log: { log: () => {}, error: () => {} },
   });
 
   // Throws synchronously before pollOnceImpl runs — a misconfigured
   // dynamic deadline is a bug, not a poll-time failure to swallow.
-  assert.throws(() => safePollOnce(), /positive finite number/);
+  for (deadline of [0, -1, NaN, Infinity, -Infinity, undefined, null, '100']) {
+    assert.throws(() => safePollOnce(), /positive finite number/);
+  }
+  await Promise.resolve();
+  assert.equal(pollCalls, 0);
+  assert.deepEqual(scheduled, []);
 });
 
 test('safePollOnce times out using a function-resolved deadline', async () => {

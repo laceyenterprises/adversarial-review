@@ -352,7 +352,10 @@ including `maxMs: Infinity`, idle/disabled scaling, and oversized nominal values
 The platform cap takes precedence over policy and nominal values. This central
 contract protects existing and future direct consumers; a timer-only wrapper
 would require every caller to remember a second operation. Compositions that add
-slack or sum scaled inputs use `timerDelayMs` without another multiplier. Chunk
+slack or sum scaled inputs use `timerDelayMs` without another multiplier. It
+rejects `NaN` and non-numeric inputs with `TypeError` before they reach Node's
+timers, rounds finite numbers up within 1 ms/platform bounds, and saturates
+numeric infinities at those bounds (including positive arithmetic overflow). Chunk
 plans retain their explicit over-cap refusal rather than silently truncating work.
 
 The table audits all 37 original `maxMs: Infinity` sites in 21 `src/` files.
@@ -410,5 +413,7 @@ merge authority, lease ownership or dispatch semantics are needed.
 The poll watchdog keeps its 30-minute default floor and a fixed 24-hour ceiling,
 including configured numeric/function deadlines. The ceiling permits a complete
 idle-host single-repo batch at the default 50 × 15-minute input budget, while
-bounding a hung org scan regardless of discovered repo count or host load. This
+bounding a hung org scan regardless of discovered repo count or host load.
+`resolveDeadlineMs` rejects non-positive or non-finite configured deadlines,
+including function results, before scheduling the watchdog or poll work. This
 is an absolute hang limit; extreme backlogs do not grant an unlimited poll pass.

@@ -1100,9 +1100,13 @@ WATCHERTIMER-01: load-aware helpers accept nominal budgets and scale each once.
 Every result is bounded by Node's `2^31 - 1` ms timer limit, including disabled
 scaling, oversized nominal values and `Infinity` policy caps. Seconds round
 down at the platform ceiling so conversion to milliseconds stays safe. Derived
-reviewer timers clamp sums and slack without another multiplier. The poll
+reviewer timers clamp sums and slack without another multiplier. The
+timer clamp (`timerDelayMs`) rejects `NaN` and non-numeric inputs with a
+`TypeError`; numeric infinities saturate at the 1 ms/platform bounds. The poll
 deadline consumes the already-scaled reviewer timeout and retains its 30-minute
 floor, with a fixed 24-hour ceiling for both workload and configured deadlines.
+Configured deadlines must resolve to positive finite numbers; invalid numeric
+or function results throw before the watchdog timer or poll work starts.
 The ceiling permits a full idle-host single-repo pass (50 × 15 minutes plus
 slack) but treats a pass still running after one day as hung. The existing
 `smv-refusals` sandbox smoke covers the 20-repo/5x-load deadline and timer cap;

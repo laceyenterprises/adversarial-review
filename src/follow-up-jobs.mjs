@@ -2259,7 +2259,9 @@ function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
     return { job: null, jobPath: null, duplicateOf: reviewClaim.duplicateOf };
   }
   try {
-    return writeNewFollowUpJob(rootDir, resolveFollowUpBranch(baseJob, { readPRHeadImpl }), jobInput);
+    // Clean reviews never publish remediation, so branch evidence cannot hold settlement.
+    const job = isSettledReviewJob(baseJob) ? baseJob : resolveFollowUpBranch(baseJob, { readPRHeadImpl });
+    return writeNewFollowUpJob(rootDir, job, jobInput);
   } finally {
     reviewClaim.release();
   }
@@ -2542,7 +2544,8 @@ function claimNextFollowUpJob({
       continue;
     }
 
-    if (pendingJob.branchResolution?.state === 'blocked'
+    const branchBlocked = pendingJob.branchResolution?.state === 'blocked' && !isSettledReviewJob(pendingJob);
+    if (branchBlocked
       && Date.parse(pendingJob.branchResolution.retryAfter) > Date.parse(claimedAt)) continue;
 
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
@@ -2563,7 +2566,7 @@ function claimNextFollowUpJob({
     }
 
     // Resolve under the atomic queue claim, before charging any remediation round.
-    if (pendingJob.branchResolution?.state === 'blocked') {
+    if (branchBlocked) {
       pendingJob = resolveFollowUpBranch(pendingJob, { readPRHeadImpl, now: claimedAt });
       writeFollowUpJob(inProgressPath, pendingJob);
       if (pendingJob.branchResolution?.state === 'blocked') {

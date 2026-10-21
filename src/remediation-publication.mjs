@@ -27,7 +27,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) throw unproven();
   if (typeof branch !== 'string' || !branch.trim()) {
     if (!repo || !prNumber) throw unproven();
-    try { ({ branch } = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl })); }
+    try { ({ branch } = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl, env })); }
     catch { throw unproven(); }
   }
   if (typeof branch !== 'string' || !branch.trim()) throw unproven();

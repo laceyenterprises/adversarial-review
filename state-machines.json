@@ -120,7 +120,7 @@
       "transitions": [
         {"id": "follow-up-job.01","from": "[*]","to": "pending","trigger": "create from delivered review","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.02","from": "pending","to": "in_progress","trigger": "resolve head branch, claim and start round","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "clean or exhausted rounds","codeSource": "src/follow-up-jobs.mjs"},
+        {"id": "follow-up-job.03","from": "pending","to": "stopped","trigger": "settled clean bypasses branch hold or exhausted rounds","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.04","from": "pending","to": "failed","trigger": "claim failure","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.05","from": "pending","to": "cancelled","trigger": "operator cancellation","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.06","from": "in_progress","to": "completed","trigger": "validated worker reply","codeSource": "src/follow-up-jobs.mjs"},
@@ -135,7 +135,7 @@
         {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"},
         {"id": "follow-up-job.16","from": "in_progress","to": "stopped","trigger": "operator-only findings after lifecycle admission: hold without spawning","codeSource": "src/follow-up-remediation.mjs"},
         {"id": "follow-up-job.17","from": "in_progress","to": "failed","trigger": "exited worker has a matching preservation-refusal sidecar","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.18","from": "pending","to": "pending","trigger": "branch-unresolved: bounded delayed head resolution without worker or round charge","codeSource": "src/follow-up-jobs.mjs"}
+        {"id": "follow-up-job.18","from": "pending","to": "pending","trigger": "branch-unresolved remediation: bounded delayed head resolution without worker or round charge","codeSource": "src/follow-up-jobs.mjs"}
       ]
     },
     {

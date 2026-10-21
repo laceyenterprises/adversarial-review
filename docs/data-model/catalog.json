@@ -243,8 +243,9 @@
     },
     {
       "id": "follow-up-jobs",
-      "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000 },
+      "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000, "settledCleanBypassesResolution": true },
       "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],
+      "unpublishedWorkEvidence": "inspected workspace HEAD overrides reply hashes; unchanged revisionRef has no debt; reported commit fallback only without valid workspace HEAD",
       "unpublishedWorkRetention": "retained workspace; committed-unpublished stop and failed publication gate",
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",

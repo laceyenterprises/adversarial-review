@@ -10,9 +10,10 @@
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix
 `builderTag` in its run context. Watcher pass metadata retains both fields so
 recovered agent-runtime posts enqueue the same contract as cli-direct posts.
-`createFollowUpJob` resolves an omitted/blank branch through one bounded REST PR
-read (8 seconds). Duplicate review claims return before that read. Resolution
-can also recover the builder tag from the title when absent.
+For jobs requiring remediation, `createFollowUpJob` resolves an omitted/blank
+branch through one bounded REST PR read (8 seconds). Duplicate review claims
+return before that read. Resolution can also recover the builder tag from the
+title when absent.
 
 If resolution fails or returns no head ref, the job stays in `pending` with
 `branch: null` and `branchResolution: { state: "blocked", reason:
@@ -21,6 +22,11 @@ worker job. The claim loop retries after 60 seconds under the atomic queue claim
 returns unresolved jobs to pending, and never charges a remediation round for
 that hold. Successful resolution stores the branch and clears `branchResolution`.
 Legacy branchless jobs must resolve the branch before either local or HQ spawn.
+Settled clean reviews bypass branch resolution at creation and claim. Legacy
+clean jobs carrying a branch hold settle immediately without a lookup, worker,
+or round charge, even before `retryAfter`; their gate reports `review-settled`.
+The shared settled predicate still honors operator retriggers and strict-mode
+non-blocking findings, which continue to require remediation branch evidence.
 
 The prompt never emits an empty `--branch`. It supplies `--repo` and `--pr` so
 the guarded publisher can resolve a missing branch from the live PR. Publication
@@ -32,6 +38,9 @@ local `commitSha` in `operationalBlockers[]`.
 An exited worker reporting committed-but-unpublished work stops with
 `remediationPlan.stop.code: "committed-unpublished"`, even at the round cap.
 `unpublishedWork` records `jobId`, `commitSha`, `workspaceDir`, and `reported`.
+When the workspace HEAD can be inspected, it overrides reply hashes: an unchanged
+HEAD at `revisionRef` produces no publication debt. Explicit worker-reported
+commit evidence remains a fallback when the workspace is unavailable.
 The stop reason and PR comment name the job and commit; the gate remains failed
 with reason `remediation-committed-unpublished`, without an operator-decision
 notice. Workspace retention skips this publication debt, including past the

@@ -1573,6 +1573,9 @@ A pending job with `branchResolution.reason = branch-unresolved` waits for its
 60-second branch retry; no remediation worker or round is charged. Inspect the
 PR read/credentials if it persists. Both reviewer runtimes now preserve the
 head branch and builder tag through pass recovery.
+Settled clean reviews skip branch resolution and settle without a worker or
+round charge, including legacy jobs with a future branch retry. Their gate
+reports `review-settled`; an operator retrigger still requires a branch.
 
 A stopped `committed-unpublished` job has publication debt. Its `unpublishedWork`
 record and PR comment identify the job and local commit; the workspace survives
@@ -1581,3 +1584,8 @@ the terminal TTL. Inspect the retained work and publish through
 and exact remote lease. Missing branch metadata is resolved from the live PR;
 never substitute an empty branch or bypass the publisher's diff/lease checks.
 The gate reports failed publication without an operator-decision-required notice.
+An inspected workspace HEAD overrides reply hashes: when it still equals the
+job's `revisionRef`, external SHAs in worker commentary cannot create publication
+debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.
+Publisher branch hydration uses the caller's environment, including scoped
+GitHub credentials, for the PR metadata read as well as Git commands.

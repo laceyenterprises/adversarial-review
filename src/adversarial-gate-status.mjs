@@ -1009,11 +1009,11 @@ function pickAdversarialGateStatus({
       'remediation-committed-unpublished');
   }
   if (latestJobStatus === 'pending') {
-    if (latestJob.branchResolution?.state === 'blocked') {
-      return decide('pending', 'Remediation is blocked while resolving the PR head branch; resolution will retry.', 'branch-unresolved');
-    }
     if (isSettledReviewJob(latestJob)) {
       return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+    }
+    if (latestJob.branchResolution?.state === 'blocked') {
+      return decide('pending', 'Remediation is blocked while resolving the PR head branch; resolution will retry.', 'branch-unresolved');
     }
     return decide('pending', 'Remediation is queued.', 'remediation-queued');
   }

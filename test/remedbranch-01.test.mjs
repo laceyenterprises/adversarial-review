@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, markFollowUpJobSpawned, buildRemediationReply, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, writeFollowUpJob, markFollowUpJobSpawned, buildRemediationReply, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { findCommittedUnpublishedWork } from '../src/remediation-unpublished.mjs';
@@ -17,6 +17,7 @@ import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-stat
 
 const reviewBody = '## Summary\nFix the synthetic retry.\n\n## Verdict\nRequest changes';
 const head = 'a'.repeat(40);
+const cleanReviewBody = '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only';
 function root(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remedbranch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -57,6 +58,67 @@ test('REMEDBRANCH-01: unresolved head holds and retries without charging a round
   assert.equal(claimed.job.branchResolution, null);
 });
 
+test('REMEDBRANCH-01: clean reviews settle without reading a missing branch', t => {
+  const options = input(t);
+  let reads = 0;
+  const result = createFollowUpJob({ ...options, reviewBody: cleanReviewBody,
+    readPRHeadImpl: () => { reads++; throw new Error('branch unavailable'); } });
+  assert.equal(reads, 0);
+  assert.equal(result.job.branchResolution?.state, undefined);
+  const stopped = claimNextFollowUpJob({ rootDir: options.rootDir, returnStopped: true,
+    readPRHeadImpl: () => { reads++; throw new Error('branch unavailable'); } });
+  assert.equal(stopped.job.status, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'no-remediation-required');
+  assert.equal(stopped.job.remediationPlan.currentRound, 0);
+  assert.equal(reads, 0);
+});
+
+for (const retryAfter of ['2000-01-01T00:00:00Z', '2099-01-01T00:00:00Z']) {
+  test(`REMEDBRANCH-01: legacy branch hold cannot prevent clean settlement (retry ${retryAfter})`, t => {
+    const options = input(t);
+    const created = createFollowUpJob({ ...options, branch: 'feature/retry', reviewBody: cleanReviewBody });
+    const held = { ...created.job, branch: null,
+      branchResolution: { state: 'blocked', reason: 'branch-unresolved', retryAfter } };
+    writeFollowUpJob(created.jobPath, held);
+    const decision = pickAdversarialGateStatus({ repo: held.repo, prNumber: held.prNumber,
+      reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: held });
+    assert.equal(decision.state, 'success');
+    assert.equal(decision.reason, 'review-settled');
+    let reads = 0;
+    const stopped = claimNextFollowUpJob({ rootDir: options.rootDir, returnStopped: true,
+      readPRHeadImpl: () => { reads++; throw new Error('branch unavailable'); } });
+    assert.equal(stopped.job.status, 'stopped');
+    assert.equal(stopped.job.remediationPlan.stop.code, 'no-remediation-required');
+    assert.equal(stopped.job.remediationPlan.currentRound, 0);
+    assert.equal(reads, 0);
+  });
+}
+
+test('REMEDBRANCH-01: clean operator retriggers still require branch resolution', t => {
+  const options = input(t);
+  const created = createFollowUpJob({ ...options, branch: 'feature/retry', reviewBody: cleanReviewBody });
+  const held = { ...created.job, branch: null,
+    branchResolution: { state: 'blocked', reason: 'branch-unresolved', retryAfter: '2099-01-01T00:00:00Z' },
+    remediationPlan: { ...created.job.remediationPlan, nextAction: { operatorOverride: true } } };
+  writeFollowUpJob(created.jobPath, held);
+  assert.equal(claimNextFollowUpJob({ rootDir: options.rootDir }), null);
+  const decision = pickAdversarialGateStatus({ repo: held.repo, prNumber: held.prNumber,
+    reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: held });
+  assert.equal(decision.reason, 'branch-unresolved');
+});
+
+test('REMEDBRANCH-01: comment-only findings still hold for remediation branch evidence', t => {
+  const options = input(t);
+  const { job } = createFollowUpJob({ ...options,
+    reviewBody: cleanReviewBody.replace('## Non-blocking issues\n- None.', '## Non-blocking issues\n- **Retry edge**: Repair the retry.'),
+    readPRHeadImpl: () => { throw new Error('branch unavailable'); } });
+  assert.equal(job.branchResolution.reason, 'branch-unresolved');
+  assert.equal(job.remediationPlan.currentRound, 0);
+  const decision = pickAdversarialGateStatus({ repo: job.repo, prNumber: job.prNumber,
+    reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: job });
+  assert.equal(decision.reason, 'branch-unresolved');
+});
+
 test('REMEDBRANCH-01: a branchless legacy prompt gives the publisher PR identity without an empty branch flag', t => {
   const options = input(t);
   const { job } = createFollowUpJob({ ...options, readPRHeadImpl: () => ({ branch: null }) });
@@ -68,14 +130,16 @@ test('REMEDBRANCH-01: a branchless legacy prompt gives the publisher PR identity
 });
 
 test('REMEDBRANCH-01: publisher hydrates a missing branch before Git and refuses unresolved evidence', async () => {
+  const env = { GH_TOKEN: 'synthetic-scoped-token' };
   for (const branch of ['feature/retry', null]) {
     const calls = [];
-    await assert.rejects(publishRemediation({ baseBranch: 'main', previousHead: head, repo: 'fixture/repo', prNumber: 42,
+    await assert.rejects(publishRemediation({ baseBranch: 'main', previousHead: head, repo: 'fixture/repo', prNumber: 42, env,
       execFileImpl: async (command, args, options) => {
         calls.push({ command, args });
         if (command === 'gh') {
           assert.deepEqual(args, ['api', 'repos/fixture/repo/pulls/42']);
           assert.equal(options.timeout, 8000);
+          assert.equal(options.env.GH_TOKEN, env.GH_TOKEN);
           return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: branch } }) };
         }
         assert.equal(branch, 'feature/retry');
@@ -84,6 +148,27 @@ test('REMEDBRANCH-01: publisher hydrates a missing branch before Git and refuses
     assert.equal(calls.some(call => call.args.includes('push')), false);
     if (!branch) assert.equal(calls.length, 1);
   }
+});
+
+test('REMEDBRANCH-01: unchanged workspace head overrides an unrelated SHA in publication commentary', async t => {
+  const job = { jobId: 'fixture-job', revisionRef: head };
+  const workspaceDir = root(t);
+  for (const operationalBlockers of [[], [{ finding: 'Publisher blocked against remote head.', commitSha: 'b'.repeat(40) }]]) {
+    const work = await findCommittedUnpublishedWork({ job, workspaceDir,
+      reply: { summary: `Publisher failed while inspecting upstream commit ${'b'.repeat(40)}.`, operationalBlockers },
+      execFileImpl: async () => ({ stdout: `${head}\n` }) });
+    assert.equal(work, null);
+  }
+});
+
+test('REMEDBRANCH-01: unavailable workspace retains explicit unpublished evidence despite malformed blockers', async t => {
+  const job = { jobId: 'fixture-job', revisionRef: head };
+  const workspaceDir = root(t);
+  const commitSha = 'b'.repeat(40);
+  const work = await findCommittedUnpublishedWork({ job, workspaceDir,
+    reply: { summary: 'Committed locally but not pushed.', operationalBlockers: [null, 42, { commitSha }] },
+    execFileImpl: async () => { throw new Error('HQ workspace unavailable'); } });
+  assert.deepEqual(work, { jobId: job.jobId, workspaceDir, commitSha, reported: true });
 });
 
 test('REMEDBRANCH-01: agent-runtime posted review retains subject branch and builder tag through pass recovery', async t => {
@@ -129,7 +214,7 @@ test('REMEDBRANCH-01: reported committed-unpublished work names job and retained
   const job = { jobId: 'fixture-job', repo: 'fixture/repo', prNumber: 42, revisionRef: head,
     status: 'stopped', reviewBody, remediationPlan: { stop: { code: 'committed-unpublished' } } };
   job.unpublishedWork = await findCommittedUnpublishedWork({ job, workspaceDir: root(t),
-    reply: { summary: 'Committed locally but the publisher refused publication.', operationalBlockers: [{ finding: 'Empty branch prevented publication.', commitSha }] },
+    reply: { summary: 'Committed locally but the publisher refused publication.', operationalBlockers: [{ finding: 'Empty branch prevented publication.', commitSha: 'c'.repeat(40) }] },
     execFileImpl: async () => ({ stdout: `${commitSha}\n` }) });
   const decision = pickAdversarialGateStatus({ repo: job.repo, prNumber: job.prNumber,
     reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: job });

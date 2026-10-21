@@ -160,6 +160,25 @@ if (scenario === 'clean') {
     claimedAt: branchHeld.branchResolution.retryAfter, readPRHeadImpl: () => ({ branch: 'fixture/head' }) });
   assert.equal(branchReady.job.branch, 'fixture/head');
 
+  const cleanRoot = join(rootDir, 'clean-branch-contract');
+  const clean = createFollowUpJob({ rootDir: cleanRoot, repo, prNumber,
+    reviewerModel: 'gemini', reviewBody: cleanBody, readPRHeadImpl: refuse });
+  assert.equal(clean.job.branchResolution?.state, undefined);
+  // Previously persisted clean jobs may still carry a future branch hold.
+  const cleanHeld = { ...clean.job, branchResolution: { state: 'blocked', reason: 'branch-unresolved',
+    retryAfter: '2099-01-01T00:00:00Z' } };
+  writeFollowUpJob(clean.jobPath, cleanHeld);
+  const { pickAdversarialGateStatus } = await import('../../src/adversarial-gate-status.mjs');
+  assert.equal(pickAdversarialGateStatus({ repo, prNumber,
+    reviewRow: { review_status: 'posted', pr_state: 'open' }, latestJob: cleanHeld }).reason, 'review-settled');
+  const settled = claimNextFollowUpJob({ rootDir: cleanRoot, returnStopped: true, readPRHeadImpl: refuse });
+  assert.equal(settled.job.remediationPlan.stop.code, 'no-remediation-required');
+  assert.equal(settled.job.remediationPlan.currentRound, 0);
+  const { findCommittedUnpublishedWork } = await import('../../src/remediation-unpublished.mjs');
+  assert.equal(await findCommittedUnpublishedWork({ job: { jobId: 'unchanged-smoke', revisionRef: headSha },
+    workspaceDir: gitDir, reply: { summary: `Publisher failed while inspecting upstream commit ${base}.` },
+    execFileImpl: async (command, args, options) => ({ stdout: execFileSync(command, args, options) }) }), null);
+
   const { isReclaimableDispatchedAmaCloserLease: reclaimLease,
     AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS: fallbackMs } = await import('../../src/ama/closer-lease.mjs');
   const leaseClock = Date.parse('2026-10-01T12:00:00Z');
@@ -430,7 +449,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, merged: true, remoteHeadMatches: true };

@@ -475,6 +475,13 @@ ham_already_merged_validated_head() {
 }
 
 ham_ci_timeout() {
+  # The deadline prevents a final gate read. Preserve the UNKNOWN deferral
+  # from the last successful snapshot rather than turning it into a veto.
+  if ham_required_gate_mergeability_unknown && ! ham_live_head_moved \
+    && jq -e '.state == "OPEN" and .checksConclusion == "PENDING"' "$HAM_GATE_JSON" >/dev/null; then
+    ham_defer_unknown_mergeability
+    return
+  fi
   echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
   cat "$HAM_GATE_JSON" >&2
   HAM_REMOTE_CI_STATUS=remote-ci-timeout

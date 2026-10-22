@@ -41,7 +41,8 @@ if (args[0] === '--input-type=module') {
   }
 } else if (args[0].endsWith('/ama-audit.mjs')) {
   const value = key => args[args.indexOf(key) + 1];
-  log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))) });
+  log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))),
+    at: Number(fs.readFileSync(dir + '/clock')) });
 } else if (args[0].endsWith('/metered-gh.mjs')) {
   log({ merge: args });
 } else if (args[0].endsWith('/hammer-pr-read.mjs')) {
@@ -133,8 +134,11 @@ test('HAMUNKNOWN-02: pending CI with persistent UNKNOWN waits for the CI deadlin
   assert.equal(result.status, 20, result.stderr);
   const samples = result.events.filter(event => event.gate);
   const waited = samples.at(-1).at - samples[0].at;
-  assert.ok(waited >= 900 && waited <= 960, `bounded CI wait: ${waited}s`);
+  // Stop before reading another gate at the deadline; the last poll is one
+  // cadence earlier, while the deferral itself must consume the full budget.
+  assert.equal(waited, 870, 'no gate read starts at or after the 900s deadline');
   const deferred = result.events.find(event => event.outcome === 'deferred');
+  assert.equal(deferred.at - samples[0].at, 900, 'deferral occurs at the CI deadline');
   assert.equal(deferred.attempt.reason, 'pr-mergeability-unknown');
   assert.equal(deferred.attempt.remoteCiStatus, 'mergeability-unknown-ci-timeout');
   assert.equal(deferred.attempt.githubGate.checksConclusion, 'PENDING');

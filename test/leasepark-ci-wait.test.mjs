@@ -20,9 +20,9 @@ function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launch
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gate.json'), JSON.stringify({ headMatches: true, state: 'OPEN', ...gate }));
-  const helpers = merge.slice(merge.indexOf('ham_required_gate_ok()'), merge.indexOf('ham_merge_error_retryable()'));
+  const helpers = render(merge.slice(merge.indexOf('ham_required_gate_ok()'), merge.indexOf('ham_merge_error_retryable()')));
   const release = verify.slice(verify.indexOf('ham_mark_merge_lease_retryable_abort()'), verify.indexOf('ham_acquire_merge_lease()'));
-  const loop = merge.slice(merge.indexOf('HAM_LOCAL_CI_STATUS=local-battery'), merge.indexOf('\nHAM_MERGE_ATTEMPTS=0'));
+  const loop = render(merge.slice(merge.indexOf('HAM_LOCAL_CI_STATUS=local-battery'), merge.indexOf('\nHAM_MERGE_ATTEMPTS=0')));
   const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')))
     .replace(' acquire \\', ' acquire --root-dir "$TEST_ROOT" \\');
   const overlapHelper = render(verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Resolve whether')));

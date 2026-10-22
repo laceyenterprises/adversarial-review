@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "aliases": {
+    "codex-corp": [
+      "codex",
+      "openai-corporate"
+    ],
+    "hammer-corp": [
+      "hammer",
+      "openai-corporate"
+    ],
+    "remediator-codex-corp": [
+      "remediator-codex",
+      "openai-corporate"
+    ],
+    "claude-code-corp": [
+      "claude-code",
+      "anthropic-corporate"
+    ],
+    "hammer-claude-corp": [
+      "hammer-claude",
+      "anthropic-corporate"
+    ],
+    "remediator-claude-corp": [
+      "remediator-claude",
+      "anthropic-corporate"
+    ],
+    "claude-reviewer-corp": [
+      "claude-reviewer",
+      "anthropic-corporate"
+    ]
+  }
+}

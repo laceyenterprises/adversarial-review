@@ -1,3 +1,4 @@
+import { expandClassAliases } from '../worker-class-aliases.mjs';
 export const MERGE_CAPABILITY_ENFORCEMENT_MODES = Object.freeze(['observe', 'enforce']);
 
 const BUILDER_TOKEN_CLASSES = new Set([
@@ -18,17 +19,15 @@ const BUILDER_TOKEN_CLASSES = new Set([
   'lacey-gemini-agent',
 ]);
 
-const MERGE_CAPABLE_TOKEN_CLASSES = new Set([
+const MERGE_CAPABLE_TOKEN_CLASSES = new Set(expandClassAliases([
   'merge-agent',
   'hammer',
-  'hammer-corp',
   'hammer-claude',
-  'hammer-claude-corp',
   'the-hammer',
   'github-app-merge-agent',
   'lacey-merge-agent',
   'the-hammer-lacey',
-]);
+]));
 
 const EXPLICIT_CLASS_ENV_NAMES = [
   'AGENT_OS_GITHUB_TOKEN_CLASS',

@@ -1908,7 +1908,7 @@ function schemaV1() {
           },
           codex_worker_account_order: {
             __type: TYPE_STRING,
-            __default: 'personal-first',
+            __default: 'corporate-first',
             __enum: ENUM_CODEX_WORKER_ACCOUNT_ORDER,
           },
           // REMFALLBACK-01: ordered remediator classes to fall back to when the

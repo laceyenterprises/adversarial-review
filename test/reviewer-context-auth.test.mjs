@@ -187,6 +187,37 @@ test('broker authorization/key failure is terminal for this read and does not tr
   assert.deepEqual(calls.reads, ['fixture-rejected']);
 });
 
+for (const source of ['secret file', 'transport', 'timeout']) {
+  test(`broker ${source} failure is preserved as the outage cause without public detail leakage`, async t => {
+    const { options, calls, selected } = fixture(t);
+    const brokerErr = new Error(`fixture-broker-secret ${source} failure`);
+    if (source === 'timeout') brokerErr.name = 'AbortError';
+    if (source === 'secret file') {
+      options.readFileImpl = () => { throw brokerErr; };
+    } else {
+      options.fetchImpl = async url => {
+        calls.mints.push(url);
+        throw brokerErr;
+      };
+    }
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err => {
+      assert.ok(err instanceof GithubAuthOutageError);
+      assert.equal(err.failureClass, 'github-auth-outage');
+      assert.equal(err.remintAttempted, true);
+      assert.equal(err.cause, brokerErr);
+      assert.match(err.message, /broker re-mint failed/);
+      assert.doesNotMatch(err.message, /fixture-broker-secret/);
+      return true;
+    });
+    assert.deepEqual(calls.reads, ['fixture-rejected']);
+    assert.equal(calls.mints.length, source === 'secret file' ? 0 : 1);
+    assert.equal(process.env[selected.envVar], 'fixture-rejected');
+    assert.equal(process.env.GH_TOKEN, 'fixture-rejected');
+    assert.equal(process.env.GITHUB_TOKEN, 'fixture-rejected');
+    assert.doesNotMatch(calls.logs.join('\n'), /fixture-broker-secret/);
+  });
+}
+
 test('a later scheduled attempt recovers after broker repair with the same selected role', async t => {
   const { options, calls } = fixture(t);
   const mint = options.fetchImpl;

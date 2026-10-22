@@ -69,10 +69,10 @@ async function fetchPRContext(repo, prNumber, {
       refreshed = await resolveReviewerAppToken(botTokenEnv, {
         env: candidateEnv, force: true, fetchImpl, readFileImpl,
       });
-    } catch {
+    } catch (brokerErr) {
       throw new GithubAuthOutageError(
         `[github-auth-outage] required PR context selected ${role.role} broker re-mint failed; inspect provider/key/installation`,
-        { cause: err, remintAttempted: true }
+        { cause: brokerErr, remintAttempted: true }
       );
     }
     if (refreshed.envVar !== botTokenEnv || !refreshed.token

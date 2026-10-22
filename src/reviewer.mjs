@@ -75,6 +75,7 @@ import {
 } from './reviewed-attestation.mjs';
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
+import { fetchPRContext, pinReviewerGhIdentity } from './reviewer-context-auth.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -98,7 +99,6 @@ import { getConfig } from './config-loader.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
 import {
   fetchPullRequestHeadAndState,
-  fetchPullRequestReviewContext,
 } from './github-api.mjs';
 import { dismissStaleRequestChangesAfterCleanReview } from './reviewer-stale-request-dismissal.mjs';
 import {
@@ -204,26 +204,6 @@ const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
 
 function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = null) {
   return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv] || fallbackIdentity || botTokenEnv;
-}
-
-// Pin every `gh` invocation in the reviewer process to the reviewer's OWN
-// identity token (the value at env[botTokenEnv]) by setting GH_TOKEN/GITHUB_TOKEN.
-// The gh env is built by github-api's buildGhEnv(), which only forwards
-// GH_TOKEN/GITHUB_TOKEN from the environment; a daemon-spawned reviewer has
-// neither set (only botTokenEnv), so gh reaches for its keychain-stored PAT —
-// inaccessible in the system-domain daemon security session — and the PR-context
-// fetch fails, mis-classified as `oauth-broken`, stalling all reviews (SEV0
-// 2026-08-11). Pinning both here also stops the fetch from silently using the
-// watcher's merge-agent GITHUB_TOKEN: only the reviewer's own bot identity drives
-// gh. Returns whether a token was found so the caller can warn on an empty env.
-function pinReviewerGhIdentity(env, botTokenEnv) {
-  const token = env && botTokenEnv ? env[botTokenEnv] : undefined;
-  if (typeof token === 'string' && token.length > 0) {
-    env.GH_TOKEN = token;
-    env.GITHUB_TOKEN = token;
-    return { pinned: true, botTokenEnv };
-  }
-  return { pinned: false, botTokenEnv };
 }
 
 // ── Local OSS shadow review (opt-in, non-gating) ────────────────────────────
@@ -1318,13 +1298,6 @@ function queueFollowUpForPostedReview({
   return { queued: !duplicateOf, jobPath, verdictMode: normalizedVerdictMode, handoffWake, ...(duplicateOf ? { reason: 'duplicate-review-follow-up', duplicateOf } : {}) };
 }
 
-async function fetchPRContext(repo, prNumber) {
-  return fetchPullRequestReviewContext(repo, prNumber, {
-    execFileImpl: execFileAsync,
-    recordApiCallImpl: recordApiCall,
-  });
-}
-
 // ── GitHub review posting ────────────────────────────────────────────────────
 
 class ReviewerPostAuthRefreshRetryableError extends Error {
@@ -1534,6 +1507,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
           if (!refreshedAfterAuthFailure && authRetryable) {
             const refreshed = await resolveReviewerAppToken(refreshIdentity, {
               env: sourceEnv,
+              force: true,
               fetchImpl: opts.fetchImpl,
               readFileImpl: opts.readFileImpl,
               timeoutMs: opts.reviewerTokenFetchTimeoutMs,
@@ -1858,15 +1832,9 @@ async function main() {
     process.exit(1);
   }
 
-  // Drive every `gh` call in this reviewer from the reviewer's own bot identity
-  // (botTokenEnv), so the PR-context fetch never falls back to the keychain PAT
-  // that a daemon-spawned reviewer cannot read. See pinReviewerGhIdentity.
   if (!pinReviewerGhIdentity(process.env, botTokenEnv).pinned) {
-    console.error(
-      `[reviewer] WARN: ${botTokenEnv} is unset in the reviewer environment; ` +
-      'gh calls will fall back to ambient auth (keychain), which fails for ' +
-      'daemon-spawned reviewers. Check reviewer-broker-refresh token resolution.'
-    );
+    console.error(`[github-auth-outage] required PR context missing selected ${botTokenEnv}`);
+    process.exit(1);
   }
 
   // The reviewer treats the final allowed review pass as a lenient
@@ -1920,7 +1888,7 @@ async function main() {
 
   let prContext;
   try {
-    prContext = await fetchPRContext(repo, prNumber);
+    prContext = await fetchPRContext(repo, prNumber, { botTokenEnv });
   } catch (err) {
     console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
     process.exit(1);

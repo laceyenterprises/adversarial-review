@@ -232,6 +232,8 @@ async function fetchReviewerTokenFromBrokerUrl({
   secret,
   fetchImpl,
   timeoutMs,
+  force = false,
+  rejectPatFallback = false,
 }) {
   // Bound the WHOLE network exchange so a wedged broker can't hang the watcher
   // tick. The timeout/abort must cover both the headers (fetchImpl) AND the body
@@ -244,7 +246,7 @@ async function fetchReviewerTokenFromBrokerUrl({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(provider)}`, {
+    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(provider)}${force ? '&force=1' : ''}`, {
       headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
       signal: controller.signal,
     });
@@ -260,6 +262,11 @@ async function fetchReviewerTokenFromBrokerUrl({
         `broker ${brokerUrl} response missing access_token`,
         { transient: false },
       );
+    }
+    // The broker can label a PAT fallback with the App's IDs. Those IDs alone
+    // cannot authorize replacing a reviewer's own installation-token identity.
+    if (rejectPatFallback && body?.metadata?.credential_source === 'github_pat_fallback') {
+      throw new BrokerTokenFetchError('reviewer broker returned a PAT fallback', { transient: false });
     }
     // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
     // a token minted for the wrong App/installation just because the call
@@ -300,7 +307,7 @@ async function fetchReviewerTokenFromBrokerUrl({
 // Resolve one role's token from the broker. Returns { token, expiresAtMs }
 // on success (expiresAtMs is null when the broker omits a parseable
 // expires_at), or throws on any failure (caller keeps the old token on throw).
-async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs }) {
+async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl, timeoutMs, force = false }) {
   const config = brokerConfigForRole({ role, env, flag: '' });
   const { brokerUrls, provider, expectedAppId, expectedInstallationId, secretFile } = config;
 
@@ -327,6 +334,8 @@ async function fetchReviewerTokenFromBroker({ role, env, fetchImpl, readFileImpl
         secret,
         fetchImpl,
         timeoutMs,
+        force,
+        rejectPatFallback: Boolean(brokerRoleConfig(role)),
       });
     } catch (err) {
       if (!brokerFetchErrorIsTransient(err)) throw err;
@@ -342,6 +351,7 @@ export async function resolveReviewerAppToken(identity, {
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
   timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
+  force = false,
 } = {}) {
   const role = resolveReviewerBrokerRole(identity);
   if (!role) {
@@ -357,6 +367,7 @@ export async function resolveReviewerAppToken(identity, {
     fetchImpl,
     readFileImpl,
     timeoutMs,
+    force,
   });
   env[roleConfig.envVar] = token;
   return {

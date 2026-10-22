@@ -911,6 +911,14 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
+LAC-2082 adds one selected-role broker remint and identity re-pin when required
+PR-context capture rejects a reviewer credential. Existing lifecycle states,
+outage settlement, budgets and smoke promises are unchanged. After normal
+deployment, verify a naturally scheduled context capture and exact-head review
+posted under that bot identity using the
+[owner runbook](docs/RUNBOOK-gemini-reviewer-app.md#required-pr-context-reads-lac-2082);
+source publication alone is not live recovery.
+
 Review-body capture records individual findings and remediation evidence in
 `data/reviews.db`. The read-only JSON command
 `node bin/review-findings.mjs show --db <database>` exposes them to corpus

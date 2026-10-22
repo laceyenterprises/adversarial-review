@@ -73,6 +73,62 @@ flag is unset/`false`, the launcher falls back to reading the
 `GH_GEMINI_REVIEWER_TOKEN=op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token` mapping
 via 1Password.
 
+### Required PR-context reads (LAC-2082)
+
+The source owner is `src/reviewer-context-auth.mjs::fetchPRContext`, called before model
+execution with the dispatch's selected `botTokenEnv`. The local runtime
+(`src/adapters/reviewer-runtime/cli-direct/index.mjs`) snapshots the daemon
+environment into a separate reviewer process; its OAuth fallback stripping
+preserves the reviewer broker flags, routes, expected App/installation IDs and
+shared-secret **file path**. A later daemon refresh does not update that child.
+`github-api.mjs` first tries the optional adapter and then the required
+GraphQL context reader. The GraphQL executor does not use `gh-cli.mjs`'s
+watcher-auth refresh hook.
+
+The required read pins both `GH_TOKEN` and `GITHUB_TOKEN` to the selected bot
+token and refuses a missing selected token before any GitHub read. On a GitHub
+authentication rejection (401/expired credential), it may refresh only that
+role, and only when its `<ROLE>_AUTH_VIA_BROKER` flag is exactly `true`.
+`resolveReviewerAppToken(..., { force: true })` requests
+`/token?provider=<selected-provider>&force=1`: bypassing the caller's refresh
+clock alone does **not** invalidate the broker's cached token. Provider and
+configured App/installation checks still apply. An unchanged token or a
+replacement without a known future expiry is refused. A valid replacement is
+re-pinned before one retry of the whole context capture, discarding partial
+pages. Review posting retains its separate bounded refresh and exact-head
+commit attribution; its auth refresh also requests `force=1`.
+The canonical reviewer broker route also refuses
+`metadata.credential_source=github_pat_fallback`, even when the response carries
+matching App/installation IDs. Those IDs do not turn a PAT into a bot token.
+
+If refresh fails or GitHub rejects the replacement, the reviewer exits with
+`github-auth-outage`. The existing watcher settlement parks the PR at
+`pending-upstream` without charging a review attempt; a naturally scheduled
+eligible attempt can recover later. Do not reset budgets or manually retrigger
+to prove this fix. A permissions 403, missing PR 404 or provider quota outage
+does not authorize this context-token remint. Operator GitHub reads prove
+neither the selected bot's credential nor its installation permissions.
+
+After normal source review, merge and deployment, prove recovery using a
+**naturally scheduled** review: record repository/PR, scheduled attempt/session,
+selected role, successful required-context capture, reviewed head SHA and the
+posted GitHub review ID/login/`commit_id`. The review must be under the selected
+bot identity and bound to that reviewed head. Source publication, deploy revision
+and this live proof are separate evidence. Do not restart active services to
+obtain it, and never collect token values, bearer headers or broker response
+bodies. See [the incident RCA](RCA-reviewer-pre-context-auth-2026-10-22.md).
+
+If the selected provider cannot mint because its App key was revoked, the App
+owner must generate a replacement key in that **same** App, store it via the
+existing secret source and follow [Rotation](#rotation). If the installation
+was suspended, the organization owner must unsuspend it; if removed, reinstall
+the same reviewer App with access to the affected repository and required
+permissions, then reconcile any changed installation ID in the broker and its
+expected-ID pins through the governed owner deployment. Verify that provider's
+mint before awaiting natural recovery. A code retry cannot repair revoked
+authority; keep the read closed. Do not substitute an operator PAT, another
+reviewer role or the merge-agent App.
+
 ## Preflight & failure modes
 
 `scripts/adversarial-watcher-start.sh` and `src/gemini-reviewer-preflight.mjs`

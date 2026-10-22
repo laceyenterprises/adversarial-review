@@ -1134,7 +1134,7 @@ test('postGitHubReview refreshes token after exact-head auth failure and retries
           prepareTokens.push(token);
         },
         fetchImpl: async (url, options = {}) => {
-          assert.equal(url, 'http://broker.test/token?provider=github-app-codex-reviewer');
+          assert.equal(url, 'http://broker.test/token?provider=github-app-codex-reviewer&force=1');
           assert.equal(options.headers.Authorization, 'Bearer shared-secret');
           return {
             ok: true,

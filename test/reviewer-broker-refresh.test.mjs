@@ -117,6 +117,29 @@ test('resolveReviewerAppToken builds the expected broker request for each review
   }
 });
 
+test('LAC-2082: periodic reviewer refresh rejects a PAT fallback even with matching App/installation pins', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv({
+    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '123',
+    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '456',
+  });
+  let requests = 0;
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: 1_000_000, readFileImpl: readSecret, log: silentLog,
+    fetchImpl: async () => {
+      requests++;
+      return brokerOk('github-app-claude-reviewer', 'fixture-pat', {
+        expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+        metadata: { app_id: '123', installation_id: '456', credential_source: 'github_pat_fallback' },
+      });
+    },
+  });
+  assert.equal(requests, 1, 'a policy rejection must not try another broker');
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(summary.refreshed.length, 0);
+  assert.match(summary.failed[0].reason, /PAT fallback/);
+});
+
 test('keys the refresh schedule off the broker expires_at minus skew (when skew is the dominant lead)', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();

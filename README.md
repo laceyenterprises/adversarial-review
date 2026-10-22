@@ -1916,3 +1916,14 @@ maps derive their compatibility views from canonical roles. The compatibility
 reader grants no account lease, model, GitHub actor or merge authority. All
 legacy spellings remain readable through drain, and broker/refresh provider IDs
 retain their account names. This changes no durable state or smoke promise.
+
+### Remediator execution arms (OSG-14)
+
+The optional remediator seam consumes an existing ticket assignment and changes
+only execution class, model, effort and proposed account. `osg.mode: off` retains
+the original dispatch object and emits no experiment evidence. Active modes use
+the canonical ledger budget/catalog owner and ITP account proposals; any missing,
+unavailable or invalid arm retains the default route with a bounded reason.
+The hammer's logical identity, prompt, lease, rebase and merge rules are unchanged.
+See [the execution contract](docs/OSG-remediator-execution.md) for evidence and
+rollout ordering. Existing lifecycle states and smoke promises are unchanged.

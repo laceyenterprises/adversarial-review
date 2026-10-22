@@ -2163,6 +2163,7 @@ for (const holdReason of ['fleet-quota-status-unavailable', 'codex-account-evide
     const deps = testDeps();
     const args = findingsRemediationArgs(rootDir);
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      resolveOsgRemediatorRouteImpl: async () => assert.fail('OSG must not bypass a harness hold'),
       resolveCloserDispatchHarnessImpl: async options => {
         assert.equal(options.rootDir, rootDir);
         return { workerClass: 'hammer', hold: true, reason: holdReason };
@@ -2416,4 +2417,48 @@ test('TERMLEASE-01: a live dispatch record names its terminal lease on early ref
   assert.equal(result.dispatched, false, JSON.stringify(result));
   assert.match(result.closureBlocker, /terminal lease from launch synthetic-live still live/);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+});
+
+test('OSG-14: assigned hammer changes execution parameters while preserving the closer prompt and lease', async t => {
+  const prompts = [];
+  const cases = [null, ...['hammer', 'hammer-claude'].flatMap(workerClass =>
+    [undefined, null, '', ' ', 'default', 7, 'low'].map(effort => ({ workerClass, effort })))];
+  for (const experiment of cases) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'osg-hammer-dispatch-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = findingsRemediationArgs(rootDir, {
+      dispatchContext: { repo: 'example/fixture', reviewedBy: 'synthetic-reviewer' },
+    });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      writeFileImpl: (_directory, _path, content) => { prompts.push(content); },
+      resolveOsgRemediatorRouteImpl: async ({ current }) => experiment ? {
+        ...current, workerClass: experiment.workerClass,
+        modelResolution: { resolvedModel: 'fixture-model', resolvedReasoningLevel: experiment.effort },
+        osg: { reason: 'assigned', assignment: { assignment_id: 'fixture' },
+          accountProposal: { identity: experiment.workerClass, tokenAccountId: 'fixture-account' } },
+      } : current,
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const dispatch = deps.calls.find(call => call.args[0] === 'dispatch');
+    assert.ok(dispatch.args.every(value => typeof value === 'string'), 'execFile accepts string arguments only');
+    assert.equal(flagValue(dispatch.args, '--worker-class'), experiment?.workerClass || 'hammer');
+    assert.equal(flagValue(dispatch.args, '--model'), experiment ? 'fixture-model' : undefined);
+    assert.equal(dispatch.args.includes('--reasoning-level'), experiment?.effort === 'low');
+    if (experiment?.effort === 'low') assert.equal(flagValue(dispatch.args, '--reasoning-level'), 'low');
+    assert.equal(result.workerClass, 'hammer', 'logical merge authority is unchanged');
+    assert.ok(result.leasePath);
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, 'example/fixture', 404, HEAD);
+    for (const resolution of [audit.harnessResolution, audit.attempts.at(-1).harnessResolution]) {
+      assert.equal(resolution.workerClass, experiment?.workerClass || 'hammer');
+      if (experiment) {
+        assert.equal(resolution.modelResolution.resolvedModel, 'fixture-model');
+        assert.equal(resolution.osgRemediator.assignment.assignment_id, 'fixture');
+        assert.equal(resolution.accountProposal.identity, experiment.workerClass);
+      }
+    }
+  }
+  assert.equal(prompts.length, cases.length);
+  assert.ok(prompts.every(prompt => prompt === prompts[0]), 'execution arm does not rewrite terminal-remediation instructions');
 });

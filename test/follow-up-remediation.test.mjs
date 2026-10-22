@@ -9725,6 +9725,40 @@ test('non-blocking Codex HQ dispatch applies model and effort through the direct
   }
 });
 
+test('OSG-14: remediation runtime dispatches both families with optional reasoning effort', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'osg-remediation-hq-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const promptPath = path.join(rootDir, 'prompt.md');
+  writeFileSync(promptPath, 'prompt\n');
+  for (const workerClass of ['remediator-codex', 'remediator-claude']) {
+    for (const effort of [undefined, null, '', ' ', 'default', 7, 'low']) {
+      const calls = [];
+      const handle = await createRemediationRuntime({
+        env: {
+          AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+          HQ_ROOT: rootDir, HQ_PARENT_SESSION: 'session:test', HQ_PROJECT: 'adversarial-review',
+        },
+        execFileImpl: async (_command, args) => {
+          calls.push(args);
+          assert.ok(args.every(value => typeof value === 'string'), 'execFile accepts string arguments only');
+          if (args[1] === 'status') return { stdout: JSON.stringify({ status: 'queued', workspacePath: rootDir }) };
+          return { stdout: JSON.stringify({ launch_request_id: 'lrq-test', dispatch_id: 'disp-test' }) };
+        },
+      }).run({
+        mode: 'os', role: { workerClass }, repo: 'example/repo', prNumber: 79,
+        promptPath, replyPath: path.join(rootDir, 'reply.json'), jobId: 'osg-pr-79',
+        modelResolution: { resolvedModel: 'fixture-model', resolvedReasoningLevel: effort, source: 'osg-remediator' },
+      });
+      const args = calls[0];
+      assert.equal(args[args.indexOf('--worker-class') + 1], workerClass);
+      assert.equal(args[args.indexOf('--model') + 1], 'fixture-model');
+      assert.equal(args.includes('--reasoning-level'), effort === 'low');
+      if (effort === 'low') assert.equal(args[args.indexOf('--reasoning-level') + 1], 'low');
+      assert.equal(handle.worker.resolvedModel, 'fixture-model');
+    }
+  }
+});
+
 test('dispatchRemediationViaHq omits branch from the agent-os payload when falsy', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'agent-os-hq');

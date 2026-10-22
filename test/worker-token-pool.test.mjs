@@ -1,3 +1,4 @@
+import { resolveOsgRemediatorRoute } from '../src/osg-remediator.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -105,7 +106,7 @@ test('ITP-14 default Codex worker order is corporate-first and unknown preferred
   assert.equal(selectCodexWorkerAccount(fixture).hold, true);
 });
 
-for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-14 real ${family} remediation claim account ${index} dispatches remediator without local credentials`, async t => {
+for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) test(`${experiment ? 'OSG-14 assigned arm' : 'ITP-14'} real ${family} remediation claim account ${index} dispatches remediator without local credentials`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'itp14-claim-'));
   const hqRoot = join(rootDir, 'hq');
   const workspaceDir = join(rootDir, 'worker');
@@ -114,6 +115,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '1',
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
+    CODEX_BROKER_PROVIDER: 'codex-corp',
     CODEX_AUTH_PATH: join(rootDir, 'absent-auth.json') };
   const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
   const apply = values => { for (const [key, value] of Object.entries(values)) {
@@ -121,7 +123,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
   } };
   apply(overrides);
   t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: family === 'codex' ? 'claude-code' : 'codex',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: experiment || family === 'codex' ? 'claude-code' : 'codex',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   const dispatches = [];
@@ -129,15 +131,31 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
   const wire = wireFor(identity, index);
   const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
     guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
-    resolveRemediationWorkerClassImpl: args => resolveRemediationWorkerClassWithFallback({ ...args,
+    ...(experiment ? { resolveOsgRemediatorRouteImpl: options => {
+      assert.equal(options.current.pooled, false);
+      assert.equal(options.env.CODEX_BROKER_PROVIDER, 'codex-corp');
+      const arm = { role: 'remediator', harness: family, worker_class: identity,
+        model: wire.request.requested_models[0], effort: 'low', account: wire.selection.account_id };
+      return resolveOsgRemediatorRoute({ ...options, mode: 'apply',
+        ownerImpl: async () => ({ reason: 'assigned', worker_class: identity, arm, effort: 'low',
+          assignment: { assignment_id: 'fixture-assignment', ticket_key: 'fixture/T-1',
+            mode: 'apply', experiment: 'remediator', arm, propensity: 0.5 } }),
+        selectAccountImpl: async () => ({ pooled: true, status: 'selected', identity,
+          hold: false, tokenAccountId: arm.account }), recordImpl: () => {} });
+    } } : {}),
+    resolveRemediationWorkerClassImpl: args => experiment
+      ? { workerClass: 'remediator-codex-corp', pooled: false, hold: false }
+      : resolveRemediationWorkerClassWithFallback({ ...args,
       selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
         model: wire.request.requested_models[0], ownerImpl: async () => wire }),
       execFileImpl: async () => ({ stdout: '{}' }) }),
-    execFileImpl: async (command, args) => {
+    execFileImpl: async (command, args, options) => {
       if (command === 'gh' && args[0] === 'api' && args[1].endsWith('/pulls/42')) return { stdout: JSON.stringify({
         base: { ref: 'main' }, head: { ref: 'fixture-branch', repo: { full_name: 'sample/project' } } }) };
       if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'running', workspaceDir }) };
       if (args[0] === 'dispatch') {
+        assert.equal(Object.hasOwn(options.env, 'CODEX_BROKER_PROVIDER'), false,
+          'pooled dispatch must discard inherited or pre-OSG legacy provider settings');
         dispatches.push(args);
         return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-lrq' }) };
       }
@@ -146,11 +164,17 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
     postCommentImpl: async () => {}, deliverAlertImpl: async () => {},
     log: { info() {}, warn() {}, log() {}, error() {} } });
   assert.equal(result.consumed, true, JSON.stringify(result));
+  assert.equal(process.env.CODEX_BROKER_PROVIDER, 'codex-corp', 'claim environment is isolated');
   assert.equal(result.job.remediationWorker.workerClass, identity);
   assert.equal(result.job.remediationWorker.accountProposal.tokenAccountId, wire.selection.account_id);
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0][dispatches[0].indexOf('--worker-class') + 1], identity);
   assert.equal(dispatches[0].includes('--harness'), false);
+  if (experiment) {
+    assert.equal(dispatches[0][dispatches[0].indexOf('--model') + 1], wire.request.requested_models[0]);
+    assert.equal(dispatches[0][dispatches[0].indexOf('--reasoning-level') + 1], 'low');
+    assert.equal(result.job.remediationWorker.osgRemediator.reason, 'assigned');
+  }
 });
 
 test('ITP-14 pooled routing preserves the declared infrastructure fallback', async () => {

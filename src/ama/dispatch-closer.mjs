@@ -1,3 +1,4 @@
+import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
@@ -4662,6 +4663,7 @@ async function maybeDispatchAmaCloserAttempt({
   useLaunchSnapshot = true,
   readLaunchRequestSnapshotImpl = readLaunchRequestSnapshotFromLedgerAsync,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
+  resolveOsgRemediatorRouteImpl = resolveOsgRemediatorRoute,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
@@ -7063,13 +7065,24 @@ async function maybeDispatchAmaCloserAttempt({
   }
   const harnessHoldReason = harnessFallback?.reason === 'all-fallbacks-grounded'
     ? 'all-fallbacks-grounded' : `harness-hold:${harnessFallback?.reason || 'unknown'}`;
+  if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
+    dispatchWorkerClass = harnessFallback.workerClass;
+  }
+  const osgRemediatorRoute = !harnessFallback?.hold && isHammerWorkerClass(workerClass)
+    ? await resolveOsgRemediatorRouteImpl({ current: { workerClass: dispatchWorkerClass },
+      kind: 'hammer', rootDir, repo, prNumber, env, log: logger })
+    : { workerClass: dispatchWorkerClass };
+  dispatchWorkerClass = osgRemediatorRoute.workerClass;
   const harnessResolution = {
     ...(harnessFallback?.pooled ? { accountProposal: {
       identity: harnessFallback.identity, tokenAccountId: harnessFallback.tokenAccountId || null,
       brokerProvider: harnessFallback.brokerProvider || null, reason: harnessFallback.reason,
       evidenceGeneration: harnessFallback.evidenceGeneration || null,
     } } : {}),
-    workerClass: harnessFallback?.workerClass || workerClass,
+    workerClass: dispatchWorkerClass,
+    ...(osgRemediatorRoute.modelResolution ? { modelResolution: osgRemediatorRoute.modelResolution,
+      accountProposal: osgRemediatorRoute.osg?.accountProposal } : {}),
+    ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),
     ...(harnessFallback?.diagnostics?.length ? { diagnostics: harnessFallback.diagnostics } : {}),
@@ -7120,7 +7133,6 @@ async function maybeDispatchAmaCloserAttempt({
       reason: harnessHoldReason, holdReason: harnessFallback.reason || 'unknown', harnessResolution });
   }
   if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
-    dispatchWorkerClass = harnessFallback.workerClass;
     logAmaCloserDispatchEvent(logger, 'ama_closer.harness_fallback', {
       repo,
       prNumber,
@@ -7337,6 +7349,7 @@ async function maybeDispatchAmaCloserAttempt({
       dispatchReason,
       workerClass,
       dispatchWorkerClass,
+      ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
       workerId,
       promptPath,
       promptDir,
@@ -7576,6 +7589,13 @@ async function maybeDispatchAmaCloserAttempt({
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
+  if (osgRemediatorRoute.modelResolution?.resolvedModel) {
+    args.push('--model', osgRemediatorRoute.modelResolution.resolvedModel);
+  }
+  const reasoningLevel = osgRemediatorRoute.modelResolution?.resolvedReasoningLevel;
+  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
+    args.push('--reasoning-level', reasoningLevel);
+  }
   if (workerId) {
     args.push('--worker-id', workerId);
   }
@@ -7748,7 +7768,7 @@ async function maybeDispatchAmaCloserAttempt({
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
   };
   logCodexWorkerDispatch({ info: message => logAmaCloserDispatchEvent(logger,
-    'ama_closer.codex_account', { repo, prNumber, message }) }, dispatchWorkerClass, harnessFallback, 'ama-closer');
+    'ama_closer.codex_account', { repo, prNumber, message }) }, dispatchWorkerClass, osgRemediatorRoute.modelResolution ? osgRemediatorRoute : harnessFallback, 'ama-closer');
   for (;;) {
     try {
       throwIfAborted(signal);
@@ -8033,6 +8053,7 @@ async function maybeDispatchAmaCloserAttempt({
       dispatchReason,
       workerClass,
       dispatchWorkerClass,
+      ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
       workerId,
       promptPath,
       promptDir,

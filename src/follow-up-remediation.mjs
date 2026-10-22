@@ -1,3 +1,4 @@
+import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
@@ -136,7 +137,7 @@ import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { detectRemediationQuotaEvidence } from './remediation-quota-evidence.mjs';
 import { settleMissingRemediationArtifact } from './remediation-missing-artifact.mjs';
 import { settleQuotaExhaustedRemediation } from './remediation-quota-hold.mjs';
-import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
+import { normalizeRemediationWorkerClass, remediatorFallbackAudit, resolveClaimedRemediatorRouting, nextRoundReviewerModels, resolveRemediationWorkerClassWithFallback } from './remediation-worker-class-fallback.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
   HQ_REMEDIATION_DISPATCH_TRIGGER,
@@ -440,7 +441,8 @@ function createRemediationRuntime({
         replyPath: request.replyPath,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
-        modelResolution: ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass) ? request.modelResolution : null,
+        modelResolution: ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)
+          || request.modelResolution?.source === 'osg-remediator' ? request.modelResolution : null,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         allowConflictedBase: Boolean(request.allowConflictedBase),
         execFileImpl,
@@ -598,7 +600,11 @@ async function dispatchRemediationViaHq({
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
     ticketRef, workerClass, repo, prNumber, branch, promptPath, parentSession, project, hqRoot, allowConflictedBase,
   });
-  if (modelResolution) legacyHqArgs.push('--model', modelResolution.resolvedModel, '--reasoning-level', modelResolution.resolvedReasoningLevel);
+  if (modelResolution?.resolvedModel) legacyHqArgs.push('--model', modelResolution.resolvedModel);
+  const reasoningLevel = modelResolution?.resolvedReasoningLevel;
+  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
+    legacyHqArgs.push('--reasoning-level', reasoningLevel);
+  }
   const ticket = useAppContract
     ? await (async () => {
         const connect = await loadAppSdkConnect();
@@ -3144,6 +3150,7 @@ async function consumeNextFollowUpJob({
   shouldStop = () => false,
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
+  resolveOsgRemediatorRouteImpl = resolveOsgRemediatorRoute,
   mintClaudeCodeRemediationTokenImpl = null,
   conflictedBaseGateImpl = null,
   guardStackedBaseImpl = guardStackedBase,
@@ -3322,7 +3329,7 @@ async function consumeNextFollowUpJob({
     // moves to a declared fallback class. The fleet read is wired only from the
     // daemon (`resolveRemediationWorkerClassImpl`), keeping the heavily-spied
     // consume path subprocess-free in unit tests (job-local evidence only).
-    const remediatorRouting = await resolveClaimedRemediatorRouting({
+    let remediatorRouting = await resolveClaimedRemediatorRouting({
       job: claimed.job,
       primary: pickRemediationWorkerClass(claimed.job),
       env: jobEnv,
@@ -3354,6 +3361,15 @@ async function consumeNextFollowUpJob({
         heldAt, delayedPendingPaths, log,
         routing: { ...remediatorRouting, hold: true, reason: 'pooled-remediation-requires-dispatch',
           holdUntil: new Date(Date.parse(heldAt) + 60_000).toISOString() } });
+    }
+    if (remediationMode === 'os') {
+      remediatorRouting = await resolveOsgRemediatorRouteImpl({ current: remediatorRouting,
+        kind: 'remediator', rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
+        reviewerModels: nextRoundReviewerModels(claimed.job, { env: jobEnv }), env: jobEnv, log });
+      workerClass = remediatorRouting.workerClass;
+    }
+    if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
+      delete jobEnv.CODEX_BROKER_PROVIDER;
     }
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,
@@ -3681,7 +3697,7 @@ async function consumeNextFollowUpJob({
       hqRoot,
       launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
-      modelResolution: codexModelResolution || claudeModelResolution,
+      modelResolution: remediatorRouting.modelResolution || codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,
     });
@@ -3696,6 +3712,7 @@ async function consumeNextFollowUpJob({
       worker: {
         ...worker,
         ...remediatorFallbackAudit(remediatorRouting),
+        ...(remediatorRouting.osg ? { osgRemediator: remediatorRouting.osg } : {}),
         dirtyMergeResolution: claimed.job?.remediationWorker?.dirtyMergeResolution || null,
         pushTokenCapability: workflowPushPreflight?.capability
           ? {

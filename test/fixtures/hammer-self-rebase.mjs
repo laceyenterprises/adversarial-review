@@ -105,7 +105,22 @@ if (args[0] === 'pushed') {
     save();
     console.log(JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: { headRefOid: target } } } }));
   } else if (args[0] === 'pr' && args[1] === 'view') {
-    if (args.includes('id') && args.includes('--jq')) { console.log('synthetic-pr'); process.exit(0); }
+    if (args.includes('id') && args.includes('--jq')) {
+      state.idReads = (state.idReads || 0) + 1;
+      save();
+      if (process.env.SCENARIO === 'id-exhausted' || process.env.SCENARIO === 'id-permanent' ||
+        (process.env.SCENARIO === 'id-transient' && state.idReads === 1)) {
+        console.error(process.env.SCENARIO === 'id-permanent' ? 'HTTP 403: Forbidden' : 'HTTP 502: Bad Gateway');
+        process.exit(1);
+      }
+      console.log('synthetic-pr'); process.exit(0);
+    }
+    if (args.includes('number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName') &&
+      ((process.env.SCENARIO === 'snapshot-failed' && state.head === state.rebased) ||
+        (process.env.SCENARIO === 'ci-snapshot-failed' && state.retried))) {
+      console.error('HTTP 502: synthetic post-rebase snapshot failure');
+      process.exit(1);
+    }
     if (process.env.SCENARIO === 'foreign-after-rebase' && state.behind === false) {
       state.head = state.foreign; save();
     }

@@ -3792,9 +3792,13 @@ failure stops publication and predicate evaluation. It never transfers an
 eligible verdict or old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
 reports `github-gate-red`; pending-only expiry reports `required-checks-pending`
 with the existing resume receipt, and other expiry reports `github-gate-timeout`.
-All release the lease. Real read, publication, head-race and authority failures
-continue to fail closed. A non-cooperating base writer during the serialized
-retry refuses as `retry-base-not-contained`; no unbounded retry loop is added.
+All release the lease. A failed post-rebase PR snapshot reports `pr-refresh-failed`
+and releases the lease before returning, including during the in-run CI retry.
+PR node-ID resolution shares the update-branch transient retry cap and backoff;
+permanent lookup failures stop immediately. Real read, publication, head-race and
+authority failures continue to fail closed. A non-cooperating base writer during
+the serialized retry refuses as `retry-base-not-contained`; no unbounded retry
+loop is added.
 The final live head/required-check gate is refreshed under the lease, preserving
 stale-head, current-review, remediation, primary-change and merge authority checks.
 

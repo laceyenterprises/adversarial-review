@@ -491,19 +491,20 @@ ham_capture_current_base_sha() {
 
 ham_update_branch_with_retries() {
   local ham_update_pr_id
-  ham_update_pr_id=$(ham_pr --json id --jq '.id') || return 1
-  [ -n "$ham_update_pr_id" ] && [ "$ham_update_pr_id" != null ] || return 1
   ham_update_attempt=1
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    # Bind provenance to the mutation result, never a later mutable branch tip.
-    # https://docs.github.com/en/graphql/reference/pulls#updatepullrequestbranch
-    if ham_gh api graphql \
-      -f 'query=mutation($id: ID!, $head: GitObjectID!) { updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) { pullRequest { headRefOid } } }' \
-      -f id="$ham_update_pr_id" -f head="$POST_REMEDIATION_SHA" \
-      > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
-      HAM_REBASE_PUBLISHED_HEAD=$(jq -er '.data.updatePullRequestBranch.pullRequest.headRefOid |
-        select(type == "string" and test("^[a-f0-9]{40}$"))' "<<RUN_DIR>>/update-branch.stdout") || return 1
-      return 0
+    if ham_update_pr_id=$(ham_pr --json id --jq '.id' 2> "<<RUN_DIR>>/update-branch.stderr"); then
+      [ -n "$ham_update_pr_id" ] && [ "$ham_update_pr_id" != null ] || return 1
+      # Bind provenance to the mutation result, never a later mutable branch tip.
+      # https://docs.github.com/en/graphql/reference/pulls#updatepullrequestbranch
+      if ham_gh api graphql \
+        -f 'query=mutation($id: ID!, $head: GitObjectID!) { updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) { pullRequest { headRefOid } } }' \
+        -f id="$ham_update_pr_id" -f head="$POST_REMEDIATION_SHA" \
+        > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
+        HAM_REBASE_PUBLISHED_HEAD=$(jq -er '.data.updatePullRequestBranch.pullRequest.headRefOid |
+          select(type == "string" and test("^[a-f0-9]{40}$"))' "<<RUN_DIR>>/update-branch.stdout") || return 1
+        return 0
+      fi
     fi
     if ham_update_branch_conflict "<<RUN_DIR>>/update-branch.stderr"; then
       return 2
@@ -603,7 +604,11 @@ ham_rebase_head() {
       return 1
     fi
   fi
-  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || return 1
+  if ! ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"; then
+    HAM_PHASE_OUTCOME=pr-refresh-failed
+    ham_release_merge_lease || return 1
+    return 1
+  fi
   if [ "$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")" != "$POST_REMEDIATION_SHA" ]; then
     HAM_PHASE_OUTCOME=head-changed
     ham_release_merge_lease || return 1

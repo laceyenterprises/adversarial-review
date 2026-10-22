@@ -17,7 +17,7 @@ const repo = 'fixture/repo', prNumber = 42;
 const body = '## Blocking issues\n- **Prefix already present**\n  - **File:** `feature.txt`\n  - **Problem:** Prefix absent.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
 const evidence = '```\n$ git show HEAD:feature.txt\nprefix: feature\n```';
 
-async function fixture(t, { changed = false, remediation = false } = {}) {
+async function fixture(t, { changed = false, remediation = false, binary = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamwithdraw-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5000,
@@ -26,8 +26,10 @@ async function fixture(t, { changed = false, remediation = false } = {}) {
   const write = (path, text) => writeFileSync(join(dir, path), text);
   const commit = message => { run('add', '--all'); run('commit', '-qm', message); return run('rev-parse', 'HEAD'); };
   run('init', '-q'); run('config', 'user.name', 'Fixture'); run('config', 'user.email', 'fixture@example.invalid');
-  write('initial.txt', 'initial\n'); const fork = commit('Initial');
-  write('feature.txt', 'prefix: feature\n'); const a = commit('Feature');
+  write('initial.txt', 'initial\n');
+  if (binary) write('feature.txt', Buffer.from([0, 1, 255]));
+  const fork = commit('Initial');
+  write('feature.txt', binary ? Buffer.from([0, 2, 255]) : 'prefix: feature\n'); const a = commit('Feature');
   const review = { id: 17, node_id: 'PRR_17', html_url: 'https://github.com/fixture/repo/pull/42#pullrequestreview-17',
     commit_id: a, state: 'CHANGES_REQUESTED', user: { login: 'lacey-codex-reviewer[bot]' }, body };
   let live = a;
@@ -56,7 +58,7 @@ async function fixture(t, { changed = false, remediation = false } = {}) {
   await disputeFinding(args, deps);
   run('checkout', '-qb', 'replay', fork);
   write('base.txt', 'new base\n'); base = commit('Base advancement');
-  write('feature.txt', changed ? 'unreviewed feature\n' : 'prefix: feature\n');
+  write('feature.txt', binary ? Buffer.from([0, changed ? 3 : 2, 255]) : changed ? 'unreviewed feature\n' : 'prefix: feature\n');
   const replay = commit('Replayed feature');
   if (remediation) {
     write('repair.txt', 'remediation\n');
@@ -175,20 +177,75 @@ test('HAMWITHDRAW-01: ama-check uses the same durable withdrawal at the diverged
 });
 
 
-test('HAMWITHDRAW-01: daemon snapshot restores the same review body and withdrawal after rebase', async t => {
-  const f = await fixture(t);
-  f.comments.push({ user: { login: 'the-hammer-lacey[bot]' }, body: `HAM-Base-Head: ${f.a}\nHAM-Validated-Head: ${f.b}` });
-  const snapshot = await buildAdversarialGateSnapshot(f.dir, { repo, prNumber, headSha: f.b,
-    includeSettledReview: true, liveHeadReview: null,
-    reviewRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'codex',
-      reviewer_head_sha: f.a, review_body: body },
-    execFileImpl: async (_file, args) => ({ stdout: JSON.stringify(await f.get(args.find(arg => arg.startsWith('repos/')))) }) });
-  assert.equal(snapshot.reviewCurrency.current, true, JSON.stringify(snapshot.reviewCurrency));
-  assert.equal(snapshot.settledReview.blockingFindingCount, 1);
-  assert.equal(snapshot.settledReview.verdict, 'request-changes');
-  assert.equal(resolveHammerAdjudication({ ...snapshot.settledReview, reviewedHead: f.a, currentHead: f.b },
-    snapshot.hammerWithdrawals).allBlockingWithdrawn, true);
-  assert.equal(pickAdversarialGateStatus(snapshot).reason, 'hammer-adjudicated');
+for (const proof of ['provenance', 'patch-id']) {
+  test(`HAMWITHDRAW-01: daemon snapshot restores the same review body and withdrawal after rebase via ${proof}`, async t => {
+    const f = await fixture(t);
+    if (proof === 'provenance') {
+      f.comments.push({ user: { login: 'the-hammer-lacey[bot]' }, body: `HAM-Base-Head: ${f.a}\nHAM-Validated-Head: ${f.b}` });
+    }
+    assert.notEqual(process.cwd(), f.dir, 'daemon runs outside the target checkout');
+    const snapshot = await buildAdversarialGateSnapshot(f.dir, { repo, prNumber, headSha: f.b,
+      reviewCurrencyCwd: f.dir,
+      includeSettledReview: true, liveHeadReview: null,
+      reviewRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'codex',
+        reviewer_head_sha: f.a, review_body: body },
+      execFileImpl: async (_file, args) => ({ stdout: JSON.stringify(await f.get(args.find(arg => arg.startsWith('repos/')))) }) });
+    assert.equal(snapshot.reviewCurrency.current, true, JSON.stringify(snapshot.reviewCurrency));
+    assert.equal(snapshot.reviewCurrency.proof, proof === 'provenance' ? 'closer-rebase-provenance' : 'reviewed-rebase-patch-id');
+    assert.equal(snapshot.settledReview.blockingFindingCount, 1);
+    assert.equal(snapshot.settledReview.verdict, 'request-changes');
+    assert.equal(resolveHammerAdjudication({ ...snapshot.settledReview, reviewedHead: f.a, currentHead: f.b },
+      snapshot.hammerWithdrawals).allBlockingWithdrawn, true);
+    assert.equal(pickAdversarialGateStatus(snapshot).reason, 'hammer-adjudicated');
+  });
+}
+
+for (const scenario of ['missing', 'superseded']) {
+  test(`HAMWITHDRAW-01: daemon skips withdrawal comment reads for ${scenario} authoritative review`, async t => {
+    const f = await fixture(t);
+    const head = f.run('commit-tree', `${f.a}^{tree}`, '-p', f.a, '-m', 'Descendant');
+    f.setLive(head);
+    const reviews = scenario === 'missing' ? [] : [f.review, { ...f.review, id: 18, commit_id: head, state: 'APPROVED' }];
+    const calls = [];
+    const snapshot = await buildAdversarialGateSnapshot(f.dir, { repo, prNumber, headSha: head,
+      includeSettledReview: true, liveHeadReview: null,
+      reviewRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'codex',
+        reviewer_head_sha: f.a, review_body: body },
+      execFileImpl: async (_file, args) => {
+        const path = args.find(arg => arg.startsWith('repos/'));
+        calls.push(path);
+        if (path.includes('/reviews?')) return { stdout: JSON.stringify(reviews) };
+        assert.ok(!path.includes('/comments?'), 'withdrawal comments must not be read');
+        return { stdout: JSON.stringify(await f.get(path)) };
+      } });
+    assert.ok(calls.some(path => path.includes('/reviews?')));
+    assert.ok(!calls.some(path => path.includes('/comments?')));
+    assert.deepEqual(snapshot.hammerWithdrawals, []);
+    assert.equal(snapshot.reviewCurrency.current, false);
+    assert.match(snapshot.reviewCurrency.missingProof, /missing or superseded/);
+    assert.equal(pickAdversarialGateStatus(snapshot).reason, 'review-currency-unproven');
+  });
+}
+
+for (const changed of [false, true]) {
+  test(`HAMWITHDRAW-01: binary-only rebase ${changed ? 'rejects changed bytes' : 'preserves patch currency'}`, async t => {
+    const f = await fixture(t, { binary: true, changed });
+    const diff = await f.git(['diff', '--binary', '--full-index', `${f.a}^`, f.a]);
+    assert.match(diff, /GIT binary patch/);
+    const currency = createReviewCurrencyReader({ repo, prNumber, get: f.get, cwd: f.dir });
+    const result = await currency(f.a, f.b);
+    assert.equal(result.current, !changed, JSON.stringify(result));
+    if (!changed) assert.equal(result.proof, 'reviewed-rebase-patch-id');
+  });
+}
+
+test('HAMWITHDRAW-01: unavailable binary patch ID fails closed without a digest fallback', async t => {
+  const f = await fixture(t, { binary: true });
+  const currency = createReviewCurrencyReader({ repo, prNumber, get: f.get,
+    git: (args, input) => args[0] === 'patch-id' ? Promise.resolve('') : f.git(args, input) });
+  const result = await currency(f.a, f.b);
+  assert.equal(result.current, false);
+  assert.match(result.missingProof, /missing patch ID/);
 });
 
 

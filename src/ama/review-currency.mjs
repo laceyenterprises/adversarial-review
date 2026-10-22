@@ -7,9 +7,9 @@ const LIMIT = 256;
 
 // No fetches: callers own checkout hydration. Missing objects are missing proof,
 // never permission to assume that a rewritten review is still current.
-export function currencyGit(args, input) {
+export function currencyGit(args, input, { cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+    const child = execFile('git', args, { cwd, timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
       (error, stdout) => error ? reject(error) : resolve(stdout));
     child.stdin.on('error', () => {});
     child.stdin.end(input);
@@ -69,7 +69,8 @@ async function patchEquivalent({ reviewedHead, currentHead, base, git, get, repo
 // One evaluation-local reader for finding admission AND disposition admission.
 // Only an exact current endpoint is covered; a later unrelated push cannot
 // inherit a prior HAM audit edge. Cache reads only within this live evaluation.
-export function createReviewCurrencyReader({ repo, prNumber, get, comments = null, git = currencyGit, pr = null }) {
+export function createReviewCurrencyReader({ repo, prNumber, get, comments = null, cwd,
+  git = (args, input) => currencyGit(args, input, { cwd }), pr = null }) {
   const cache = new Map();
   let commentRead, prRead;
   const readComments = () => commentRead ||= comments !== null ? Promise.resolve(comments)

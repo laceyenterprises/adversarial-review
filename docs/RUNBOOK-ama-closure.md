@@ -2599,6 +2599,18 @@ unattributed extra commit, branch reset or later unrelated push supplies no
 carry-forward authority. Missing objects, capped evidence and unavailable
 provenance name the missing proof and retain no-merge status; they do not imply
 that operator recovery is necessary.
+Binary-only commits use the same `--binary --full-index` diff and stable patch
+ID proof; a changed binary blob does not preserve currency. If the installed
+Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
+requires an authenticated `closer-rebase-provenance` chain instead of a digest
+fallback. Local proof never fetches objects. Daemon callers with a hydrated
+target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
+or `projectAdversarialGateStatus`; the lower-level `createReviewCurrencyReader`
+accepts `cwd` or a repository-bound `git(args, input)` executor (which takes
+precedence over `cwd`). Without either, Git uses the process working directory;
+missing target objects remain missing proof. Once the authoritative review is
+missing or superseded, the snapshot discards withdrawals and skips their live
+comment verification.
 It posts a HAM-authored comment carrying `Resolution: withdrawn-by-hammer`, the
 finding identity (`sha256([title, file])`), the exact head (`Reviewed-Head`), the
 reviewed head of the finding, `Evidence-SHA256` and the evidence. It rechecks the

@@ -1110,6 +1110,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
   hammerWithdrawals: hammerWithdrawalsOverride = undefined,
+  reviewCurrencyCwd = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
@@ -1150,7 +1151,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   if (reviewedHeadSha && headSha && hammerWithdrawals.some(entry => entry.headSha !== headSha)) {
     const get = async path => JSON.parse((await meteredExecFile(execFileImpl, 'gh', ['api', path],
       { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout);
-    const currency = createReviewCurrencyReader({ repo, prNumber, get });
+    const currency = createReviewCurrencyReader({ repo, prNumber, get, cwd: reviewCurrencyCwd });
     reviewCurrency = await currency(reviewedHeadSha, headSha);
     try {
       const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
@@ -1161,15 +1162,18 @@ async function buildAdversarialGateSnapshot(rootDir, {
         (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
         reviewCurrency = { reviewedHead: reviewedHeadSha, currentHead: headSha, current: false,
           missingProof: reviewCurrency.missingProof || `latest authoritative review missing or superseded for ${reviewedHeadSha} -> ${headSha}` };
-      } else if (reviewCurrency.current && shouldIncludeSettledReview && !hasActiveSamePrRemediation) {
-        const verdict = normalizeEffectiveReviewVerdict(review.body);
-        settledReview = { verdict, remediationPending: false, reviewedHeadSha,
-          evidenceVersion: createHash('sha256').update(String(review.body || '')).digest('hex'),
-          ...classifyBlockersFromBody(review.body, verdict) };
+        hammerWithdrawals = [];
+      } else {
+        if (reviewCurrency.current && shouldIncludeSettledReview && !hasActiveSamePrRemediation) {
+          const verdict = normalizeEffectiveReviewVerdict(review.body);
+          settledReview = { verdict, remediationPending: false, reviewedHeadSha,
+            evidenceVersion: createHash('sha256').update(String(review.body || '')).digest('hex'),
+            ...classifyBlockersFromBody(review.body, verdict) };
+        }
+        const comments = await get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
+        if (!Array.isArray(comments) || comments.length >= 100) throw new Error('missing or capped withdrawal comments');
+        hammerWithdrawals = await carryHammerWithdrawals(hammerWithdrawalsFromComments(comments, hammerWithdrawals), headSha, currency);
       }
-      const comments = await get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
-      if (!Array.isArray(comments) || comments.length >= 100) throw new Error('missing or capped withdrawal comments');
-      hammerWithdrawals = await carryHammerWithdrawals(hammerWithdrawalsFromComments(comments, hammerWithdrawals), headSha, currency);
     } catch {
       // No live comment verification means no cross-head withdrawal evidence.
       hammerWithdrawals = [];
@@ -1356,6 +1360,7 @@ async function projectAdversarialGateStatus(rootDir, {
   operatorApprovalEvent = undefined,
   env = process.env,
   gateProvider = null,
+  reviewCurrencyCwd = undefined,
   domainId = 'code-pr',
   now = () => new Date(),
 } = {}) {
@@ -1368,6 +1373,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prAuthor,
     reviewRow,
     includeSettledReview: 'quota-capped',
+    reviewCurrencyCwd,
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,

@@ -176,6 +176,36 @@ test('updateAmaCloserLease dispatched without lrqId is rejected', () => {
   }
 });
 
+test('lease CAS accepts reordered snapshot keys', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { lease } = acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 4242 });
+  const expectedLease = Object.fromEntries(Object.entries(lease).reverse());
+  const result = updateAmaCloserLease({ rootDir, ...IDENTITY, expectedLease,
+    status: 'dispatched', lrqId: 'lrq_reordered' });
+  assert.equal(result.lease.status, 'dispatched');
+  assert.equal(readAmaCloserLease(rootDir, IDENTITY).lrqId, 'lrq_reordered');
+});
+
+test('lease CAS rejects changed, missing and additional snapshot fields without writing', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { lease, leasePath } = acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 4242 });
+  const before = readFileSync(leasePath, 'utf8');
+  const missingField = { ...lease };
+  delete missingField.dispatchTimeoutMs;
+  for (const expectedLease of [
+    { ...lease, watcherPid: 4243 },
+    missingField,
+    { ...lease, annotation: 'concurrent change' },
+    null,
+  ]) {
+    assert.throws(() => updateAmaCloserLease({ rootDir, ...IDENTITY, expectedLease,
+      status: 'dispatched', lrqId: 'lrq_stale' }), { code: 'ESTALE' });
+    assert.equal(readFileSync(leasePath, 'utf8'), before);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Test 6 — dispatched → terminal succeeds and sets terminalOutcome.
 // ---------------------------------------------------------------------------

@@ -332,10 +332,21 @@ export function evaluateHammerRetryCap(ledger, {
 export function recordHammerRetryDispatch(rootDir, identity, {
   jobKey,
   headSha,
+  dispatchKey = null,
+  preserveSuppression = false,
   lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
   now = null,
 } = {}) {
   const existing = readHammerRetryCapLedger(rootDir, identity);
+  if (dispatchKey && existing?.__corrupt) throw new Error('cannot charge recovered dispatch: corrupt hammer retry ledger');
+  if (dispatchKey && existing?.chargedDispatchKeys !== undefined
+    && (!Array.isArray(existing.chargedDispatchKeys)
+      || existing.chargedDispatchKeys.some(key => typeof key !== 'string'))) {
+    throw new Error('cannot charge recovered dispatch: invalid charged dispatch keys');
+  }
+  // Receipt recovery may repeat after a crash between the charge and record
+  // persistence. Keys survive series resets, just like lifetime charges.
+  if (dispatchKey && existing?.chargedDispatchKeys?.includes(dispatchKey)) return existing;
   const decision = evaluateHammerRetryCap(existing, { jobKey, headSha, lifetimeDispatchCeiling });
   const incomingJobKey = normalizeKey(jobKey);
   const head = normalizeKey(headSha);
@@ -366,6 +377,9 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
     ...(existing?.operatorHoldRefundedAt ? { operatorHoldRefundedAt: existing.operatorHoldRefundedAt } : {}),
     dispatchHeads,
+    ...(dispatchKey || existing?.chargedDispatchKeys ? {
+      chargedDispatchKeys: [...(existing?.chargedDispatchKeys || []), ...(dispatchKey ? [dispatchKey] : [])],
+    } : {}),
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
     // reset path). Within the same series we never reach here while suppressed
@@ -383,6 +397,10 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     targetAlertedAt: null,
     createdAt: existing?.createdAt || now || null,
     updatedAt: now || existing?.updatedAt || null,
+    ...(preserveSuppression && existing ? Object.fromEntries([
+      'suppressed', 'lifetimeSuppressed', 'targetSuppressed', 'suppressionState',
+      'suppressedJobKey', 'suppressedHeadSha', 'suppressedAttemptCount', 'alertedAt', 'targetAlertedAt',
+    ].filter(key => Object.hasOwn(existing, key)).map(key => [key, existing[key]])) : {}),
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;

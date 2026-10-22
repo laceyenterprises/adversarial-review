@@ -43,6 +43,7 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { closeSync, openSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -165,6 +166,8 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
     const current = readAmaCloserLease(rootDir, lease);
     return current?.status === lease.status && current?.lrqId === lease.lrqId
       && current?.updatedAt === lease.updatedAt && current?.acquiredAt === lease.acquiredAt
+      && current?.watcherPid === lease.watcherPid && current?.holderHost === lease.holderHost
+      && current?.dispatchTimeoutMs === lease.dispatchTimeoutMs
       && current?.terminalOutcome === lease.terminalOutcome;
   } catch { return false; }
 }
@@ -629,6 +632,7 @@ export function acquireAmaCloserLease({
  * @param {string=} args.lrqId
  * @param {string=} args.terminalOutcome
  * @param {string=} args.now
+ * @param {object=} args.expectedLease Complete observed lease snapshot; object key order is ignored.
  * @returns {{ leasePath: string, lease: object }}
  */
 export function updateAmaCloserLease({
@@ -640,6 +644,7 @@ export function updateAmaCloserLease({
   lrqId,
   terminalOutcome,
   now,
+  expectedLease,
 } = {}) {
   if (!VALID_STATUSES.has(String(status || ''))) {
     throw new RangeError(
@@ -658,7 +663,18 @@ export function updateAmaCloserLease({
   }
 
   const leasePath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha });
+  mkdirSync(dirname(leasePath), { recursive: true });
+  const mutationFd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
+  try {
+  try { fsExt.flockSync(mutationFd, 'exnb'); }
+  catch (error) {
+    if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+    throw Object.assign(new Error('closer lease is owned by another mutation'), { code: 'EBUSY' });
+  }
   const existing = readLeaseFile(leasePath);
+  if (expectedLease !== undefined && !isDeepStrictEqual(existing, expectedLease)) {
+    throw Object.assign(new Error('closer lease changed during evidence lookup'), { code: 'ESTALE' });
+  }
   if (!existing) {
     throw new Error(
       `updateAmaCloserLease: no lease at ${leasePath} — ` +
@@ -710,6 +726,7 @@ export function updateAmaCloserLease({
     overwrite: true,
   });
   return { leasePath, lease: next };
+  } finally { closeSync(mutationFd); }
 }
 
 /**

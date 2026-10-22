@@ -1298,17 +1298,10 @@ rule. Red required CI and a stale pre-remediation verdict admit a wake, while
 current-head blocking verdicts and other holds keep their existing refusals.
 Ownership and wake inputs exclude the pipeline's adversarial-gate status, and
 an empty same-head verdict alone does not establish an unreviewed repair head.
-Only an invoked closer's settled refusal changes an unchanged unlaunched `dispatching` intent
-to `dispatch-failed` with `wake-refused:<closer result.reason>` only with a
-matching pending lease whose owner is dead or whose bounded launch reclaim age
-elapsed, regardless of wake outcome; missing leases, receipts and live work
-remain owned. The retired unlaunched prompt is removed only within its generated
-prompt namespace. Early daemon and background pre-dispatch exits do not settle
-closer intents. Rescue projects a `[ci-regression-stopped]` or
-`[ci-regression-hammer-owned]` row with exhausted remediation or recorded
-final-round evidence to the final hammer only with live failed external CI on
-the candidate head and passes those failed checks into its prompt, filtering to
-configured required contexts when present. Actual merges still require green CI and exact-head proof.
+LAC-2081 supersedes age/dead-owner wake settlement. A later refusal cannot
+prove whether an interrupted submission reached HQ. The keyed native recovery
+contract below owns settlement.
+
 
 ## 3) Fast-merge skip lane
 
@@ -1695,3 +1688,19 @@ exhaustion is a retryable deferred audit, never a terminal no-merge; the next
 pass refunds failure charges and resumes without contention backoff. The daemon
 keeps priority. All holder transitions, including LEASEFAIR-02's CI retry hold,
 are retained in the bounded per-base JSONL history.
+
+## Interrupted dispatch intents (LAC-2081)
+
+Native reconciliation now owns interrupted `dispatching` intents. A persisted
+per-attempt HQ key and fenced prepared/submitting phase either recover an exact
+receipt (`dispatched`) or prove no submission (`no-dispatch`, terminal deferred
+pending lease, one intent-budget rollback). A later wake refusal or stale-lease
+reaper cannot infer no launch from age or caller death. Unknown retains same-PR
+ownership, reaches a fixed inspection diagnostic deadline, and releases only
+its bounded fleet-capacity reservation. Live/replaced leases and retry caps
+remain authoritative; no receipt grants merge authority.
+
+See the [owner recovery procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
+and [persistent evidence contract](data-model/ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).
+Legacy #8918 remains outside automatic no-launch proof; LAC-2081 authorizes no
+production apply, new closer, teardown, remediation or merge for that PR.

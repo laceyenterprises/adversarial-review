@@ -22,6 +22,7 @@ const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await impor
 const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
 const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
+const { reconcilePreReceiptIntent } = await import('../../src/ama/pre-receipt-intent.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
@@ -658,12 +659,12 @@ if (scenario === 'clean') {
     assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
       ciBlockedHammerOwner: true, roundsLeft: false, checks }).owner, 'hammer');
   }
-  const promptDir = join(rootDir, 'prompts');
+  const promptDir = join(rootDir, 'data', 'smoke-intent-prompts');
   mkdirSync(promptDir, { recursive: true });
   const promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${base}-hammer-scratch-smoke.md`);
   writeFileSync(promptPath, 'synthetic unlaunched prompt');
   const intent = { ...identity(), targetRemediationSha: headSha, state: 'dispatching',
-    promptDir, lastAttemptedAt: '2026-01-01T00:00:00Z' };
+    promptDir, dispatchTimeoutMs: 600_000, lastAttemptedAt: '2026-01-01T00:00:00Z' };
   updateAmaCloserDispatchRecord(rootDir, identity(), () => intent);
   const leaseBefore = acquireAmaCloserLease({ ...identity(), now: intent.lastAttemptedAt,
     watcherPid: process.pid }).lease;
@@ -676,10 +677,37 @@ if (scenario === 'clean') {
   updateAmaCloserDispatchRecord(rootDir, identity(), record => ({ ...record, promptPath }));
   settleRefusedHammerWake({ rootDir, identity: identity(), intent,
     wake: { outcome: 'duplicate' }, result: { dispatched: false, reason: 'synthetic-refusal' } });
-  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-refusal');
-  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-failed');
-  assert.equal(readAmaCloserLease(rootDir, identity()), null);
-  assert.equal(existsSync(promptPath), false);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, undefined);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatching');
+  assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
+  assert.equal(existsSync(promptPath), true);
+  const recoveryNow = '2026-01-02T00:00:00Z';
+  const unknownIntent = await reconcilePreReceiptIntent(rootDir, identity(), {
+    now: recoveryNow, readIntentReceiptImpl: () => assert.fail('legacy intent has no keyed lookup'),
+  });
+  assert.equal(unknownIntent.status, 'unknown');
+  assert.equal(unknownIntent.record.preReceiptReconciliation.status, 'inspection-required');
+  updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
+    dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-smoke-prepared' }));
+  const noLaunch = await reconcilePreReceiptIntent(rootDir, identity(), {
+    now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
+    processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); },
+  });
+  assert.equal(noLaunch.status, 'no-launch');
+  assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'deferred');
+  const receiptIdentity = { ...identity(), prNumber: prNumber + 1 };
+  updateAmaCloserDispatchRecord(rootDir, receiptIdentity, () => ({ ...receiptIdentity,
+    reviewedSha: base, workerClass: 'hammer', state: 'dispatching',
+    dispatchPhase: 'submitting', dispatchIdempotencyKey: 'ama-closer-smoke-receipt',
+    lastAttemptedAt: recoveryNow, retryCount: 1 }));
+  const recovered = await reconcilePreReceiptIntent(rootDir, receiptIdentity, {
+    now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [{
+      idempotency_key: 'ama-closer-smoke-receipt', launch_request_id: 'lrq_smoke_recovered',
+      ticket_ref: `AMA-PR-${receiptIdentity.prNumber}`, target_repo: repo,
+    }] }),
+  });
+  assert.equal(recovered.status, 'receipt-recovered');
+  assert.equal(recovered.record.launchRequestId, 'lrq_smoke_recovered');
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);

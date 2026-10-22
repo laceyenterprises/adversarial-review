@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
 /**
  * Startup + periodic stale-state reaper — offline-period & quota-outage
  * resilience for the adversarial-review pipeline.
@@ -61,7 +62,6 @@ import { basename, dirname, join } from 'node:path';
 
 import {
   AMA_CLOSER_REDISPATCH_BOUND,
-  isInterruptedInFlightAmaCloserDispatch,
   isTransientHqDispatchError,
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
@@ -639,8 +639,12 @@ async function readLeaseRecords(rootDir, {
     }
     // All selected reads settled, so cursor advancement remains ordered even
     // though I/O was concurrent. Persistent failures retry after one rotation.
-    lastEntryName = outcome.name;
-    lastSafeIndex = outcome.index;
+    // A trailing lock sidecar may already have advanced the safe cursor. Do
+    // not rewind it when the earlier JSON read completes.
+    if (outcome.index > lastSafeIndex) {
+      lastEntryName = outcome.name;
+      lastSafeIndex = outcome.index;
+    }
   }
   if (discovery.wrapped && names.length === 0) {
     lastEntryName = null;
@@ -665,7 +669,7 @@ async function readLeaseRecords(rootDir, {
  * offline). Without this, a budget already exhausted *by* the outage stays
  * exhausted forever — `dispatch-retry-exhausted` — even after recovery.
  */
-function resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now = new Date().toISOString() } = {}) {
+function resetTransientExhaustedCloserBudget(rootDir, lease, logger, intentLock) {
   const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
   let record;
   try {
@@ -674,29 +678,7 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now = new
     return 'failed';
   }
   if (!record) return 'not-needed';
-  if (isInterruptedInFlightAmaCloserDispatch(record, lease, { now })) {
-    try {
-      updateAmaCloserDispatchRecord(rootDir, identity, (current) => ({
-        ...(current || {}),
-        retryCount: Math.max(0, Number(current?.retryCount || record.retryCount || 1) - 1),
-        state: 'dispatch-interrupted-reclaimed',
-        lastObservedStatus: 'interrupted-before-launch',
-        lastObservedAt: now,
-        reclaimedAt: now,
-      }));
-    } catch (err) {
-      logger?.error?.(
-        `[reaper] failed to reclaim interrupted closer dispatch repo=${lease.repo} `
-        + `pr=${lease.prNumber} head=${String(lease.headSha || '').slice(0, 12)}: ${err?.message || err}`,
-      );
-      return 'failed';
-    }
-    logger?.warn?.(
-      `[reaper] reclaimed interrupted closer dispatch repo=${lease.repo} pr=${lease.prNumber} `
-      + `head=${String(lease.headSha || '').slice(0, 12)} (phantom retry rolled back)`,
-    );
-    return 'reclaimed-interrupted';
-  }
+  if (record.state === 'dispatching') return 'failed'; // Native intent reconciliation owns proof of no launch.
   const exhausted = Number(record.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND;
   if (!exhausted) return 'not-needed';
   const transient = record.lastFailureTransient === true
@@ -708,7 +690,7 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now = new
       retryCount: 0,
       state: 'dispatch-budget-reset-transient',
       lastFailureTransient: false,
-    }));
+    }), { intentLock });
   } catch (err) {
     logger?.error?.(
       `[reaper] failed to reset transient-exhausted closer budget repo=${lease.repo} `
@@ -780,7 +762,7 @@ export async function reapStaleCloserLeases({
       launchRequestId: lease.lrqId, rootDir, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }
   }
-  const interruptedDispatchLeasePaths = new Set();
+  const unresolvedIntentLeasePaths = new Set();
   for (const lease of discovery.records) {
     if (!lease?._path || lease._isCorrupt === true) continue;
     const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
@@ -790,27 +772,32 @@ export async function reapStaleCloserLeases({
     } catch {
       record = null;
     }
-    if (isInterruptedInFlightAmaCloserDispatch(record, lease, { now })) {
-      interruptedDispatchLeasePaths.add(lease._path);
-    }
+    if (record?.state === 'dispatching') unresolvedIntentLeasePaths.add(lease._path);
   }
-  const releasable = selectReleasableCloserLeases(discovery.records, {
+  const releasable = selectReleasableCloserLeases(discovery.records.filter(lease => !unresolvedIntentLeasePaths.has(lease._path)), {
     now,
     thresholdMs,
     livePid,
     deadHolderThresholdMs,
     isProcessAlive,
     host,
-    isInterruptedInFlightDispatch: (lease) => interruptedDispatchLeasePaths.has(lease._path),
     launchStatusProbes,
   });
   let released = 0;
   let budgetsReset = 0;
   let interruptedDispatchesReclaimed = 0;
   for (const lease of releasable) {
+    let releaseIntent;
+    try { releaseIntent = lease._isCorrupt ? null : tryAcquireCloserIntentLock(rootDir, lease); }
+    catch (error) {
+      logger?.error?.(`[reaper] failed to fence closer lease ${lease._path}: ${error.message}`);
+      continue;
+    }
+    if (!lease._isCorrupt && !releaseIntent) continue;
+    try {
     if (lease._isCorrupt !== true) {
-      if (lease.status === 'dispatched' && !isCurrentAmaCloserLease(rootDir, lease)) continue;
-      const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger, { now });
+      if (!isCurrentAmaCloserLease(rootDir, lease)) continue;
+      const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger, releaseIntent);
       if (resetStatus === 'failed') {
         continue;
       }
@@ -838,6 +825,7 @@ export async function reapStaleCloserLeases({
     } catch (err) {
       logger?.error?.(`[reaper] failed to release lease ${lease._path}: ${err?.message || err}`);
     }
+    } finally { releaseIntent?.(); }
   }
   const prunable = selectPrunableCloserLeases(discovery.records, { now, pruneAfterMs });
   let pruned = 0;

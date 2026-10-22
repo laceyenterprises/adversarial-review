@@ -25,6 +25,9 @@ export async function reconcileRecoveryLaunches({
     if (repo !== undefined && record.repo !== repo) continue;
     if (prNumber !== undefined && Number(record.prNumber) !== Number(prNumber)) continue;
     if (headSha !== undefined && record.headSha !== headSha) continue;
+    // A retry intent may still name its predecessor's receipt. Only native
+    // intent reconciliation can decide whether the replacement was submitted.
+    if (record.state === 'dispatching') { uncertain += 1; continue; }
     const launchRequestId = record.launchRequestId || record.dispatchId;
     if (!launchRequestId) { uncertain += 1; continue; }
     let probe;
@@ -40,6 +43,7 @@ export async function reconcileRecoveryLaunches({
     if (!TERMINAL.has(status) && !phantom) { active += 1; continue; }
     // A concurrently replaced record belongs to a new launch. Do not touch it.
     const current = JSON.parse(readFileSync(record.dispatchPath, 'utf8'));
+    if (current.state === 'dispatching') { uncertain += 1; continue; }
     if ((current.launchRequestId || current.dispatchId) !== launchRequestId) { active += 1; continue; }
     const identity = { repo: record.repo, prNumber: record.prNumber, headSha: record.headSha };
     const lease = readAmaCloserLease(rootDir, identity);

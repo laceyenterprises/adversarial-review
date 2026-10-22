@@ -2260,7 +2260,7 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
         const intent = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
         assert.equal(Object.hasOwn(intent, 'terminalLaunchStatus'), false);
         assert.equal(Object.hasOwn(intent, 'reconciledAt'), false);
-        updateAmaCloserDispatchRecord(rootDir, intent, current => ({ ...current, terminalLaunchStatus: 'failed', reconciledAt: 'old-cli-write' }));
+        assert.throws(() => updateAmaCloserDispatchRecord(rootDir, intent, current => ({ ...current, terminalLaunchStatus: 'failed', reconciledAt: 'old-cli-write' })), /owned by another writer/);
       }
       return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
     },
@@ -2437,7 +2437,7 @@ test('active AMA closer dispatches reserve their repo PR until terminal status',
   );
 });
 
-test('active AMA closer dispatch classification releases stale launch-only records', () => {
+test('active AMA closer dispatch classification retains unknown launch-only records', () => {
   assert.equal(
     isActiveAmaCloserDispatchRecord(
       {
@@ -2460,7 +2460,7 @@ test('active AMA closer dispatch classification releases stale launch-only recor
       },
       { now: '2026-07-06T18:00:00Z' },
     ),
-    false,
+    true,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord(
@@ -2472,7 +2472,7 @@ test('active AMA closer dispatch classification releases stale launch-only recor
       },
       { now: '2026-07-06T12:01:00Z' },
     ),
-    false,
+    true,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord({
@@ -2512,7 +2512,7 @@ test('launch-only record stays active across a 600s retry window', () => {
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:40:00Z' }),
-    false,
+    true,
   );
 });
 
@@ -2542,7 +2542,7 @@ test('listing a launch and a running worker does not delete their leases', (t) =
   }
 });
 
-test('stale dispatching record with reaped lease redispatches instead of exhausting retry bound', async (t) => {
+test('stale dispatching record with reaped lease preserves unknown ownership and retry budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-stale-dispatching-no-lease-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -2578,20 +2578,41 @@ test('stale dispatching record with reaped lease redispatches instead of exhaust
     ...deps,
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.launchRequestId, 'lrq_hammer');
-  assert.ok(
-    deps.execCalls.some((call) => call.args[0] === 'dispatch' && call.args.includes('--worker-id')),
-    'a stale launch-only record without a lease must not suppress hq dispatch',
-  );
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'existing-dispatch-unknown');
+  assert.equal(deps.execCalls.length, 0, 'age and a missing lease cannot authorize another launch');
   const record = readAmaCloserDispatchRecord(rootDir, {
     repo: REPO,
     prNumber: PR_NUMBER,
     headSha: REVIEWED_HEAD,
   });
-  assert.equal(record.state, 'dispatched');
-  assert.equal(record.launchRequestId, 'lrq_hammer');
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.launchRequestId, null);
   assert.equal(record.retryCount, AMA_CLOSER_REDISPATCH_BOUND);
+});
+
+test('proven pre-submission interruption settles natively then retries through normal eligibility and caps', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-proven-no-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  const at = '2026-07-06T12:00:00Z';
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    reviewedSha: REVIEWED_HEAD, targetRemediationSha: REVIEWED_HEAD, workerClass: 'hammer',
+    state: 'dispatching', dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-old',
+    lastAttemptedAt: at, retryCount: AMA_CLOSER_REDISPATCH_BOUND,
+  }));
+  acquireAmaCloserLease({ rootDir, ...identity, now: at, watcherPid: 12345 });
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps,
+    readIntentReceiptImpl: async () => ({ ok: true, rows: [] }),
+    processKillImpl: () => { throw Object.assign(new Error('dead fixture owner'), { code: 'ESRCH' }); },
+  });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  assert.equal(record.retryCount, AMA_CLOSER_REDISPATCH_BOUND);
+  const launch = deps.execCalls.find(call => call.args[0] === 'dispatch' && call.args.includes('--worker-id'));
+  assert.equal(launch.args[launch.args.indexOf('--idempotency-key') + 1], record.dispatchIdempotencyKey);
+  assert.match(record.dispatchIdempotencyKey, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
 });
 
 test('aged branch-holder exhaustion record retries instead of pinning the closer forever', async (t) => {
@@ -3198,7 +3219,7 @@ test('lease-held observation does not recreate a concurrently deleted dispatch r
     },
   });
   assert.equal(deleted, true, 'delete the competing intent during lease observation');
-  assert.equal(result.reason, 'closer-lease-held-by-other-process');
+  assert.equal(result.reason, 'existing-dispatch-unknown');
   assert.equal(deps.execCalls.length, 0);
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity), null);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), priorLease);

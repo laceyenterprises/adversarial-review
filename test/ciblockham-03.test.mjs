@@ -327,7 +327,7 @@ test('a parked row without a proven stale reviewed head retains ordinary wake ad
 });
 
 for (const outcome of ['skipped', 'requested', 'duplicate'])
-for (const recordHead of [head, reviewed]) test(`a ${outcome} wake records the actual handoff refusal: ${recordHead[0]}`, async t => {
+for (const recordHead of [head, reviewed]) test(`a ${outcome} wake preserves an earlier ambiguous intent: ${recordHead[0]}`, async t => {
   const { args } = fixture(t);
   const identity = { repo, prNumber, headSha: recordHead };
   const at = '2026-01-01T00:00:00Z';
@@ -342,11 +342,11 @@ for (const recordHead of [head, reviewed]) test(`a ${outcome} wake records the a
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible' });
   await maybeDispatchAmaClosureFor(args);
   const record = readAmaCloserDispatchRecord(args.rootDir, identity);
-  assert.equal(record.state, 'dispatch-failed');
-  assert.equal(record.reason, 'wake-refused:not-eligible');
-  assert.equal(record.lastError, 'wake-refused:not-eligible');
-  assert.equal(record.retryCount, 0, 'an unlaunched handoff does not spend the dispatch retry');
-  assert.equal(readAmaCloserLease(args.rootDir, leaseIdentity), null);
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.reason, undefined);
+  assert.equal(record.lastError, undefined);
+  assert.equal(record.retryCount, 1, 'a later refusal cannot refund an unknown submission');
+  assert.equal(readAmaCloserLease(args.rootDir, leaseIdentity).status, 'pending');
 });
 
 test('a missing reviewed head cannot adopt and settle a headless dispatch record', async t => {
@@ -520,8 +520,8 @@ test('failed dispatch settlement preserves the unlaunched prompt and pending lea
   });
   syncBuiltinESMExports();
   try {
-    assert.throws(() => settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
-      result: { dispatched: false, reason: 'not-eligible' } }), /synthetic rename failure/);
+    assert.equal(settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
+      result: { dispatched: false, reason: 'not-eligible' } }), null);
   } finally {
     mocked.mock.restore();
     syncBuiltinESMExports();
@@ -531,7 +531,7 @@ test('failed dispatch settlement preserves the unlaunched prompt and pending lea
   assert.equal(existsSync(promptPath), true);
 });
 
-for (const pathKind of ['owned', 'outside', 'wrong-namespace']) test(`refused unlaunched prompt cleanup respects its path namespace: ${pathKind}`, t => {
+for (const pathKind of ['owned', 'outside', 'wrong-namespace']) test(`ambiguous intent preserves retained prompt evidence: ${pathKind}`, t => {
   const { args } = fixture(t);
   const identity = { repo, prNumber, headSha: head };
   const promptDir = join(args.rootDir, 'prompts');
@@ -546,8 +546,8 @@ for (const pathKind of ['owned', 'outside', 'wrong-namespace']) test(`refused un
   acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
   settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
     result: { dispatched: false, reason: 'not-eligible' } });
-  assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).state, 'dispatch-failed');
-  assert.equal(existsSync(promptPath), pathKind !== 'owned');
+  assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).state, 'dispatching');
+  assert.equal(existsSync(promptPath), true);
 });
 
 test('refusal reconciliation preserves launch receipts, active work and replacement intents', t => {
@@ -574,7 +574,7 @@ test('refusal reconciliation preserves launch receipts, active work and replacem
   }
 });
 
-for (const promptPath of [undefined, null, '']) test(`refusal settles a matching attempt that populated its prompt after capture: ${String(promptPath)}`, t => {
+for (const promptPath of [undefined, null, '']) test(`refusal retains an ambiguous attempt that populated its prompt after capture: ${String(promptPath)}`, t => {
   const { args } = fixture(t);
   const identity = { repo, prNumber, headSha: head };
   const intent = { ...identity, targetRemediationSha: head, promptPath,
@@ -584,10 +584,10 @@ for (const promptPath of [undefined, null, '']) test(`refusal settles a matching
   settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
     result: { dispatched: false, reason: 'synthetic-refusal' } });
   const record = readAmaCloserDispatchRecord(args.rootDir, identity);
-  assert.equal(record.state, 'dispatch-failed');
-  assert.equal(record.reason, 'wake-refused:synthetic-refusal');
-  assert.equal(record.retryCount, 0);
-  assert.equal(readAmaCloserLease(args.rootDir, identity), null);
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.reason, undefined);
+  assert.equal(record.retryCount, 1);
+  assert.equal(readAmaCloserLease(args.rootDir, identity).status, 'pending');
 });
 
 test('a plain refusal preserves a fresh live-pid pending lease and its dispatch intent', t => {
@@ -607,8 +607,8 @@ test('a plain refusal preserves a fresh live-pid pending lease and its dispatch 
   settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent, now,
     processKillImpl: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
     result: { dispatched: false, reason: 'not-eligible' } });
-  assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).reason, 'wake-refused:not-eligible');
-  assert.equal(readAmaCloserLease(args.rootDir, identity), null);
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.equal(readAmaCloserLease(args.rootDir, identity).status, 'pending');
 });
 
 test('refusal settlement cannot retire an intent without a matching reclaimable lease', t => {

@@ -332,7 +332,7 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
   assert.equal(record.retryCount, 2, 'genuine-failure budget NOT reset');
 });
 
-test('reapStaleCloserLeases reclaims interrupted launch-only dispatch below generic threshold', async (t) => {
+test('reapStaleCloserLeases preserves unknown launch-only dispatch and lease regardless of age', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -365,14 +365,14 @@ test('reapStaleCloserLeases reclaims interrupted launch-only dispatch below gene
     logger: { warn() {}, error() {} },
   });
 
-  assert.equal(result.released, 1);
-  assert.equal(result.interruptedDispatchesReclaimed, 1);
+  assert.equal(result.released, 0);
+  assert.equal(result.interruptedDispatchesReclaimed, 0);
   assert.equal(result.budgetsReset, 0);
-  assert.equal(existsSync(leasePath), false, 'pending lease deleted -> closer can re-dispatch');
+  assert.equal(existsSync(leasePath), true, 'caller death does not prove no child launch');
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
-  assert.equal(record.retryCount, 1, 'phantom in-flight retry rolled back');
-  assert.equal(record.state, 'dispatch-interrupted-reclaimed');
-  assert.equal(record.lastObservedStatus, 'interrupted-before-launch');
+  assert.equal(record.retryCount, 2, 'unknown attempt retains its charge');
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.lastObservedStatus, undefined);
 });
 
 test('reapStaleCloserLeases unlinks corrupt lease files', async (t) => {
@@ -557,7 +557,7 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
   assert.equal(result.budgetsReset, 0);
   assert.equal(result.cursorPersisted, true, 'a failed lease cannot pin healthy leases behind its page');
   assert.equal(existsSync(leasePath), true, 'failed reset does not remove the recovery trigger');
-  assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
+  assert.ok(errors.some((line) => line.includes('failed to fence closer lease')));
 
   chmodSync(dirname(recordPath), 0o755);
   const retry = await reapStaleCloserLeases({

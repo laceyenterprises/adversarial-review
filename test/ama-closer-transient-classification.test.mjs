@@ -394,34 +394,23 @@ async function dispatchWithError(rootDir, errFactory) {
   return { result, calls };
 }
 
-test('a rate-limit hammer-dispatch failure does NOT burn the redispatch budget', async (t) => {
+test('an interrupted dispatch with rate-limit text preserves unknown ownership and its conservative attempt charge', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-transient-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: 'acme/myrepo', prNumber: 1234, headSha: 'abc12345abc12345abc12345abc12345abc12345' };
-
-  const { result } = await dispatchWithError(rootDir, () => {
-    const err = new Error('hq dispatch failed');
-    err.code = 'ETIMEDOUT';
-    err.signal = 'SIGTERM';
-    err.killed = true;
-    err.stdout = '{"partial":true}';
-    err.stderr = 'gh: API rate limit exceeded (HTTP 403)';
-    return err;
-  });
-
+  const { result } = await dispatchWithError(rootDir, () => Object.assign(new Error('hq dispatch interrupted'), {
+    code: 'ETIMEDOUT', signal: 'SIGTERM', killed: true,
+    stdout: '{"partial":true}', stderr: 'gh: API rate limit exceeded (HTTP 403)',
+  }));
   assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'dispatch-deferred-transient');
-  assert.equal(result.skipMergeAgent, true, 'transient failure keeps hammer on the hook, suppresses merge-agent fallback');
-
+  assert.equal(result.reason, 'existing-dispatch-unknown');
+  assert.equal(result.skipMergeAgent, true);
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
-  assert.equal(record.retryCount, 0, 'transient failure did not increment retryCount');
-  assert.equal(record.state, 'dispatch-deferred-transient');
-  assert.equal(record.lastFailureTransient, true);
-  assert.match(record.lastError, /code: ETIMEDOUT/);
-  assert.match(record.lastError, /signal: SIGTERM/);
-  assert.match(record.lastError, /killed: true/);
-  assert.match(record.lastError, /stdout: \{"partial":true\}/);
-  assert.match(record.lastError, /stderr: gh: API rate limit exceeded \(HTTP 403\)/);
+  assert.equal(record.retryCount, 1, 'partial diagnostics cannot prove no launch or authorize a refund');
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.dispatchPhase, 'submitting');
+  assert.ok(record.dispatchIdempotencyKey);
+  assert.equal(record.lastError, null);
 });
 
 test('BUG-2: an hq drain-in-effect hammer-dispatch refusal is transient (no merge-agent fallback, budget preserved)', () => {

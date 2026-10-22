@@ -57,8 +57,8 @@ for (const state of ['dispatching', 'dispatched']) {
     }));
     let probes = 0;
     const options = { now, readLaunchRequestStatusImpl: () => { probes += 1; return { ok: true, row: { status: 'running' } }; } };
-    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
-    assert.equal(probes, 0, 'aged-out records must not query the ledger');
+    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, state === 'dispatching' ? 1 : 0);
+    assert.equal(probes, 0, 'an intent must not query a predecessor LRQ');
     assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(root, identity))).state, state,
       'age expiry alone does not fabricate a terminal outcome');
     updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, state: 'dispatched', lastObservedAt: now }));
@@ -232,14 +232,16 @@ test('historical cleanup remains available through explicit reconciliation', asy
   assert.equal(JSON.parse(readFileSync(path)).state, 'launch-terminal');
 });
 
-test('daemon and CLI leave in-flight same-head retry intents untouched', async (t) => {
+test('daemon and CLI retain unknown same-head retry intent without probing its predecessor', async (t) => {
   const root = fixture(t, 'retry');
   const path = dispatchRecord(root, 1, { state: 'dispatching', lastObservedStatus: 'failed' });
-  const before = readFileSync(path, 'utf8');
   const options = { now: NOW, readLaunchRequestStatusImpl: () => assert.fail('must not probe the previous LRQ') };
-  assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
-  assert.equal((await reconcileAmaCloserDispatches(root, options)).active.length, 0);
-  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 1);
+  assert.equal((await reconcileAmaCloserDispatches(root, options)).active.length, 1);
+  const record = JSON.parse(readFileSync(path));
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.launchRequestId, 'lrq-1');
+  assert.equal(record.preReceiptReconciliation.reason, 'legacy-intent-without-key');
 });
 
 test('missing ledger row with no parseable launch timestamps stays held', async (t) => {

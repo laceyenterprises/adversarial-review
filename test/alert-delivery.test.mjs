@@ -394,7 +394,7 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
   assert.deepEqual(calls, [calls[0]]);
 });
 
-test('permanent delivery failure reaches an operator-visible dead letter ceiling', async (t) => {
+test('permanent delivery failure dead-letters on its first attempt', async (t) => {
   const { env, rootDir } = makeEnv({
     ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '2',
     ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
@@ -433,15 +433,15 @@ test('permanent delivery failure reaches an operator-visible dead letter ceiling
   const first = await drainPendingAlerts(drainOptions);
   const second = await drainPendingAlerts(drainOptions);
 
-  assert.equal(first.status, 'queued');
-  assert.equal(second.status, 'error');
-  assert.equal(second.results[0].status, 'dead-lettered');
+  assert.equal(first.status, 'error');
+  assert.equal(first.results[0].status, 'dead-lettered');
+  assert.equal(second.results.length, 0);
   assert.equal(readdirSync(sinkPath(rootDir, 'dead-letter')).length, 1);
   const health = readAlertSinkHealth({ env });
   assert.equal(health.ready, false);
   assert.equal(health.pendingCount, 0);
   assert.equal(health.deadLetterCount, 1);
-  assert.match(health.lastFailureReason, /dead-lettered.*2 attempts.*HTTP 401/);
+  assert.match(health.lastFailureReason, /dead-lettered.*1 attempts.*HTTP 401/);
 });
 
 // A stub standing in for the canonical superproject scripts/alert-delivery.mjs:

@@ -239,6 +239,7 @@ import {
   isTerminalCloserCommitIdentity,
 } from './head-closer-commit-suppression.mjs';
 import {
+  alertDeliveryHeartbeatStatus,
   deliverAlert as defaultDeliverAlert,
   readAlertSinkHealth,
   scheduleAlertDrain,
@@ -1744,7 +1745,10 @@ async function main() {
     filePath: heartbeatPath,
     ownerGuardRootDir: heartbeatOwnerGuardRootDir,
     logger: console,
-    statusProvider: () => ({ detached_reviewer_dispatches: detachedReviewerDispatchTracker.liveEntries() }),
+    statusProvider: () => ({
+      detached_reviewer_dispatches: detachedReviewerDispatchTracker.liveEntries(),
+      ...alertDeliveryHeartbeatStatus(),
+    }),
   });
   watcherHeartbeat.persist('startup');
   const stallWatchdog = createWatcherStallWatchdog({

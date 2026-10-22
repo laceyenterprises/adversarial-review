@@ -29,7 +29,7 @@ Directory: `data/alert-delivery/`
 | `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. The same ID/basename invariant applies. Stale inflight files are recovered back to `pending/`. |
 | `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive, retained for 30 days by default. |
 | `quarantine/*.json` | Original unreadable file bytes | Files that cannot be parsed or read during pending drain or inflight recovery. Quarantining is fail-isolating: later alerts continue draining. |
-| `dead-letter/*.json` | Alert document with `deadLetteredAt` and `lastError` | Parseable alerts that exhausted the bounded transport-attempt ceiling. Dead letters are terminal and operator-actionable; they are not retried silently forever. |
+| `dead-letter/*.json` | Alert document with `deadLetteredAt` and `lastError` | Parseable alerts with a permanent delivery error or exhausted transport attempts. Dead letters are terminal and operator-actionable; they are not retried silently forever. |
 | `receipts/*.json` | Receipt document | Append-style audit receipts for queued, failed, and delivered phases, retained for 30 days by default. |
 | `health.json` | Health snapshot | Last observed delivery health and live queue counters for probes and operators. |
 
@@ -49,7 +49,8 @@ Directory: `data/alert-delivery/`
 | `lastQueuedEvent` | string or null | Event name from the latest queued alert, when present. |
 | `lastQuarantinedAt` | string or null | ISO-8601 timestamp for the latest quarantine. |
 | `lastQuarantinedFile` | string or null | Basename of the latest quarantined file. |
-| `lastDeadLetteredAt` / `lastDeadLetteredFile` | string or null | Timestamp and basename for the latest alert that exhausted its attempt ceiling. |
+| `lastDeadLetteredAt` / `lastDeadLetteredFile` | string or null | Timestamp and basename for the latest permanent or exhausted delivery failure. |
+| `lastSev1DeliveryFailure` | object or absent | Latest dead-lettered SEV1 signal: `signal: "alert-delivery-failed"`, `alertId`, `event`, `repo`, `pr`, `at`, `attemptCount`, `reason` (up to 2,000 characters). Event/PR identifiers may be null when absent from the original page. Retained across unrelated deliveries and process restarts. |
 
 ## Operational Contract
 
@@ -122,11 +123,27 @@ Directory: `data/alert-delivery/`
 - The watcher invokes a drain sweep at startup and every poll, so durable work
   survives a process restart even when no new alert arrives. The scheduled
   retry loop continues between polls while pending work exists.
-- Parseable transport failures retry with bounded backoff and move to
+- ALERTTIMEOUT-01: the canonical delivery child uses the shared load-aware
+  helper on its nominal 35-second budget exactly once per spawn, with a fixed
+  five-minute ceiling and Node's `2^31 - 1` ms platform timer bound. Timeout
+  errors report the effective budget and carry `ETIMEDOUT` for retry classification.
+- Transient transport failures (including timeouts, unknown nonzero script
+  exits, HTTP 408/409/425/429 and 5xx) retry with exponential backoff, starting
+  at five seconds and capped at sixty seconds by default, and move to
   `dead-letter/` after `ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS` (default 8).
+  Permanent errors (other HTTP 4xx, bad request, unknown/unsupported sink,
+  invalid URL or recipient) dead-letter immediately.
+- A dead-lettered SEV1 creates one `lastSev1DeliveryFailure` health signal
+  naming its original event and PR. Every subsequent watcher heartbeat carries
+  that record as `alert_delivery_failure`, read from the durable local health
+  file independently of the notification transport. The latest record persists
+  across polls, unrelated deliveries and watcher restarts; a later SEV1 failure
+  replaces it. Its `alertId` identifies the signal for watchdog deduplication.
+  This is historical failure evidence, not a new alert queued on the failing
+  bus. Terminal dead letters are never automatically replayed.
   `readAlertSinkHealth()` stays not-ready until an operator resolves the dead
-  letter; this is the escalation path for permanent 401, bad URL, or similar
-  delivery failures.
+  letter. The external heartbeat consumer can observe the failed delivery
+  without depending on a successful notification send.
 - Quarantine is intentionally operator-visible. A non-empty quarantine directory
   keeps `readAlertSinkHealth().ready` false even when no pending alerts remain.
   Its returned `quarantineEventCounts` diagnostic samples the first 1,000 sorted

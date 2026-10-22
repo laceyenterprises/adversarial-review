@@ -9,7 +9,7 @@ function recordReason(log, reason, repoPath, prNumber) {
 
 export function applyReviewerArmEffectiveRoute(options) {
   if (!options.baseRoute?.reviewerArm) return applyEffectiveReviewerRoute(options);
-  const defaultRoute = applyEffectiveReviewerRoute({ ...options, baseRoute: options.baseRoute.reviewerArmDefaultRoute });
+  const defaultRoute = options.baseRoute.reviewerArmDefaultRoute;
   // The trial replaces the default selection, while the ordinary integrity
   // guard still runs. Keep the fully resolved default for admission fallback.
   return { ...applyEffectiveReviewerRoute({ ...options, mode: 'off', primaryReviewerQuotaCapped: false }),

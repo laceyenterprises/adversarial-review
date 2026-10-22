@@ -664,6 +664,10 @@ async function spawnReviewer(args) {
 }
 
 async function spawnReviewerOnce(args) {
+  const log = args.log || args.logger || console;
+  const recordArmFallback = reason => {
+    try { log.info?.(`[watcher] osg-reviewer reason=${reason}`); } catch {}
+  };
   // Family eligibility precedes account admission, including direct callers.
   if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
   const sessionUuid = args.reviewerSessionUuid || randomUUID();
@@ -685,7 +689,7 @@ async function spawnReviewerOnce(args) {
     return spawnReviewer(next);
   };
   if (arm && runtimeId !== 'cli-direct') {
-    console.info('[watcher] osg-reviewer reason=runtime-unsupported');
+    recordArmFallback('runtime-unsupported');
     return runDefault();
   }
   let receipt;
@@ -697,16 +701,16 @@ async function spawnReviewerOnce(args) {
     });
   } catch (error) {
     if (!arm) throw error;
-    console.info('[watcher] osg-reviewer reason=error-account-unavailable');
+    recordArmFallback('error-account-unavailable');
     return runDefault();
   }
   if (arm && (receipt?.hold || !receipt?.lease || receipt.tokenAccountId !== arm.account)) {
     if (receipt?.lease) {
       try {
         await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env, rootDir: args.rootDir || ROOT });
-      } catch { console.info('[watcher] osg-reviewer reason=error-account-release'); }
+      } catch { recordArmFallback('error-account-release'); }
     }
-    console.info('[watcher] osg-reviewer reason=account-changed');
+    recordArmFallback('account-changed');
     return runDefault();
   }
   if (receipt?.hold) {

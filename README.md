@@ -1955,7 +1955,9 @@ holder-based Gemini, keeps current routing. ITP still authorizes the model, choo
 and acquires its execution lease at spawn. A changed/held account discards the
 experiment pins and uses the ordinary default; a family change transfers the
 existing review claim through a model-neutral compare-and-swap callback. The
-claim, runtime and settlement retain one session UUID; this pre-spawn fallback
+fallback reuses the resolved incumbent route and sends stable reason notices
+through the caller's contextual logger when provided.
+The claim, runtime and settlement retain one session UUID; this pre-spawn fallback
 does not invoke Gemini quota handling or release Gemini credential probes. No trial pins cross
 a subsequent family fallback. CLI arguments carry model/effort to the existing
 `reasoningPin`, including Claude broker model preparation and silent retries.
@@ -1965,3 +1967,9 @@ Offline validation uses `osg-reviewer-{arm,effort,spawn}.test.mjs`, the watcher
 claim-loop, ITP account, spawn/settlement and reviewed-attestation fixtures. The
 assigned/default fixture compares the real posting path's verdict and attestation
 payload with injected effects; it never calls GitHub, a signer or a provider.
+
+Run selected suites through `node test/run-tests.mjs <test files>` to isolate
+production state from the checkout. Restricted workers can set
+`ADVERSARIAL_REVIEW_TEST_TEMP_BASE` to an owned temporary parent; this disables
+the runner's short-path `/tmp` fallback. Socket-based tests still need a parent
+short enough for the platform's Unix socket path limit.

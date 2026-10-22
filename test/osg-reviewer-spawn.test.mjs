@@ -115,8 +115,9 @@ for (const state of ['changed', 'held', 'error', 'unsupported-runtime']) {
     db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, review_status,
       reviewer_session_uuid, reviewer_head_sha, reviewed_at) VALUES ('sample/project', 7, 'claude',
       'reviewing', 'fixture-session', ?, '2026-10-22T00:00:00Z')`).run('a'.repeat(40));
-    const fallbackCalls = [], requests = [];
+    const fallbackCalls = [], requests = [], logs = [];
     const fallback = await run(t, {
+      log: { info: message => logs.push(message) },
       reviewerModel: 'claude', builderTag: 'gemini', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
       reviewerArm: { ...arm, harness: 'claude', worker_class: 'claude-reviewer' },
       reviewerArmDefaultRoute: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', codexBrokerProvider: 'codex-corp' },
@@ -141,6 +142,9 @@ for (const state of ['changed', 'held', 'error', 'unsupported-runtime']) {
       } : {}),
     });
     assert.equal(fallbackCalls.length, 1);
+    const reason = state === 'unsupported-runtime' ? 'runtime-unsupported'
+      : state === 'error' ? 'error-account-unavailable' : 'account-changed';
+    assert.deepEqual(logs, [`[watcher] osg-reviewer reason=${reason}`]);
     const row = db.prepare('SELECT * FROM reviewed_prs').get();
     assert.equal(row.reviewer_session_uuid, 'fixture-session');
     assert.equal(row.reviewer, 'codex');

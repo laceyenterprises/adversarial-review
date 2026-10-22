@@ -63,11 +63,13 @@ test('later family fallback drops the experiment execution pins', () => {
   assert.deepEqual(reviewerArmExecution({ ...current, reviewerArm: arm, reviewerModel: 'claude' }), {});
 });
 
-test('an assigned arm overrides Gemini default selection but retains its integrity guard and default fallback', () => {
-  const selected = { ...current, reviewerArm: arm, reviewerArmDefaultRoute: current };
+test('an assigned arm overrides Gemini default selection but retains its integrity guard and resolved default fallback', async () => {
+  const selected = await applyReviewerArm({ baseRoute: current, domainId: 'code-pr', config: { mode: 'apply' },
+    reviewerMode: 'always-on', owner: async () => ({ arm, reason: 'assigned' }), log: quiet });
   const route = applyReviewerArmEffectiveRoute({ builderClass: current.builderClass, baseRoute: selected, mode: 'always-on' });
   assert.equal(route.reviewerModel, 'codex');
   assert.equal(route.reviewerArmDefaultRoute.reviewerModel, 'gemini');
+  assert.equal(route.reviewerArmDefaultRoute, selected.reviewerArmDefaultRoute);
   const refused = applyReviewerArmEffectiveRoute({ builderClass: 'codex',
     baseRoute: { ...selected, builderClass: 'codex' }, mode: 'always-on' });
   assert.notEqual(refused.reviewerModel, 'codex');

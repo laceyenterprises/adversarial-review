@@ -102,7 +102,8 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
     writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, events: [] }));
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
-const fs = require('fs'), path = ${JSON.stringify(stateFile)};
+import fs from 'node:fs';
+const path = ${JSON.stringify(stateFile)};
 const s = JSON.parse(fs.readFileSync(path)), a = process.argv.slice(2);
 if (a[0] === 'pr' && a[1] === 'view' && a[a.indexOf('-R') + 1] !== ${JSON.stringify(repo)}) {
   process.stderr.write('missing explicit repository selector'); process.exit(1);

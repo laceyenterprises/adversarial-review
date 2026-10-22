@@ -6632,30 +6632,37 @@ test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with an act
   assert.match(pendingJobs[0], /pr-7-/);
 });
 
-test('buildFollowUpClaimReservations accepts an ISO timestamp for AMA closer reservations', () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  updateAmaCloserDispatchRecord(rootDir, {
-    repo: 'laceyenterprises/clio',
-    prNumber: 7,
-    headSha: 'abc123',
-  }, () => ({
-    schemaVersion: 1,
-    repo: 'laceyenterprises/clio',
-    prNumber: 7,
-    headSha: 'abc123',
-    state: 'dispatching',
-    launchRequestId: 'lrq_hammer_dispatching',
-    lastObservedStatus: 'starting',
-    dispatchedAt: '2026-04-21T10:20:00.000Z',
-  }));
+for (const state of ['dispatched', 'dispatching']) {
+  test(`buildFollowUpClaimReservations accepts an ISO timestamp for ${state} AMA closer reservations`, t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    updateAmaCloserDispatchRecord(rootDir, {
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      headSha: 'abc123',
+    }, () => ({
+      schemaVersion: 1,
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      headSha: 'abc123',
+      state,
+      ...(state === 'dispatching'
+        ? { dispatchIdempotencyKey: 'synthetic-attempt' }
+        : { launchRequestId: 'lrq_hammer_dispatched' }),
+      lastObservedStatus: 'starting',
+      dispatchedAt: '2026-04-21T10:20:00.000Z',
+    }));
 
-  const result = buildFollowUpClaimReservations({
-    rootDir,
-    now: '2026-04-21T10:21:00.000Z',
+    const result = buildFollowUpClaimReservations({
+      rootDir,
+      now: '2026-04-21T10:21:00.000Z',
+    });
+
+    assert.equal(result.blockedRepoPrKeys.has('laceyenterprises/clio#7'), true);
+    assert.equal(result.blockedRepoPrKeys.has('laceyenterprises/clio#8'), false);
+    assert.equal(result.activeJobs.length, 0, 'closer ownership does not reserve a remediation slot');
   });
-
-  assert.equal(result.blockedRepoPrKeys.has('laceyenterprises/clio#7'), true);
-});
+}
 
 test('consumeFollowUpJobsUntilCapacity treats repo casing drift as the same PR for deferral', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

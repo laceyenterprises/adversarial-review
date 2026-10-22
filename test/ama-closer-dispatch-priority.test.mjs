@@ -2417,3 +2417,31 @@ test('TERMLEASE-01: a live dispatch record names its terminal lease on early ref
   assert.match(result.closureBlocker, /terminal lease from launch synthetic-live still live/);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
 });
+
+test('OSG-14: assigned hammer changes execution parameters while preserving the closer prompt and lease', async t => {
+  const prompts = [];
+  for (const experiment of [false, true]) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'osg-hammer-dispatch-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, {
+      dispatchContext: { repo: 'example/fixture', reviewedBy: 'synthetic-reviewer' },
+    }), ...deps, env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      writeFileImpl: (_directory, _path, content) => { prompts.push(content); },
+      resolveOsgRemediatorRouteImpl: async ({ current }) => experiment ? {
+        ...current, workerClass: 'hammer-claude',
+        modelResolution: { resolvedModel: 'fixture-model', resolvedReasoningLevel: 'low' },
+        osg: { reason: 'assigned', assignment: { assignment_id: 'fixture' } },
+      } : current,
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const dispatch = deps.calls.find(call => call.args[0] === 'dispatch');
+    assert.equal(flagValue(dispatch.args, '--worker-class'), experiment ? 'hammer-claude' : 'hammer');
+    assert.equal(flagValue(dispatch.args, '--model'), experiment ? 'fixture-model' : undefined);
+    assert.equal(flagValue(dispatch.args, '--reasoning-level'), experiment ? 'low' : undefined);
+    assert.equal(result.workerClass, 'hammer', 'logical merge authority is unchanged');
+    assert.ok(result.leasePath);
+  }
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0], prompts[1], 'execution arm does not rewrite terminal-remediation instructions');
+});

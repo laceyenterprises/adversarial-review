@@ -1,3 +1,4 @@
+import { resolveOsgRemediatorRoute } from '../src/osg-remediator.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -105,7 +106,7 @@ test('ITP-14 default Codex worker order is corporate-first and unknown preferred
   assert.equal(selectCodexWorkerAccount(fixture).hold, true);
 });
 
-for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-14 real ${family} remediation claim account ${index} dispatches remediator without local credentials`, async t => {
+for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) test(`${experiment ? 'OSG-14 assigned arm' : 'ITP-14'} real ${family} remediation claim account ${index} dispatches remediator without local credentials`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'itp14-claim-'));
   const hqRoot = join(rootDir, 'hq');
   const workspaceDir = join(rootDir, 'worker');
@@ -129,6 +130,16 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
   const wire = wireFor(identity, index);
   const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
     guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
+    ...(experiment ? { resolveOsgRemediatorRouteImpl: options => {
+      const arm = { role: 'remediator', harness: family, worker_class: identity,
+        model: wire.request.requested_models[0], effort: 'low', account: wire.selection.account_id };
+      return resolveOsgRemediatorRoute({ ...options, mode: 'apply',
+        ownerImpl: async () => ({ reason: 'assigned', worker_class: identity, arm, effort: 'low',
+          assignment: { assignment_id: 'fixture-assignment', ticket_key: 'fixture/T-1',
+            mode: 'apply', experiment: 'remediator', arm, propensity: 0.5 } }),
+        selectAccountImpl: async () => ({ pooled: true, status: 'selected', identity,
+          hold: false, tokenAccountId: arm.account }), recordImpl: () => {} });
+    } } : {}),
     resolveRemediationWorkerClassImpl: args => resolveRemediationWorkerClassWithFallback({ ...args,
       selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
         model: wire.request.requested_models[0], ownerImpl: async () => wire }),
@@ -151,6 +162,11 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) test(`ITP-
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0][dispatches[0].indexOf('--worker-class') + 1], identity);
   assert.equal(dispatches[0].includes('--harness'), false);
+  if (experiment) {
+    assert.equal(dispatches[0][dispatches[0].indexOf('--model') + 1], wire.request.requested_models[0]);
+    assert.equal(dispatches[0][dispatches[0].indexOf('--reasoning-level') + 1], 'low');
+    assert.equal(result.job.remediationWorker.osgRemediator.reason, 'assigned');
+  }
 });
 
 test('ITP-14 pooled routing preserves the declared infrastructure fallback', async () => {

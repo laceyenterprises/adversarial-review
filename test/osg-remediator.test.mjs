@@ -1,0 +1,88 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const seam = await import('../src/osg-remediator.mjs').catch(error => {
+  if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
+  throw error;
+});
+const arm = { role: 'remediator', harness: 'codex', worker_class: 'codex',
+  model: 'fixture-model', effort: 'low', account: 'fixture-account' };
+const assignment = { assignment_id: 'fixture-assignment', ticket_key: 'fixture/T-1',
+  experiment: 'remediator', arm, mode: 'apply', propensity: 0.5 };
+
+async function route(options = {}) {
+  assert.equal(typeof seam.resolveOsgRemediatorRoute, 'function');
+  return seam.resolveOsgRemediatorRoute({ repo: 'example/fixture', prNumber: 7,
+    kind: 'hammer', current: { workerClass: 'hammer' }, mode: 'apply',
+    ownerImpl: async () => ({ assignment, arm, worker_class: 'hammer', effort: 'low', reason: 'assigned' }),
+    selectAccountImpl: async () => ({ pooled: true, status: 'selected', hold: false,
+      identity: 'hammer', tokenAccountId: arm.account, evidenceGeneration: 'fixture-generation' }),
+    recordImpl: () => {}, env: {}, ...options });
+}
+
+test('assigned arm keeps hammer authority and carries model, effort and account', async () => {
+  const selected = await route();
+  assert.equal(selected.workerClass, 'hammer');
+  assert.equal(selected.modelResolution.resolvedModel, arm.model);
+  assert.equal(selected.modelResolution.resolvedReasoningLevel, 'low');
+  assert.equal(selected.osg.arm.account, arm.account);
+  assert.equal(selected.osg.assignment.propensity, 0.5);
+  assert.equal(selected.osg.reason, 'assigned');
+});
+
+test('unavailable or changed account falls back without holding dispatch', async () => {
+  const current = { workerClass: 'hammer', reason: 'preferred-ready' };
+  let recorded;
+  for (const account of [null, { hold: true }, { pooled: true, status: 'selected',
+    identity: 'hammer', tokenAccountId: 'another-account' }]) {
+    const result = await route({ current, selectAccountImpl: async () => account,
+      recordImpl: value => { recorded = value; } });
+    assert.equal(result.workerClass, current.workerClass);
+    assert.equal(result.reason, current.reason);
+    assert.equal(result.modelResolution, undefined);
+    assert.equal(result.hold, undefined);
+    assert.equal(recorded.reason, 'arm-account-unavailable');
+  }
+});
+
+test('off returns the exact original object without config/owner/account/evidence I/O', async () => {
+  const current = Object.freeze({ workerClass: 'hammer', reason: 'preferred-ready' });
+  const forbidden = () => assert.fail('off touched an experimental dependency');
+  assert.equal(await route({ current, mode: 'off', ownerImpl: forbidden,
+    selectAccountImpl: forbidden, recordImpl: forbidden }), current);
+});
+
+test('owner failure, budget fallback and audit failure keep a usable default', async () => {
+  const current = { workerClass: 'hammer' };
+  for (const ownerImpl of [async () => { throw Error('private diagnostic'); },
+    async () => ({ assignment, reason: 'quota-trial-share' })]) {
+    const result = await route({ current, ownerImpl });
+    assert.equal(result.workerClass, 'hammer');
+    assert.equal(result.modelResolution, undefined);
+    assert.doesNotMatch(JSON.stringify(result), /private diagnostic/);
+  }
+  assert.equal((await route({ current, recordImpl: () => { throw Error('disk unavailable'); } })).workerClass, 'hammer');
+  assert.equal((await route({ current, recordImpl: () => { throw Error('disk unavailable'); } })).modelResolution, undefined);
+});
+
+test('shadow and another role cannot override the current route', async () => {
+  assert.equal((await route({ mode: 'shadow' })).modelResolution, undefined);
+  assert.equal((await route({ ownerImpl: async () => ({ assignment: { ...assignment,
+    experiment: 'builder' }, arm, worker_class: 'hammer', effort: 'low', reason: 'assigned' }) })).modelResolution, undefined);
+});
+
+test('evidence persists the assignment and fallback with no provider text', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'osg-remediator-'));
+  try {
+    await route({ rootDir, recordImpl: undefined, ownerImpl: async () => ({ assignment, reason: 'quota-trial-share' }) });
+    const files = readdirSync(join(rootDir, 'data', 'osg-remediator'));
+    assert.equal(files.length, 1);
+    const value = JSON.parse(readFileSync(join(rootDir, 'data', 'osg-remediator', files[0])));
+    assert.equal(value.assignment.assignment_id, assignment.assignment_id);
+    assert.equal(value.reason, 'quota-trial-share');
+    assert.equal(value.repo, 'example/fixture');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

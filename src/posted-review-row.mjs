@@ -606,7 +606,7 @@ async function handlePostedReviewRowWithinReadCache({
     // generation; their legacy inputs and mutation-time freshness checks remain.
     const source = (sourceRef, value) => ({ sourceRef, read: () => value });
     const passSnapshot = await snapshotPass.collect({ subjectKey: stepKey, head: candidate?.headSha,
-      anchors: { reviewerStartedAt: existing.reviewer_started_at ?? null, postedAt: existing.posted_at ?? null },
+      anchors: { reviewerStartedAt: existing?.reviewer_started_at ?? null, postedAt: existing?.posted_at ?? null },
       sources: {
         pr: source('candidate-evaluation', { headSha: candidate?.headSha, baseSha: candidate?.baseSha,
           state: candidate?.prState, mergedAt: candidate?.mergedAt, closedAt: candidate?.closedAt,

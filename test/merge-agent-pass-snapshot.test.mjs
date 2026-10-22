@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setImmediate as turn } from 'node:timers/promises';
 import { createMergeAgentSnapshotPass, fetchMergeAgentCandidateSnapshot } from '../src/merge-agent-candidate-snapshot.mjs';
 import { withPostedReviewReadCache, closePostedReviewReadCache } from '../src/posted-review-read-cache.mjs';
-import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
+import { readClosureImmutable, withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
@@ -170,6 +170,33 @@ test('immutable history cannot be poisoned and completed evidence survives new o
   assert.equal(calls, 2);
 });
 
+test('uncached closure reads copy and freeze evidence with or without an asynchronous reader', async () => {
+  for (const asynchronous of [false, true]) {
+    const original = { files: [{ filename: 'f-01' }] };
+    const run = () => asynchronous ? Promise.resolve(original) : original;
+    const snapshot = await readClosureImmutable(run, ['uncached'], run);
+    original.files[0].filename = 'f-02';
+    assert.equal(snapshot.files[0].filename, 'f-01');
+    assert.throws(() => { snapshot.files[0].filename = 'f-03'; }, TypeError);
+    assert.throws(() => snapshot.files.push({}), TypeError);
+    assert.ok(Object.isFrozen(snapshot));
+    assert.notEqual(await readClosureImmutable(run, ['uncached'], run), snapshot);
+  }
+  const cyclic = {}; cyclic.self = cyclic;
+  await assert.rejects(readClosureImmutable(null, [], () => cyclic), /plain acyclic value/);
+});
+
+test('reads from an expired closure scope still return immutable evidence', async () => {
+  const gate = deferred();
+  let lateRead;
+  await withClosureEvaluationReadCache(() => {
+    lateRead = gate.promise.then(() => readClosureImmutable(null, [], () => ({ nested: [] })));
+  });
+  gate.resolve();
+  const snapshot = await lateRead;
+  assert.throws(() => snapshot.nested.push('mutation'), TypeError);
+});
+
 test('a failed tree read is retried by the same history reader within its original budget', async () => {
   let failedTreeReads = 0;
   const get = createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
@@ -312,6 +339,26 @@ for (const kind of ['terminal', 'live-retry', 'unreadable-retry']) {
   });
 }
 
+test('active launch worker reads prefer the resolved row ID over absent or unresolved caller IDs', async () => {
+  for (const status of ['starting', 'running']) {
+    for (const launchRequestId of [undefined, '', 'unresolved-alias']) {
+      let workerReads = 0;
+      const observation = await readLaunchRequestObservationFromLedgerAsync({ launchRequestId,
+        readLaunchRequestStatusImpl: async () => ({ ok: true,
+          row: { launch_request_id: 'l-resolved', status }, retryChain: [] }),
+        readWorkerStatusImpl: async args => {
+          workerReads++;
+          assert.equal(args.launchRequestId, 'l-resolved');
+          return { ok: true, row: { status: 'running' } };
+        },
+      });
+      assert.equal(workerReads, 1);
+      assert.equal(observation.state, 'complete');
+      assert.equal(observation.value.worker.status, 'running');
+    }
+  }
+});
+
 test('representative legacy owner outputs remain identical after immutable collection', async () => {
   const clean = { reviewState: { verdict: 'approved', headSha: head,
     blockingFindingState: 'known', blockingFindingCount: 0,
@@ -326,22 +373,25 @@ test('representative legacy owner outputs remain identical after immutable colle
   }
 });
 
-test('posted handler hands both consumers the identical snapshot and keeps its legacy wait result', async () => {
-  let builtSnapshot, closureSnapshot;
-  const row = { review_status: 'posted', reviewer_head_sha: head, posted_at: '2026-01-01T00:00:00Z' };
-  const result = await handlePostedReviewRow({ repoPath: subjectKey, prNumber: 1, currentRevisionRef: head,
-    now: () => clock, currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
-    latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
-    fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),
-    buildMergeAgentDispatchJobImpl: (_root, _candidate, { passSnapshot }) => { builtSnapshot = passSnapshot; return {}; },
-    resolveMergeAgentCoexistenceForWatcherImpl: async ({ passSnapshot }) => {
-      closureSnapshot = passSnapshot;
-      return { outcome: 'ama-pending', amaClosureResult: { reason: 'synthetic-wait' } };
-    }, logger: { log() {}, warn() {}, error() {} },
+for (const postedAt of ['2026-01-01T00:00:00Z', undefined]) {
+  test(`posted handler shares its snapshot and preserves wait with posted anchor ${postedAt}`, async () => {
+    let builtSnapshot, closureSnapshot;
+    const row = { review_status: 'posted', reviewer_head_sha: head, posted_at: postedAt };
+    const result = await handlePostedReviewRow({ repoPath: subjectKey, prNumber: 1, currentRevisionRef: head,
+      now: () => clock, currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
+      latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+      fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),
+      buildMergeAgentDispatchJobImpl: (_root, _candidate, { passSnapshot }) => { builtSnapshot = passSnapshot; return {}; },
+      resolveMergeAgentCoexistenceForWatcherImpl: async ({ passSnapshot }) => {
+        closureSnapshot = passSnapshot;
+        return { outcome: 'ama-pending', amaClosureResult: { reason: 'synthetic-wait' } };
+      }, logger: { log() {}, warn() {}, error() {} },
+    });
+    assert.equal(builtSnapshot, closureSnapshot);
+    assert.equal(builtSnapshot.anchors.postedAt, postedAt ?? null);
+    assert.equal(builtSnapshot.anchors.reviewerStartedAt, null);
+    assert.equal(builtSnapshot.observations.launches.state, 'unknown');
+    assert.equal(result.outcome, 'ama-pending');
+    assert.deepEqual(result, { handled: true, outcome: 'ama-pending', urgent: false, gateDecision: null });
   });
-  assert.equal(builtSnapshot, closureSnapshot);
-  assert.equal(builtSnapshot.anchors.postedAt, row.posted_at);
-  assert.equal(builtSnapshot.observations.launches.state, 'unknown');
-  assert.equal(result.outcome, 'ama-pending');
-  assert.deepEqual(result, { handled: true, outcome: 'ama-pending', urgent: false, gateDecision: null });
-});
+}

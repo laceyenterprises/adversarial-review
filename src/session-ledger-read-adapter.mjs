@@ -975,7 +975,7 @@ export async function readLaunchRequestObservationFromLedgerAsync({
   let worker = null;
   if (effective?.ok && ['starting', 'running'].includes(effective.row?.status)) {
     worker = await readWorkerStatusImpl({ ...args,
-      launchRequestId: effective.liveRetryLaunchRequestId || args.launchRequestId });
+      launchRequestId: effective.liveRetryLaunchRequestId || effective.row?.launch_request_id || args.launchRequestId });
   }
   return {
     state: !effective?.ok || !statusKnown || !chainReadable ? 'unknown' : 'complete',

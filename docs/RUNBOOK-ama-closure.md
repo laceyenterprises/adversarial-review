@@ -188,6 +188,8 @@ prefer terminal launch evidence over stale worker projections, and preserve
 unreadable descendants as unknown. Process success is recorded separately from
 remote merge evidence, which belongs to the PR observation. Collection never
 spawns work or changes a lease.
+Active-launch worker probes target the live retry descendant when present,
+otherwise the resolved launch row's ID, falling back to the caller's ID.
 
 The handler closes this advisory cache before coexistence, including any gate
 reprojection after a changed review row. Closure, daemon merge and dispatch
@@ -210,6 +212,8 @@ Completed immutable reads can now be shared across operation signals. Pending
 reads share only when their signal is identical, so one operation's cancellation
 cannot cancel another operation. Mutable PR, review, label and base-ref reads
 are excluded from this immutable cache.
+Reads outside an open evaluation scope still return copied, deeply frozen
+snapshots; only reuse depends on the scope being open.
 Shared history response objects are deeply frozen as well. Failed per-reader
 tree/blob promises are evicted so a later read can retry within its existing
 context budget; immutable evidence reuse does not refresh mutable PR facts.

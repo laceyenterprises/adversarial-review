@@ -41,7 +41,7 @@ export async function withClosureEvaluationReadCache(run) {
 export function readClosureImmutable(reader, identity, run, executor = reader, signal = null) {
   signal?.throwIfAborted();
   const scope = storage.getStore();
-  if (!scope?.open) return run();
+  if (!scope?.open) return Promise.resolve().then(run).then(immutableSnapshotValue);
   let executors = scope.readers.get(reader);
   if (!executors) { executors = new Map(); scope.readers.set(reader, executors); }
   let reads = executors.get(executor);

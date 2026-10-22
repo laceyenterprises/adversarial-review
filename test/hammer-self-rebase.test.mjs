@@ -171,7 +171,10 @@ for (const scenario of ['snapshot-transient', 'ci-snapshot-transient']) {
     const result = f.run();
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /outcome=merged/);
-    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).snapshotReads, 2);
+    const state = JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8'));
+    assert.equal(state.snapshotFailures, 1);
+    // CI retry performs one additional final PR refresh after snapshot recovery.
+    assert.equal(state.snapshotReads, scenario.startsWith('ci-') ? 3 : 2);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }

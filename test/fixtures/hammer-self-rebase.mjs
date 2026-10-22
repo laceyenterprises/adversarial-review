@@ -121,6 +121,8 @@ if (args[0] === 'pushed') {
       state.snapshotReads = (state.snapshotReads || 0) + 1;
       save();
       if (!process.env.SCENARIO.endsWith('transient') || state.snapshotReads === 1) {
+        state.snapshotFailures = (state.snapshotFailures || 0) + 1;
+        save();
         console.error(process.env.SCENARIO.endsWith('permanent')
           ? 'HTTP 403: Forbidden' : 'HTTP 502: synthetic post-rebase snapshot failure');
         process.exit(1);

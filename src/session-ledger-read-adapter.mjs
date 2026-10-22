@@ -7,6 +7,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { loadConfig } from './config-loader.mjs';
+import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
+import { readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -955,6 +957,49 @@ function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchReq
 // sets retryChainUnreadable. Ownership-changing callers must check that flag.
 export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
 export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLaunchRequestStatusFromLedgerSteps(args), args); }
+
+// Collection seam only. Reuse the existing bounded ledger target/retry reader;
+// terminal launch evidence outranks a stale worker projection. Neither process
+// success nor a wake supplies evidence of a remote merge.
+export async function readLaunchRequestObservationFromLedgerAsync({
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
+  readWorkerStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
+  ...args
+} = {}) {
+  const launch = await readLaunchRequestStatusImpl({ ...args, includeRetryChain: true });
+  const effective = withLiveLaunchRetry(launch);
+  const chainReadable = Array.isArray(launch?.retryChain) && launch.retryChainUnreadable !== true;
+  const ownershipProbe = chainReadable ? effective : { ...effective, retryChainUnreadable: true };
+  const statusKnown = Boolean(readLaunchRequestStatus(effective?.row?.status).status)
+    || isTerminalLaunchRequestStatus(effective?.row?.status);
+  let worker = null;
+  if (effective?.ok && ['starting', 'running'].includes(effective.row?.status)) {
+    worker = await readWorkerStatusImpl({ ...args,
+      launchRequestId: effective.liveRetryLaunchRequestId || args.launchRequestId });
+  }
+  return {
+    state: !effective?.ok || !statusKnown || !chainReadable ? 'unknown' : 'complete',
+    value: {
+      launchRequestId: args.launchRequestId,
+      launch: launch?.row ?? null,
+      retryChain: launch?.retryChain ?? null,
+      retryChainUnreadable: !chainReadable,
+      effectiveLaunch: effective?.row ?? null,
+      liveRetryLaunchRequestId: effective?.liveRetryLaunchRequestId ?? null,
+      worker: worker?.ok ? worker.row : null,
+      inFlight: statusKnown ? launchRequestInFlight(ownershipProbe) : null,
+      terminal: statusKnown && launchRequestInFlight(ownershipProbe) === false
+        && isTerminalLaunchRequestStatus(effective?.row?.status),
+      processSucceeded: effective?.row?.status === 'succeeded',
+      // The PR observation owns merged/closed receipts, independently.
+      remoteMerge: null,
+    },
+    provenance: { sourceRef: 'launch-requests', backend: launch?.target?.backend ?? null,
+      launchRead: launch?.ok === true, launchReadReason: launch?.reason ?? null,
+      retryReadReason: launch?.retryChainFailure?.reason ?? null, workerRead: worker?.ok ?? null,
+      workerReadReason: worker?.reason ?? null },
+  };
+}
 
 function* readLaunchRequestStatusFromLedgerSteps({
   launchRequestId,

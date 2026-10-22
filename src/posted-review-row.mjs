@@ -1,6 +1,6 @@
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
-import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
+import { createMergeAgentSnapshotPass, fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -335,9 +335,12 @@ export async function timePostedReviewStep(
   }
 }
 
-export function handlePostedReviewRow(options = {}) {
-  return withPostedReviewReadCache({ repo: options.repoPath, prNumber: options.prNumber,
-    headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache(options));
+export async function handlePostedReviewRow(options = {}) {
+  const snapshotPass = createMergeAgentSnapshotPass({ now: options.now });
+  try {
+    return await withPostedReviewReadCache({ repo: options.repoPath, prNumber: options.prNumber,
+      headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache({ ...options, snapshotPass }));
+  } finally { snapshotPass.close(); }
 }
 
 async function handlePostedReviewRowWithinReadCache({
@@ -365,6 +368,7 @@ async function handlePostedReviewRowWithinReadCache({
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce passes domainId). Default is never read (only used when operatorSurface is set, and every such caller passes domainId).
   logGate = postedReviewRowLogGate,
   logger = console,
+  snapshotPass,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
   const retireTerminalHammerIntent = () => {
@@ -598,7 +602,27 @@ async function handlePostedReviewRowWithinReadCache({
     }
     operatorApprovalEvent = operatorApprovalEvent ?? candidate?.operatorApprovalEvent ?? null;
     mergeAgentRequestEvent = mergeAgentRequestEvent ?? candidate?.mergeAgentRequestEvent ?? null;
-    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb });
+    // Observational handoff only. Both consumers receive this same immutable
+    // generation; their legacy inputs and mutation-time freshness checks remain.
+    const source = (sourceRef, value) => ({ sourceRef, read: () => value });
+    const passSnapshot = await snapshotPass.collect({ subjectKey: stepKey, head: candidate?.headSha,
+      anchors: { reviewerStartedAt: existing.reviewer_started_at ?? null, postedAt: existing.posted_at ?? null },
+      sources: {
+        pr: source('candidate-evaluation', { headSha: candidate?.headSha, baseSha: candidate?.baseSha,
+          state: candidate?.prState, mergedAt: candidate?.mergedAt, closedAt: candidate?.closedAt,
+          isDraft: candidate?.isDraft,
+          mergeable: candidate?.mergeable, mergeStateStatus: candidate?.mergeStateStatus }),
+        candidate: source('candidate-evaluation', candidate),
+        checks: source('candidate-evaluation', { rollup: candidate?.statusCheckRollup,
+          branchProtection: candidate?.branchProtection }),
+        reviews: source('review-row', existing),
+        remediation: source('follow-up-job', latestFollowUp),
+        controls: source('posted-review-controls', { gateDecision, operatorApprovalEvent,
+          mergeAgentRequestEvent, adversarialMergeRequestedEvent }),
+      } });
+    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb, passSnapshot });
+    // Executing consumers retain their own live exact-head/effect checks.
+    snapshotPass.invalidate(stepKey);
 
     if (gateDecision?.reason === 'operator-skip-label') {
       const terminalReason = liveCandidateTerminalReason(candidate);
@@ -656,6 +680,7 @@ async function handlePostedReviewRowWithinReadCache({
             reviewStateDb,
             dispatchJob,
             candidate,
+            passSnapshot,
             labelNames,
             operatorApprovalEvent,
             mergeAgentRequestEvent,

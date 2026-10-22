@@ -158,6 +158,34 @@ entries; failed reads are evicted, and executor, credential, host and adapter
 identities remain separate. The live timeline still determines the head to
 which a label belongs.
 
+NXA-01 extends that advisory scope to the raw candidate PR response, including
+draft state. Completed responses are copied and deeply frozen; pending reads
+share only their own cancellation signal. A response establishing a changed
+head discards previous-head evidence and retains only that response at the new
+head. Closing the scope before effects still forces execution freshness reads.
+
+`createMergeAgentSnapshotPass` collects supplied bounded observation readers
+with the same four-read concurrency bound. Repeated consumers of one subject/head
+receive the same frozen value, identified by `passId` and `generation`, with a
+supplied UTC observation clock, requested/observed head, source provenance,
+`complete`/`unknown`/`error` observations and caller-supplied durable timing anchors.
+Missing sources remain unknown; partial readers retain their explicit state and
+provenance. Polling never creates or slides durable action/deadline anchors.
+Head changes, explicit invalidation after effects and a new pass require fresh
+observations. `isCurrent` identifies invalidated in-flight results; it grants no
+execution authority. A pass must be closed when its owner finishes.
+
+The posted-review handler hands dispatch-job construction and coexistence the
+same `passSnapshot`, assembled from already-read candidate, checks, review,
+follow-up and control inputs. Uncollected ownership, policy and history evidence
+remains unknown. These consumers continue using their legacy action inputs;
+this collection change adds no decision, refusal, deadline enforcement or launch.
+Optional launch observations use the existing session-ledger retry traversal,
+prefer terminal launch evidence over stale worker projections, and preserve
+unreadable descendants as unknown. Process success is recorded separately from
+remote merge evidence, which belongs to the PR observation. Collection never
+spawns work or changes a lease.
+
 The handler closes this advisory cache before coexistence, including any gate
 reprojection after a changed review row. Closure, daemon merge and dispatch
 freshness probes therefore remain live. PR terminal state, reviews, CI, leases,
@@ -179,6 +207,9 @@ Completed immutable reads can now be shared across operation signals. Pending
 reads share only when their signal is identical, so one operation's cancellation
 cannot cancel another operation. Mutable PR, review, label and base-ref reads
 are excluded from this immutable cache.
+Shared history response objects are deeply frozen as well. Failed per-reader
+tree/blob promises are evicted so a later read can retry within its existing
+context budget; immutable evidence reuse does not refresh mutable PR facts.
 
 Run the synthetic before/after profile from the repository root:
 

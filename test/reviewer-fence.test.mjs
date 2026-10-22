@@ -192,7 +192,7 @@ test('postGitHubReview refreshes the reviewer App token once after a 403 integra
           },
           fetchImpl: async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-claude-reviewer$/);
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1$/);
             return {
               ok: true,
               status: 200,
@@ -262,7 +262,7 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
           },
           fetchImpl: async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-claude-reviewer$/);
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1$/);
             return {
               ok: true,
               status: 200,
@@ -335,7 +335,7 @@ test('postGitHubReview refreshes Gemini by botTokenEnv even when reviewerIdentit
           },
           fetchImpl: async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-gemini-reviewer$/);
+            assert.match(url, /\/token\?provider=github-app-gemini-reviewer&force=1$/);
             assert.doesNotMatch(url, /github-app-claude-reviewer/);
             return {
               ok: true,

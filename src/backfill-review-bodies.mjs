@@ -1,3 +1,4 @@
+import { persistReviewFindingsSafe } from './review-finding-records.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { loginsMatch, resolveReviewerBotLoginAliases } from './review-body-capture.mjs';
 import { reviewerAttributionMetadata } from './reviewer-attribution.mjs';
@@ -526,6 +527,7 @@ async function backfillReviewerPassBodies(rootDir, {
             row.metadata_json,
           );
           if (updated.changes !== 1) throw new Error('reviewer pass changed during backfill; retry with fresh evidence');
+          persistReviewFindingsSafe(db, row.pass_id, log);
           summary.populated += 1;
           if (nodeId) claimedNodeIds.add(nodeId);
         } catch (err) {

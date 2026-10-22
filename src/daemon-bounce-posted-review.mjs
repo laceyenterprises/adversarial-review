@@ -1,3 +1,4 @@
+import { persistReviewFindingsSafe } from './review-finding-records.mjs';
 import { bouncedPostedReviewSettleSql } from './daemon-bounce-recovery.mjs';
 import { ghReviewStateToVerdict } from './backfill-review-bodies.mjs';
 import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
@@ -42,6 +43,7 @@ export function settleDaemonBouncePostedReview({
       SET body_md = ?, verdict = ?, gh_comment_id = ?, body_captured_at = ?,
           status = 'completed', ended_at = ?
       WHERE pass_id = ?`).run(body, verdict, reviewId, postedAt, postedAt, pass.pass_id);
+    persistReviewFindingsSafe(db, pass.pass_id);
     queueFollowUp({
       rootDir,
       row: { ...pass, body_md: body, verdict, gh_comment_id: reviewId,

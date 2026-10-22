@@ -1,3 +1,4 @@
+import { persistReviewFindingsSafe } from './review-finding-records.mjs';
 import { SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW } from './review-state-statements.mjs';
 import { reviewerBotLoginAliases } from './reviewer-reattach.mjs';
 import { loginsMatch } from './review-body-capture.mjs';
@@ -193,6 +194,7 @@ export async function reconcilePostedFailedOrphans({
               );
               linkedPass = passResult.changes === 1 ? (passById.get(pass.pass_id) || pass) : null;
             }
+            if (linkedPass) persistReviewFindingsSafe(db, linkedPass.pass_id, log);
             const artifactLinked = Boolean(
               linkedPass && (reviewId || review.node_id) && (linkedPass.gh_comment_id || existingArtifact)
             );

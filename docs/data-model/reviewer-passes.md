@@ -15,6 +15,11 @@ closer review attempt. Its primary identity is `(repo, pr_number,
 attempt_number, pass_kind)`. `worker_run_id` links a dispatched reviewer to the
 session-ledger `worker_runs.run_id` when that attribution is available.
 
+First-pass and rereview body capture also projects blocking and non-blocking
+findings into [review finding records](review-findings.md). These observations
+retain source pass attribution and link stored replies, overlapping commits and
+hammer evidence without changing pass or review lifecycle states.
+
 For closer passes, a confirmed merge records `status='completed'`. An unmerged
 worker success, including `unverified-terminal-success`, records `failed`;
 cancelled or superseded work records `cancelled`. This keeps time-to-merge

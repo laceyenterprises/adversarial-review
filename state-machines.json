@@ -261,7 +261,7 @@
         "src/ama-closure-orchestration.mjs"
       ],
       "states": [
-        {"name": "dispatching","terminal": false,"exitOwner": "closer dispatcher / operator inspection","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it), but unproven launch absence intentionally has no time-based ownership exit."},
+        {"name": "dispatching","terminal": false,"exitOwner": "closer dispatcher / operator inspection","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence; unproven absence has no time-based ownership exit."},
         {"name": "dispatched","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
         {"name": "launch-terminal","terminal": true},
         {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher or watcher lane","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
@@ -275,7 +275,7 @@
       ],
       "transitions": [
         {"id": "hammer-dispatch.29","from": "dispatching","to": "dispatched","trigger": "recover one canonical receipt by exact attempt key, AMA ticket and repository; preserve retry charge once","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.30","from": "dispatching","to": "no-dispatch","trigger": "fenced prepared attempt with matching dead pending owner and readable absent key proves no submission; roll back intent retry once","codeSource": "src/ama/pre-receipt-intent.mjs"},
+        {"id": "hammer-dispatch.30","from": "dispatching","to": "no-dispatch","trigger": "fenced prepared attempt with dead matching owner and absent key, or legacy empty successful ticket/time ledger query, proves no submission; defer lease and refund intent retry once","codeSource": "src/ama/pre-receipt-intent.mjs"},
         {"id": "hammer-dispatch.31","from": "dispatching","to": "dispatching","trigger": "unprovable launch absence: fixed inspection deadline and bounded diagnostics retain same-PR ownership without indefinite fleet capacity","codeSource": "src/ama/pre-receipt-intent.mjs"},
         {"id": "hammer-dispatch.24","from": "dispatching","to": "deferred-by-drain","trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.25","from": "deferred-by-drain","to": "no-dispatch","trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission","codeSource": "src/ama/dispatch-closer.mjs"},
@@ -309,7 +309,7 @@
     }
   ],
   "sourceProjectionSha256": {
-    "src/ama/pre-receipt-intent.mjs": "d73ce52d8da920b986fdf0d4e36a6873e1ad32e1cfdaddb2862b3add4c11d15b",
+    "src/ama/pre-receipt-intent.mjs": "03d31f6834b5624a8b3c90e5cb9c1b906fb5c109f58c657b243f2ef14de99954",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",

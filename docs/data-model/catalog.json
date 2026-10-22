@@ -679,7 +679,7 @@
     {
       "id": "ama-closer-dispatches",
       "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "preReceiptReconciliation"],
-      "preReceiptSemantics": "LAC-2081: native fenced keyed receipt recovery or proof of no submission; unknown reaches a fixed inspection deadline but never age-cancels same-PR ownership",
+      "preReceiptSemantics": "LAC-2081 / LEGACYINTENT-01: native fenced keyed receipt recovery or proof of no submission; legacy no-key attempts settle legacy-no-launch-proven only on a successful empty inclusive ticket/time ledger query recorded in preReceiptReconciliation.query; unknown retains same-PR ownership; audited single-PR command defaults to dry-run",
       "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps after the readable 60-second terminal grace, with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",
@@ -694,6 +694,7 @@
         "src/ama/dead-hammer-rearm.mjs",
         "src/ama/primary-change.mjs",
         "bin/reconcile-ama-closer-dispatches.mjs",
+        "bin/settle-legacy-closer-intent.mjs",
         "src/ama/prelaunch-refusal-retry.mjs"
       ],
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",

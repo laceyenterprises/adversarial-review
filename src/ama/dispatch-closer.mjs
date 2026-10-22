@@ -2227,13 +2227,14 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     // Historical records do not belong on the synchronous dispatch hot path.
     // The operator CLI can still reconcile them outside that path.
     if (options.capacityOnly && !inProgress) continue;
-    // Same-head retries may carry a predecessor LRQ. Use only the keyed
-    // intent protocol here; a dead caller or old receipt proves no absence.
+    // Same-head retries may carry a predecessor LRQ. Use attempt-key evidence
+    // or, for legacy intents, the ticket/time ledger query.
     if (record.state === 'dispatching') {
       const recovery = await reconcilePreReceiptIntent(rootDir, record, { ...options, now,
         logger: options.logger || options.log,
         ...(Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)
-          ? { readIntentReceiptImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }) } : {}),
+          ? { readIntentReceiptImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }),
+            readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }) } : {}),
       });
       if (recovery.changed) counts.changed += 1;
       counts.preReceipt ||= { recovered: 0, noLaunch: 0, unknown: 0, held: 0 };
@@ -4550,6 +4551,7 @@ export async function maybeDispatchAmaCloser(args) {
         { repo: targetRepo, prNumber: targetPrNumber }).filter(isPreReceiptIntent)) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
+          readLegacyIntentLaunchesImpl: args.readLegacyIntentLaunchesImpl,
           processKillImpl: args.processKillImpl, env: args.env || process.env,
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
         });

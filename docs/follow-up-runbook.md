@@ -45,25 +45,72 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
   as `deferred`. The intent's retry increment rolls back once. A crash after
   terminalization resumes this transition. The original owner may also settle
   its own prepared intent on a pre-submit return while still holding the fence.
-- Submitted, legacy, ambiguous, missing or unreadable evidence stays explicitly
-  unknown. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
+- Keyed submitted attempts without a receipt, ambiguous, missing or unreadable
+  evidence stay explicitly unknown. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
   `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
   deadline is the original dispatch timeout (30 minutes from first observation
   if unavailable). On expiry status becomes `inspection-required`; ownership
   remains held. Repeated diagnostics write at most once per minute and log only
   status changes. No accumulating history or launch-timestamp refresh is added.
 
-Legacy attempts have no key or provable submission phase. In particular, a
-same-head retry's retained LRQ can belong to its predecessor. The native repair
-does not query or adopt that predecessor as the new attempt's receipt. An empty
-registry listing or failed ledger read cannot authorize retirement. A later wake
-refusal and the stale-lease reaper no longer reclaim such an intent.
+### Legacy ticket/time evidence (LEGACYINTENT-01)
+
+A legacy `dispatching` intent has no `dispatchIdempotencyKey`. Under the same
+PR fence, query the canonical `launch_requests` ledger for
+`ticket_ref = AMA-PR-<number>` and `requested_at >= lastAttemptedAt` (inclusive,
+compared as timestamps). Do not filter by repository or head: any row in range
+keeps ownership held, including an exact PR/head match. This repair deliberately
+does not adopt unkeyed rows. Earlier launches, including a retained predecessor
+LRQ, do not prevent settlement. An invalid attempt timestamp, failed/unreadable
+query, or malformed/null launch timestamp cannot prove absence.
+
+A successful empty query settles `state: no-dispatch`,
+`reason: legacy-no-launch-proven`, clears launch IDs, refunds the intent retry
+increment once, and terminalizes a matching pending lease as `deferred`.
+Reconciliation resumes after a crash between lease and intent persistence.
+Missing leases are preserved; replaced owners or leases with launch receipts remain
+held. A matching pending legacy lease can settle even if its original watcher
+PID is still alive: the canonical ledger query supplies the proof.
+The next ordinary closer admission can proceed under the existing eligibility
+and retry rules. Keyed attempts retain their stricter prepared/submitting proof.
+
+`preReceiptReconciliation.query` records the bounded query kind, ticket,
+inclusive attempt-time lower bound, limit (one row is sufficient to refuse),
+read success, row count, launch IDs and secret-free backend/source or failure
+reason. The result is recorded on automatic reconciliation as well as operator
+apply. No ledger DSN or credentials are stored in this evidence.
+
+For one PR and **dispatch-record head**, run as the dispatch directory owner:
+
+```bash
+node bin/settle-legacy-closer-intent.mjs \
+  --root-dir /path/to/review-root --hq-root /path/to/hq-root \
+  --ledger-target '<canonical-ledger-target>' \
+  --repo sample/project --pr 42 --head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# Repeat the same command with: --apply --reason 'incident evidence recovery'
+```
+
+Dry-run is the default and prints JSON evidence without changing the intent,
+lease, retry ledger or audit store (a companion lock file may be created).
+`--head` accepts uppercase or mixed-case hex and normalizes it to lowercase for
+record lookup, identity checks and audit rows. `--apply` requires `--reason` and
+the directory owner's UID, verified through `process.getuid` on a POSIX host.
+If UID verification is unavailable, apply fails closed before reconciliation
+or audit writes; there is no ownership bypass for testing. Dry-run skips this
+UID check. Apply uses the same fenced check, writes and fsyncs a
+`settlement-authorized` row before mutation, then appends `settled-no-dispatch` or `refused:<reason>` under
+`data/operator-mutations/YYYY-MM.jsonl`. Rows include actor, PR, dispatch head,
+operator reason, invocation ID and query evidence. Audit-write failure before
+mutation refuses settlement. An authorization row without a completion row
+means interrupted apply; rerun the command to inspect current state. Inconclusive
+evidence exits nonzero and cannot release ownership. The command only handles
+legacy intents and performs no GitHub operation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
 `--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
 created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
-Do not run apply against PR 8918 under the LAC-2081 source-fix authorization.
+A source-code change does not authorize production apply.
 Missing credentials or inaccessible rows mean unknown, not absence. Preserve
 prompt/scratch evidence while ownership remains unknown. No new configuration
 keys, launch route, retry allowance or merge/finalization gate is introduced.

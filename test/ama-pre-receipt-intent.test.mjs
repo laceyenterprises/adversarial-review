@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { closeSync, openSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -13,7 +13,8 @@ import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, amaClo
 import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord,
   findActiveAmaCloserLaunches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
-import { readLaunchRequestByIdempotencyKeyAsync } from '../src/session-ledger-read-adapter.mjs';
+import { main as settleLegacyIntent } from '../bin/settle-legacy-closer-intent.mjs';
+import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
 
 const identity = { repo: 'fixture/repo', prNumber: 8, headSha: 'a'.repeat(40) };
 const started = '2026-10-22T10:18:18Z';
@@ -93,6 +94,7 @@ for (const phase of ['prepared', 'submitting', 'accepted']) {
 test('legacy and submitted intents keep same-PR ownership past any age; diagnostics stop at inspection', async t => {
   for (const dispatchIdempotencyKey of [null, key]) {
     const f = fixture(t, { dispatchIdempotencyKey }, false);
+    f.options.readLegacyIntentLaunchesImpl = () => ({ ok: false, reason: 'fixture-unreadable' });
     await f.reconcile();
     assert.equal(f.read().preReceiptReconciliation.status, 'inspection-required');
     const deadline = f.read().preReceiptReconciliation.deadlineAt;
@@ -105,6 +107,7 @@ test('legacy and submitted intents keep same-PR ownership past any age; diagnost
     let launches = 0;
     const decision = await maybeDispatchAmaCloser({ cfg: { enabled: true },
       dispatchContext: { rootDir: f.rootDir, ...identity, dispatchedAt: now },
+      readLegacyIntentLaunchesImpl: f.options.readLegacyIntentLaunchesImpl,
       execFileImpl: () => { launches++; throw Error('must not launch'); }, logger: { warn() {} } });
     assert.equal(decision.reason, 'existing-dispatch-unknown');
     assert.equal(decision.skipMergeAgent, true);
@@ -306,4 +309,203 @@ test('reaper preserves a replacement pending owner with identical state and time
   assert.equal(replaced, true);
   assert.equal(result.released, 0);
   assert.equal(readAmaCloserLease(f.rootDir, identity).watcherPid, 999);
+});
+
+
+for (const lease of [true, false]) test(`legacy empty ticket/time query settles without a receipt (lease=${lease})`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: undefined, launchRequestId: 'lrq_predecessor' }, lease);
+  f.insert({ ...receipt, requested_at: '2026-10-22T10:00:00Z' });
+  const outcome = await f.reconcile();
+  assert.equal(outcome.status, 'no-launch');
+  assert.equal(f.read().state, 'no-dispatch');
+  assert.equal(f.read().reason, 'legacy-no-launch-proven');
+  assert.equal(f.read().launchRequestId, null);
+  assert.equal(f.read().retryCount, 1);
+  assert.deepEqual(f.read().preReceiptReconciliation.query, {
+    kind: 'launch-requests-for-ticket-since', ticketRef: 'AMA-PR-8',
+    requestedAtOrAfter: started, limit: 1, ok: true, rowCount: 0,
+    backend: 'sqlite', source: 'deprecated-ledger-db-path', reason: null, launchRequestIds: [],
+  });
+  if (lease) assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  const before = f.read();
+  assert.equal((await f.reconcile()).status, 'unchanged');
+  assert.deepEqual(f.read(), before);
+});
+
+for (const mode of ['failed', 'thrown', 'malformed', 'missing-ledger', 'missing-table', 'row', 'other-repo',
+  'absent-key-row', 'equal-time-offset', 'null-time', 'invalid-time', 'invalid-attempt', 'replacement-owner', 'dispatched-owner']) {
+  test(`legacy intent retains ownership with ${mode} evidence`, async t => {
+    const f = fixture(t, { dispatchIdempotencyKey: mode === 'absent-key-row' ? undefined : null,
+      ...(mode === 'invalid-attempt' ? { lastAttemptedAt: null } : {}) });
+    const extra = {};
+    if (mode === 'failed') extra.readLegacyIntentLaunchesImpl = () => ({ ok: false, rows: [] });
+    if (mode === 'thrown') extra.readLegacyIntentLaunchesImpl = () => { throw Error('fixture failure'); };
+    if (mode === 'malformed') extra.readLegacyIntentLaunchesImpl = () => ({ ok: true, rows: null });
+    if (mode === 'missing-ledger') rmSync(f.options.ledgerDbPath);
+    if (mode === 'missing-table') {
+      const db = new Database(f.options.ledgerDbPath);
+      db.exec('DROP TABLE launch_requests'); db.close();
+    }
+    if (['row', 'other-repo', 'absent-key-row', 'equal-time-offset', 'null-time', 'invalid-time'].includes(mode)) {
+      f.insert({ ...receipt, target_repo: mode === 'other-repo' ? 'different' : receipt.target_repo,
+        requested_at: mode === 'equal-time-offset' ? '2026-10-22T03:18:18-07:00'
+          : mode === 'null-time' ? null : mode === 'invalid-time' ? 'unreadable' : started });
+    }
+    if (mode === 'replacement-owner') writeFileSync(amaCloserLeaseFilePath(f.rootDir, identity), JSON.stringify({
+      ...readAmaCloserLease(f.rootDir, identity), acquiredAt: now,
+    }));
+    if (mode === 'dispatched-owner') updateAmaCloserLease({ rootDir: f.rootDir, ...identity,
+      status: 'dispatched', lrqId: 'lrq_different_owner' });
+    const lease = readAmaCloserLease(f.rootDir, identity);
+    assert.equal((await f.reconcile(extra)).status, 'unknown');
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(f.read().retryCount, 2);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+  });
+}
+
+test('legacy settlement resumes after deferred lease persistence', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  updateAmaCloserLease({ rootDir: f.rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred' });
+  assert.equal((await f.reconcile()).status, 'no-launch');
+  assert.equal(f.read().reason, 'legacy-no-launch-proven');
+});
+
+test('legacy query yielding preserves a replacement owner', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const result = await f.reconcile({ readLegacyIntentLaunchesImpl: async () => {
+    writeFileSync(amaCloserLeaseFilePath(f.rootDir, identity), JSON.stringify({
+      ...readAmaCloserLease(f.rootDir, identity), watcherPid: 999,
+    }));
+    return { ok: true, rows: [] };
+  } });
+  assert.equal(result.reason, 'intent-or-lease-changed');
+  assert.equal(f.read().state, 'dispatching');
+});
+
+function operatorArgs(f, extra = []) {
+  return ['--root-dir', f.rootDir, '--hq-root', join(f.rootDir, 'hq'),
+    '--ledger-target', f.options.ledgerDbPath, '--repo', identity.repo,
+    '--pr', String(identity.prNumber), '--head', identity.headSha, ...extra];
+}
+
+test('operator legacy dry-run preserves intent, lease, budget and audit; apply audits settlement', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const path = amaCloserDispatchFilePath(f.rootDir, identity);
+  const before = readFileSync(path, 'utf8');
+  const lease = readAmaCloserLease(f.rootDir, identity);
+  const options = { ...f.options, print() {} };
+  assert.equal((await settleLegacyIntent(operatorArgs(f), options)).conclusive, true);
+  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['ama-closer-leases', 'follow-up-jobs']);
+  const applied = await settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), options);
+  assert.equal(applied.conclusive, true);
+  assert.equal(f.read().state, 'no-dispatch');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+  const rows = readFileSync(applied.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(rows.map(row => row.outcome), ['settlement-authorized', 'settled-no-dispatch']);
+  assert.equal(rows[0].actor.length > 0, true);
+  assert.equal(rows[0].revisionRef, identity.headSha);
+  assert.deepEqual(rows[0].evidence, f.read().preReceiptReconciliation.query);
+});
+
+for (const head of ['A'.repeat(40), 'Aa'.repeat(20)]) test(`operator normalizes ${head.slice(0, 2)} head input for dry-run and apply`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const args = operatorArgs(f);
+  args[args.indexOf('--head') + 1] = head;
+  const options = { ...f.options, print() {} };
+  const preview = await settleLegacyIntent(args, options);
+  assert.equal(preview.conclusive, true);
+  assert.equal(preview.headSha, identity.headSha);
+  assert.equal(f.read().state, 'dispatching');
+  const applied = await settleLegacyIntent([...args, '--apply', '--reason', 'fixture recovery'], options);
+  assert.equal(applied.conclusive, true);
+  assert.equal(applied.headSha, identity.headSha);
+  assert.equal(f.read().state, 'no-dispatch');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+  const rows = readFileSync(applied.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(rows.map(row => row.revisionRef), [identity.headSha, identity.headSha]);
+});
+
+for (const mode of ['unavailable', 'foreign-owner']) test(`operator apply refuses ${mode} UID verification without mutations`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const before = readFileSync(amaCloserDispatchFilePath(f.rootDir, identity), 'utf8');
+  const lease = readAmaCloserLease(f.rootDir, identity);
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const uid = process.getuid();
+  Object.defineProperty(process, 'getuid', { configurable: true,
+    value: mode === 'unavailable' ? undefined : () => uid + 1 });
+  try {
+    await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), {
+      ...f.options, print() {},
+    }), mode === 'unavailable' ? /POSIX UID verification.*unavailable/ : /directory owner uid/);
+    assert.equal((await settleLegacyIntent(operatorArgs(f), { ...f.options, print() {} })).conclusive, true);
+    assert.equal(readFileSync(amaCloserDispatchFilePath(f.rootDir, identity), 'utf8'), before);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['ama-closer-leases', 'follow-up-jobs']);
+  } finally {
+    if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
+    else delete process.getuid;
+  }
+});
+
+for (const mode of ['row', 'unreadable', 'keyed']) test(`operator refuses ${mode} evidence and audits apply refusal`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: mode === 'keyed' ? key : null });
+  if (mode === 'row') f.insert(receipt);
+  if (mode === 'unreadable') rmSync(f.options.ledgerDbPath);
+  let output;
+  await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), {
+    ...f.options, print: text => { output = JSON.parse(text); },
+  }), /Legacy settlement refused/);
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
+  const audit = JSON.parse(readFileSync(output.auditPath, 'utf8').trim());
+  assert.match(audit.outcome, /^refused:/);
+});
+
+test('audit failure prevents operator settlement', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  writeFileSync(join(f.rootDir, 'data', 'operator-mutations'), 'fixture obstruction');
+  await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), {
+    ...f.options, print() {},
+  }));
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
+});
+
+test('legacy Postgres query is read-only, bounded and parameterized across the whole ticket', async () => {
+  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started,
+    ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
+    spawnSyncImpl(command, args, options) {
+      assert.equal(command, 'psql');
+      assert.ok(args.includes("ticket_ref=AMA-PR-8'fixture"));
+      assert.ok(args.includes('since=2026-10-22T10:18:18.000Z'));
+      assert.match(options.input, /BEGIN READ ONLY/);
+      assert.match(options.input, /ticket_ref = :'ticket_ref'/);
+      assert.match(options.input, /requested_at >= :'since'::timestamptz/);
+      assert.match(options.input, /LIMIT 1/);
+      assert.doesNotMatch(options.input, /AMA-PR-8|target_repo =|head_sha =/);
+      return { status: 0, stdout: '' };
+    } });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.rows, []);
+});
+
+
+test('legacy absence proof does not depend on whether the original watcher is still alive', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const outcome = await f.reconcile({ processKillImpl: () => {} });
+  assert.equal(outcome.status, 'no-launch');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+});
+
+test('automatic launch reconciliation uses the same legacy ledger proof', async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  assert.deepEqual(await findActiveAmaCloserLaunches(f.rootDir, f.options), []);
+  assert.equal(f.read().reason, 'legacy-no-launch-proven');
+  assert.equal(f.read().preReceiptReconciliation.query.ok, true);
 });

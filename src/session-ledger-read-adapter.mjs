@@ -964,6 +964,38 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
     { spawnSyncImpl, readOnly: true, psqlVars: [['intent_key', idempotencyKey]] });
 }
 
+// Legacy intents lack an admission key. Query the whole ticket, without a repo
+// or head filter: even an unrelated row in this window must prevent settlement.
+export function readLaunchRequestsForTicketSinceAsync(args = {}) {
+  return runLedgerStepsAsync(readLaunchRequestsForTicketSinceSteps(args), args);
+}
+
+function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
+  ledgerTarget, ledgerDbPath, env = process.env, rootDir = process.cwd(), hqRoot,
+  spawnSyncImpl = spawnSync } = {}) {
+  if (!normalizeText(ticketRef) || typeof requestedAtOrAfter !== 'string'
+    || !Number.isFinite(Date.parse(requestedAtOrAfter))) {
+    return { ok: false, reason: 'invalid-ticket-attempt-query' };
+  }
+  const since = new Date(requestedAtOrAfter).toISOString();
+  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
+    rootDir, hqRoot, requiredTables: ['launch_requests'] });
+  if (!resolution.ok) return resolution;
+  const columns = 'launch_request_id, ticket_ref, target_repo, requested_at';
+  if (resolution.target.backend === 'sqlite') {
+    return querySqliteRows(resolution.target,
+      `SELECT ${columns} FROM launch_requests WHERE ticket_ref = @ticket
+        AND (julianday(requested_at) >= julianday(@since) OR julianday(requested_at) IS NULL) LIMIT 1`,
+      { ticket: ticketRef, since });
+  }
+  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
+  return yield* queryPostgresRowsSteps(resolution.target,
+    `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
+       WHERE ticket_ref = :'ticket_ref'
+         AND (requested_at >= :'since'::timestamptz OR requested_at IS NULL) LIMIT 1) receipt`,
+    { spawnSyncImpl, readOnly: true, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
+}
+
 function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,
   rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,

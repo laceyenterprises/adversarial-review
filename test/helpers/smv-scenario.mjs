@@ -707,6 +707,24 @@ if (scenario === 'clean') {
   });
   assert.equal(noLaunch.status, 'no-launch');
   assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'deferred');
+  const legacyIdentity = { ...identity(), prNumber: prNumber + 2 };
+  updateAmaCloserDispatchRecord(rootDir, legacyIdentity, () => ({ ...legacyIdentity,
+    targetRemediationSha: legacyIdentity.headSha, workerClass: 'hammer', state: 'dispatching',
+    lastAttemptedAt: recoveryNow, retryCount: 1 }));
+  acquireAmaCloserLease({ rootDir, ...legacyIdentity, now: recoveryNow, watcherPid: 12345 });
+  const legacyOptions = { now: recoveryNow,
+    processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); } };
+  const legacyHeld = await reconcilePreReceiptIntent(rootDir, legacyIdentity, {
+    ...legacyOptions, readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'synthetic unreadable' }),
+  });
+  assert.equal(legacyHeld.status, 'unknown');
+  const legacySettled = await reconcilePreReceiptIntent(rootDir, legacyIdentity, {
+    ...legacyOptions, readLegacyIntentLaunchesImpl: () => ({ ok: true, rows: [] }),
+  });
+  assert.equal(legacySettled.status, 'no-launch');
+  assert.equal(legacySettled.record.reason, 'legacy-no-launch-proven');
+  assert.equal(legacySettled.record.preReceiptReconciliation.query.requestedAtOrAfter, recoveryNow);
+  assert.equal(readAmaCloserLease(rootDir, legacyIdentity).terminalOutcome, 'deferred');
   const receiptIdentity = { ...identity(), prNumber: prNumber + 1 };
   updateAmaCloserDispatchRecord(rootDir, receiptIdentity, () => ({ ...receiptIdentity,
     reviewedSha: base, workerClass: 'hammer', state: 'dispatching',
@@ -728,7 +746,7 @@ if (scenario === 'clean') {
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
     nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
-    refusedWakeTerminal: true, livePendingLeasePreserved: true,
+    refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
   const { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } = await import('../../src/load-aware-timeout.mjs');

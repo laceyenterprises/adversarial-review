@@ -246,7 +246,7 @@ function rebasedFixture(t, moveAfterRebase = false, disjoint = false) {
 
 test('validated head containing current base skips unnecessary failing git diffs', t => {
   const fixture = rebasedFixture(t);
-  const helper = verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Resolve whether'));
+  const helper = verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Shared by initial verification'));
   const result = spawnSync('/bin/bash', ['-c', `
 BASE_BRANCH=main
 POST_REMEDIATION_SHA=${fixture.head}

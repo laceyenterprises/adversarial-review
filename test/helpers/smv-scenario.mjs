@@ -59,6 +59,17 @@ const tick = (overrides = {}) => watcherTick({ ...identity(), evidence: { headSh
 const scenario = process.argv[2];
 let evidence = {};
 if (scenario === 'clean') {
+  // HAMATTEST-02: the shared, head-bound decision selects ownership only.
+  const reviewState = { verdict: 'approved', headSha: base, blockingFindingCount: 0,
+    blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' };
+  const closureInput = { reviewState, currentHead: headSha, roundsLeft: false, reviewCeilingReached: true };
+  const closerAuthoredStale = { currentHead: headSha, reviewedHead: base,
+    decision: 'rereview-exact-head', carryForward: false };
+  assert.equal(decideClosureOwner({ ...closureInput, attested: true, closerAuthoredStale }).owner, 'review');
+  assert.equal(decideClosureOwner({ ...closureInput,
+    closerAuthoredStale: { ...closerAuthoredStale, decision: 'eligible', carryForward: true } }).owner, 'daemon-merge');
+  assert.equal(decideClosureOwner({ ...closureInput,
+    closerAuthoredStale: { ...closerAuthoredStale, currentHead: base } }).owner, 'hammer');
   const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, readMergeLeaseHistory } = await import('../../src/ama/merge-lease.mjs');
   const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main',
     holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
@@ -178,6 +189,7 @@ if (scenario === 'clean') {
   } finally { probeGate.resolve(); await holders.settleProbes(); probeGate = null; }
   assert.equal(holders.readyCount(), 2);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
+    sharedRereviewOwnership: true, carriedCleanOwnership: true, staleDecisionRefused: true,
     leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true,
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };

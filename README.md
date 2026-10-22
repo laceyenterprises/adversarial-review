@@ -924,8 +924,10 @@ stop a run. Pushed edges carry the reviewed verdict through the same chain
 reader as validated edges; exact-head CI remains mandatory. An explicit
 `rereview-exact-head` decision executes through the existing pending-review
 transition and per-head orphan reservation as soon as ownership is certainly
-absent. The reasons persist in watchdog evidence. No lifecycle states or smoke
-promises are added. Focused offline acceptance is in
+absent. The reasons persist in watchdog evidence. The clean sandbox smoke
+checks that closure ownership honors that head-bound decision even at the review
+ceiling, and carries an attested clean verdict into ordinary merge eligibility.
+No lifecycle states are added. Focused offline acceptance is in
 `test/hammer-pushed-attestation.test.mjs`, `test/remorphan-01.test.mjs` and the
 rendered publish/rebase and watcher claim-loop fixtures.
 
@@ -1521,7 +1523,7 @@ stateDiagram-v2
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 recompute ownership: wait
     [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
-    [*] --> s4: closure-owner.05 recompute ownership: review
+    [*] --> s4: closure-owner.05 recompute ownership: review (including a head-bound shared rereview-exact-head decision before historical hammer ownership)
     [*] --> s5: closure-owner.06 recompute ownership: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
     [*] --> s7: closure-owner.08 recompute ownership: conflict-rebase

@@ -2587,7 +2587,18 @@ hammer shell refuses with exit 78; a non-HAM GitHub identity refuses with exit 7
 Preserve evidence and record a no-merge handoff rather than switching accounts
 or credentials in the worker.
 The helper verifies the live head and the latest submitted authoritative review
-in its ancestry; a superseded blocking review cannot be withdrawn.
+under the shared review-currency rule (`src/ama/review-currency.mjs`); a
+superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
+currency across a closer rebase with either an authenticated HAM base/head
+attestation chain ending at the exact live head, or ordered `git patch-id
+--stable` equivalence of the PR commits. The patch proof reads at most 256
+linear commits per series, preserves empty commit positions, and permits extra
+commits only with independently authenticated HAM identity and matching
+`Reviewed-Head`, worker ticket/class and close-out trailers. A changed PR patch,
+unattributed extra commit, branch reset or later unrelated push supplies no
+carry-forward authority. Missing objects, capped evidence and unavailable
+provenance name the missing proof and retain no-merge status; they do not imply
+that operator recovery is necessary.
 It posts a HAM-authored comment carrying `Resolution: withdrawn-by-hammer`, the
 finding identity (`sha256([title, file])`), the exact head (`Reviewed-Head`), the
 reviewed head of the finding, `Evidence-SHA256` and the evidence. It rechecks the
@@ -2605,8 +2616,15 @@ withdrawn finding as resolved when its identity matches a blocking finding of
 the cited review, its `Finding-Reviewed-Head` matches that review's head, and its
 `Reviewed-Head` matches the current evaluated head. Descendant-head evidence
 cannot resolve a finding after a branch reset to its reviewed ancestor.
-Cross-head carry-forward requires independently validated coverage or content
-equivalence; the withdrawal itself supplies neither. `ama-check` requires the
+Cross-head carry-forward uses the same currency reader for the cited review
+and the withdrawal's evidence head. The evidence head additionally needs HAM
+provenance or patch equivalence, rather than ancestry alone. Findings and their
+dispositions are admitted together: an unproven review contributes neither,
+and missing current-review proof still refuses merge. Partial withdrawals
+reduce the standing blocker count. The original durable row and comment remain
+bound to their original heads and digests; a proven rebase reuses that
+adjudication without posting again. The withdrawal itself supplies no rebase
+proof. `ama-check` requires the
 local durable admission in `data/reviews.db` under `--root-dir` (default: the
 adversarial-review checkout), matching the comment node ID, HAM author,
 full-body digest, both heads, finding identity and evidence digest. It also
@@ -2619,10 +2637,10 @@ calls `bin/dismiss-withdrawn-reviews.mjs` under the held lease, after predicate
 admission and the required-check gate. It reads complete live review/comment
 lists and the local withdrawal store, verifies the same durable admission and
 comment evidence as `ama-check`, and dismisses only authoritative
-`CHANGES_REQUESTED` reviews on the exact live head whose complete blocking lists
-are withdrawn. It rechecks the review body and live head before dismissal.
-Reviews with standing or unknown findings, older-head reviews, and unrelated
-review vetoes remain. A read or dismissal failure refuses merge; GitHub still
+`CHANGES_REQUESTED` reviews current under this same currency rule whose complete
+blocking lists are withdrawn. It rechecks the review body and live head before dismissal.
+Reviews with standing or unknown findings, unproven older-head reviews, and
+unrelated review vetoes remain. A read or dismissal failure refuses merge; GitHub still
 enforces branch protection without an administrative bypass. A withdrawal-only
 PR needs no HAM commit. `ama-check` retains dismissed review bodies as finding
 authority so an interrupted merge can retry; dismissal alone resolves nothing.

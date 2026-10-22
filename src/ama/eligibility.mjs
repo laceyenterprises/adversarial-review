@@ -1,3 +1,4 @@
+import { reviewCurrencyCovers, rebaseCurrencyCovers } from './review-currency.mjs';
 import { exactHammerValidation, hammerRangeMatches } from './hammer-head-validation.mjs';
 import { operatorLabelGateFailures } from './operator-label-gates.mjs';
 import { checkPrimaryChange, guardRepairReviewCoverage } from './primary-change.mjs';
@@ -1026,7 +1027,12 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   }
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
-  const blockingFindings = classifyBlockingFindings(reviewState);
+  const reviewCurrency = reviewState?.reviewCurrency;
+  const currencyRefused = reviewCurrency && !reviewCurrencyCovers(reviewCurrency, reviewedHead, currentHead);
+  // A non-current review contributes neither findings nor dispositions. Missing
+  // current review proof remains an explicit no-merge reason, never known zero.
+  const blockingFindings = currencyRefused ? { known: false, count: 0 } : classifyBlockingFindings(reviewState);
+  if (currencyRefused) reasons.push('review-currency-unproven');
   const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
   const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
   const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
@@ -1066,7 +1072,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     || rebaseReviewCoverage.ok
     || nonReviewableHeadDelta.ok
     || guardRepairCoverage
-    || closerAuthoredStaleOk;
+    || closerAuthoredStaleOk
+    || rebaseCurrencyCovers(reviewCurrency, reviewedHead, currentHead);
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
@@ -1081,12 +1088,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // review is withdrawn, the review is settled; one standing finding still
   // blocks (and still needs validated HAM remediation evidence, below).
   const hammerAdjudication = resolveHammerAdjudication(
-    { ...reviewState, reviewedHead, currentHead },
+    { ...reviewState, ...(currencyRefused ? { blockingFindingState: 'unknown' } : {}), reviewedHead, currentHead },
     options?.hammerWithdrawnFindings ?? reviewState?.hammerWithdrawnFindings,
   );
   const hammerSettled = verdictNormalized === 'request-changes' && hammerAdjudication.allBlockingWithdrawn;
   const verdictSettles = SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) || hammerSettled;
-  const standingBlockingFindings = hammerSettled ? { ...blockingFindings, count: 0 } : blockingFindings;
+  const standingBlockingFindings = blockingFindings.known
+    ? { ...blockingFindings, count: Math.max(0, blockingFindings.count - hammerAdjudication.withdrawnCount) }
+    : blockingFindings;
   const settledSuccess =
     verdictSettles &&
     remediationPending === false &&
@@ -1479,6 +1488,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     fastMerge,
     mergeability,
     headMatch: {
+      reviewCurrency: reviewCurrency || null,
       reviewed: reviewedHead,
       current: currentHead,
       ok: headMatchOk,

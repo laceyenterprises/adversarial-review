@@ -1,6 +1,7 @@
+import { carryHammerWithdrawals, createReviewCurrencyReader } from './review-currency.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { classifyBlockingFindings } from '../follow-up-merge-agent.mjs';
-import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import {
   blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments, readHammerWithdrawals,
   resolveHammerAdjudication,
@@ -10,7 +11,7 @@ import {
 // durable, comment-verified withdrawals at the live head. This grants no merge
 // authority and does not use the older-head terminal-remediation dismissal.
 export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha, expectedWithdrawnIdentities = [] }, {
-  get, dismiss, readWithdrawals = readHammerWithdrawals,
+  get, dismiss, readWithdrawals = readHammerWithdrawals, git,
 } = {}) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '')
     || !Number.isInteger(prNumber) || prNumber < 1 || !/^[a-f0-9]{40}$/i.test(headSha || '')) {
@@ -29,17 +30,19 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
   const reviews = await get(`${prPath}/reviews?per_page=100`);
   const comments = await get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
   if (!Array.isArray(reviews) || !Array.isArray(comments)) throw new Error('missing reviews or withdrawal comments');
-  const withdrawals = hammerWithdrawalsFromComments(comments, recorded);
+  const currency = createReviewCurrencyReader({ repo, prNumber, get, comments, git });
+  const withdrawals = await carryHammerWithdrawals(hammerWithdrawalsFromComments(comments, recorded), headSha, currency);
   if (!expectedWithdrawnIdentities.every(identity => withdrawals.some(entry =>
-    entry.identity === identity && entry.headSha === headSha))) {
+    entry.identity === identity && entry.reviewCurrency.current && entry.evidenceCurrency.current))) {
     throw new Error('admitted withdrawal authority is missing or invalid');
   }
   const dismissed = [];
   for (const review of reviews) {
     if (!Number.isSafeInteger(review.id) || review.id < 1 || !['CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)
-      || review.commit_id !== headSha
       || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
       || normalizeEffectiveReviewVerdict(review.body) !== 'request-changes') continue;
+    if (review.commit_id !== headSha && !await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
+      (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) continue;
     const blockers = classifyBlockingFindings(review.body, { lastVerdict: 'request-changes' });
     const adjudication = resolveHammerAdjudication({
       blockingFindingState: blockers.state, blockingFindingCount: blockers.count,

@@ -1201,14 +1201,22 @@ Key control points:
   "Hammers judgement is final"). No re-review is requested; the gate, closer and
   self-cert accept the withdrawal, and a review whose every blocking finding is
   withdrawn projects `success (hammer-adjudicated)`. The held-lease hammer merge
-  procedure dismisses only authoritative same-head GitHub review vetoes with
+  procedure dismisses only authoritative current GitHub review vetoes with
   complete durable, comment-verified withdrawal coverage. Standing findings and
   unrelated vetoes remain; read/dismissal failures refuse merge. Dismissed review
   bodies retain finding authority for predicate retries. Withdrawal reuse binds
   identity, evidence head and finding reviewed head; a superseding reviewed head
   requires fresh admission. Before
   applying a withdrawal, the finding's reviewed head must match the cited
-  review and the evidence head must match the current evaluated head. A branch
+  review and the evidence head must match the current evaluated head or have
+  independent HAMWITHDRAW-01 coverage. Findings and withdrawals share one
+  review-currency rule: authenticated HAM base/head provenance ending at the
+  live head, or ordered patch-ID equivalence apart from authenticated HAM
+  remediation commits, preserves currency across a closer rebase. A proven
+  rebase reuses the original withdrawal without rewriting its durable head or
+  posting again. Partial withdrawals reduce the standing blocker count.
+  Unproven currency admits neither findings nor dispositions and refuses merge
+  with the exact missing proof; unrelated pushes cannot inherit an old edge. A branch
   reset cannot reuse descendant-head evidence. `ama-check` also matches the
   HAM comment's node ID, author and full-body digest to successful durable
   admission; a posted comment from a failed admission resolves nothing.

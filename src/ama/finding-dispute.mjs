@@ -1,3 +1,4 @@
+import { createReviewCurrencyReader } from './review-currency.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
@@ -18,7 +19,7 @@ import {
 // required". The hammer continues remediating the other findings and merges.
 // HAMINTENT-02's identity, liveness, authority and provenance checks still run.
 export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewRef, findingNumber, evidence }, {
-  db, get, postComment, wake = null, logger = console,
+  db, get, postComment, wake = null, logger = console, git,
 } = {}) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '')
     || !Number.isInteger(prNumber) || prNumber < 1 || !/^[a-f0-9]{40}$/i.test(headSha || '')
@@ -40,15 +41,22 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
     throw new Error('dispute requires authoritative blocking review');
   }
+  const currency = createReviewCurrencyReader({ repo, prNumber, get, pr, git });
+  const reviewCurrency = await currency(review.commit_id, headSha);
   if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
-    (from, to) => get(`repos/${repo}/compare/${from}...${to}`))) {
-    throw new Error('dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head');
+    (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
+    throw new Error('dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head'
+      + (reviewCurrency.current ? '' : `; no merge: ${reviewCurrency.missingProof}`));
   }
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
   if (!finding) throw new Error('blocking finding not found');
   const identity = blockingFindingIdentity(finding);
   const params = [repo, prNumber, identity];
   const digest = evidenceDigest(evidence);
+  const previous = db.prepare('SELECT * FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
+  const previousCurrency = previous?.resolution === HAMMER_WITHDRAWN_RESOLUTION && previous.comment_id
+    && previous.finding_reviewed_head === review.commit_id
+    ? await currency(previous.head_sha, headSha, { rebaseOnly: true }) : null;
   db.prepare('INSERT OR IGNORE INTO ham_finding_disputes(repo, pr_number, identity) VALUES (?, ?, ?)').run(...params);
   const reservation = db.transaction(() => {
     db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1), reserved_at=NULL
@@ -57,7 +65,8 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     if (row.reserved_at) throw new Error('dispute reservation already in flight');
     // Idempotent per finding, evidence head and reviewed head: a re-run reuses
     // the recorded adjudication instead of posting a second comment.
-    if (row.resolution === HAMMER_WITHDRAWN_RESOLUTION && row.head_sha === headSha
+    if (row.resolution === HAMMER_WITHDRAWN_RESOLUTION
+      && (row.head_sha === headSha || (row.head_sha === previous?.head_sha && previousCurrency?.current))
       && row.finding_reviewed_head === review.commit_id && row.comment_id) return { done: row };
     db.prepare('UPDATE ham_finding_disputes SET requests=requests+1, reserved_at=? WHERE repo=? AND pr_number=? AND identity=?').run(new Date().toISOString(), ...params);
     return { row };

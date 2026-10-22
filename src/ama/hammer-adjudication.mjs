@@ -1,3 +1,4 @@
+import { reviewCurrencyCovers } from './review-currency.mjs';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -144,19 +145,22 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
 // Cross-head coverage must be validated independently, never inferred here.
 // Applies only when the structured blocker list is known and complete.
 export function resolveHammerAdjudication({
-  blockingFindingState, blockingFindingCount, blockingFindingIdentities, reviewedHead, currentHead = reviewedHead,
+  blockingFindingState, blockingFindingCount, blockingFindingIdentities, reviewedHead, currentHead = reviewedHead, reviewCurrency = null,
 } = {}, withdrawals = []) {
   const count = Number(blockingFindingCount);
   const identities = Array.isArray(blockingFindingIdentities) ? blockingFindingIdentities : null;
   const head = String(reviewedHead || '');
   const applicable = String(blockingFindingState || '').toLowerCase() === 'known'
     && Number.isInteger(count) && count > 0 && identities !== null && identities.length === count && new Set(identities).size === count
-    && SHA40.test(head) && SHA40.test(currentHead || '');
+    && SHA40.test(head) && SHA40.test(currentHead || '')
+    && (!reviewCurrency || reviewCurrencyCovers(reviewCurrency, head, currentHead));
   const resolved = applicable
     ? (Array.isArray(withdrawals) ? withdrawals : []).filter((entry) => entry?.resolution === HAMMER_WITHDRAWN_RESOLUTION
       && identities.includes(entry.identity)
       && SHA64.test(entry.evidenceSha256 || '')
-      && entry.findingReviewedHead === head && entry.headSha === currentHead)
+      && entry.findingReviewedHead === head
+      && (entry.headSha === currentHead || (reviewCurrencyCovers(entry.reviewCurrency, head, currentHead)
+        && reviewCurrencyCovers(entry.evidenceCurrency, entry.headSha, currentHead))))
     : [];
   const withdrawnIdentities = [...new Set(resolved.map((entry) => entry.identity))];
   return {

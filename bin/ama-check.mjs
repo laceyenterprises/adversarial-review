@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { carryHammerWithdrawals, createReviewCurrencyReader, currencyGit } from '../src/ama/review-currency.mjs';
 import { checkCiCost } from '../src/ama/ci-cost.mjs';
 import { fleetStopReason } from '../src/fleet-stop.mjs';
 /**
@@ -37,7 +38,7 @@ import {
 } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
-import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
+import { amaAuthoritativeReviewerLoginsForModel, isCurrentAuthoritativeFamilyReview } from '../src/ama/reviewer-authority.mjs';
 import { resolveGateStatusContext } from '../src/adversarial-gate-context.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 
@@ -483,7 +484,7 @@ function findVerifiedHamAuditComment(timelineJson, evidence) {
   };
 }
 
-function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   const args = parseInputs(argv);
   if (args.help) {
     process.stdout.write(USAGE);
@@ -533,6 +534,7 @@ function main(argv = process.argv.slice(2)) {
     reviewCycleExhausted,
   });
   const prMetadata = buildPrMetadata({ prJson, protectionJson });
+  let hamCommitJson = null;
   let hamTerminalRemediation = null;
   let hamTerminalRemediationGroundTruth = null;
   let rebaseReviewCoverage = null;
@@ -543,8 +545,9 @@ function main(argv = process.argv.slice(2)) {
     }
     try {
       hamTerminalRemediation = loadJson(args['ham-terminal-remediation']);
+      hamCommitJson = loadJson(args['ham-commit']);
       hamTerminalRemediationGroundTruth = {
-        commit: buildVerifiedHamCommit(loadJson(args['ham-commit'])),
+        commit: buildVerifiedHamCommit(hamCommitJson),
         range: args['ham-range'] ? loadJson(args['ham-range']) : null,
         auditComment: findVerifiedHamAuditComment(timelineJson, hamTerminalRemediation),
       };
@@ -579,6 +582,42 @@ function main(argv = process.argv.slice(2)) {
       commit: { ...hamTerminalRemediationGroundTruth.commit, primaryChange },
     };
   }
+  const recordedWithdrawals = hammerWithdrawalsFromComments(timelineJson, readHammerWithdrawals({
+    rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
+    repo: args.repo, prNumber: prJson?.number,
+  }));
+  let hammerWithdrawnFindings = recordedWithdrawals;
+  if (recordedWithdrawals.some(entry => entry.headSha !== prMetadata.headSha)) {
+    // Fixture-driven CLI: provenance comes from the supplied live snapshot;
+    // patch proofs read local objects only, never an implicit network fetch.
+    const get = async path => {
+      if (path.includes('/compare/')) {
+        const [from, to] = path.split('/compare/')[1].split('...');
+        try { await currencyGit(['merge-base', '--is-ancestor', from, to]); return { status: 'ahead' }; } catch { /* Try rebase proof. */ }
+        try { await currencyGit(['merge-base', '--is-ancestor', to, from]); return { status: 'behind' }; } catch { return { status: 'diverged' }; }
+      }
+      if (path.endsWith(`/pulls/${prJson.number}`)) {
+        const base = prJson.baseRefOid || (await currencyGit(['rev-parse', `origin/${prJson.baseRefName || 'main'}`])).trim();
+        return { head: { sha: prMetadata.headSha }, base: { sha: base } };
+      }
+      if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
+      throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
+    };
+    const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, comments: timelineJson, get });
+    reviewState.reviewCurrency = await currency(args['reviewed-sha'], prMetadata.headSha);
+    const reviews = (Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : []).map(entry => ({ ...entry, commit_id: reviewCommitOid(entry),
+      user: { login: reviewAuthorLogin(entry) } }))
+      .sort((a, b) => String(reviewSubmittedAt(a) || '').localeCompare(String(reviewSubmittedAt(b) || '')));
+    const logins = amaAuthoritativeReviewerLoginsForModel(args.reviewer);
+    const review = reviews.findLast(entry => entry.commit_id === args['reviewed-sha']
+      && logins.includes(normalizeLogin(entry.user.login)));
+    if (!review || !await isCurrentAuthoritativeFamilyReview(review, reviews, prMetadata.headSha,
+      (from, to) => get(`repos/${args.repo}/compare/${from}...${to}`), currency)) {
+      reviewState.reviewCurrency = { ...reviewState.reviewCurrency, current: false,
+        missingProof: reviewState.reviewCurrency.missingProof || 'cited review is missing or superseded by a newer authoritative review' };
+    }
+    hammerWithdrawnFindings = await carryHammerWithdrawals(recordedWithdrawals, prMetadata.headSha, currency);
+  }
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     primaryChange,
     hamTerminalRemediation,
@@ -586,11 +625,7 @@ function main(argv = process.argv.slice(2)) {
     rebaseReviewCoverage,
     // HAMFINAL-01 ("Hammers judgement is final"): HAM-authored
     // `withdrawn-by-hammer` comments must match successful durable admission.
-    hammerWithdrawnFindings: hammerWithdrawalsFromComments(timelineJson, readHammerWithdrawals({
-      rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
-      repo: args.repo,
-      prNumber: prJson?.number,
-    })),
+    hammerWithdrawnFindings,
   });
   if (!ciCostGate.ok) {
     result.eligible = false;
@@ -605,4 +640,4 @@ function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-process.exit(main());
+process.exit(await main());

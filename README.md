@@ -1803,3 +1803,37 @@ requires role, harness, worker class, model, effort and a non-secret account ID.
 `src/osg-config-schema.v1.json` is the versioned schema mirror; synthetic shared
 vectors live in `test/fixtures/osg-config.v1.json`. These declarations do not
 change reviewer or remediation routing.
+
+### Reviewed routing policy (OSG-18)
+
+`osg.policy.enabled` defaults to false. `src/osg-policy.mjs` exports `readPolicy`,
+`loadPolicy` and `resolveDefault`. The policy file belongs to the parent
+configuration package at
+`platform/agent-os-config/src/agent_os_core/osg-routing-policy.v1.json`.
+The caller supplies its already-resolved path; there is no second policy copy.
+OSG-12/14 will connect the resolver to their review/remediation seams.
+
+The v1 document is `{version: 1, entries: [...]}`. Each entry has `role`,
+`stratum: {task_type, size}`, `arm` and `promotions`. Roles are builder, reviewer
+and remediator; task types are build, fix, refactor/chore and docs/config, with
+small/large size. Initial `arm: "current"` entries preserve the caller's route,
+cross-model rules and ordered token-pool selection. A concrete arm uses the
+existing six-field OSG arm contract. Its final promotion receipt
+`{checkpoint, report, arm}` must match that arm. Role/checkpoint pairs cannot
+repeat across entries. Shared accept/reject vectors cover both loaders.
+
+`resolveDefault({enabled, mode, policyPath, role, stratum, current, allowArm})`
+returns `{arm, reason}`. It reads no file unless enabled is true and mode is
+apply. On missing/invalid policy or an unavailable arm it returns the exact
+current object with a safe reason for the seam to record. The caller must
+provide `allowArm` using its normal allowlist, availability, token-pool and
+cross-model checks; only literal true authorizes a concrete arm. The file
+reader bounds input at 128 KiB and refuses non-regular files and malformed UTF-8.
+Values are copied and frozen; current routing objects are never mutated.
+
+Promotions are reviewed one-entry policy changes with a matching checkpoint
+report under `docs/reports/`. The parent package owns the on-demand promotion
+check and idempotent ledger-ticket interface for demotion alarms. A policy-file
+revert restores the previous route. Report analysis and service wiring are
+separate changes; no startup read, provider request, config flip, CI gate,
+authority change or daemon restart is introduced here.

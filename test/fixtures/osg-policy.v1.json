@@ -1,0 +1,846 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "current",
+      "valid": true,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "promoted",
+      "valid": true,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "future-version",
+      "valid": false,
+      "policy": {
+        "version": 2,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "bool-version",
+      "valid": false,
+      "policy": {
+        "version": true,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty-entries",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": []
+      }
+    },
+    {
+      "name": "entries-object",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": {}
+      }
+    },
+    {
+      "name": "unknown-top",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ],
+        "extra": 1
+      }
+    },
+    {
+      "name": "invalid-role",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "judge",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-type",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "rca/ops",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "medium-size",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "medium"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-stratum-key",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small",
+              "extra": true
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-entry",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          },
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "null-arm",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": null,
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-arm-name",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "codex",
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "concrete-without-evidence",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "current-with-history",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": "current",
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wrong-arm-role",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "reviewer",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "reviewer",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "bad-effort",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "extreme",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "extreme",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-model",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-arm-field",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account",
+              "token": "synthetic"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account",
+                  "token": "synthetic"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "newline-id",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model\n",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model\n",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unicode-id",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-\u00e9"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-\u00e9"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "history-not-list",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "unbound-arm",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "other",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-report",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "report-traversal",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/../other.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "absolute-report",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "/tmp/report.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-checkpoint",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              },
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "role-checkpoint-reused",
+      "valid": false,
+      "policy": {
+        "version": 1,
+        "entries": [
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "small"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          },
+          {
+            "role": "builder",
+            "stratum": {
+              "task_type": "fix",
+              "size": "large"
+            },
+            "arm": {
+              "role": "builder",
+              "harness": "synthetic",
+              "worker_class": "fixture-worker",
+              "model": "fixture-model",
+              "effort": "low",
+              "account": "fixture-account"
+            },
+            "promotions": [
+              {
+                "checkpoint": "checkpoint-1",
+                "report": "docs/reports/checkpoint-1.json",
+                "arm": {
+                  "role": "builder",
+                  "harness": "synthetic",
+                  "worker_class": "fixture-worker",
+                  "model": "fixture-model",
+                  "effort": "low",
+                  "account": "fixture-account"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

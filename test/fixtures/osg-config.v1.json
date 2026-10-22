@@ -185,6 +185,65 @@
         ]
       },
       "valid": false
+    },
+    {
+      "name": "policy-enabled",
+      "config": {
+        "policy": {
+          "enabled": true
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "policy-disabled",
+      "config": {
+        "policy": {
+          "enabled": false
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "policy-empty",
+      "config": {
+        "policy": {}
+      },
+      "valid": true
+    },
+    {
+      "name": "policy-string",
+      "config": {
+        "policy": {
+          "enabled": "true"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "policy-number",
+      "config": {
+        "policy": {
+          "enabled": 1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "policy-unknown",
+      "config": {
+        "policy": {
+          "path": "other"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "policy-null",
+      "config": {
+        "policy": null
+      },
+      "valid": false
     }
   ]
 }

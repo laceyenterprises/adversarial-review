@@ -75,6 +75,16 @@
           }
         }
       }
+    },
+    "policy": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "enabled": {
+          "__type": "bool",
+          "__default": false
+        }
+      }
     }
   }
 }

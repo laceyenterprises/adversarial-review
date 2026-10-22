@@ -35,11 +35,18 @@ watcher closure orchestration read these rows through the read-only, fail-soft
 `readHammerWithdrawals` in `src/ama/hammer-adjudication.mjs`. A withdrawal resolves
 a finding only when its identity is a blocking finding of the cited review,
 `finding_reviewed_head` equals that review's head, and `head_sha` equals the
-current evaluated head. Evidence gathered on a descendant does not apply after
+current evaluated head or has independently proven HAMWITHDRAW-01 coverage.
+`src/ama/review-currency.mjs` supplies the same decision for findings and their
+dispositions: authenticated HAM base/head provenance ending at the exact current
+head, or ordered patch-ID equivalence apart from independently authenticated
+HAM remediation commits. Missing proof refuses merge with its exact head pair;
+non-current reviews contribute neither findings nor withdrawals. Partial
+withdrawals reduce the standing blocker count. Cross-head evidence is transient
+and read-only; no column, original head, comment or digest is rewritten. Evidence gathered on a descendant does not apply after
 a branch reset to the reviewed ancestor. Withdrawals do not carry to another
 head without independently validated coverage or content equivalence. The
 held-lease hammer merge procedure uses these rows and matching live HAM comments
-to dismiss only authoritative same-head GitHub reviews whose complete blocker
+to dismiss only authoritative current GitHub reviews whose complete blocker
 lists are withdrawn. Unknown or standing blockers and unrelated vetoes remain;
 read/dismissal failures refuse merge. Dismissal does not remove finding authority
 from the review body: `ama-check` continues to evaluate it on retries.
@@ -60,7 +67,7 @@ live head's ancestry, live head and evidence bound of 16,000 UTF-8 bytes. An imm
 posting. Failed posts, head rechecks and thrown review requests refund that
 reservation; those comments cannot enter dispute context. Successful post
 provenance and the withdrawal are recorded together after a live head recheck.
-A rerun for the same identity and head returns the recorded withdrawal without
+A rerun for the same identity and head, or a proven closer rebase, returns the recorded withdrawal without
 posting again only when `finding_reviewed_head` also matches the currently
 authoritative review. A newer review at the evidence head with the same identity
 requires a fresh post and admission, replacing the latest row for that identity.

@@ -1593,6 +1593,7 @@ async function dispatchAmaClosureFor({
     postedAt: reviewStateRow?.review_status === 'posted'
       && reviewStateRow?.reviewer_head_sha === gateSnapshot.reviewedHeadSha
       ? reviewStateRow.posted_at || null : null,
+    reviewCurrency: gateSnapshot.reviewCurrency || null,
     verdict: gateSnapshot.settledReview?.verdict || '',
     // `headSha` remains the reviewed evidence identity. Ordinary MSM-04 dispatch
     // uses it as the stable budget key; proven closer-only continuations use the

@@ -1,3 +1,5 @@
+import { isCurrentAuthoritativeFamilyReview, amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
+import { carryHammerWithdrawals, createReviewCurrencyReader, rebaseCurrencyCovers } from './ama/review-currency.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { classifyOperatorGatedFindings } from './ama/operator-label-gates.mjs';
 import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
@@ -48,6 +50,7 @@ import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs'
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 import {
   blockingFindingIdentitiesFromBody,
+  hammerWithdrawalsFromComments,
   readHammerWithdrawals,
   resolveHammerAdjudication,
 } from './ama/hammer-adjudication.mjs';
@@ -697,10 +700,14 @@ function pickAdversarialGateStatus({
   settledReview = null,
   hasActiveSamePrRemediation = false,
   hammerWithdrawals = [],
+  reviewCurrency = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
     makeDecision(state, description, reason, context, extra);
+  if (reviewCurrency?.current === false) return decide('pending',
+    `No merge: missing HAM provenance / patch proof ${reviewCurrency.reviewedHead} -> ${reviewCurrency.currentHead}`,
+    'review-currency-unproven');
   const hammerAdjudicated = (body) => hammerAdjudicatedEveryBlocker(body, {
     reviewedHead: reviewRow?.reviewer_head_sha || headSha,
     currentHead: headSha,
@@ -946,7 +953,7 @@ function pickAdversarialGateStatus({
     return decide('pending', 'Adversarial review (primary quota-capped) is awaiting fallback verdict.', 'awaiting-fallback');
   }
 
-  if (primaryRowIsStale) {
+  if (primaryRowIsStale && !rebaseCurrencyCovers(reviewCurrency, reviewedHead, headSha)) {
     return decide(
       'pending',
       'Live head has advanced past the reviewed head; re-review of the current head is pending.',
@@ -1103,6 +1110,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
   hammerWithdrawals: hammerWithdrawalsOverride = undefined,
+  reviewCurrencyCwd = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
@@ -1123,7 +1131,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     : null;
   const shouldIncludeSettledReview = includeSettledReview === true
     || (includeSettledReview === 'quota-capped' && primaryReviewerQuotaCappedForRow(resolvedRow));
-  const settledReview = shouldIncludeSettledReview
+  let settledReview = shouldIncludeSettledReview
     ? resolveSettledReviewVerdict(rootDir, {
       repo,
       prNumber,
@@ -1138,7 +1146,41 @@ async function buildAdversarialGateSnapshot(rootDir, {
   }
   const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
   // HAMFINAL-01: the hammer's final `withdrawn-by-hammer` adjudications.
-  const hammerWithdrawals = hammerWithdrawalsOverride ?? readHammerWithdrawals({ rootDir, repo, prNumber });
+  let hammerWithdrawals = hammerWithdrawalsOverride ?? readHammerWithdrawals({ rootDir, repo, prNumber });
+  let reviewCurrency = null;
+  if (reviewedHeadSha && headSha && hammerWithdrawals.some(entry => entry.headSha !== headSha)) {
+    const get = async path => JSON.parse((await meteredExecFile(execFileImpl, 'gh', ['api', path],
+      { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout);
+    const currency = createReviewCurrencyReader({ repo, prNumber, get, cwd: reviewCurrencyCwd });
+    reviewCurrency = await currency(reviewedHeadSha, headSha);
+    try {
+      const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
+      const logins = amaAuthoritativeReviewerLoginsForModel(resolvedRow?.reviewer);
+      const review = Array.isArray(reviews) && reviews.length < 100 ? reviews.findLast(entry =>
+        entry.commit_id === reviewedHeadSha && logins.includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) : null;
+      if (!review || !await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
+        (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
+        reviewCurrency = { reviewedHead: reviewedHeadSha, currentHead: headSha, current: false,
+          missingProof: reviewCurrency.missingProof || `latest authoritative review missing or superseded for ${reviewedHeadSha} -> ${headSha}` };
+        hammerWithdrawals = [];
+      } else {
+        if (reviewCurrency.current && shouldIncludeSettledReview && !hasActiveSamePrRemediation) {
+          const verdict = normalizeEffectiveReviewVerdict(review.body);
+          settledReview = { verdict, remediationPending: false, reviewedHeadSha,
+            evidenceVersion: createHash('sha256').update(String(review.body || '')).digest('hex'),
+            ...classifyBlockersFromBody(review.body, verdict) };
+        }
+        const comments = await get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
+        if (!Array.isArray(comments) || comments.length >= 100) throw new Error('missing or capped withdrawal comments');
+        hammerWithdrawals = await carryHammerWithdrawals(hammerWithdrawalsFromComments(comments, hammerWithdrawals), headSha, currency);
+      }
+    } catch {
+      // No live comment verification means no cross-head withdrawal evidence.
+      hammerWithdrawals = [];
+      reviewCurrency = { reviewedHead: reviewedHeadSha, currentHead: headSha, current: false,
+        missingProof: `live authoritative review or withdrawal comment provenance unreadable for ${reviewedHeadSha} -> ${headSha}` };
+    }
+  }
 
   let operatorApproval = null;
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
@@ -1174,6 +1216,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     headSha,
     settledReview,
     reviewedHeadSha,
+    reviewCurrency,
     argusVerdict,
     hammerWithdrawals,
     mergeableState: shouldIncludeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
@@ -1317,6 +1360,7 @@ async function projectAdversarialGateStatus(rootDir, {
   operatorApprovalEvent = undefined,
   env = process.env,
   gateProvider = null,
+  reviewCurrencyCwd = undefined,
   domainId = 'code-pr',
   now = () => new Date(),
 } = {}) {
@@ -1329,6 +1373,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prAuthor,
     reviewRow,
     includeSettledReview: 'quota-capped',
+    reviewCurrencyCwd,
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,

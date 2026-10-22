@@ -276,14 +276,21 @@ records the same in `ham_finding_disputes`, and wakes the watcher. It requests
 NO re-review, so the same-head duplicate guard can never strand the PR. Exit 0
 means the withdrawal is recorded; any other exit means it is not, and the
 finding still stands (remediate it or stop with the exit's reason). A rerun on
-the same head is idempotent.
+the same head or a proven closer rebase is idempotent.
 The predicate verifies the posted comment against the successful admission in
 the canonical `--root-dir` database, including its node ID and full-body digest.
 A comment left by a failed helper call cannot resolve a finding. Withdrawal
 evidence applies only on its recorded live head and to its cited review head;
 after another head change, independently validated remediation coverage or
 content equivalence is required. Never reuse descendant-head evidence after
-resetting the branch to the reviewed ancestor.
+resetting the branch to the reviewed ancestor. HAMWITHDRAW-01 uses one currency
+rule for findings and withdrawals: authenticated HAM base/head provenance ending
+at the exact live head, or ordered patch-ID equivalence apart from authenticated
+HAM remediation commits, keeps the cited review current across your rebase.
+The next closer reuses the original adjudication. A third-party edit or changed
+PR patch grants no such coverage. If currency cannot be proven, quote the
+predicate's exact missing proof and head pair in the no-merge closing status;
+do not report operator recovery as required when that proof is present.
 
 After a withdrawal, do NOT release the lease, stop, or wait for a reviewer. In
 the same run: remediate and certify every remaining finding exactly as for any
@@ -295,7 +302,7 @@ predicate and the self-cert accept withdrawn findings as resolved. A PR whose
 only unresolved findings are withdrawn needs no HAM commit: re-run the predicate
 and merge when it is `eligible: true`. The versioned merge procedure verifies
 durable withdrawal admission and HAM comment evidence, then dismisses only
-authoritative same-head `CHANGES_REQUESTED` reviews whose complete blocker lists
+authoritative current `CHANGES_REQUESTED` reviews whose complete blocker lists
 are withdrawn. Reviews with standing findings and unrelated review vetoes remain;
 a dismissal failure refuses merge. No administrative bypass is used.
 Neither finding-anchored reversal nor dispute uses `hq decision raise`.

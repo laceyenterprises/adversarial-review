@@ -311,8 +311,9 @@ printf 'exit:%s outcome:%s' "$?" "$HAM_PHASE_OUTCOME"
   });
 }
 
-for (const outcome of ['acquired', 'exhausted', 'head-moved', 'ci-red']) {
-  test(`LEASEFAIR-03 green closer in-run lease retry: ${outcome}`, t => {
+for (const [phase, outcome] of ['initial', 'post-CI'].flatMap(phase =>
+  ['acquired', 'exhausted', 'head-moved', 'ci-red'].map(outcome => [phase, outcome]))) {
+  test(`LEASEFAIR-03 green closer ${phase} in-run lease retry: ${outcome}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'lease-green-retry-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const stub = join(dir, 'node-stub');
@@ -335,6 +336,8 @@ esac
 exit 1
 `, { mode: 0o755 });
     const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')));
+    const reacquire = merge.slice(merge.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&'),
+      merge.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files'));
     const script = `
 export TEST_ROOT=${quote(dir)} TEST_OUTCOME=${quote(outcome)}
 HAM_NODE_BIN=${quote(stub)}
@@ -349,8 +352,17 @@ ham_lease_pr_view() {
   printf '{"headRefOid":"%s","state":"OPEN","labels":[],"statusCheckRollup":[{"name":"tests","status":"COMPLETED","conclusion":"%s"}]}' "$live_head" "$conclusion"
 }
 ham_release_merge_lease() { :; }
+ham_append_terminal_audit() {
+  jq -n --arg outcome "$1" --arg reason "$2" '{outcome:$outcome,reason:$reason}' >> "$TEST_ROOT/audits"
+  echo >> "$TEST_ROOT/audits"
+}
 ${acquire}
-ham_acquire_merge_lease
+HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_MERGE_LEASE_HELD=0
+acquire_phase() {
+${phase === 'post-CI' ? reacquire : 'ham_acquire_merge_lease'}
+}
+acquire_phase
 printf 'exit:%s outcome:%s held:%s' "$?" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_HELD"
 `;
     const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 15000, env: process.env });
@@ -360,6 +372,8 @@ printf 'exit:%s outcome:%s held:%s' "$?" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_
     assert.equal(count, ['acquired', 'exhausted'].includes(outcome) ? 3 : 1);
     const audits = readFileSync(join(dir, 'audits'), 'utf8').trim().split(/\n\s*\n/).map(JSON.parse);
     assert.equal(audits.length, outcome === 'acquired' ? 2 : count);
+    assert.ok(audits.every(audit => audit.outcome === 'deferred' && audit.reason === 'merge-lease-timeout'),
+      'reacquisition must preserve the helper audit without appending a terminal failure');
     assert.equal(audits.at(-1).inRunRetry, outcome === 'acquired');
     assert.equal(audits.at(-1).leaseWaitExhausted, ['acquired', 'exhausted'].includes(outcome));
     assert.deepEqual(audits[0].holders, [{ holderPr: 123 }]);

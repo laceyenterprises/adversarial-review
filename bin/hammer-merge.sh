@@ -686,6 +686,8 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-
       HAM_PHASE_OUTCOME=parked:merge-lease-timeout
       return 20
     fi
+    # Acquisition owns the contention audit and normalizes CLI timeout 75 to
+    # parked exit 20. Preserve its outcome instead of appending a failure here.
     return "$HAM_REACQUIRE_EXIT"
   fi
 fi

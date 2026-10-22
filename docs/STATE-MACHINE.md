@@ -761,6 +761,8 @@ unchanged dispatch identity still owns the PR. They cannot be reclaimed,
 redispatched by ordinary or orphan recovery, or lose their scratch directory
 while parked. Parked observations are re-read rather than cached as final.
 A later resolved producer status restores the existing retry/settlement policy.
+Confirmed terminal ledger evidence overrides a stored parked observation;
+unknown ledger evidence preserves parked ownership.
 The legacy stored spellings map through producer values: `completed` →
 `succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
 `rejected` → `failed`. These aliases supply no new retry authority. Unknown

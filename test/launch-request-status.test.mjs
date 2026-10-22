@@ -8,7 +8,7 @@ import { launchHoldsCloserCapacity } from '../src/ama/closure-capacity.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease,
   isReclaimableTerminalAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { reconcileAmaCloserLeaseAsync, maybeDispatchAmaCloser, updateAmaCloserDispatchRecord,
-  findActiveAmaCloserLaunches, amaCloserDispatchFilePath } from '../src/ama/dispatch-closer.mjs';
+  findActiveAmaCloserLaunches, amaCloserDispatchFilePath, isAmaCloserLaunchInProgress } from '../src/ama/dispatch-closer.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
@@ -62,6 +62,19 @@ test('parked retry descendants retain ownership without capacity', () => {
 });
 
 for (const status of ['blocked_needs_decision', 'waiting_input', 'waiting_approval']) {
+  test(`fresh terminal ledger evidence overrides stored parked ${status}`, () => {
+    const record = { state: 'dispatched', launchRequestId: 'parked', lastObservedStatus: status,
+      dispatchedAt: '2026-10-01T00:00:00Z' };
+    const options = { now: '2026-10-10T00:00:00Z', lease: null };
+    assert.equal(isAmaCloserLaunchInProgress(record, options), true, 'parked ownership survives age and lease absence');
+    assert.equal(isAmaCloserLaunchInProgress(record, { ...options, ledgerActive: undefined }), true,
+      'unknown ledger evidence preserves parked ownership');
+    assert.equal(isAmaCloserLaunchInProgress(record, { ...options, ledgerActive: false }), false,
+      'confirmed terminal ledger evidence releases parked ownership');
+    assert.equal(isAmaCloserLaunchInProgress({ ...record, state: 'dispatching' },
+      { ...options, ledgerActive: false }), true, 'terminal predecessor cannot settle an unreceipted intent');
+  });
+
   test(`parked ${status} releases lease and capacity without reassignment or scratch cleanup`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'launch-status-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));

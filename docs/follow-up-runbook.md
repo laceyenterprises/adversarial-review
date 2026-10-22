@@ -116,13 +116,15 @@ operator reason, invocation ID and query evidence. Audit-write failure before
 mutation refuses settlement. An authorization row without a completion row
 means interrupted apply; rerun the command to inspect current state. Inconclusive
 evidence exits nonzero and cannot release ownership. The command only handles
-legacy intents and performs no GitHub operation or dispatch.
+legacy intents, reads authoritative PR state through the shared reconciler,
+and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
 `--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
 created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
-A source-code change does not authorize production apply. Do not run apply against PR 8918 under the LAC-2081 source-fix authorization.
+A source-code change does not authorize production apply. Do not run apply
+against PR 8918 under the LAC-2081 source-fix authorization.
 Missing credentials or inaccessible rows mean unknown, not absence. Preserve
 prompt/scratch evidence while ownership remains unknown. No new configuration
 keys, launch route, retry allowance or merge/finalization gate is introduced.

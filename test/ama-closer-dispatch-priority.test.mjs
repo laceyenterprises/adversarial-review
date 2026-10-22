@@ -2462,3 +2462,38 @@ test('OSG-14: assigned hammer changes execution parameters while preserving the 
   assert.equal(prompts.length, cases.length);
   assert.ok(prompts.every(prompt => prompt === prompts[0]), 'execution arm does not rewrite terminal-remediation instructions');
 });
+
+
+test('LEGACYINTENT-01: automatic negative ledger proof releases an old intent for a new closer', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-redrive-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'sample/project', prNumber: 404, headSha: HEAD };
+  const attemptedAt = '2026-07-20T10:00:00Z';
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+    ...identity, reviewedSha: HEAD, targetRemediationSha: HEAD, state: 'dispatching',
+    workerClass: 'hammer', lastAttemptedAt: attemptedAt, retryCount: 1,
+  }));
+  acquireAmaCloserLease({ rootDir, ...identity, now: attemptedAt, watcherPid: 12345 });
+  let queries = 0;
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { dispatchContext: {
+      repo: identity.repo, prUrl: 'https://github.com/sample/project/pull/404', reviewedBy: 'synthetic-reviewer',
+    } }), ...deps,
+    env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+    processKillImpl: () => { throw Object.assign(Error('fixture dead owner'), { code: 'ESRCH' }); },
+    readLegacyIntentLaunchesImpl: async query => {
+      queries++;
+      assert.equal(query.ticketRef, 'AMA-PR-404');
+      assert.equal(query.requestedAtOrAfter, attemptedAt);
+      return { ok: true, rows: [] };
+    },
+  });
+  assert.equal(queries, 1);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.launchRequestId, 'lrq_hammer_1');
+  assert.ok(record.dispatchIdempotencyKey);
+});

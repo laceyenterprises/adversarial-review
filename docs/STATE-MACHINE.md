@@ -1715,5 +1715,7 @@ remain authoritative; no receipt grants merge authority.
 
 See the [owner recovery procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
 and [persistent evidence contract](data-model/ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).
-Legacy #8918 remains outside automatic no-launch proof; LAC-2081 authorizes no
-production apply, new closer, teardown, remediation or merge for that PR.
+LEGACYINTENT-01 adds legacy no-key settlement only when a successful canonical
+ledger ticket/time query returns no rows at or after the attempt timestamp.
+The audited single-PR command defaults to dry-run; any row or unreadable query
+retains ownership. Source changes authorize no production action.

@@ -10,6 +10,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,12 +27,16 @@ import {
   reclaimIfStale,
   reconcileMergeLeases,
   readMergeLeaseWaiters,
+  readMergeLeaseHistory,
+  mergeLeaseHistoryFilePath,
   releaseMergeLease,
   releaseMergeLeaseForRetryableAbort,
   refundMergeLeaseGateAttempt,
   removeMergeLeaseWaiter,
   resetMergeLeaseGateAttempts,
 } from '../src/ama/merge-lease.mjs';
+
+import { loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -48,7 +53,7 @@ Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
                       [--root-dir <path>] [--required-checks-green]
-                      [--wait-for-holder-deadline]
+                      [--wait-for-holder-deadline] [--wait-by-progress]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason>]
                       [--root-dir <path>]
@@ -67,6 +72,8 @@ Safety:
   --wait-for-holder-deadline is accepted for compatibility, but never extends
   the caller's explicit --wait command budget. FIFO acquisition retries within
   that window; --wait 0 always returns immediately.
+  --wait-by-progress treats --wait as a no-progress interval, with a six-hour
+  nominal overall ceiling. Both bounds are load-scaled once and timer-clamped.
   needs-revalidation fetches origin/<base> in --repo-path. Run it only while
   holding the matching (repo, base) merge lease; it is not an unlocked probe.
 
@@ -204,7 +211,7 @@ function leaseJson({ result, waitedSeconds }) {
   };
 }
 
-function timeoutJson({ repo, base, waitedSeconds, configuredSeconds, refundFailed = false }) {
+function timeoutJson({ repo, base, waitedSeconds, configuredSeconds, refundFailed = false, evidence = {} }) {
   return {
     acquired: false,
     timedOut: true,
@@ -212,6 +219,7 @@ function timeoutJson({ repo, base, waitedSeconds, configuredSeconds, refundFaile
     key: deriveLeaseKey({ repo, base }).key,
     waited_s: waitedSeconds,
     ...(refundFailed ? { refundFailed: true } : {}),
+    ...evidence,
   };
 }
 
@@ -309,6 +317,7 @@ async function runAcquire(argv, deps) {
     wait: { type: 'string' },
     'required-checks-green': { type: 'boolean' },
     'wait-for-holder-deadline': { type: 'boolean' },
+    'wait-by-progress': { type: 'boolean' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -331,18 +340,66 @@ async function runAcquire(argv, deps) {
   if (!deps.pidAliveFn(ownerPid)) {
     throw usageError('--owner-pid is not live on this host');
   }
-  // The caller's wall-clock budget is authoritative, including holder-aware
-  // acquisition. FIFO waiters can outlive a holder; never extend this command.
-  const acquisitionSeconds = waitSeconds;
+  const progressWait = values['wait-by-progress'] && waitSeconds > 0;
+  const stallSeconds = progressWait ? deps.loadAwareTimeoutSeconds(waitSeconds, { maxSeconds: Infinity }) : waitSeconds;
+  const acquisitionSeconds = progressWait
+    ? deps.loadAwareTimeoutSeconds(Math.max(6 * 3600, waitSeconds), { maxSeconds: Infinity }) : waitSeconds;
   const deadlineMs = startedMs + acquisitionSeconds * 1000;
+  let lastProgressMs = startedMs;
+  let previousPosition = null;
+  let lastServiceEvent = null;
+  let historyVersion;
+  const historyPath = mergeLeaseHistoryFilePath(rootDir, { repo, base });
+  const holders = new Map();
+  const rememberHolder = holder => {
+    if (!holder || (Number(holder.holderPr) === pr && holder.holderHead === head)) return;
+    const key = holder.leaseId || JSON.stringify([
+      holder.holderPr, holder.holderHead, holder.holderHost, holder.holderPid, holder.acquiredAt,
+    ]);
+    holders.set(key, holder);
+    if (holders.size > 128) holders.delete(holders.keys().next().value);
+  };
+  const observeProgress = result => {
+    rememberHolder(result.lease || result.existingLease);
+    let version = null;
+    try {
+      const stat = statSync(historyPath, { bigint: true });
+      // History is atomically replaced, including when the bounded tail is full.
+      version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+    let latest = lastServiceEvent;
+    if (version !== historyVersion) {
+      const history = deps.readMergeLeaseHistory(rootDir, { repo, base });
+      const service = history.filter(row => Date.parse(row.at) >= startedMs && row.event !== 'renew');
+      for (const row of service) rememberHolder(row);
+      latest = service.at(-1)?.eventId;
+      historyVersion = version;
+    }
+    if ((latest && latest !== lastServiceEvent)
+      || (result.queuePosition != null && previousPosition != null && result.queuePosition < previousPosition)) {
+      lastProgressMs = deps.nowMs();
+    }
+    if (latest) lastServiceEvent = latest;
+    if (result.queuePosition != null) previousPosition = result.queuePosition;
+  };
+  const timeoutEvidence = () => ({
+    reason: progressWait ? (deps.nowMs() >= deadlineMs ? 'lease-wait-ceiling' : 'lease-queue-no-progress') : 'merge-lease-timeout',
+    holders: [...holders.values()],
+    closingStatus: `lease wait exhausted behind ${[...holders.values()].map(h => `PR ${h.holderPr} (${h.holderRole || 'closer'}, ${h.holderHead}, pid ${h.holderPid})`).join(', ') || 'no observed holder'}`,
+    no_progress_s: Math.floor((deps.nowMs() - lastProgressMs) / 1000),
+    ceiling_s: acquisitionSeconds,
+  });
 
   let nextProgressMs = startedMs;
   const reportProgress = () => {
     if (deps.nowMs() < nextProgressMs) return;
     const status = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(), host: deps.host, pidAliveFn: deps.pidAliveFn });
+    rememberHolder(status.holder);
     const queue = readMergeLeaseWaiters(rootDir, { repo, base });
     const position = queue.findIndex((w) => Number(w.pr) === pr && w.head === head && Number(w.holderPid) === ownerPid);
-    deps.stderr.write(`HAM merge lease wait: waited=${Math.floor((deps.nowMs() - startedMs) / 1000)}s allowed=${waitSeconds}s holder=${status.holder?.holderPr ?? 'none'} queue=${position < 0 ? 'unregistered' : position + 1}\n`);
+    deps.stderr.write(`HAM merge lease wait: waited=${Math.floor((deps.nowMs() - startedMs) / 1000)}s allowed=${acquisitionSeconds}s holder=${status.holder?.holderPr ?? 'none'} queue=${position < 0 ? 'unregistered' : position + 1}\n`);
     // Leave slack for the bounded lock retries and the next polling tick.
     nextProgressMs = deps.nowMs() + 25000;
   };
@@ -360,8 +417,9 @@ async function runAcquire(argv, deps) {
       });
     } catch (err) {
       if (!isMutationLockBusyError(err)) throw err;
-      if (deps.nowMs() >= deadlineMs) {
+      if (deps.nowMs() >= Math.min(deadlineMs, startedMs + stallSeconds * 1000)) {
         jsonLine(deps.stdout, timeoutJson({
+          evidence: timeoutEvidence(),
           configuredSeconds: waitSeconds,
           repo,
           base,
@@ -418,6 +476,7 @@ async function runAcquire(argv, deps) {
         now: tickNow,
         waiterId,
         registerWaiter: true,
+        waiterDeadlineSeconds: progressWait ? Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000), acquisitionSeconds + 1) : undefined,
         attempt,
         pidAliveFn: deps.pidAliveFn,
       });
@@ -428,6 +487,7 @@ async function runAcquire(argv, deps) {
         }));
         return 0;
       }
+      observeProgress(result);
     } catch (err) {
       if (!isMutationLockBusyError(err)) throw err;
       const status = inspectMergeLease({
@@ -448,7 +508,7 @@ async function runAcquire(argv, deps) {
     }
 
     reportProgress();
-    if (deps.nowMs() >= deadlineMs) {
+    if (deps.nowMs() >= deadlineMs || deps.nowMs() - lastProgressMs >= stallSeconds * 1000) {
       removeWaiterForTimeout({
         rootDir,
         repo,
@@ -477,6 +537,7 @@ async function runAcquire(argv, deps) {
         base,
         waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
         refundFailed,
+        evidence: timeoutEvidence(),
       }));
       return EXIT_TIMEOUT;
     }
@@ -684,10 +745,12 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     selfPid: process.pid,
     host: hostname(),
     acquireMergeLease,
+    readMergeLeaseHistory,
     assessMergeLeaseNeedsRevalidation,
     execFileImpl: execFile,
     maxGateAttempts: parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
     pidAliveFn: defaultPidAliveFn,
+    loadAwareTimeoutSeconds,
     nowIso,
     nowMs: () => Date.now(),
     sleep: sleepSync,

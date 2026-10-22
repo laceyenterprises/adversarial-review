@@ -161,6 +161,7 @@ ham_lease_pr_view() {
 }
 
 ham_acquire_merge_lease() {
+  local ham_lease_wait_retry=${1:-0}
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "AMG-04 hard-blocker: merge lease head is not a full SHA" >&2
     return 1
@@ -218,14 +219,17 @@ NODE
     HAM_PHASE_OUTCOME=merge-lease-admission-refused
     return 20
   fi
-  if jq -e --arg head "$POST_REMEDIATION_SHA" '
-    .headRefOid == $head and
-    (.statusCheckRollup | type == "array" and length > 0 and all(.[];
-      if .__typename == "StatusContext" then .state == "SUCCESS"
-      else .conclusion as $conclusion |
-        (.status == "COMPLETED" and (["SUCCESS", "NEUTRAL", "SKIPPED"] | index($conclusion)) != null) end
-    ))
-  ' "<<RUN_DIR>>/pre-acquire-checks.json" >/dev/null; then
+  ham_lease_snapshot_green() {
+    HAM_CHECKS_ROOT=<<ROOT_DIR>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" "<<RUN_DIR>>/pre-acquire-checks.json" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { summarizeChecksConclusion } = await import(pathToFileURL(`${process.env.HAM_CHECKS_ROOT}/src/checks-summary.mjs`));
+const pr = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+process.exit(pr.state === 'OPEN' && pr.headRefOid === process.argv[2]
+  && summarizeChecksConclusion(pr.statusCheckRollup) === 'SUCCESS' ? 0 : 1);
+NODE
+  }
+  if ham_lease_snapshot_green; then
     ham_required_checks_green_args=(--required-checks-green)
   fi
   # The procedure wrapper preserves live stderr on descriptor 3. Direct
@@ -238,7 +242,7 @@ NODE
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --owner-pid "$$" \
-    --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline \
+    --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline --wait-by-progress \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
     > "<<RUN_DIR>>/merge-lease-acquire.json" 2>&"$ham_lease_progress_fd"; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
@@ -350,10 +354,20 @@ $HAM_GATE_CAP_COMMENT"
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
     && [ "$(jq -r '.timedOut // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
     HAM_PARK_WAITED=$(jq -c '.waited_s // null' "<<RUN_DIR>>/merge-lease-acquire.json")
-    echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s (configured ${HAM_MERGE_LEASE_WAIT_SECONDS}s); no merge" >&2
+    local ham_lease_wait_green=false ham_lease_wait_retrying=false
+    if ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
+      > "<<RUN_DIR>>/pre-acquire-checks.json" && ham_lease_snapshot_green; then
+      ham_lease_wait_green=true
+      if [ "$ham_lease_wait_retry" -lt 2 ]; then ham_lease_wait_retrying=true; fi
+    fi
+    echo "AMG-04 deferred: $(jq -r '.closingStatus // "lease wait exhausted behind unknown holders"' "<<RUN_DIR>>/merge-lease-acquire.json"); waited ${HAM_PARK_WAITED}s; in-run retry=${ham_lease_wait_retrying}" >&2
+    cp "<<RUN_DIR>>/merge-lease-acquire.json" "<<RUN_DIR>>/merge-lease-wait-${ham_lease_wait_retry}.json" || return 1
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
-    jq -n --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
-      '{outcome:"deferred",reason:"merge-lease-timeout",waited_s:$waited_s,configured_s:$configured_s}' > "$ham_park_json"
+    jq --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+      --argjson green "$ham_lease_wait_green" --argjson retrying "$ham_lease_wait_retrying" \
+      '{outcome:"deferred",reason:"merge-lease-timeout",waited_s:$waited_s,configured_s:$configured_s,
+        leaseWaitExhausted:$green,inRunRetry:$retrying,holders:(.holders // []),
+        waitReason:.reason,closingStatus:.closingStatus}' "<<RUN_DIR>>/merge-lease-acquire.json" > "$ham_park_json"
     if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
       --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
       --outcome deferred --closure-authority ham-terminal-remediation \
@@ -370,6 +384,12 @@ $HAM_GATE_CAP_COMMENT"
       return 20
     elif [ "$HAM_PARK_AUDIT_EXIT" -ne 0 ]; then
       echo "AMG-04 warning: lease-timeout park audit failed (exit ${HAM_PARK_AUDIT_EXIT}); retaining contention outcome" >&2
+    fi
+    if [ "$ham_lease_wait_retrying" = true ]; then
+      # Re-enter admission and the live exact-head CI snapshot for each retry.
+      # The acquisition cap refunded contention; no failed merge was attempted.
+      ham_acquire_merge_lease "$((ham_lease_wait_retry + 1))"
+      return $?
     fi
     HAM_PHASE_OUTCOME=parked:merge-lease-timeout
     return 20

@@ -563,6 +563,13 @@ acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
 unchanged; the clean smoke verifies priority service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
 `ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
+LEASEFAIR-03 gives closers a progress-aware lease wait: a 900-second nominal
+stall bound and six-hour nominal ceiling, each load-scaled once. Service advances
+reset the stall timer; daemon priority remains. Exact-head green exhaustion gets
+two in-run retries and then next-pass recovery without failure charges. The
+per-base JSONL history retains 4096 lease events; the clean smoke verifies grants
+and releases for both roles, including the retry CI hold. See the
+[history contract](docs/data-model/merge-lease-history.md).
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
 
 When the hammer closes a PR (the common MSM path),
@@ -1060,7 +1067,9 @@ mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expir
 remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
 Retryable UNKNOWN deferral requires an open PR at the validated head; moved
-heads and closed PRs retain their terminal refusal.
+heads and closed PRs retain their terminal refusal. A shared CI deadline reached
+before the next snapshot retains that classification from the last exact-head
+UNKNOWN snapshot; real hold reasons still receive their ordinary refusal.
 Packaging stops and deferrals retain earlier deterministic hammer refusals until
 success. Packaging-only audit history also reasserts an unreleased persisted
 refusal before all dispatch routes, including ownerless recovery, without state
@@ -1539,7 +1548,7 @@ stateDiagram-v2
     s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
     s1 --> s7: hammer-dispatch.10 failed outcome reconciled
-    s2 --> s0: hammer-dispatch.11 bounded same-head no-merge retry or changed context; merged success stays sticky
+    s2 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; merged success stays sticky
     s4 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
     s5 --> s0: hammer-dispatch.13 bounded retry or changed context
     s7 --> s0: hammer-dispatch.14 bounded retry or changed context

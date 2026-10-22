@@ -242,7 +242,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);
   assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"; ham_release_merge_lease' EXIT/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
-  assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
+  assert.match(HAMMER_PROMPT, /summarizeChecksConclusion\(pr\.statusCheckRollup\) === 'SUCCESS'/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA="\$HAM_REBASED_ONTO_BASE_SHA"/);
   assert.doesNotMatch(HAMMER_PROMPT, /--stdin < "\$HAM_PPH_STDIN"/);

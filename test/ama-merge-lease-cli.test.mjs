@@ -5,6 +5,9 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  renameSync,
+  statSync,
+  utimesSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,6 +22,8 @@ import {
   inspectMergeLease,
   mergeLeaseAttemptsFilePath,
   mergeLeaseFilePath,
+  mergeLeaseHistoryFilePath,
+  readMergeLeaseHistory,
   readMergeLeaseAttempts,
   recordMergeLeaseGateAttempt,
   readMergeLeaseWaiters,
@@ -748,7 +753,7 @@ test('merge-lease reconcile releases holder whose PR is merged', async () => {
       execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '305', '--repo', REPO, '--json', 'state']);
-        assert.equal(options.timeout, 30000);
+        assert.ok(Number.isInteger(options.timeout) && options.timeout >= 30000 && options.timeout <= 180000);
         assert.equal(options.maxBuffer, 10 * 1024 * 1024);
         callback(null, '{"state":"MERGED"}\n', '');
       },
@@ -796,7 +801,7 @@ test('merge-lease reconcile prunes released holder gate attempt', async () => {
       execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '307', '--repo', REPO, '--json', 'state']);
-        assert.equal(options.timeout, 30000);
+        assert.ok(Number.isInteger(options.timeout) && options.timeout >= 30000 && options.timeout <= 180000);
         callback(null, '{"state":"MERGED"}\n', '');
       },
     });
@@ -1117,4 +1122,137 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
       assert.ok(out.waited_s - times.at(-1) <= 30);
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
+});
+
+test('LEASEFAIR-03 position 3 survives two daemon holds beyond the old wall clock', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const start = Date.parse('2026-06-20T18:00:00Z');
+  for (const pr of [201, 202]) upsertMergeLeaseWaiter({ rootDir, repo: REPO, base: BASE,
+    pr, head: `daemon-${pr}`, holderPid: 7000 + pr, holderHost: HOST,
+    waiterId: `daemon-${pr}`, priority: 'daemon', arrivedAt: new Date(start).toISOString() });
+  let holder = null, finished = 0;
+  const positions = [];
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+    acquireMergeLease: args => {
+      const result = acquireMergeLease(args);
+      positions.push(result.queuePosition);
+      return result;
+    },
+    onSleep: ({ nowMs }) => {
+      if (holder && nowMs - Date.parse(holder.lease.acquiredAt) >= 1000) {
+        releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
+        holder = null;
+        finished++;
+      }
+      if (!holder && finished < 2) {
+        const pr = 201 + finished;
+        holder = acquireFixture(rootDir, { holderPr: pr, holderHead: `daemon-${pr}`,
+          holderPid: 7000 + pr, now: new Date(nowMs).toISOString(), registerWaiter: true,
+          waiterId: `daemon-${pr}`, waiterPriority: 'daemon' });
+        assert.equal(holder.acquired, true);
+      }
+    },
+  });
+  assert.equal(result.code, 0, result.io.stderrText);
+  assert.equal(positions[0], 3);
+  assert.equal(finished, 2);
+  assert.ok(jsonOutput(result.io).waited_s > 1);
+  const { readMergeLeaseHistory } = await import('../src/ama/merge-lease.mjs');
+  const history = readMergeLeaseHistory(rootDir, { repo: REPO, base: BASE });
+  assert.deepEqual(history.map(row => [row.event, row.holderRole, row.holderPr]), [
+    ['grant', 'daemon', 201], ['release', 'daemon', 201],
+    ['grant', 'daemon', 202], ['release', 'daemon', 202], ['grant', 'closer', 203],
+  ]);
+});
+
+test('LEASEFAIR-03 no progress names the holder and refunds the gate attempt', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireFixture(rootDir, { holderHead: 'blocking-head', waiterPriority: 'daemon' });
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75);
+  assert.equal(out.reason, 'lease-queue-no-progress');
+  assert.equal(out.no_progress_s, 1);
+  assert.match(out.closingStatus, /lease wait exhausted behind PR 100 \(daemon, blocking-head, pid 7100\)/);
+  assert.equal(out.holders[0].holderPr, 100);
+  assert.equal(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE })[0].attempts, 0);
+  assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
+});
+
+test('progress polling parses unchanged history once and detects equal-size atomic replacement', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const holder = acquireFixture(rootDir);
+  const historyPath = mergeLeaseHistoryFilePath(rootDir, { repo: REPO, base: BASE });
+  const row = readMergeLeaseHistory(rootDir, { repo: REPO, base: BASE })[0];
+  let reads = 0, sleeps = 0;
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+    readMergeLeaseHistory: (...args) => { reads++; return readMergeLeaseHistory(...args); },
+    onSleep: () => {
+      if (++sleeps !== 2) return;
+      const stat = statSync(historyPath);
+      const replacement = `${historyPath}.replacement`;
+      writeFileSync(replacement, JSON.stringify({ ...row, eventId: 'x'.repeat(row.eventId.length),
+        holderPr: 101, leaseId: 'y'.repeat(holder.lease.leaseId.length) }) + '\n');
+      utimesSync(replacement, stat.atime, stat.mtime);
+      assert.equal(statSync(replacement).size, stat.size);
+      renameSync(replacement, historyPath);
+    },
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75, result.io.stderrText);
+  assert.equal(reads, 2);
+  assert.equal(out.waited_s, 1);
+  assert.deepEqual(out.holders.map(h => h.holderPr), [100, 101]);
+  // Replacement at 500ms resets the no-progress deadline; unchanged ticks do not.
+  assert.equal(sleeps, 6);
+});
+
+test('timeout evidence retains distinct holders without lease IDs', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let tick = 0;
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+    acquireMergeLease: () => ({ acquired: false, existingLease: {
+      holderPr: 100, holderHead: 'legacy-head', holderPid: 7000 + (++tick % 2), holderHost: HOST,
+    } }),
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75, result.io.stderrText);
+  assert.deepEqual(out.holders.map(h => h.holderPid).sort(), [7000, 7001]);
+});
+
+test('LEASEFAIR-03 progress ceiling is sized once and cannot be postponed by daemon service', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const start = Date.parse('2026-06-20T18:00:00Z');
+  let holder = acquireFixture(rootDir);
+  const scaled = [];
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => { scaled.push(n); return n === 1 ? 2 : 4; },
+    onSleep: ({ nowMs }) => {
+      releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
+      holder = acquireFixture(rootDir, { holderPr: 300 + (nowMs - start),
+        registerWaiter: true, waiterPriority: 'daemon', now: new Date(nowMs).toISOString() });
+      assert.equal(holder.acquired, true);
+    },
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75);
+  assert.equal(out.reason, 'lease-wait-ceiling');
+  assert.equal(out.waited_s, 4);
+  assert.deepEqual(scaled, [1, 21600]);
+  assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
 });

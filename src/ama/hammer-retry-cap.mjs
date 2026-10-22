@@ -354,7 +354,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     prNumber: Number(identity.prNumber),
     jobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     attemptCount: decision.nextAttemptCount,
-    // Lifetime count survives fresh reviews; only bounded deferral refunds reduce it.
+    // Lifetime failure count survives fresh reviews; green lease waits are refunded.
     lifetimeAttemptCount: decision.nextLifetimeCount,
     targetRemediationSha: head || existingTargetSha,
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
@@ -507,7 +507,7 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   const ledgerJobKey = normalizeKey(existing.jobKey);
   const incomingJobKey = normalizeKey(jobKey);
   if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
-  if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch)
+  if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch) || existing.leaseWaitLaunches?.includes(launch)
     || existing.unexecutedLaunchRequestIds?.includes(launch))) return refuse('already-refunded');
   if (existing.suppressed || existing.lifetimeSuppressed || existing.targetSuppressed) return refuse('suppressed');
   const attemptCount = Math.max(0, Math.trunc(Number(existing.attemptCount) || 0));
@@ -541,7 +541,7 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, head
   const launches = ledger.unexecutedLaunchRequestIds || [];
   if (launches.includes(launch)) return { refunded: false, reason: 'already-refunded' };
   // An older refund must not subtract the same dispatch twice.
-  if (ledger.retryableLaunchRequestIds?.includes(launch) || ledger.deferralLaunches?.includes(launch)) {
+  if (ledger.retryableLaunchRequestIds?.includes(launch) || ledger.deferralLaunches?.includes(launch) || ledger.leaseWaitLaunches?.includes(launch)) {
     return { refunded: false, reason: 'already-refunded' };
   }
   const down = (count) => Math.max(0, Number(count || 0) - 1);
@@ -625,6 +625,7 @@ const HAMMER_DEFERRAL_LAUNCH_LIMIT = 12;
 const HAMMER_DEFERRAL_WINDOW_MS = 6 * 3600_000;
 const LIFETIME_DEFERRAL_REFUND_BUDGET = HAMMER_DEFERRAL_LAUNCH_LIMIT;
 export function evaluateHammerDeferralQueue(ledger, now = new Date().toISOString()) {
+  if (ledger?.leaseWaitExhausted === true) return { expired: false, backoff: false };
   const nowMs = Date.parse(now);
   const started = Date.parse(ledger?.deferralStartedAt);
   const next = Date.parse(ledger?.deferralNextAt);
@@ -643,6 +644,8 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
     ? Math.min(LIFETIME_DEFERRAL_REFUND_BUDGET, raw) : LIFETIME_DEFERRAL_REFUND_BUDGET;
   return {
     deferralLaunches: jobKeyChanged ? [] : launches,
+    ...(existing?.leaseWaitLaunches && !jobKeyChanged ? { leaseWaitLaunches: existing.leaseWaitLaunches } : {}),
+    ...(existing?.leaseWaitExhausted === true && !jobKeyChanged ? { leaseWaitExhausted: true } : {}),
     deferralStartedAt: jobKeyChanged ? null : existing?.deferralStartedAt || null,
     deferralNextAt: jobKeyChanged ? null : existing?.deferralNextAt || null,
     lifetimeDeferralRefundCount,
@@ -650,26 +653,29 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
 }
 
 // Contention has its own bounded history, separate from ordinary retry refunds.
-export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequestId, headSha, now } = {}) {
+export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
   const fields = deferralFieldsForSeries(ledger);
-  const launches = fields.deferralLaunches;
-  if (launches.includes(launchRequestId)) return ledger;
+  const launches = leaseWaitExhausted ? (fields.leaseWaitLaunches || []) : fields.deferralLaunches;
+  if (fields.deferralLaunches.includes(launchRequestId) || fields.leaseWaitLaunches?.includes(launchRequestId)) return ledger;
   const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true;
-  const refund = !alreadyRefunded && launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT && ledger.attemptCount > 0;
-  const lifetimeRefund = refund && fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET;
+  const refund = !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
+  const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const deferredAt = now || new Date().toISOString();
   const count = launches.length + 1;
   const doc = { ...ledger, ...fields,
     attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
     lifetimeAttemptCount: lifetimeRefund ? Math.max(0, ledger.lifetimeAttemptCount - 1) : ledger.lifetimeAttemptCount,
-    lifetimeDeferralRefundCount: fields.lifetimeDeferralRefundCount + (lifetimeRefund ? 1 : 0),
+    lifetimeDeferralRefundCount: fields.lifetimeDeferralRefundCount + (lifetimeRefund && !leaseWaitExhausted ? 1 : 0),
     targetAttemptCount: refund && ledger.targetRemediationSha === headSha
       ? Math.max(0, ledger.targetAttemptCount - 1) : ledger.targetAttemptCount,
-    deferralLaunches: [...launches, launchRequestId],
-    deferralStartedAt: ledger.deferralStartedAt || deferredAt,
-    deferralNextAt: new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
+    leaseWaitExhausted,
+    ...(leaseWaitExhausted
+      ? { leaseWaitLaunches: [...launches, launchRequestId].slice(-64) }
+      : { deferralLaunches: [...launches, launchRequestId] }),
+    deferralStartedAt: leaseWaitExhausted ? fields.deferralStartedAt : ledger.deferralStartedAt || deferredAt,
+    deferralNextAt: leaseWaitExhausted ? deferredAt : new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
     updatedAt: deferredAt,
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);

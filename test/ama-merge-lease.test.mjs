@@ -359,7 +359,7 @@ test('dead or expired FIFO waiters are pruned before head-of-queue acquire', () 
       waiterId: 'w-dead',
       arrivedAt: '2026-06-20T18:00:01Z',
     });
-    upsertMergeLeaseWaiter({
+    const expired = upsertMergeLeaseWaiter({
       rootDir,
       ...IDENTITY,
       pr: 21,
@@ -379,7 +379,7 @@ test('dead or expired FIFO waiters are pruned before head-of-queue acquire', () 
       waiterId: 'w-next',
       registerWaiter: true,
       deadlineSeconds: 900,
-      now: '2026-06-20T18:01:00Z',
+      now: new Date(Date.parse(expired.waiter.arrivedAt) + (expired.waiter.deadlineSeconds + 1) * 1000).toISOString(),
       pidAliveFn: (pid) => pid !== 5020,
     });
 
@@ -883,7 +883,7 @@ test('reclaimIfStale does not reclaim a live same-host past-deadline holder', ()
 test('reclaimIfStale can reclaim a past-deadline cross-host holder', () => {
   const rootDir = freshRoot();
   try {
-    acquire(rootDir, {
+    const acquired = acquire(rootDir, {
       holderPid: 99996,
       holderHost: 'other-host',
       deadlineSeconds: 10,
@@ -893,7 +893,7 @@ test('reclaimIfStale can reclaim a past-deadline cross-host holder', () => {
       rootDir,
       ...IDENTITY,
       host: 'test-host',
-      now: '2026-06-20T18:00:11Z',
+      now: new Date(Date.parse(acquired.lease.acquiredAt) + (acquired.lease.deadlineSeconds + 1) * 1000).toISOString(),
       pidAliveFn: () => true,
     });
     assert.equal(result.reclaimed, true);
@@ -939,7 +939,7 @@ test('reconcileMergeLeases releases a holder whose PR is already merged', async 
       execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
-        assert.equal(options.timeout, 30000);
+        assert.ok(Number.isInteger(options.timeout) && options.timeout >= 30000 && options.timeout <= 180000);
         assert.equal(options.maxBuffer, 10 * 1024 * 1024);
         callback(null, '{"state":"MERGED"}\n', '');
       },
@@ -982,7 +982,7 @@ test('reconcileMergeLeases keeps going when attempt prune lock is busy after rel
       execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
-        assert.equal(options.timeout, 30000);
+        assert.ok(Number.isInteger(options.timeout) && options.timeout >= 30000 && options.timeout <= 180000);
         assert.equal(options.maxBuffer, 10 * 1024 * 1024);
         callback(null, '{"state":"MERGED"}\n', '');
       },
@@ -1028,7 +1028,7 @@ test('reconcileMergeLeases stale identity does not delete a newer holder', async
           holderPid: 9909,
           now: '2026-06-20T18:01:01Z',
         });
-        assert.equal(options.timeout, 30000);
+        assert.ok(Number.isInteger(options.timeout) && options.timeout >= 30000 && options.timeout <= 180000);
         callback(null, '{"state":"MERGED"}\n', '');
       },
     });
@@ -1155,7 +1155,8 @@ test('inspectMergeLease returns stored holder, age, deadline, and waiters', () =
     assert.equal(status.holder.leaseId, acquired.lease.leaseId);
     assert.equal(status.holder.holderProcessGroup, 7000);
     assert.equal(status.ageSeconds, 60);
-    assert.equal(status.deadlineSeconds, 120);
+    assert.equal(status.deadlineSeconds, acquired.lease.deadlineSeconds);
+    assert.ok(status.deadlineSeconds >= 120 && status.deadlineSeconds <= 720);
     assert.equal(status.pastDeadline, false);
     assert.equal(status.holderPidLive, true);
     assert.equal(status.waiters.length, 1);

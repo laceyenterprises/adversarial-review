@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { acquireMergeLease, inspectMergeLease, readMergeLeaseAttempts, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const rootDir = resolve(new URL('..', import.meta.url).pathname);
@@ -18,11 +19,55 @@ const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<HQ_ROOT>>', quote(rootDir)).replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
   .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');
 
+test('CI retry renewal consumes the inspection lease alias and fences other holders', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-retry-renewal-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const identity = { rootDir: dir, repo: 'fixture/repo', base: 'main' };
+  const acquired = acquireMergeLease({ ...identity, holderPr: 7702, holderHead: head,
+    holderPid: process.pid, now: '2026-06-20T18:00:00Z' });
+  assert.equal(acquired.acquired, true);
+  const renewal = merge.slice(merge.indexOf('ham_renew_ci_retry_lease()'),
+    merge.indexOf('ham_validate_ci_retry()'))
+    .replace("rootDir: '<<ROOT_DIR>>'", `rootDir: ${JSON.stringify(dir)}`)
+    .replaceAll('<<ROOT_DIR>>', rootDir).replaceAll('<<REPO>>', identity.repo);
+  const run = (leaseId, pr = 7702) => spawnSync('/bin/bash', ['-c', `
+HAM_NODE_BIN=${quote(process.execPath)}
+HAM_MERGE_LEASE_ID=${quote(leaseId)}
+BASE_BRANCH=main
+${renewal.replaceAll('<<PR_NUMBER>>', String(pr))}
+ham_renew_ci_retry_lease
+`], { encoding: 'utf8', timeout: 5000 });
+  const result = run(acquired.lease.leaseId);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  const renewed = inspectMergeLease(identity);
+  assert.equal(renewed.lease, renewed.holder);
+  assert.equal(renewed.lease.leaseId, acquired.lease.leaseId);
+  assert.equal(renewed.lease.previousAcquiredAt, acquired.lease.acquiredAt);
+  assert.notEqual(renewed.lease.acquiredAt, acquired.lease.acquiredAt);
+  for (const [leaseId, pr] of [['wrong-lease', 7702], [acquired.lease.leaseId, 7703]]) {
+    const refused = run(leaseId, pr);
+    assert.equal(refused.error, undefined);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.deepEqual(inspectMergeLease(identity).lease, renewed.lease);
+  }
+  assert.equal(releaseMergeLease({ ...identity, ...renewed.lease }).released, true);
+  const missing = run(acquired.lease.leaseId);
+  assert.equal(missing.error, undefined);
+  assert.equal(missing.status, 1, missing.stderr);
+});
+
 function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gate.json'), JSON.stringify({ headMatches: true, state: 'OPEN', ...gate }));
-  const helpers = render(merge.slice(merge.indexOf('ham_required_gate_ok()'), merge.indexOf('ham_merge_error_retryable()')));
+  const renderedMerge = renderHammerProcedure('hammer-merge', {
+    ROOT_DIR: rootDir, RUN_DIR: '$TEST_ROOT', HQ_ROOT: rootDir, REPO: 'fixture/repo', PR_NUMBER: '7702',
+    PR_URL: 'fixture-url', REVIEWED_SHA: head, TARGET_REMEDIATION_SHA: head,
+    MERGE_METHOD: 'squash', REVIEWER: 'claude', RISK_CLASS: 'critical',
+  });
+  const helpers = renderedMerge.slice(renderedMerge.indexOf('ham_required_gate_ok()'),
+    renderedMerge.indexOf('ham_merge_error_retryable()'));
   const release = verify.slice(verify.indexOf('ham_mark_merge_lease_retryable_abort()'), verify.indexOf('ham_acquire_merge_lease()'));
   const loop = render(merge.slice(merge.indexOf('HAM_LOCAL_CI_STATUS=local-battery'), merge.indexOf('\nHAM_MERGE_ATTEMPTS=0')));
   const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')))
@@ -308,5 +353,76 @@ printf 'exit:%s outcome:%s' "$?" "$HAM_PHASE_OUTCOME"
     assert.match(readFileSync(join(dir, 'audit-args'), 'utf8'), /--reviewer claude --risk-class critical/);
     if (outcome) assert.equal(result.stdout, `exit:20 outcome:${outcome}`);
     else assert.match(result.stdout, /^exit:1/);
+  });
+}
+
+for (const [phase, outcome] of ['initial', 'post-CI'].flatMap(phase =>
+  ['acquired', 'exhausted', 'head-moved', 'ci-red'].map(outcome => [phase, outcome]))) {
+  test(`LEASEFAIR-03 green closer ${phase} in-run lease retry: ${outcome}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'lease-green-retry-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const stub = join(dir, 'node-stub');
+    writeFileSync(stub, `#!/bin/bash
+case "$*" in
+  *--input-type=module*) exec ${quote(process.execPath)} "$@" ;;
+  *merge-lease.mjs*)
+    n=0; [ ! -f "$TEST_ROOT/acquires" ] || n=$(cat "$TEST_ROOT/acquires")
+    n=$((n + 1)); echo "$n" > "$TEST_ROOT/acquires"
+    if [ "$n" -eq 3 ] && [ "$TEST_OUTCOME" = acquired ]; then
+      echo '{"acquired":true,"leaseId":"fixture-lease"}'; exit 0
+    fi
+    echo '{"timedOut":true,"waited_s":1,"reason":"lease-queue-no-progress","holders":[{"holderPr":123}],"closingStatus":"lease wait exhausted behind PR 123"}'; exit 75 ;;
+  *ama-audit.mjs*)
+    while [ "$#" -gt 1 ]; do
+      if [ "$1" = --attempt-json ]; then cat "$2" >> "$TEST_ROOT/audits"; echo >> "$TEST_ROOT/audits"; exit 0; fi
+      shift
+    done ;;
+esac
+exit 1
+`, { mode: 0o755 });
+    const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')));
+    const reacquire = merge.slice(merge.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&'),
+      merge.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files'));
+    const script = `
+export TEST_ROOT=${quote(dir)} TEST_OUTCOME=${quote(outcome)}
+HAM_NODE_BIN=${quote(stub)}
+POST_REMEDIATION_SHA=${head}
+BASE_BRANCH=main
+HAM_MERGE_LEASE_WAIT_SECONDS=1
+ham_lease_pr_view() {
+  n=0; [ ! -f "$TEST_ROOT/acquires" ] || n=$(cat "$TEST_ROOT/acquires")
+  live_head=${head}; conclusion=SUCCESS
+  if [ "$n" -gt 0 ] && [ "$TEST_OUTCOME" = head-moved ]; then live_head=${'b'.repeat(40)}; fi
+  if [ "$n" -gt 0 ] && [ "$TEST_OUTCOME" = ci-red ]; then conclusion=FAILURE; fi
+  printf '{"headRefOid":"%s","state":"OPEN","labels":[],"statusCheckRollup":[{"name":"tests","status":"COMPLETED","conclusion":"%s"}]}' "$live_head" "$conclusion"
+}
+ham_release_merge_lease() { :; }
+ham_append_terminal_audit() {
+  jq -n --arg outcome "$1" --arg reason "$2" '{outcome:$outcome,reason:$reason}' >> "$TEST_ROOT/audits"
+  echo >> "$TEST_ROOT/audits"
+}
+${acquire}
+HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_MERGE_LEASE_HELD=0
+acquire_phase() {
+${phase === 'post-CI' ? reacquire : 'ham_acquire_merge_lease'}
+}
+acquire_phase
+printf 'exit:%s outcome:%s held:%s' "$?" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_HELD"
+`;
+    const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 15000, env: process.env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.error, undefined);
+    const count = Number(readFileSync(join(dir, 'acquires'), 'utf8'));
+    assert.equal(count, ['acquired', 'exhausted'].includes(outcome) ? 3 : 1);
+    const audits = readFileSync(join(dir, 'audits'), 'utf8').trim().split(/\n\s*\n/).map(JSON.parse);
+    assert.equal(audits.length, outcome === 'acquired' ? 2 : count);
+    assert.ok(audits.every(audit => audit.outcome === 'deferred' && audit.reason === 'merge-lease-timeout'),
+      'reacquisition must preserve the helper audit without appending a terminal failure');
+    assert.equal(audits.at(-1).inRunRetry, outcome === 'acquired');
+    assert.equal(audits.at(-1).leaseWaitExhausted, ['acquired', 'exhausted'].includes(outcome));
+    assert.deepEqual(audits[0].holders, [{ holderPr: 123 }]);
+    assert.match(result.stderr, /lease wait exhausted behind PR 123/);
+    assert.match(result.stdout, outcome === 'acquired' ? /exit:0.*held:1/ : /exit:20 outcome:parked:merge-lease-timeout/);
   });
 }

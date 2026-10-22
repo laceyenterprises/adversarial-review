@@ -319,24 +319,24 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    validated current head: refresh the live head, reacquire the lease, rerun only
    the fail-closed live-head validation below, and
    complete the merge/closing-comment sequence idempotently. Do not restart remediation.
-0b. **A run that does not merge must say so exactly once on the PR.** If the live head changes or validation cannot complete, release for the next hammer pass. While the PR remains open, state what the run completed, the exact step and blocker where it stopped, whether the merge lease was released, and what happens next. If the audit exists, edit it in place into closing status; do not leave the audit and add a second comment.
+0b. **A run that does not merge must say so exactly once on the PR.** Release changed heads or incomplete validation for the next pass. While open, state what the run completed, the exact blocker and where it stopped, whether the merge lease was released, and what happens next. For an existing audit, edit it in place; do not leave the audit and add a second comment.
    The single in-lease audit comment remains the only comment for the successful merge path.
-   Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures: the next hammer
-   recovers the durable edge; do not request source re-review for delivery failure.
-   Otherwise include that note or measured `HAM_HEAD_WAITED_SECONDS` and
-   `HAM_REQUIRED_CHECKS_WAITED_SECONDS`. Missing CI becomes terminal only after
-   the existing head/check waits; on head visibility timeout say checks could not
-   start (0s). A different live head keeps the race handling;
-   the comment must contain the line `HAM closing status — no merge.` for the closer's terminal audit. Never post
-   it after merge or claim success merely for remediation or rebase completion.
-   If the gate-attempt cap parks this head, include the `closingStatus` returned
-   by `merge-lease acquire` verbatim in that comment and the terminal audit.
-0c. **Run every step in the foreground (HAMBG-02).** Background work dies when
-   your final message ends. If a step can exceed your tool's timeout, split it into repeated
-   foreground polls within that timeout (e.g. required checks before merge). Never end
-   your final message while a command you started is still running.
-   Every exit must have a merge or current-head no-merge audit;
-   otherwise the closer records `hammer-exited-without-close` and redispatches
+   Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures;
+   do not request source re-review for delivery failure. Otherwise include the
+   note or measured `HAM_HEAD_WAITED_SECONDS` and `HAM_REQUIRED_CHECKS_WAITED_SECONDS`.
+   Missing CI becomes terminal only after the existing head/check waits; on head
+   timeout say checks could not start (0s). Preserve different-live-head race handling.
+   Green lease-wait exhaustion is a retryable deferral: quote the helper's
+   “lease wait exhausted behind …” holders and state acquisition retries next
+   pass. Retain its deferred audit; never overwrite it with failed-without-merge
+   or a terminal no-merge comment.
+   For other terminal stops, the comment must contain the line `HAM closing status — no merge.`.
+   Never post it after merge or claim remediation/rebase completion as merge.
+   At the gate-attempt cap, copy the acquire result's `closingStatus` verbatim
+   into that comment and terminal audit.
+0c. **Run every step in the foreground (HAMBG-02).** If a step can exceed your tool's timeout, split it into repeated
+   foreground polls. Never end your final message while a command you started is still running. Each exit needs a merge or
+   current-head no-merge audit; otherwise `hammer-exited-without-close` redispatches
    within its small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.

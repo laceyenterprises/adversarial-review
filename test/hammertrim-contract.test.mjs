@@ -745,13 +745,15 @@ test('HAMLEASE-01 lease timeout note and audit retain waited and configured seco
   for (const evidence of [{ waited_s: 900 }, { waited_s: 0 }, { waited_s: null }, {}]) {
     writeFileSync(join(dir, 'merge-lease-acquire.json'), JSON.stringify({ timedOut: true, configured_s: 900, ...evidence }));
     const result = run('bash', ['-c', `HAM_MERGE_LEASE_ACQUIRE_EXIT=75 HAM_MERGE_LEASE_WAIT_SECONDS=900 HAM_NODE_BIN="$1" POST_REMEDIATION_SHA=${'a'.repeat(40)}
+ham_lease_pr_view() { return 1; }
 phase() { ${rendered.stdout.slice(start, end)} }
 phase
 `, '_', stub], { TMPDIR: dir });
     assert.equal(result.status, 20, result.stderr);
-    assert.ok(result.stderr.includes(`after ${evidence.waited_s ?? 'null'}s (configured 900s); no merge`));
+    assert.match(result.stderr, /lease wait exhausted behind unknown holders/);
     assert.deepEqual(JSON.parse(result.stdout), {
       outcome: 'deferred', reason: 'merge-lease-timeout', waited_s: evidence.waited_s ?? null, configured_s: 900,
+      leaseWaitExhausted: false, inRunRetry: false, holders: [], waitReason: null, closingStatus: null,
     });
   }
 });

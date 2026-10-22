@@ -244,6 +244,303 @@
         "policy": null
       },
       "valid": false
+    },
+    {
+      "name": "budget-defaults",
+      "config": {
+        "budget": {}
+      },
+      "valid": true
+    },
+    {
+      "name": "budget-lower",
+      "config": {
+        "budget": {
+          "monthly_usd": 100,
+          "open_model_usd": 0,
+          "trial_share_pct": 10
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "budget-monthly_usd-above",
+      "config": {
+        "budget": {
+          "monthly_usd": 301
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-monthly_usd-negative",
+      "config": {
+        "budget": {
+          "monthly_usd": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-monthly_usd-bool",
+      "config": {
+        "budget": {
+          "monthly_usd": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-monthly_usd-null",
+      "config": {
+        "budget": {
+          "monthly_usd": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-monthly_usd-string",
+      "config": {
+        "budget": {
+          "monthly_usd": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-open_model_usd-above",
+      "config": {
+        "budget": {
+          "open_model_usd": 201
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-open_model_usd-negative",
+      "config": {
+        "budget": {
+          "open_model_usd": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-open_model_usd-bool",
+      "config": {
+        "budget": {
+          "open_model_usd": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-open_model_usd-null",
+      "config": {
+        "budget": {
+          "open_model_usd": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-open_model_usd-string",
+      "config": {
+        "budget": {
+          "open_model_usd": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-judge_usd-above",
+      "config": {
+        "budget": {
+          "judge_usd": 71
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-judge_usd-negative",
+      "config": {
+        "budget": {
+          "judge_usd": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-judge_usd-bool",
+      "config": {
+        "budget": {
+          "judge_usd": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-judge_usd-null",
+      "config": {
+        "budget": {
+          "judge_usd": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-judge_usd-string",
+      "config": {
+        "budget": {
+          "judge_usd": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-jev_usd-above",
+      "config": {
+        "budget": {
+          "jev_usd": 31
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-jev_usd-negative",
+      "config": {
+        "budget": {
+          "jev_usd": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-jev_usd-bool",
+      "config": {
+        "budget": {
+          "jev_usd": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-jev_usd-null",
+      "config": {
+        "budget": {
+          "jev_usd": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-jev_usd-string",
+      "config": {
+        "budget": {
+          "jev_usd": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-trial_share_pct-above",
+      "config": {
+        "budget": {
+          "trial_share_pct": 16
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-trial_share_pct-negative",
+      "config": {
+        "budget": {
+          "trial_share_pct": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-trial_share_pct-bool",
+      "config": {
+        "budget": {
+          "trial_share_pct": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-trial_share_pct-null",
+      "config": {
+        "budget": {
+          "trial_share_pct": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-trial_share_pct-string",
+      "config": {
+        "budget": {
+          "trial_share_pct": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-double_blind_share_pct-above",
+      "config": {
+        "budget": {
+          "double_blind_share_pct": 6
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-double_blind_share_pct-negative",
+      "config": {
+        "budget": {
+          "double_blind_share_pct": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-double_blind_share_pct-bool",
+      "config": {
+        "budget": {
+          "double_blind_share_pct": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-double_blind_share_pct-null",
+      "config": {
+        "budget": {
+          "double_blind_share_pct": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-double_blind_share_pct-string",
+      "config": {
+        "budget": {
+          "double_blind_share_pct": "10"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "budget-unknown",
+      "config": {
+        "budget": {
+          "extra": 1
+        }
+      },
+      "valid": false
     }
   ]
 }

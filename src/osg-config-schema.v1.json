@@ -85,6 +85,54 @@
           "__default": false
         }
       }
+    },
+    "budget": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "monthly_usd": {
+          "__type": "float",
+          "__default": 300,
+          "__min": 0,
+          "__max": 300,
+          "__enforce_max": true
+        },
+        "open_model_usd": {
+          "__type": "float",
+          "__default": 200,
+          "__min": 0,
+          "__max": 200,
+          "__enforce_max": true
+        },
+        "judge_usd": {
+          "__type": "float",
+          "__default": 70,
+          "__min": 0,
+          "__max": 70,
+          "__enforce_max": true
+        },
+        "jev_usd": {
+          "__type": "float",
+          "__default": 30,
+          "__min": 0,
+          "__max": 30,
+          "__enforce_max": true
+        },
+        "trial_share_pct": {
+          "__type": "float",
+          "__default": 15,
+          "__min": 0,
+          "__max": 15,
+          "__enforce_max": true
+        },
+        "double_blind_share_pct": {
+          "__type": "float",
+          "__default": 5,
+          "__min": 0,
+          "__max": 5,
+          "__enforce_max": true
+        }
+      }
     }
   }
 }

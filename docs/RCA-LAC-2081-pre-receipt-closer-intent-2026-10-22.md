@@ -131,3 +131,132 @@ were corrected and covered by focused reruns. The final full suite exited zero: 
 zero failed (830 seconds). Managed publication evidence is recorded with the
 source PR and incident link. These are source validation, not deployment or
 incident-recovery evidence.
+
+## Reopened acceptance follow-up (2026-10-22)
+
+This follow-up is `lrq_e1cc6874-41ef-4128-9bbf-e3a534162aeb`, worker
+`codex-rescue-lac-2081-followup`, in its separately provisioned adversarial-review
+workspace. The original RCA launch is canonical terminal succeeded at
+15:22:12Z; it was not redispatched. The issue and latest rescue comments were
+read before investigation. The core acceptance observations were collected by
+approximately 19:46Z; validation and the lease/budget recheck followed.
+
+### Publication and deployment
+
+Source PR [#1453](https://github.com/laceyenterprises/adversarial-review/pull/1453)
+merged at 17:17:22Z as `e8c049bfa4073cb87c78892957ef36af6be8d8f5`.
+Both the deployed parent gitlink and checked-out submodule were independently
+read as `66a90efaf7a903682979c8d602631feaf25a840d`, which contains that merge.
+These facts establish publication and deployed source, separately from loaded
+behavior or incident recovery.
+
+### Loaded applicability
+
+The canonical watcher log contains native `ama_closer.pre_receipt_reconciled`
+events for the exact incident heads:
+
+| PR / head | Native observation | Fixed diagnostic deadline | Result |
+| --- | --- | --- | --- |
+| #8918 / `fc01d661d0c0abd842b7b285c59ca43c729490f3` | 17:40:37Z | 11:01:52.118Z | `inspection-required`, `legacy-intent-without-key` |
+| #8924 / `1560377865d73174152317303e4de06a36e14329` | 17:40:19Z | 18:14:51.338Z | Initially `unknown`; `inspection-required` at 18:19:21Z, same reason |
+
+This is positive evidence that the running watcher executed the repair for
+both intents, beyond merely finding the source on disk. The system launchd
+service and canonical HQ heartbeat also agreed on watcher PID 66740; the
+heartbeat advanced through 19:45:38Z. No restart was performed or needed to
+explain these records. This evidence establishes the repair's loaded behavior;
+it does not fingerprint every module in the running process.
+
+Neither legacy intent has `dispatchIdempotencyKey` or `dispatchPhase`. The
+native owner therefore cannot recover an exact keyed receipt or prove the
+prepared-before-submission boundary. It correctly retains unknown custody.
+The diagnostic is `preReceiptReconciliation`, not `lastObservedAt` or
+`lastError`: those fields can remain null while the repair is working. Thus the
+19:28Z rescue projection of `dispatching` with null receipt/liveness fields did
+not establish that reconciliation had never run.
+
+Mergeability and custody are separate. The log records `hammer_wake` skips
+with `pr-not-mergeable` for both heads, while subsequent background AMA passes
+settle as `existing-dispatch-unknown`, including the 19:29Z passes. The native
+`maybeDispatchAmaCloser` wrapper reconciles same-PR intents across heads before
+its admission attempt; the capacity reconciler also treats every `dispatching`
+intent as in progress. These heads reached that repair despite the wake refusal.
+Other orchestration holds need not invoke admission, so absence of a diagnostic
+alone still warrants the documented reconciliation dry-run, not a launch or an
+assumed runtime version. A live GitHub read at approximately 19:46Z reported
+both PRs open at these exact heads, with `mergeable` and `mergeStateStatus`
+`UNKNOWN`; that later reading cannot replace the earlier observed gate result.
+
+### Actual recovery and external custody change
+
+Read-only inspection found both incident records already changed to
+`no-dispatch` at 19:32:38Z by another session. Their embedded annotations say
+`legacy-no-launch-proven`, attribute settlement to “Main Loop 6 SRE session”,
+and claim operator authorization and negative ledger evidence. The annotations
+retain the previous native `inspection-required` objects, last observed at
+19:31:27Z. These are assertions in the changed records, not independently
+verified authorization or proof that no subprocess could still enqueue.
+This follow-up neither performed nor adopts that settlement as native recovery.
+The shipped native repair does not emit `legacy-no-launch-proven`.
+
+By the 19:37Z and 19:42Z watcher passes, both exact heads instead returned
+`hammer-retry-cap-exhausted`. No budget reset or additional closer was attempted.
+No natural receipt recovery was established. The verified native outcome before
+the external change was safe, explicit unknown custody; publication, deployment
+and this diagnostic result must not be reported as a recovered or merged PR.
+Incident closure remains with the incident owner after assessing the external
+settlement and current ownership against canonical evidence.
+
+### Bounded inspection and operator action
+
+The existing reconciliation CLI ran as the dispatch directory owner with
+`--dry-run`, the explicit deployed `--root-dir`, canonical `--hq-root`, and the
+watcher's explicit PostgreSQL `--ledger-target`. It exited zero within a
+45-second command bound: 3,024 records scanned, three proposed changes, 632
+unreadable results, and pre-receipt counts recovered 0 / no-launch 0 / unknown 0 /
+held 1. These are fleet totals; the two incident records were already
+`no-dispatch` and were not pre-receipt candidates. SHA-256 comparisons of all
+eight existing target intent, lease and retry-budget JSON files were unchanged
+across the dry-run. Unreadable results do not prove missing launches.
+
+The [LAC-2081 interrupted-dispatch operator procedure](./follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
+remains applicable: inspect the complete intent and its bounded diagnostic,
+use owner-qualified canonical dry-run first, preserve same-PR custody and
+scratch evidence, and obtain exact current-attempt receipt/submission evidence
+when a legacy key is absent. A missing key cannot be repaired retroactively by
+reusing a predecessor LRQ, elapsed time or an empty listing. Do not apply against
+#8918 under the original source-fix authorization. For the externally settled
+records, the incident owner must assess that separate action and the subsequent
+cap refusal; this follow-up grants no authority to rewrite either record or
+budget, force a closer, restart active services, or remediate/merge either PR.
+The lease/budget recheck still found #8924's exact-head pending lease with no
+LRQ, acquired at 17:38:03Z under watcher PID 46625; #8918 had no closer lease
+JSON. The earlier #8924 head's terminal lease cannot resolve the pending
+attempt. Both per-PR budget ledgers were suppressed, with recorded lifetime
+counts three (#8918) and four (#8924). Lease absence, a different watcher PID
+and budget suppression supply no current-attempt launch-absence proof.
+
+No follow-up runtime fix is justified by the observed applicability. This PR
+records acceptance evidence only and must use ordinary cross-model convergence.
+HCP memory search initially timed out; a later documentation-scope search was
+available and returned zero records. Linear shared field notes returned
+`Tool get_agent_context not found`; local runbooks supplied the missing context.
+
+The focused offline run passed 185 tests across pre-receipt interruption,
+reconciliation and watcher claim-loop suites. Disposable native replays of both
+incident shapes, with conflicting PR metadata, returned inspection-required
+unknown custody with their original timeout deadlines, zero launches and
+unchanged retry counts. A future observation retained PR exclusion without a
+fleet-capacity reservation. An initial exploratory assertion incorrectly assumed
+the load-scaled capacity window had already expired for #8924 at 19:28Z; the
+future observation avoids that unsupported timing assumption. Lint passed with
+zero errors (existing warnings), contract typechecking passed, and the offline
+research-finding walkthrough converged with byte-stable deliveries.
+The required full offline run completed in 849 seconds with exit 1: 12,787
+tests, 12,779 passed, six skipped, two failed. The failures were
+`LEASEFAIR-02: ci-disjoint` in `test/hammer-self-rebase.test.mjs` and
+`four same-head pending CI launches retain charges within the gate cap` in
+`test/leasepark-ci-wait.test.mjs` (a 20-second subprocess timeout). All runtime
+and test files were identical to `origin/main` at `66a90efa`; the only change
+was this document. These are failures in the unchanged baseline, not a green
+full-suite claim. They were not repaired or masked in this acceptance follow-up.

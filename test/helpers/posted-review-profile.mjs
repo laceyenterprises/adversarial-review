@@ -29,7 +29,7 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
   const scope = new AsyncLocalStorage();
   const steps = {};
   const bucket = () => steps[scope.getStore() || 'handler-overhead'] ||= { runs: 0, wallMs: 0, samplesMs: [],
-    github: {}, subprocesses: {}, database: { count: 0, ms: 0 } };
+    github: {}, subprocesses: {}, database: { count: 0, ms: 0, migrationChecks: {} } };
   const timed = async (step, run) => scope.run(step, async () => {
     const entry = bucket();
     entry.runs++;
@@ -52,6 +52,10 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
         const entry = bucket().database;
         const start = performance.now();
         entry.count++;
+        if (sql === 'SELECT 1 FROM schema_migrations WHERE id = ?') {
+          const migration = args[0];
+          entry.migrationChecks[migration] = (entry.migrationChecks[migration] || 0) + 1;
+        }
         try { return value.apply(target, args); }
         finally { entry.ms += performance.now() - start; }
       };

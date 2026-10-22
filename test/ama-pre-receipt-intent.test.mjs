@@ -38,7 +38,7 @@ function fixture(t, patch = {}, lease = true) {
   updateAmaCloserDispatchRecord(rootDir, identity, () => record);
   if (lease) acquireAmaCloserLease({ rootDir, ...identity, now: started, watcherPid: 12345 });
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
-    processKillImpl: dead, logger: { warn() {} } };
+    processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };
   return { rootDir, options, record,
     read: () => readAmaCloserDispatchRecord(rootDir, identity),
     reconcile: extra => reconcilePreReceiptIntent(rootDir, identity, { ...options, ...extra }),
@@ -100,14 +100,14 @@ test('legacy and submitted intents keep same-PR ownership past any age; diagnost
     const deadline = f.read().preReceiptReconciliation.deadlineAt;
     await f.reconcile({ now: '2030-01-01T00:00:00Z' });
     assert.equal(f.read().preReceiptReconciliation.deadlineAt, deadline);
-    assert.equal(isActiveAmaCloserDispatchRecord(f.read(), { now: '2030-01-01' }), true);
+    assert.equal(isActiveAmaCloserDispatchRecord(f.read(), { now: '2030-01-01' }), Boolean(dispatchIdempotencyKey));
     const active = await findActiveAmaCloserLaunches(f.rootDir, { ...f.options, now: '2030-01-01T00:00:00Z' });
-    assert.equal(active.length, 1);
-    assert.equal(active[0].holdsCapacity, false, 'unknown PR does not hold a fleet slot indefinitely');
+    assert.deepEqual(active, [], 'an unresolved intent never appears in the fleet launch census');
     let launches = 0;
     const decision = await maybeDispatchAmaCloser({ cfg: { enabled: true },
       dispatchContext: { rootDir: f.rootDir, ...identity, dispatchedAt: now },
       readLegacyIntentLaunchesImpl: f.options.readLegacyIntentLaunchesImpl,
+      deliverAlertImpl: async () => {},
       execFileImpl: () => { launches++; throw Error('must not launch'); }, logger: { warn() {} } });
     assert.equal(decision.reason, 'existing-dispatch-unknown');
     assert.equal(decision.skipMergeAgent, true);
@@ -508,4 +508,45 @@ test('automatic launch reconciliation uses the same legacy ledger proof', async 
   assert.deepEqual(await findActiveAmaCloserLaunches(f.rootDir, f.options), []);
   assert.equal(f.read().reason, 'legacy-no-launch-proven');
   assert.equal(f.read().preReceiptReconciliation.query.ok, true);
+});
+
+test('CLOSERGATE-01: inspection pages once per intent across repeated reconciliation', async t => {
+  const f = fixture(t, {}, false);
+  const pages = [];
+  const deliverAlertImpl = async (text, options) => { pages.push({ text, ...options }); };
+  await f.reconcile({ deliverAlertImpl });
+  await f.reconcile({ deliverAlertImpl, now: '2030-01-01T00:00:00Z' });
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].event, 'ama_closer.pre_receipt_inspection_required');
+  assert.match(pages[0].text, /fixture\/repo#8/);
+  assert.ok(pages[0].text.includes(identity.headSha));
+  assert.ok(pages[0].text.includes('submission-absence-unproven'));
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, now);
+});
+
+test('CLOSERGATE-01: dry-run never pages; failed enqueue retries without releasing ownership', async t => {
+  const f = fixture(t, {}, false);
+  const before = f.read();
+  let calls = 0;
+  const deliverAlertImpl = async () => { calls++; throw Error('synthetic outbox unavailable'); };
+  await f.reconcile({ dryRun: true, deliverAlertImpl });
+  assert.equal(calls, 0);
+  assert.deepEqual(f.read(), before);
+  await f.reconcile({ deliverAlertImpl });
+  assert.equal(calls, 1);
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, undefined);
+  assert.equal(f.read().state, 'dispatching');
+  await f.reconcile({ deliverAlertImpl: async () => { calls++; } });
+  assert.equal(calls, 2);
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, now);
+});
+
+test('CLOSERGATE-01: yielding alert enqueue cannot overwrite a replacement intent', async t => {
+  const f = fixture(t, {}, false);
+  const result = await f.reconcile({ deliverAlertImpl: async () => {
+    writeFileSync(amaCloserDispatchFilePath(f.rootDir, identity), JSON.stringify({ ...f.read(), replacement: true }));
+  } });
+  assert.equal(result.status, 'held');
+  assert.equal(f.read().replacement, true);
+  assert.equal(f.read().preReceiptReconciliation, undefined);
 });

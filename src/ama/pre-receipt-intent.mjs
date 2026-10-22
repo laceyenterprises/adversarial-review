@@ -8,6 +8,7 @@ import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinc
 import { amaCloserDispatchFilePath } from './dispatch-record-read.mjs';
 import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
+import { deliverAlert } from '../alert-delivery.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -46,6 +47,9 @@ const readBytes = path => {
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const isPreReceiptIntent = record => record?.state === 'dispatching';
+export const isTerminalCloserPullRequest = record => record?.isOpen === false
+  || record?.isMerged === true
+  || ['CLOSED', 'MERGED'].includes(String(record?.prState || record?.state || '').toUpperCase());
 
 export async function reconcilePreReceiptIntent(rootDir, identity, options = {}) {
   const release = tryAcquireCloserIntentLock(rootDir, identity);
@@ -54,7 +58,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const path = amaCloserDispatchFilePath(rootDir, identity);
     const bytes = readBytes(path);
     const record = bytes && JSON.parse(bytes);
-    if (!isPreReceiptIntent(record)) return { status: 'unchanged' };
+    if (!isPreReceiptIntent(record) || isTerminalCloserPullRequest(record)) return { status: 'unchanged' };
     if (record.repo !== identity.repo || Number(record.prNumber) !== Number(identity.prNumber)
       || record.headSha !== identity.headSha) return { status: 'held', reason: 'intent-identity-mismatch' };
     if (options.legacyOnly && record.dispatchIdempotencyKey) return { status: 'held', reason: 'keyed-intent' };
@@ -196,11 +200,35 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           ? 'legacy-launch-in-range' : 'legacy-intent-without-key')
         : !rows ? 'receipt-lookup-unreadable' : rows.length ? 'receipt-identity-ambiguous' : 'submission-absence-unproven';
       next = { ...record, preReceiptReconciliation: { status: diagnosticStatus,
-        firstObservedAt, deadlineAt, observedAt: now, reason, ...(evidence ? { query: evidence } : {}) } };
+        firstObservedAt, deadlineAt, observedAt: now, reason,
+        ...(evidence ? { query: evidence } : {}),
+        ...(prior?.alertedAt ? { alertedAt: prior.alertedAt } : {}) } };
       // Bounded diagnostics: no launch timestamp refresh, no unbounded history,
       // no polling write/log storm. The deadline never clears ownership.
       if (prior?.status === diagnosticStatus && prior?.reason === reason
         && Date.parse(now) - Date.parse(prior.observedAt) < 60_000) next = record;
+    }
+    if (!options.dryRun && next.preReceiptReconciliation?.status === 'inspection-required'
+      && !next.preReceiptReconciliation.alertedAt) {
+      try {
+        await (options.deliverAlertImpl || deliverAlert)(
+          `Closer intent requires inspection for ${record.repo}#${record.prNumber}, head ${record.headSha}: `
+          + `${next.preReceiptReconciliation.reason}. This PR/head is held; other closers may proceed.`,
+          { event: 'ama_closer.pre_receipt_inspection_required', env: options.env || process.env,
+            now: new Date(now), payload: { repo: record.repo, prNumber: record.prNumber,
+              headSha: record.headSha, reason: next.preReceiptReconciliation.reason,
+              dispatchIdempotencyKey: record.dispatchIdempotencyKey || null,
+              lastAttemptedAt: record.lastAttemptedAt || null } });
+        next = { ...next, preReceiptReconciliation: { ...next.preReceiptReconciliation, alertedAt: now } };
+      } catch (error) {
+        options.logger?.warn?.(JSON.stringify({ event: 'ama_closer.pre_receipt_alert_failed',
+          repo: record.repo, prNumber: record.prNumber, headSha: record.headSha,
+          error: error.message }));
+      }
+      // Alert enqueue can yield too. Never overwrite a replacement owner.
+      if (readBytes(path) !== bytes || !same(readAmaCloserLease(rootDir, leaseIdentity), lease)) {
+        return { status: 'held', reason: 'intent-or-lease-changed' };
+      }
     }
     if (!options.dryRun && next !== record) {
       writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);

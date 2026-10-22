@@ -14,12 +14,14 @@ condition is resolved.
 
 ## Interrupted dispatch intents (LAC-2081)
 
-A persisted `dispatching` record reserves its PR across all heads until native
-reconciliation resolves the attempt. Age, a dead watcher, a missing lease,
-null launch IDs, and a previous head's terminal launch do not prove no launch.
-The launch subprocess can enqueue after its caller disappears. These records
-never age-cancel; after the pending capacity window they retain same-PR
-exclusion without occupying a fleet launch slot.
+CLOSERGATE-01: an unresolved `dispatching` record holds only its own PR/head.
+It never appears in the global active-launch census or consumes concurrent
+launch capacity. Keyless legacy records retain stale/orphan escapes in active
+record listings. Authoritative merged/closed PR metadata bypasses intent holds.
+Keyed ownership is not age-canceled: a missing lease, caller death or an old
+receipt cannot prove no submission. At the fixed inspection deadline, the
+existing durable alert outbox pages once with PR, head and reason; repeated
+polls and restarts reuse the attempt identity and its `alertedAt` receipt.
 
 New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
 `hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,

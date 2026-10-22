@@ -669,6 +669,12 @@ function alertPresentationForDoc(doc) {
       detail: `PR: ${payload.repo}#${payload.pr}; head: ${payload.head}; attempts: ${payload.attempts}; reason: ${payload.reason}` };
   }
 
+  if (event === 'ama_closer.pre_receipt_inspection_required') {
+    return { severity: 'SEV1', headline: 'Closer intent requires inspection',
+      body: String(doc.text || ''), action: 'Inspect the named intent and canonical receipt; retain its PR/head hold.',
+      detail: `PR: ${payload.repo}#${payload.prNumber}; head: ${payload.headSha}; reason: ${payload.reason}` };
+  }
+
   if (event === 'ama.orphan_recovery.exhausted') {
     return { severity: 'SEV1', headline: 'PR owner-of-last-resort recovery exhausted',
       body: String(doc.text || ''), action: 'Inspect the exact-head recovery evidence; retain all safety gates.',
@@ -719,6 +725,7 @@ const FIXED_RECOVERY_EVENTS = Object.freeze([
   'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted',
   'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain',
   'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS,
+  'ama_closer.pre_receipt_inspection_required',
 ]);
 
 function sanitizeAlertIdPrefix(prefix) {
@@ -1546,6 +1553,13 @@ async function deliverAlert(text, {
     if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
       || HAMMER_OWNER_PAGE_EVENTS.includes(event)) {
       doc.id = fixedAlertId(event, crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex'));
+    }
+    if (event === 'ama_closer.pre_receipt_inspection_required') {
+      // Same attempt, including a crash after enqueue but before alertedAt.
+      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(JSON.stringify([
+        payload?.repo, payload?.prNumber, payload?.headSha,
+        payload?.dispatchIdempotencyKey || payload?.lastAttemptedAt,
+      ])).digest('hex'));
     }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);

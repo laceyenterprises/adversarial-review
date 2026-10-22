@@ -123,6 +123,7 @@ function hammerDispatchDeps(overrides = {}) {
   const execCalls = [];
   return {
     execCalls,
+    deliverAlertImpl: async () => {},
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
@@ -2437,7 +2438,7 @@ test('active AMA closer dispatches reserve their repo PR until terminal status',
   );
 });
 
-test('active AMA closer dispatch classification retains unknown launch-only records', () => {
+test('legacy keyless launch-only records retain the stale-record escape', () => {
   assert.equal(
     isActiveAmaCloserDispatchRecord(
       {
@@ -2460,7 +2461,7 @@ test('active AMA closer dispatch classification retains unknown launch-only reco
       },
       { now: '2026-07-06T18:00:00Z' },
     ),
-    true,
+    false,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord(
@@ -2472,7 +2473,7 @@ test('active AMA closer dispatch classification retains unknown launch-only reco
       },
       { now: '2026-07-06T12:01:00Z' },
     ),
-    true,
+    false,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord({
@@ -2508,11 +2509,11 @@ test('launch-only record stays active across a 600s retry window', () => {
   );
   assert.equal(
     isAmaCloserLaunchInProgress(record, { now: '2026-07-06T12:20:00Z' }),
-    true,
+    false,
   );
   assert.equal(
     isActiveAmaCloserDispatchRecord(record, { now: '2026-07-06T12:40:00Z' }),
-    true,
+    false,
   );
 });
 

@@ -1071,7 +1071,8 @@ record becomes `launch-terminal`. A readable `terminal_at` keeps a 60-second
 grace for GitHub head propagation; a missing timestamp permits immediate
 same-head settlement.
 Merged success remains sticky. A shared read-only ledger snapshot excludes
-terminal launches from fleet capacity. Unreadable or budget-skipped rows retain
+terminal launches from fleet capacity. Pre-receipt intents never reserve fleet
+capacity. Unreadable or budget-skipped receipted rows retain
 same-PR ownership and reserve fleet capacity inside the bounded pending-launch
 window. The watcher explicitly enables the shared snapshot through its retry
 wrapper; a failed snapshot does not trigger per-record PostgreSQL queries.
@@ -1708,10 +1709,15 @@ Native reconciliation now owns interrupted `dispatching` intents. A persisted
 per-attempt HQ key and fenced prepared/submitting phase either recover an exact
 receipt (`dispatched`) or prove no submission (`no-dispatch`, terminal deferred
 pending lease, one intent-budget rollback). A later wake refusal or stale-lease
-reaper cannot infer no launch from age or caller death. Unknown retains same-PR
-ownership, reaches a fixed inspection diagnostic deadline, and releases only
-its bounded fleet-capacity reservation. Live/replaced leases and retry caps
-remain authoritative; no receipt grants merge authority.
+reaper cannot infer no launch from age or caller death. CLOSERGATE-01 scopes
+unknown ownership to the intent's own PR and head. Pre-receipt intents never
+appear in global launch admission or consume concurrent-launch capacity, even
+when fresh or held by a live writer. Keyless legacy records retain the existing
+stale/orphan escapes in active-record listings. Authoritative merged/closed PR
+state holds nothing. At the fixed inspection deadline, one durable alert names
+the PR, head and reason; repeated polls and restarts reuse its attempt identity.
+Live/replaced leases and retry caps remain authoritative; no receipt grants
+merge authority.
 
 See the [owner recovery procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
 and [persistent evidence contract](data-model/ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).

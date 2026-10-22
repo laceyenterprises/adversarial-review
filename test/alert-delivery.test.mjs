@@ -1415,3 +1415,27 @@ for (const budgetState of ['rateLimited', 'deferred']) {
     assert.equal(readAlertSinkHealth({ env }).pendingCount, 4);
   });
 }
+
+test('CLOSERGATE-01: inspection page deduplicates an attempt before and after outbox delivery', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = { env, event: 'ama_closer.pre_receipt_inspection_required',
+    payload: { repo: 'fixture/repo', prNumber: 7, headSha: 'synthetic-head',
+      dispatchIdempotencyKey: 'synthetic-key', reason: 'receipt-lookup-unreadable' },
+    requestText: async () => ({ statusCode: 200, body: '{}' }) };
+  const first = await deliverAlert('Synthetic intent requires inspection', options);
+  const retry = await deliverAlert('Synthetic intent requires inspection', options);
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.queued, false);
+  renameSync(first.queuePath, sinkPath(rootDir, 'delivered', `${first.id}.json`));
+  const afterDelivery = await deliverAlert('Synthetic intent requires inspection', {
+    ...options, payload: { ...options.payload, reason: 'receipt-identity-ambiguous' } });
+  assert.equal(afterDelivery.status, 'delivered');
+  assert.equal(afterDelivery.queued, false);
+  const nextAttempt = await deliverAlert('Another synthetic intent requires inspection', {
+    ...options, payload: { ...options.payload, dispatchIdempotencyKey: 'synthetic-next-key' } });
+  assert.notEqual(nextAttempt.id, first.id);
+  const presentation = alertPresentationForDoc({ ...options, text: 'Synthetic intent requires inspection' });
+  assert.equal(presentation.severity, 'SEV1');
+  assert.match(presentation.detail, /fixture\/repo#7.*synthetic-head.*receipt-lookup-unreadable/);
+});

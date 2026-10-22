@@ -694,11 +694,17 @@ if (scenario === 'clean') {
   assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
   assert.equal(existsSync(promptPath), true);
   const recoveryNow = '2026-01-02T00:00:00Z';
+  const inspectionPages = [];
   const unknownIntent = await reconcilePreReceiptIntent(rootDir, identity(), {
+    deliverAlertImpl: async (text, options) => { inspectionPages.push({ text, ...options }); },
     now: recoveryNow, readIntentReceiptImpl: () => assert.fail('legacy intent has no keyed lookup'),
   });
   assert.equal(unknownIntent.status, 'unknown');
   assert.equal(unknownIntent.record.preReceiptReconciliation.status, 'inspection-required');
+  assert.equal(inspectionPages.length, 1);
+  assert.equal(inspectionPages[0].payload.headSha, headSha);
+  assert.deepEqual(await findActiveAmaCloserLaunches(rootDir, { now: recoveryNow }), []);
+  await reconcilePreReceiptIntent(rootDir, identity(), { now: recoveryNow, deliverAlertImpl: refuse });
   updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
     dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-smoke-prepared' }));
   const noLaunch = await reconcilePreReceiptIntent(rootDir, identity(), {
@@ -745,7 +751,8 @@ if (scenario === 'clean') {
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
-    nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
+    nativeFinalHammerWake: true, inspectionPagedOnce: true, unresolvedIntentHoldsNoFleetCapacity: true,
+    repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {

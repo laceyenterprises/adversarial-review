@@ -1,6 +1,6 @@
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
-import { isPreReceiptIntent, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
+import { isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
@@ -2052,7 +2052,9 @@ function isAmaCloserMissingLrqTimedOut(record, options = {}) {
 }
 
 export function isAmaCloserLaunchInProgress(record, options = {}) {
-  if (isPreReceiptIntent(record)) return true;
+  // Intent ownership is enforced for its own PR/head before admission. It is
+  // never evidence of a fleet launch, even while its writer holds the fence.
+  if (isTerminalCloserPullRequest(record) || isPreReceiptIntent(record)) return false;
   // Terminal ledger evidence releases immediately; a non-terminal or failed
   // ledger read must still respect the existing record and lease age escapes.
   if (options.ledgerActive === false) return false;
@@ -2067,37 +2069,26 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
         || (options.lease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
           && !isReclaimableDispatchedAmaCloserLease(options.lease, options)));
   }
-  if (
-    !hasInterruptedInFlightAmaCloserDispatchShape(record)
-    || isStaleDispatchingAmaCloserRecord(record, options)
-  ) {
-    return false;
-  }
-
-  if (!Object.hasOwn(options, 'lease')) return true;
-  if (options.lease?.status === AMA_CLOSER_LEASE_STATUS.PENDING) {
-    return !isReclaimablePendingAmaCloserLease(options.lease, options);
-  }
-
-  // The dispatch record is written immediately before the lease is acquired.
-  // Treat a lease-less record as live only for that narrow gap; old orphaned
-  // pre-LRQ JSON should not become a global hammer hold after a restart.
-  if (options.lease === null) {
-    const ageMs = amaCloserRecordAgeMs(record, options);
-    return ageMs !== null && ageMs < loadAwareTimeoutMs(AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS);
-  }
 
   return false;
 }
 
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return false;
-  if (isPreReceiptIntent(record)) return true;
+  if (isTerminalCloserPullRequest(record)) return false;
+  if (isPreReceiptIntent(record) && record.dispatchIdempotencyKey) return true;
   const state = String(record.state || '').trim().toLowerCase();
   if (options.lease?.status === 'handed-to-review'
     || AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(record.lastObservedStatus))) return false;
   if (state === 'dispatching') {
-    return !isStaleDispatchingAmaCloserRecord(record, options);
+    if (isStaleDispatchingAmaCloserRecord(record, options)) return false;
+    // Legacy keyless JSON retains the orphan escape. Keyed ownership above
+    // cannot be canceled using age or caller death as absence evidence.
+    if (options.lease === null) {
+      const ageMs = amaCloserRecordAgeMs(record, options);
+      return ageMs !== null && ageMs < loadAwareTimeoutMs(AMA_CLOSER_LEASELESS_LAUNCH_GRACE_MS);
+    }
+    return true;
   }
   if (state !== 'dispatched') return false;
 
@@ -2210,7 +2201,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     const record = readJsonFile(dispatchPath);
     const prNumber = Number(record?.prNumber);
     if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0
-      || !['dispatched', 'dispatching'].includes(record.state)) return [];
+      || !['dispatched', 'dispatching'].includes(record.state)
+      || isTerminalCloserPullRequest(record)) return [];
     let lease = null;
     try { lease = readAmaCloserLease(rootDir, record); }
     catch { /* Preserve the existing lease-less liveness rules. */ }
@@ -2243,7 +2235,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         : recovery.status === 'unknown' ? 'unknown' : 'held'] += 1;
       if (['unknown', 'held'].includes(recovery.status)) {
         active.push({ ...(recovery.record || record), prNumber, dispatchPath,
-          holdsCapacity: holdsPendingCapacity(record) });
+          holdsCapacity: false });
       } else if (recovery.status === 'receipt-recovered') {
         active.push({ ...recovery.record, prNumber, dispatchPath, holdsCapacity: true });
       }
@@ -4546,14 +4538,21 @@ export async function maybeDispatchAmaCloser(args) {
   let preservePredecessor = false;
   try {
     throwIfAborted(args.signal);
+    if (args.cfg?.enabled && isTerminalCloserPullRequest(args.prMetadata)) {
+      return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
+    }
+    const targetHead = args.prMetadata?.headSha || args.reviewState?.headSha
+      || dispatchContext?.headSha || dispatchContext?.reviewedSha || args.headSha;
     if (args.cfg?.enabled && dispatchContext?.rootDir && targetRepo && targetPrNumber) {
       for (const intent of readAmaCloserDispatchRecordsForPR(dispatchContext.rootDir,
-        { repo: targetRepo, prNumber: targetPrNumber }).filter(isPreReceiptIntent)) {
+        { repo: targetRepo, prNumber: targetPrNumber }).filter(record => isPreReceiptIntent(record)
+          && !isTerminalCloserPullRequest(record) && (!targetHead || record.headSha === targetHead))) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
           readLegacyIntentLaunchesImpl: args.readLegacyIntentLaunchesImpl,
           processKillImpl: args.processKillImpl, env: args.env || process.env,
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
+          deliverAlertImpl: args.deliverAlertImpl,
         });
         if (['unknown', 'held'].includes(recovery.status)) return noAmaDispatch({
           dispatched: false, skipMergeAgent: true, inFlight: true,

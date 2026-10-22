@@ -502,6 +502,7 @@ ham_base_touches_pr_files() {
   local current_base_sha comparison_base pr_ref pr_files base_files
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
+  HAM_CURRENT_BASE_SHA="$current_base_sha"
   comparison_base="${HAM_VALIDATION_BASE_SHA:-}"
   pr_ref=HEAD
   if [ "${1:-}" = "validated-head" ]; then
@@ -517,6 +518,59 @@ ham_base_touches_pr_files() {
   [ -n "$pr_files" ] || return 1
   [ -n "$base_files" ] || return 1
   comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .
+}
+
+# Shared by initial verification and the single in-run CI retry. GitHub publishes
+# the rebased head atomically; fetch that exact result into the scratch checkout.
+ham_rebase_head() {
+  if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ] && [ "${1:-}" != --ci-retry ]; then
+    echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
+    ham_release_merge_lease
+    HAM_PHASE_OUTCOME=rebase-attempt-cap-exceeded
+    return 20
+  fi
+  HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
+  ham_update_branch_with_retries
+  HAM_UPDATE_BRANCH_EXIT=$?
+  if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
+    # The hammer OWNS merge-conflict resolution, but NEVER while holding the
+    # merge lease. Release the lease immediately, step out to the conflict
+    # procedure below, resolve locally, force-push with lease, re-run the FULL
+    # suite + required checks in the parallel phase, then return here and
+    # re-acquire before the next rebase/merge attempt.
+    echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
+    if ! ham_release_merge_lease; then
+      echo "HAM-03 hard-blocker: cannot resolve conflict while merge lease release is unconfirmed" >&2
+      HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed
+      return 1
+    fi
+    HAM_PHASE_OUTCOME=rebase-conflict
+    HAM_VALIDATION_BASE_SHA=""
+    return 21
+  fi
+  if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
+    cat "<<RUN_DIR>>/update-branch.stderr" >&2
+    ham_release_merge_lease
+    HAM_PHASE_OUTCOME=update-branch-failed
+    return 1
+  fi
+  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
+  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
+  # Fetch the exact result, never a branch tip that a later author push could
+  # move. Refuse dirty tracked files rather than carrying them onto that head.
+  if ! ham_is_full_sha "$POST_REMEDIATION_SHA" \
+    || ! git diff --quiet || ! git diff --cached --quiet \
+    || ! ham_bounded_git_sync "$POST_REMEDIATION_SHA" \
+    || ! git checkout --detach "$POST_REMEDIATION_SHA" \
+    || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive \
+    || [ "$(git rev-parse HEAD)" != "$POST_REMEDIATION_SHA" ]; then
+    echo "HAM hard-blocker: cannot sync scratch checkout to the server-rebased head" >&2
+    HAM_PHASE_OUTCOME=rebased-head-sync-failed
+    ham_release_merge_lease || return 1
+    return 1
+  fi
+  HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"
+  return 0
 }
 
 # Resolve whether the target branch REQUIRES the PR to be up to date before merge
@@ -568,53 +622,7 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
     ham_acquire_merge_lease || return $?
   fi
-  if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
-    echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
-    ham_release_merge_lease
-    HAM_PHASE_OUTCOME=rebase-attempt-cap-exceeded
-    return 20
-  fi
-  HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
-  ham_update_branch_with_retries
-  HAM_UPDATE_BRANCH_EXIT=$?
-  if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
-    # The hammer OWNS merge-conflict resolution, but NEVER while holding the
-    # merge lease. Release the lease immediately, step out to the conflict
-    # procedure below, resolve locally, force-push with lease, re-run the FULL
-    # suite + required checks in the parallel phase, then return here and
-    # re-acquire before the next rebase/merge attempt.
-    echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
-    if ! ham_release_merge_lease; then
-      echo "HAM-03 hard-blocker: cannot resolve conflict while merge lease release is unconfirmed" >&2
-      HAM_PHASE_OUTCOME=merge-lease-release-unconfirmed
-      return 1
-    fi
-    HAM_PHASE_OUTCOME=rebase-conflict
-    HAM_VALIDATION_BASE_SHA=""
-    return 21
-  fi
-  if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
-    cat "<<RUN_DIR>>/update-branch.stderr" >&2
-    ham_release_merge_lease
-    HAM_PHASE_OUTCOME=update-branch-failed
-    return 1
-  fi
-  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
-  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
-  # Fetch the exact result, never a branch tip that a later author push could
-  # move. Refuse dirty tracked files rather than carrying them onto that head.
-  if ! ham_is_full_sha "$POST_REMEDIATION_SHA" \
-    || ! git diff --quiet || ! git diff --cached --quiet \
-    || ! ham_bounded_git_sync "$POST_REMEDIATION_SHA" \
-    || ! git checkout --detach "$POST_REMEDIATION_SHA" \
-    || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive \
-    || [ "$(git rev-parse HEAD)" != "$POST_REMEDIATION_SHA" ]; then
-    echo "HAM hard-blocker: cannot sync scratch checkout to the server-rebased head" >&2
-    HAM_PHASE_OUTCOME=rebased-head-sync-failed
-    ham_release_merge_lease || return 1
-    return 1
-  fi
-  HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"
+  ham_rebase_head || return $?
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then

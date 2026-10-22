@@ -282,6 +282,18 @@ ham_fire_watcher_merge_wake() {
   return 0
 }
 
+# Clamp every polling/backoff sleep to the already-scaled CI deadline. The
+# adapter process also receives the remaining budget, including UNKNOWN reads.
+ham_ci_sleep() {
+  local seconds="$1" remaining
+  if [ "${HAM_CI_WAIT_ACTIVE:-0}" -eq 1 ]; then
+    remaining=$((HAM_REMOTE_CI_DEADLINE - $(date +%s)))
+    [ "$remaining" -gt 0 ] || return 1
+    if [ "$seconds" -gt "$remaining" ]; then seconds="$remaining"; fi
+  fi
+  sleep "$seconds"
+}
+
 # One cadence helper owns every check snapshot, including retry attempts and
 # the final pre-merge refresh. Never add a second check-polling loop.
 ham_wait_for_check_poll() {
@@ -289,16 +301,21 @@ ham_wait_for_check_poll() {
   now=$(date +%s)
   next=$(( ${HAM_LAST_CHECK_POLL_AT:-0} + HAM_REMOTE_CI_POLL_SECONDS ))
   wait=$((next - now))
-  if [ "$wait" -gt 0 ]; then sleep "$wait"; fi
+  if [ "$wait" -gt 0 ]; then ham_ci_sleep "$wait" || return 1; fi
   HAM_LAST_CHECK_POLL_AT=$(date +%s)
 }
 
 ham_refresh_github_gate_once() {
-  ham_wait_for_check_poll
+  local gate_timeout=900
+  ham_wait_for_check_poll || return 1
+  if [ "${HAM_CI_WAIT_ACTIVE:-0}" -eq 1 ]; then
+    gate_timeout=$((HAM_REMOTE_CI_DEADLINE - $(date +%s)))
+    [ "$gate_timeout" -gt 0 ] || return 1
+  fi
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
-  "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' "$gate_timeout" "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchHammerPr } from '<<ROOT_DIR>>/src/hammer-pr-read.mjs';
 import { createHistoryReader } from '<<ROOT_DIR>>/src/ama/history-reader.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
@@ -406,7 +423,7 @@ ham_refresh_github_gate() {
       # backoffs below HAM_REMOTE_CI_POLL_SECONDS to the shared snapshot cadence
       # (30s by default), including when HAM_MERGEABILITY_BACKOFF_BASE_SECONDS is lower.
       echo "HAM mergeability UNKNOWN; re-reading GitHub gate ${unknown_samples}/${HAM_MERGEABILITY_RETRY_CAP:-3} after ${unknown_sleep}s" >&2
-      sleep "$unknown_sleep"
+      ham_ci_sleep "$unknown_sleep" || return 1
       HAM_GATE_ATTEMPTS=0
       continue
     fi
@@ -417,7 +434,7 @@ ham_refresh_github_gate() {
     HAM_GATE_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
     HAM_GATE_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_GATE_BACKOFF_MULTIPLIER + HAM_GATE_JITTER))
     echo "HAM GitHub gate read transient failure; retrying ${HAM_GATE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_GATE_SLEEP}s" >&2
-    sleep "$HAM_GATE_SLEEP"
+    ham_ci_sleep "$HAM_GATE_SLEEP" || return 1
   done
   return 1
 }
@@ -457,6 +474,21 @@ ham_already_merged_validated_head() {
   jq -e '.state == "MERGED" and .liveHead == .expectedHead' "$HAM_GATE_JSON" >/dev/null
 }
 
+ham_ci_timeout() {
+  echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
+  cat "$HAM_GATE_JSON" >&2
+  HAM_REMOTE_CI_STATUS=remote-ci-timeout
+  # Keep both attempts charged; a timeout is a real CI outcome.
+  if ham_required_gate_pending_only; then
+    if ham_append_terminal_audit deferred required-checks-pending; then
+      echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
+    fi
+  else
+    ham_append_terminal_audit failed-without-merge github-gate-timeout || true
+  fi
+  ham_release_merge_lease
+}
+
 ham_merge_error_retryable() {
   grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|HTTP 5[0-9][0-9]|502|503|504|rate limit|secondary rate limit|Retry-After|temporar(y|ily)|try again|service unavailable|gateway' "$1"
 }
@@ -469,6 +501,52 @@ ham_merge_error_permanent() {
   grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft' "$1"
 }
 
+# A live holder is never preempted on age. Refresh its fence at the retry
+# boundaries so the audit's expiry check also permits the full CI window; this
+# does not move the CI deadline or scale another budget.
+ham_renew_ci_retry_lease() {
+  HAM_RETRY_LEASE_ID="$HAM_MERGE_LEASE_ID" HAM_RETRY_BASE="$BASE_BRANCH" \
+    "$HAM_NODE_BIN" --input-type=module <<'NODE'
+import { inspectMergeLease, renewMergeLease } from '<<ROOT_DIR>>/src/ama/merge-lease.mjs';
+const identity = { rootDir: '<<ROOT_DIR>>', repo: '<<REPO>>', base: process.env.HAM_RETRY_BASE };
+const { lease } = inspectMergeLease(identity);
+if (!lease || lease.leaseId !== process.env.HAM_RETRY_LEASE_ID || Number(lease.holderPr) !== Number('<<PR_NUMBER>>')) process.exit(1);
+if (!renewMergeLease({ ...identity, ...lease }).renewed) process.exit(1);
+NODE
+}
+
+# Rebuild head-bound remediation authority after the retry's CI succeeds. The
+# original finding/doc claims survive; commit, range, audit and live evidence do
+# not. Never relabel an old eligible verdict as authority for a different head.
+ham_validate_ci_retry() {
+  HAM_VERDICT_READY_FILE=""
+  ham_renew_ci_retry_lease || { HAM_PHASE_OUTCOME=merge-lease-lost; return 1; }
+  ham_publish_phase || return $?
+  HAM_PHASE_OUTCOME=retry-predicate-not-eligible
+  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || return 1
+  ham_pr --json reviews > "<<RUN_DIR>>/reviews.json" || return 1
+  ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "<<RUN_DIR>>/timeline.json" || return 1
+  ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "<<RUN_DIR>>/commit.json" || return 1
+  jq --arg head "$POST_REMEDIATION_SHA" --arg body "$HAM_AUDIT_COMMENT_BODY" \
+    --slurpfile commit "<<RUN_DIR>>/commit.json" \
+    '.commit.sha = $head | .commit.parentSha = $commit[0].parents[0].sha | .auditComment.body = $body' \
+    "<<RUN_DIR>>/terminal-remediation.json" > "<<RUN_DIR>>/retry-terminal-remediation.json" || return 1
+  /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs \
+    <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" > "<<RUN_DIR>>/retry-primary-change.json" || return 1
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-check.mjs \
+    --pr "<<RUN_DIR>>/pr-after.json" --reviews "<<RUN_DIR>>/reviews.json" \
+    --protection "<<RUN_DIR>>/protection.json" --timeline "<<RUN_DIR>>/timeline.json" \
+    --repo <<REPO>> --root-dir <<ROOT_DIR>> --reviewed-sha <<REVIEWED_SHA>> \
+    --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
+    --ham-terminal-remediation "<<RUN_DIR>>/retry-terminal-remediation.json" \
+    --ham-commit "<<RUN_DIR>>/commit.json" --ham-range "<<RUN_DIR>>/range.json" \
+    --primary-change "<<RUN_DIR>>/retry-primary-change.json" > "$HAM_VERDICT_FILE" || return 1
+  jq -e --arg head "$POST_REMEDIATION_SHA" \
+    '.eligible == true and .trace.headMatch.current == $head' "$HAM_VERDICT_FILE" >/dev/null || return 20
+  [ "$HAM_PUBLISHED_AUDIT_HEAD" = "$POST_REMEDIATION_SHA" ] || return 20
+  HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
+}
+
 # The hammer does NOT run a local test battery or the PPH pre-push CI mirror as a
 # merge gate. GitHub required checks are the SOLE CI authority: the poll loop
 # below waits (bounded) for the required gate to go green on this exact head and
@@ -476,17 +554,34 @@ ham_merge_error_permanent() {
 # localCiStatus audit-JSON sites populate an honest value.
 HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative
 
-HAM_REMOTE_CI_STATUS=waiting
-HAM_REMOTE_CI_STARTED_AT=$(date +%s)
-HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_WAIT_SECONDS ))
-HAM_REMOTE_CI_GATE_READ_FAILURES=0
-# CI polling (including UNKNOWN sampling and read backoffs) owns no base
-# lease. Only the final refreshed gate and merge run in the serialized lane.
-HAM_ALREADY_MERGED_VALIDATED_HEAD=0
-ham_release_merge_lease || return 1
+HAM_CI_BASE_RETRY=0
+HAM_CI_WAIT_ACTIVE=0
+# Scale the nominal CI bound once per merge phase; both waits use this duration.
+HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_REMOTE_CI_WAIT_SECONDS" 2>/dev/null || true)
+case "$HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS" in
+  ''|*[!0-9]*|0) HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS="$HAM_REMOTE_CI_WAIT_SECONDS" ;;
+esac
 while :; do
+HAM_REMOTE_CI_STATUS=waiting
+HAM_CI_WAIT_ACTIVE=1
+HAM_REMOTE_CI_STARTED_AT=$(date +%s)
+HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS ))
+HAM_REMOTE_CI_GATE_READ_FAILURES=0
+# The first wait is lease-free. The single retry retains its acquired lease
+# through CI so another cooperating merger cannot overtake it.
+HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+if [ "$HAM_CI_BASE_RETRY" -eq 0 ]; then ham_release_merge_lease || return 1; fi
+while :; do
+  if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+    ham_ci_timeout
+    return 20
+  fi
   HAM_REQUIRED_CHECKS_WAITED_SECONDS=$(( $(date +%s) - HAM_REMOTE_CI_STARTED_AT ))
   if ! ham_refresh_github_gate; then
+    if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+      ham_ci_timeout
+      return 20
+    fi
     HAM_REMOTE_CI_GATE_READ_FAILURES=$((HAM_REMOTE_CI_GATE_READ_FAILURES + 1))
     HAM_REMOTE_CI_STATUS=gate-read-transient-failure
     if [ "$HAM_REMOTE_CI_GATE_READ_FAILURES" -ge "$HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT" ] || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
@@ -497,7 +592,7 @@ while :; do
       return 1
     fi
     echo "HAM remote CI: transient GitHub gate read failure ${HAM_REMOTE_CI_GATE_READ_FAILURES}/${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT}; retrying within remote CI wait window" >&2
-    sleep "$HAM_REMOTE_CI_POLL_SECONDS"
+    ham_ci_sleep "$HAM_REMOTE_CI_POLL_SECONDS" || true
     continue
   fi
   HAM_REMOTE_CI_GATE_READ_FAILURES=0
@@ -534,7 +629,11 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
-  if ham_required_gate_ok; then
+  if ham_required_gate_ok || { [ "$HAM_CI_BASE_RETRY" -eq 0 ] &&
+    jq -e '.state == "OPEN" and .headMatches == true and .checksConclusion == "SUCCESS" and
+      (.mergeStateStatus == "BEHIND" or .mergeable == "CONFLICTING") and
+      (.reasons | length > 0 and all(.[]; . == "pr-not-mergeable"))' "$HAM_GATE_JSON" >/dev/null &&
+    ham_base_touches_pr_files validated-head; }; then
     HAM_REMOTE_CI_STATUS=remote-ci-green
     break
   fi
@@ -550,35 +649,26 @@ while :; do
   # shorter sampling budget is spent. The CI deadline still bounds this wait.
   if ham_required_gate_mergeability_unknown && ! ham_live_head_moved \
     && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null && {
-    jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null \
+    { [ "$HAM_CI_BASE_RETRY" -eq 0 ] && jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null; } \
       || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]
   }; then
     ham_defer_unknown_mergeability
     return 20
   fi
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
-    echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
-    cat "$HAM_GATE_JSON" >&2
-    HAM_REMOTE_CI_STATUS=remote-ci-timeout
-    # The lease was released before polling; keep that attempt charged.
-    # Timeout records the outcome without marking or releasing another lease.
-    if ham_required_gate_pending_only; then
-      ham_append_terminal_audit deferred required-checks-pending || return 20
-      echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
-    else
-      ham_append_terminal_audit failed-without-merge github-gate-timeout || true
-    fi
+    ham_ci_timeout
     return 20
   fi
   # Remote CI does not own the serialized merge lane. Reacquisition below
   # repeats the live exact-head gate before any merge attempt. Keep this
   # attempt charged: a later red CI outcome must retain the gate-cap charge.
-  if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
+  if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
     ham_release_merge_lease || return 1
   fi
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
-  sleep "$HAM_REMOTE_CI_POLL_SECONDS"
+  ham_ci_sleep "$HAM_REMOTE_CI_POLL_SECONDS" || true
 done
+HAM_CI_WAIT_ACTIVE=0
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   if ham_acquire_merge_lease; then
     :
@@ -591,11 +681,39 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-
     fi
     return "$HAM_REACQUIRE_EXIT"
   fi
-  # A lease released for CI may have let another PR advance the base. Require
-  # that entire base in the validated head; otherwise retry rebase and CI.
-  if ham_base_touches_pr_files validated-head; then
-    ham_append_terminal_audit deferred base-advanced-during-ci-wait || true
-    ham_mark_merge_lease_retryable_abort base-advanced-during-ci-wait
+fi
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files validated-head; then
+  if [ "$HAM_CI_BASE_RETRY" -eq 1 ]; then
+    # Non-cooperating writers can still move the base while we own the lease.
+    ham_append_terminal_audit failed-without-merge retry-base-not-contained || true
+    ham_release_merge_lease
+    return 20
+  fi
+  HAM_CI_BASE_RETRY=1
+  echo "HAM base advanced during first CI wait; rebasing and validating once under the merge lease" >&2
+  HAM_REBASED_ONTO_BASE_SHA="${HAM_CURRENT_BASE_SHA:-}"
+  if ham_rebase_head --ci-retry; then
+    if ! ham_renew_ci_retry_lease; then
+      ham_append_terminal_audit failed-without-merge merge-lease-lost || true
+      ham_release_merge_lease
+      return 20
+    fi
+    # New head, new CI evidence and predicate. Publication follows green CI.
+    HAM_VERDICT_READY_FILE=""
+    HAM_PUBLISHED_AUDIT_HEAD=""
+    continue
+  else
+    HAM_CI_REBASE_EXIT=$?
+    ham_append_terminal_audit failed-without-merge "$HAM_PHASE_OUTCOME" || true
+    ham_release_merge_lease
+    return "$HAM_CI_REBASE_EXIT"
+  fi
+fi
+break
+done
+if [ "$HAM_CI_BASE_RETRY" -eq 1 ] && [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
+  if ! ham_validate_ci_retry; then
+    ham_append_terminal_audit failed-without-merge "$HAM_PHASE_OUTCOME" || true
     ham_release_merge_lease
     return 20
   fi
@@ -909,6 +1027,12 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
       *) ham_append_terminal_audit deferred stacked-base-read-failed || true ;;
     esac
     printf '%s\n' "$HAM_STACKED_BASE_REASON" >&2
+    ham_release_merge_lease
+    return 20
+  fi
+  # Use the same entire-base ancestry rule as the post-wait boundary.
+  if ham_base_touches_pr_files validated-head; then
+    ham_append_terminal_audit failed-without-merge retry-base-not-contained || true
     ham_release_merge_lease
     return 20
   fi

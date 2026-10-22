@@ -550,12 +550,17 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 LEASEFAIR-01 gives deferred daemon merges a durable priority reservation ahead
 of the next closer acquisition, FIFO among daemon requests. Closers release
-before remote-CI polling, including read retries and UNKNOWN sampling, then
+before the first remote-CI wait, including read retries and UNKNOWN sampling, then
 reacquire and refresh the exact-head gate. After that release, any current-base
 commit absent from the validated head requires rebase and fresh CI, including
-disjoint changes. Contention notices report the queue position; the existing
+disjoint changes. LEASEFAIR-02 rebases in the same run, holds the reacquired
+lease through one bounded CI wait on the new head, then rebuilds its audit and
+predicate before merge. The nominal CI bound is scaled once; sleeps and gate
+reads consume that deadline. Conflict, red CI and expiry release with their
+actual reasons. Deferred daemon reservations retain priority before the retry
+acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
-unchanged; the clean smoke verifies priority service without preemption. Additional offline regressions are in `ama-merge-lease`,
+unchanged; the clean smoke verifies priority service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
 `ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
 
@@ -572,7 +577,8 @@ fetches the exact resulting SHA, detaches the scratch checkout and synchronizes
 initialized submodules before changed-surface revalidation. Publish and recovered
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
 merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
-before remote-CI polling and reacquires before merging. Foreign pushes still
+before the first remote-CI wait and reacquires before merging; LEASEFAIR-02
+retains that lease through one retry CI wait if the base advanced. Foreign pushes still
 stop with `head-changed`. Existing lifecycle states are unchanged.
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.

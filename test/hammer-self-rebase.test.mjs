@@ -24,10 +24,10 @@ function fixture(t, scenario) {
   const git = (args, input) => execFileSync(realGit, args, { cwd: scratch, env, input, encoding: 'utf8', timeout: 10000 }).trim();
   git(['init', '--bare', '--quiet', remote]);
   const surfaceTest = `import { readFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\nassert.equal(readFileSync('surface.txt', 'utf8'), 'base-new\\nbody\\nhammer-new\\n');\n`;
-  const commit = (text, parent) => {
+  const commit = (text, parent, extra = false) => {
     const blob = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text);
     const tests = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], surfaceTest);
-    const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n`);
+    const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${blob}\tunrelated.txt\n` : ''}`);
     return git(['--git-dir', remote, 'commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Synthetic change\n');
   };
   const ancestor = commit('base-old\nbody\nhammer-old\n');
@@ -35,6 +35,9 @@ function fixture(t, scenario) {
   const base = commit('base-new\nbody\nhammer-old\n', ancestor);
   const rebased = commit('base-new\nbody\nhammer-new\n', base);
   const foreign = commit('foreign\n', rebased);
+  const disjoint = scenario === 'ci-disjoint';
+  const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
+  const nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
   git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
   git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', original]);
   git(['init', '--quiet']);
@@ -43,15 +46,20 @@ function fixture(t, scenario) {
   const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: original + '\n', timeout: 10000 });
   execFileSync(realGit, ['unpack-objects'], { cwd: scratch, env, input: pack, timeout: 10000 });
   git(['checkout', '--quiet', '--detach', original]);
-  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, head: original, behind: true }));
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: original, behind: true }));
   writeFileSync(join(dir, 'details'), 'Synthetic surface repaired.\n');
+  writeFileSync(join(dir, 'terminal-remediation.json'), JSON.stringify({ active: true,
+    commit: { sha: rebased }, auditComment: { body: 'synthetic', findings: [] } }));
+  writeFileSync(join(dir, 'protection.json'), '{}');
   writeFileSync(join(dir, 'clock'), '1700000000');
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
   executable('gh', '#!/bin/sh\nexec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"\n');
   executable('date', '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$FIXTURE_DIR/clock"; else exec /bin/date "$@"; fi\n');
   executable('sleep', `#!/bin/sh
 value=$(cat "$FIXTURE_DIR/clock")
-echo $((value + $1)) > "$FIXTURE_DIR/clock"
+increment="$1"
+if [ "$SCENARIO" = ci-pending ]; then increment=300; fi
+echo $((value + increment)) > "$FIXTURE_DIR/clock"
 `);
   executable('node-fixture', `#!/bin/bash
 case "$1" in
@@ -66,8 +74,12 @@ case "$1" in
       *) exit 78 ;;
     esac ;;
   --input-type=module)
-    if [ -n "\${POST_REMEDIATION_SHA:-}" ]; then cat >/dev/null; exec "$REAL_NODE" "$FIXTURE_HELPER" gate;
+    if [ -n "\${HAM_RETRY_LEASE_ID:-}" ]; then cat >/dev/null; [ -f "$FIXTURE_DIR/lease-held" ];
+    elif [ -n "\${POST_REMEDIATION_SHA:-}" ]; then cat >/dev/null; exec "$REAL_NODE" "$FIXTURE_HELPER" gate;
     else exec "$REAL_NODE" "$@"; fi ;;
+  */ama-check.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" predicate "$@" ;;
+  */primary-change-context.mjs) echo '{}' ;;
+  */load-aware-timeout.mjs) if [ "$2" = 900 ]; then echo scale >> "$FIXTURE_DIR/wait-scales"; fi; echo "$2" ;;
   */hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" range ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs|*/dismiss-withdrawn-reviews.mjs|*/stacked-base-check.mjs) echo '{}' ;;
   *) exec "$REAL_NODE" "$@" ;;
@@ -116,12 +128,13 @@ echo "publish=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 printf '{"eligible":true,"trace":{"headMatch":{"current":"%s"},"branchProtection":{"required":false}}}' "$HAM_PRODUCED_HEAD" > "$FIXTURE_DIR/verdict"
 HAM_VERDICT_FILE="$FIXTURE_DIR/verdict"
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
+if [ "$SCENARIO" = ci-touching ]; then HAM_REBASE_ATTEMPTS="$HAM_REBASE_ATTEMPT_CAP"; fi
 source "$FIXTURE_DIR/hammer-merge.sh"
 status=$?
 echo "merge=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 exit "$status"
 `], { cwd: scratch, env, encoding: 'utf8', timeout: 45000 });
-  return { dir, scratch, original, rebased, run, git };
+  return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 
 for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 'foreign-recovery', 'conflict', 'dirty']) {
@@ -134,6 +147,7 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
     assert.equal(result.status, scenario === 'conflict' ? 21 : scenario === 'dirty' ? 1 : stops ? 20 : 0, diagnostics);
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), !stops ? 'acquire\nrelease\nacquire\nrelease\n' : 'acquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    if (!stops) assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'update-branch').length, 1);
     if (!stops) {
@@ -153,5 +167,42 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
       assert.match(diagnostics, scenario === 'conflict' ? /outcome=rebase-conflict/ : scenario === 'dirty' ? /outcome=rebased-head-sync-failed/ : /outcome=head-changed/);
       if (['conflict', 'dirty'].includes(scenario)) assert.equal(f.git(['rev-parse', 'HEAD']), f.original);
     }
+  });
+}
+
+for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-strict-behind']) {
+  test(`LEASEFAIR-02: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    const diagnostics = result.stdout + result.stderr;
+    const succeeds = ['ci-touching', 'ci-disjoint', 'ci-strict-behind'].includes(scenario);
+    assert.equal(result.signal, null, diagnostics);
+    assert.equal(result.status, succeeds ? 0 : scenario === 'ci-conflict' ? 21 : 20, diagnostics);
+    assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'acquire\nrelease\nacquire\nrelease\n', diagnostics);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const checks = events.filter(e => e.kind === 'checks').map(e => e.value);
+    assert.ok(checks.some(c => c.head === f.rebased && c.held === false), 'first wait is lease-free');
+    if (scenario !== 'ci-conflict') {
+      const retryChecks = checks.filter(c => c.head === f.nextRebased);
+      assert.ok(retryChecks.length >= 1, diagnostics);
+      assert.ok(retryChecks.every(c => c.held === true), 'retry never releases while polling');
+    }
+    const merges = events.filter(e => e.kind === 'gh' && e.value[1] === 'merge');
+    assert.equal(merges.length, succeeds ? 1 : 0, diagnostics);
+    if (succeeds) {
+      assert.ok(merges[0].value.includes(f.nextRebased));
+      assert.equal(f.git(['merge-base', f.nextBase, 'HEAD']), f.nextBase);
+      assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'PENDING'));
+      assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'SUCCESS'));
+      assert.ok(events.some(e => e.kind === 'predicate' && e.value === f.nextRebased));
+      assert.match(diagnostics, /outcome=merged/);
+    } else {
+      assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
+        scenario === 'ci-red' ? 'outcome=github-gate-red' : scenario === 'ci-head-moved' ? 'outcome=live-head-moved-before-merge' :
+          scenario === 'ci-predicate-refused' ? 'outcome=retry-predicate-not-eligible' : 'outcome=required-checks-pending'));
+    }
+    assert.doesNotMatch(diagnostics, /outcome=base-advanced-during-ci-wait/);
   });
 }

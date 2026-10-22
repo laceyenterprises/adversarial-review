@@ -43,6 +43,7 @@ HAM_REMOTE_CI_POLL_SECONDS=1
 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=${transientRead ? 3 : 1}
 ${render(release).replace(' release \\', ' release --root-dir "$TEST_ROOT" \\')}
 ${helpers}
+${render(merge.slice(merge.indexOf('ham_ci_sleep()'), merge.indexOf('# One cadence helper')))}
 ${acquire}
 ham_pr() { printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"; }
 ham_is_full_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
@@ -50,6 +51,13 @@ HAM_MERGE_LEASE_WAIT_SECONDS=0
 ${fixture ? `${overlapHelper}
 HAM_VALIDATION_BASE_SHA=${quote(fixture.validationBase)}
 ham_bounded_git_sync() { git fetch origin main >/dev/null 2>&1; }` : `ham_base_touches_pr_files() { return ${overlap ? 0 : 1}; }`}
+ham_rebase_head() {
+  echo rebase >> "$TEST_ROOT/retries"
+  if [ -d .git ]; then git rebase origin/main >/dev/null 2>&1 || return 21; fi
+  ham_base_touches_pr_files() { return 1; }
+}
+ham_renew_ci_retry_lease() { [ "$HAM_MERGE_LEASE_HELD" -eq 1 ]; }
+ham_validate_ci_retry() { echo validate >> "$TEST_ROOT/retries"; }
 ham_refresh_github_gate() {
   ${transientRead ? 'if [ "$FAKE_SECONDS" -eq 0 ]; then return 1; fi' : ':'}
   return 0
@@ -81,6 +89,14 @@ for launch in $(seq 1 ${launches}); do
   FAKE_SECONDS=0
   ${staleAbortBeforeAcquire ? 'HAM_MERGE_LEASE_RETRYABLE_ABORT=1; HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=old-acquisition' : ':'}
   ham_acquire_merge_lease || exit $?
+  ${daemonDuringWait ? `"$HAM_NODE_BIN" --input-type=module - "$TEST_ROOT" <<'NODE'
+import { acquireDaemonMergeLease } from '${rootDir}/src/ama/merge-lease.mjs';
+import { hostname } from 'node:os';
+const result = acquireDaemonMergeLease({ rootDir: process.argv[2], repo: 'fixture/repo', base: 'main',
+  holderPr: 100, holderHead: 'daemon-head', holderPid: process.ppid, holderHost: hostname() });
+if (result.acquired || result.queuePosition !== 1) process.exit(95);
+NODE
+  [ "$?" -eq 0 ] || exit 95` : ':'}
   ${staleAbortBeforeAcquire ? '[ "$HAM_MERGE_LEASE_RETRYABLE_ABORT" -eq 0 ] && [ -z "$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" ] || exit 90' : ':'}
   wait_phase
   phase_status=$?
@@ -212,24 +228,24 @@ for (const validationBase of ['old', '', 'malformed']) {
   });
 }
 
-test('real overlap guard blocks base changes after the validated head was rebased', t => {
+test('real overlap guard retries base changes after the validated head was rebased', t => {
   const fixture = rebasedFixture(t, true);
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
     greenAfterSleep: true, greenAfterPolls: 3, fixture });
-  assert.match(result.audit, /deferred base-advanced-during-ci-wait\nexit:20/);
+  assert.match(result.audit, /^exit:0\n$/);
 });
 
 test('LEASEFAIR-01 even disjoint base advancement during CI requires rebase and fresh CI', t => {
   const fixture = rebasedFixture(t, true, true);
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
     greenAfterSleep: true, fixture });
-  assert.match(result.audit, /deferred base-advanced-during-ci-wait\nexit:20/);
+  assert.match(result.audit, /^exit:0\n$/);
 });
 
 for (const transientRead of [false, true]) {
   test(`LEASEFAIR-01 daemon acquires while closer waits on ${transientRead ? 'unreadable' : 'pending'} CI`, t => {
     const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
-      greenAfterSleep: true, greenAfterPolls: 3, daemonDuringWait: true, transientRead });
+      greenAfterSleep: true, greenAfterPolls: 3, daemonDuringWait: true, transientRead, overlap: true });
     assert.equal(result.audit, 'exit:0\n');
     assert.equal(readFileSync(join(result.dir, 'daemon-service'), 'utf8').match(/daemon-served/g).length, 3);
   });
@@ -250,8 +266,8 @@ for (const [name, gate] of [
 
 test('base overlap after CI-green reacquire requires revalidation', t => {
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, greenAfterSleep: true, overlap: true });
-  assert.match(result.audit, /deferred base-advanced-during-ci-wait/);
-  assert.match(result.audit, /exit:20/);
+  assert.equal(result.audit, 'exit:0\n');
+  assert.equal(readFileSync(join(result.dir, 'retries'), 'utf8'), 'rebase\nvalidate\n');
 });
 
 for (const [auditExit, state, outcome] of [[1, 'OPEN', 'parked:merge-lease-timeout'], [65, 'MERGED', 'already-merged'], [65, 'OPEN', null]]) {

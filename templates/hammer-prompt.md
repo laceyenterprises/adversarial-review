@@ -467,10 +467,14 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit. **Rebase the PR onto a recent base (`main`) and CONFIRM THE
    REBASE HOLDS.** Required checks must pass on the exact head containing the
-   current base. The procedure releases the base merge lease during remote CI,
+   current base. The procedure releases the base merge lease during its first CI wait,
    then reacquires before merge and checks the fetched current base again. If
-   that base advanced, including disjoint file changes, defer for another rebase
-   and fresh exact-head CI; never merge the old CI-validated head on a new base.
+   that base advanced, including disjoint file changes, the procedure rebases in
+   this run and holds the reacquired lease through one bounded, load-aware CI
+   wait on the new exact head. Deferred daemon merges retain priority before
+   reacquisition. A conflict, red CI or expired bound reports its actual reason;
+   clean base advancement alone does not end the run. The retry rebuilds the
+   audit and predicate before merging; never reuse old-head validation.
    A lagging GitHub `BEHIND` snapshot may avoid a redundant rebase only when the
    exact validated head already contains the entire fetched current base.
    Before entering the final rebase→remote-CI→merge window, acquire the

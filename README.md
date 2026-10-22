@@ -913,12 +913,17 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 LRQSTATUS-01 uses the producer's launch-status vocabulary and wire booleans.
 Decision-blocked and waiting launches release active closer leases and capacity,
-while their dispatch receipts retain PR ownership until the decision resolves.
+while their dispatch receipts retain PR ownership through decision resolution
+and resumed execution. Resumed workers fence both redispatch and inline daemon
+merge on subsequent polls until confirmed terminal launch/retry evidence.
+Positive resumed execution also restores fleet capacity accounting, including
+when the deferred lease was rekeyed to the worker's new head.
 Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
 The offline `test/launch-request-status.test.mjs` table covers every vocabulary
-status, wire precedence, retry descendants, and parked ownership without a
-second dispatch. No live action or configuration change is required after deploy.
+status, wire precedence, retry descendants, and parked/resumed ownership without a
+second dispatch. The clean sandbox smoke also verifies repeated resumed-owner
+fences and terminal release. No live action or configuration change is required after deploy.
 
 LAC-2082 adds one selected-role broker remint and identity re-pin when required
 PR-context capture rejects a reviewer credential. Existing lifecycle states,

@@ -1,4 +1,4 @@
-import { launchRequestParked, launchRequestMeaning, withLiveLaunchRetry } from './launch-request-status.mjs';
+import { launchRequestOwned, launchRequestParked, launchRequestMeaning, withLiveLaunchRetry } from './launch-request-status.mjs';
 import { readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 import { checkPrimaryChange } from './primary-change.mjs';
@@ -30,12 +30,13 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
       return waitExhausted ? action('page', primary.reason) : action('wait', primary.reason, { boundedMs: CLOSURE_OWNER_WAIT_MS, retryAfterMs: CLOSURE_OWNER_WAIT_MS });
     }
   }
-  // Terminal deferred leases no longer reserve capacity. Their parked receipt
-  // still fences every closure path, including the rare inline daemon merge.
+  // Terminal deferred leases no longer reserve capacity. Their receipt still
+  // fences closure while parked or resumed, including the inline daemon merge.
   if (rootDir && lease?.lrqId && lease.status === 'terminal' && lease.terminalOutcome === 'deferred') {
     const record = readAmaCloserDispatchRecord(rootDir, { ...lease,
       headSha: lease.rekeyedFromHeadSha || lease.headSha });
-    if (record?.launchRequestId === lease.lrqId && launchRequestMeaning(record.lastObservedStatus).parked) {
+    if (record?.launchRequestId === lease.lrqId
+      && launchRequestOwned({ ok: true, row: { status: record.lastObservedStatus } }) === true) {
       if (launchStatusProbe === undefined) {
         try { launchStatusProbe = (readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedger)({
           rootDir, launchRequestId: lease.lrqId, includeRetryChain: true }); }
@@ -47,7 +48,9 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
       }
     }
   }
-  if (lease?.lrqId && launchRequestParked(launchStatusProbe)) {
+  if (lease?.lrqId && (launchRequestParked(launchStatusProbe)
+    || (lease.status === 'terminal' && lease.terminalOutcome === 'deferred'
+      && launchRequestOwned(launchStatusProbe) === true))) {
     return action('wait', `dispatch-status-${withLiveLaunchRetry(launchStatusProbe).row.status.replaceAll('_', '-')}`,
       { retryAfterMs: CLOSURE_OWNER_WAIT_MS });
   }

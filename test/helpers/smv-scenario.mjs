@@ -67,6 +67,35 @@ if (scenario === 'clean') {
     assert.equal(launchRequestInFlight(probe), false);
     assert.equal(launchRequestOwned(probe), true);
     assert.equal(launchHoldsCloserCapacity(probe.row), false);
+    const parkedRoot = join(rootDir, status);
+    const receipt = { repo, prNumber, headSha };
+    acquireAmaCloserLease({ rootDir: parkedRoot, ...receipt });
+    updateAmaCloserLease({ rootDir: parkedRoot, ...receipt, status: 'dispatched', lrqId: 'resumed' });
+    updateAmaCloserLease({ rootDir: parkedRoot, ...receipt, status: 'terminal', terminalOutcome: 'deferred' });
+    updateAmaCloserDispatchRecord(parkedRoot, receipt, () => ({ ...receipt,
+      state: 'dispatched', launchRequestId: 'resumed', lastObservedStatus: status }));
+    const ownerInput = { rootDir: parkedRoot, lease: readAmaCloserLease(parkedRoot, receipt),
+      currentHead: headSha, reviewState: { verdict: 'approved', headSha,
+        blockingFindingState: 'known', blockingFindingCount: 0,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } };
+    let resumedProbe = { ok: true, row: { status: 'running' } };
+    for (let poll = 0; poll < 2; poll++) {
+      assert.equal(decideClosureOwner({ ...ownerInput,
+        readLaunchRequestStatusImpl: () => resumedProbe }).owner, 'wait');
+      const dispatch = await maybeDispatchAmaCloser({ cfg: { enabled: true }, prMetadata: receipt,
+        dispatchContext: { rootDir: parkedRoot, repo }, readLaunchRequestStatusImpl: async () => resumedProbe,
+        execFileImpl: refuse, cleanupScratchImpl: refuse });
+      assert.equal(dispatch.skipMergeAgent, true);
+      assert.equal(dispatch.reason, 'dispatch-status-running');
+      assert.equal(readAmaCloserDispatchRecord(parkedRoot, receipt).lastObservedStatus, 'running');
+    }
+    const resumedActive = await findActiveAmaCloserLaunches(parkedRoot, {
+      readLaunchRequestStatusImpl: async () => resumedProbe, cleanupScratchImpl: refuse });
+    assert.equal(resumedActive.length, 1);
+    assert.equal(resumedActive[0].holdsCapacity, true);
+    resumedProbe = { ok: true, row: { status: 'canceled' } };
+    assert.equal(decideClosureOwner({ ...ownerInput,
+      readLaunchRequestStatusImpl: () => resumedProbe }).owner, 'daemon-merge');
   }
 
   // HAMATTEST-02: the shared, head-bound decision selects ownership only.

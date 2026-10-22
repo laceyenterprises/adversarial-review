@@ -175,6 +175,25 @@ function flagValue(args, flag) {
   return idx === -1 ? undefined : args[idx + 1];
 }
 
+test('LRQSTATUS-01: the secondary launch probe persists a newly parked status', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-secondary-park-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir), deps = testDeps();
+  const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+  // No stored ownership status or dispatched lease: only the secondary probe
+  // can discover that this receipt is now parked.
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'dispatched', launchRequestId: 'secondary-park', workerClass: 'hammer',
+    dispatchedAt: args.dispatchContext.dispatchedAt }));
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'waiting_input' } }),
+  });
+  assert.equal(result.reason, 'dispatch-status-waiting-input');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity))).lastObservedStatus, 'waiting_input');
+  assert.equal(deps.calls.length, 0);
+});
+
 for (const account of ['personal', 'corporate', 'pinned-personal']) test(`LANEFAILOVER-01: AMA dispatch uses and logs ${account}`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'codex-ama-dispatch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

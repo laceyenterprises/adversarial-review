@@ -1980,7 +1980,14 @@ closer capacity and settle an active lease as terminal `deferred`, but their
 unchanged dispatch identity still owns the PR. They cannot be reclaimed,
 redispatched by ordinary or orphan recovery, or lose their scratch directory
 while parked. Parked observations are re-read rather than cached as final.
-A later resolved producer status restores the existing retry/settlement policy.
+Positive resumed execution occupies fleet capacity again, including through a
+matching rekeyed deferred lease. A resolved decision retains the same PR owner and fences
+both closer redispatch and inline daemon merge, including after the observed
+status is persisted as running. Only confirmed terminal launch/retry evidence
+restores the existing retry/settlement policy. Unknown status or unreadable retry
+evidence preserves the last ownership observation. The recovery probe persists
+known resolved statuses; the secondary probe persists newly parked statuses
+under the matching receipt identity.
 Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
 The legacy stored spellings map through producer values: `completed` →

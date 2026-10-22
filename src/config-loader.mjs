@@ -212,6 +212,19 @@ const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // The Node reviewer never reads it, but an operator may set it in
   // config.local.yaml. Without this entry the watcher rejects it on startup.
   'media_generation',
+  // CFGFOREIGN-01: `comms.ingressMode` is declared by the authoritative Python
+  // schema, but ingress selection belongs to another reader. Rejecting this
+  // documented local override crash-loops the watcher on an unknown root.
+  'comms',
+  // The same audit of all authoritative schema roots found these unmirrored,
+  // externally owned sections. None is consumed by this reader; keep them
+  // foreign rather than duplicating their schemas. The complete root snapshot
+  // is in test/fixtures/config-schema-roots.json (config-schema.multi-loader-parity).
+  'submodule_float', // Submodule float signing configuration.
+  'assessment_cadence', // Assessment scheduler configuration.
+  'argus', // Argus daemon configuration, separate from reviewer routing here.
+  'searchlight', // Searchlight OSS configuration.
+  'timeouts', // Shared timeouts; this reader uses adversarial.reviewer.load_aware.
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a

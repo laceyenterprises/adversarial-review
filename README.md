@@ -1135,6 +1135,21 @@ focused poll-guard tests additionally exercise real timers and capture overflow
 warnings. After deployment, confirm org discovery completes without
 `TimeoutOverflowWarning` or immediate `POLL_DEADLINE_EXCEEDED` exits. See the
 [call-site audit](docs/load-aware-wait-inventory.md#watchertimer-01-timer-safety-audit).
+
+ALERTTIMEOUT-01: canonical alert delivery scales its nominal 35-second child
+budget once, capped at five minutes and the platform timer maximum. Transient
+failures use the existing bounded exponential retries; permanent request or
+sink errors dead-letter immediately. A dead-lettered SEV1 persists an
+`alert-delivery-failed` record naming the event and PR in sink health and the
+watcher heartbeat's `alert_delivery_failure` field. This independent local
+signal survives subsequent polls and restarts without sending another page
+through the failed transport. Existing lifecycle states and smoke promises
+are unchanged. Offline regressions are in `test/alert-delivery-timeout.test.mjs`
+and `test/alert-delivery.test.mjs`; see the
+[delivery contract](docs/data-model/alert-delivery-state.md). After watcher
+deployment, inspect the effective timeout in any timeout error and the heartbeat
+field when investigating a failed SEV1 delivery; no live test page is required.
+
 The follow-up graph maps operator-only review holds and preservation-refusal
 failures. A matching refusal sidecar fails an exited worker's round; successful
 publication clears that sidecar before reporting success.

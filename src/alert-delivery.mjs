@@ -1,4 +1,4 @@
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, timerDelayMs } from './load-aware-timeout.mjs';
 import { HAMMER_OWNER_PAGE_EVENTS, hammerOwnerRouteForPageEvent } from './ama/review-cycle-cap-route.mjs';
 import {
   existsSync,
@@ -404,6 +404,7 @@ function setHealthQuarantined(rootDir, filePath, error, quarantinedAt) {
 
 function setHealthDeadLettered(rootDir, doc, error, deadLetteredAt) {
   const prior = readHealth(rootDir);
+  const sev1 = alertPresentationForDoc(doc).severity === 'SEV1';
   return writeHealth(rootDir, {
     ...prior,
     ready: false,
@@ -413,7 +414,27 @@ function setHealthDeadLettered(rootDir, doc, error, deadLetteredAt) {
     lastFailureReason: `dead-lettered ${doc.id} after ${doc.attemptCount} attempts: ${String(error?.message || error)}`,
     lastDeadLetteredAt: deadLetteredAt,
     lastDeadLetteredFile: `${doc.id}.json`,
+    ...(sev1 ? {
+      lastSev1DeliveryFailure: {
+        signal: 'alert-delivery-failed',
+        alertId: doc.id,
+        event: doc.event || null,
+        repo: doc.payload?.repo || null,
+        pr: doc.payload?.prNumber ?? doc.payload?.pr ?? null,
+        at: deadLetteredAt,
+        attemptCount: doc.attemptCount,
+        reason: String(error?.message || error).slice(0, 2000),
+      },
+    } : {}),
   });
+}
+
+// A constant-size local read for heartbeat writes, independent of the failed
+// transport and queue scans. Retain the signal across polls and restarts.
+function alertDeliveryHeartbeatStatus({ env = process.env } = {}) {
+  return {
+    alert_delivery_failure: readHealth(resolveAlertSinkStateRoot(env)).lastSev1DeliveryFailure ?? null,
+  };
 }
 
 function setHealthDelivered(rootDir, deliveredAt) {
@@ -915,7 +936,26 @@ function markInflightDeadLettered(rootDir, doc) {
 // watcher back on the live bus while keeping this module's durable queue / retry /
 // dead-letter / health telemetry.
 const CANONICAL_ALERT_SCRIPT_TIMEOUT_MS = 35_000;
+const MAX_CANONICAL_ALERT_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 const CANONICAL_ALERT_SCRIPT_OUTPUT_LIMIT_BYTES = 100_000;
+
+function canonicalAlertScriptTimeoutMs(loadOptions = {}) {
+  // Scale the nominal once; enforce both bounds even if policy caps change.
+  return timerDelayMs(Math.min(MAX_CANONICAL_ALERT_SCRIPT_TIMEOUT_MS,
+    loadAwareTimeoutMs(CANONICAL_ALERT_SCRIPT_TIMEOUT_MS, loadOptions)));
+}
+
+function isPermanentDeliveryError(error) {
+  if (error?.code === 'ETIMEDOUT') return false;
+  const message = String(error?.message || error);
+  const status = message.match(/\bHTTP(?:\s+status)?\s*[:=]?\s*([45]\d\d)\b/iu);
+  if (status) {
+    const code = Number(status[1]);
+    return code < 500 && ![408, 409, 425, 429].includes(code);
+  }
+  return /\b(?:bad request|unknown sink|unsupported sink|invalid (?:url|recipient))\b/iu.test(message)
+    || error?.code === 'ERR_INVALID_URL';
+}
 
 function appendBoundedOutput(current, chunk, limit = CANONICAL_ALERT_SCRIPT_OUTPUT_LIMIT_BYTES) {
   if (current.length >= limit) {
@@ -944,11 +984,15 @@ function resolveCanonicalAlertScript(env = process.env) {
 // Spawn `node <canonical script> --stdin-json`, feed the alert payload, and resolve
 // with the exit code + captured output. Never rejects — a spawn error maps to a
 // non-zero code so the caller's retry/dead-letter contract handles it uniformly.
-function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
+function spawnCanonicalAlertScript(scriptPath, payload, env = process.env, {
+  spawnImpl = spawnChild,
+  loadOptions = {},
+} = {}) {
+  const timeoutMs = canonicalAlertScriptTimeoutMs(loadOptions);
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawnChild(resolveNodeBin({ env }), [scriptPath, '--stdin-json'], {
+      child = spawnImpl(resolveNodeBin({ env }), [scriptPath, '--stdin-json'], {
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -976,10 +1020,11 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
       }
       finish({
         code: 1,
+        errorCode: 'ETIMEDOUT',
         stdout,
-        stderr: `${stderr}\ncanonical alert-delivery timed out after ${CANONICAL_ALERT_SCRIPT_TIMEOUT_MS}ms`.trim(),
+        stderr: `${stderr}\ncanonical alert-delivery timed out after ${timeoutMs}ms`.trim(),
       });
-    }, loadAwareTimeoutMs(CANONICAL_ALERT_SCRIPT_TIMEOUT_MS));
+    }, timeoutMs);
     child.stdout.on('data', (chunk) => {
       stdout = appendBoundedOutput(stdout, chunk);
     });
@@ -1030,9 +1075,11 @@ async function deliverViaCanonicalAlertScript(scriptPath, doc, {
   // A non-zero exit is a real failure; throw so drainSingleAlert retries / dead-letters.
   if (!result || result.code !== 0) {
     const detail = String((result && (result.stderr || result.stdout)) || '').trim();
-    throw new Error(
+    const error = new Error(
       `canonical alert-delivery exited ${result ? result.code : 'null'}${detail ? `: ${detail}` : ''}`
     );
+    error.code = result?.errorCode;
+    throw error;
   }
   return { status: 'delivered', via: 'canonical-alert-script' };
 }
@@ -1090,6 +1137,7 @@ async function drainSingleAlert(filePath, {
   requestText = httpRequestText,
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
+  runAlertScript = spawnCanonicalAlertScript,
 } = {}) {
   const rootDir = ROOT;
   const config = resolveAlertTransportDefaults(env, {
@@ -1123,7 +1171,7 @@ async function drainSingleAlert(filePath, {
   writeFileAtomic(inflightPath, `${JSON.stringify(doc, null, 2)}\n`);
 
   try {
-    await postAlertDoc(doc, { env, requestText, fsImpl, loadConfigRuntimeImpl });
+    await postAlertDoc(doc, { env, requestText, fsImpl, loadConfigRuntimeImpl, runAlertScript });
     const deliveredAt = (now instanceof Date ? now : new Date(now)).toISOString();
     const delivered = {
       ...doc,
@@ -1136,7 +1184,7 @@ async function drainSingleAlert(filePath, {
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
     return { status: 'delivered', id: delivered.id, attemptCount: delivered.attemptCount };
   } catch (error) {
-    if (doc.attemptCount >= config.maxAttempts) {
+    if (isPermanentDeliveryError(error) || doc.attemptCount >= config.maxAttempts) {
       const deadLetteredAt = attemptAt;
       const deadLettered = {
         ...doc,
@@ -1195,6 +1243,7 @@ async function drainPendingAlerts({
   requestText = httpRequestText,
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
+  runAlertScript = spawnCanonicalAlertScript,
   maxItems = Infinity,
   archiveSweepIntervalMs = DEFAULT_ARCHIVE_SWEEP_INTERVAL_MS,
 } = {}) {
@@ -1215,6 +1264,7 @@ async function drainPendingAlerts({
         requestText,
         fsImpl,
         loadConfigRuntimeImpl,
+        runAlertScript,
       }));
     } catch (error) {
       try {
@@ -1517,6 +1567,9 @@ async function deliverAlert(text, {
 }
 
 export {
+  alertDeliveryHeartbeatStatus,
+  canonicalAlertScriptTimeoutMs,
+  spawnCanonicalAlertScript,
   FIXED_RECOVERY_EVENTS,
   queueAlertDoc,
   validateAlertDocIdentity,

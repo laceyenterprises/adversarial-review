@@ -553,10 +553,12 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
-      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs", "src/fleet-stop.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs", "src/fleet-stop.mjs", "src/watcher.mjs"],
       "owner": "adversarial-review alert delivery",
       "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"],
-      "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"]
+      "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"],
+      "sev1DeliveryFailureFields": ["signal", "alertId", "event", "repo", "pr", "at", "attemptCount", "reason"],
+      "heartbeatDeliveryFailureField": "alert_delivery_failure"
     },
     {
       "id": "daemon-merge-parks",

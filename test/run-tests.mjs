@@ -10,7 +10,10 @@ const repoRoot = path.dirname(testDir);
 const checkoutDataDir = path.join(repoRoot, 'data');
 const callerTmpDir = tmpdir();
 // Leave room under the macOS 104-byte Unix socket path limit for nested fixtures.
-const tempBase = Buffer.byteLength(realpathSync(callerTmpDir)) > 60 ? '/tmp' : callerTmpDir;
+// Restricted workers can require every fixture to remain under an owned parent.
+// Such callers must choose a parent compatible with their selected tests' sockets.
+const tempBase = process.env.ADVERSARIAL_REVIEW_TEST_TEMP_BASE
+  || (Buffer.byteLength(realpathSync(callerTmpDir)) > 60 ? '/tmp' : callerTmpDir);
 let sandboxRoot;
 
 function makeWorkerRoot(index) {

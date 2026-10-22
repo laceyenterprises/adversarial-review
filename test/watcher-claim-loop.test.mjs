@@ -4375,3 +4375,67 @@ test('retry fallback refreshes corporate Codex cooldown recorded after initial r
     assert.ok(codexSpawns.every(spawn => spawn.subjectContext.codexBrokerProvider === 'codex'), output);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+
+test('OSG arm admission fallback preserves watcher claim identity through settlement', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-arm-fallback-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const armModuleUrl = fileUrl('src', 'osg-reviewer-arm.mjs');
+    let loader = buildLoaderSource({
+      subject101Overrides: { builderClass: 'gemini' },
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return { spawnReviewer: async payload => {
+            const row = globalThis.__watcherClaimLoopDb.prepare(
+              'SELECT reviewer, reviewer_session_uuid FROM reviewed_prs WHERE pr_number = ?'
+            ).get(payload.subjectContext.prNumber);
+            if (row.reviewer_session_uuid !== payload.sessionUuid || row.reviewer !== payload.model) {
+              throw Error('runtime does not match watcher claim');
+            }
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            return { ok: true, stdout: '', stderr: '' };
+          }, cancel: async () => {}, reattach: async () => ({}) };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    });
+    loader = loader.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(armModuleUrl)}) return {
+        format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from '${armModuleUrl}?actual';
+          export function applyReviewerArm(options) {
+            if (options.baseRoute.builderClass !== 'gemini') return options.baseRoute;
+            return { ...options.baseRoute, reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+              reviewerArmDefaultRoute: options.baseRoute,
+              reviewerArm: { role: 'reviewer', harness: 'claude', worker_class: 'claude-reviewer',
+                model: 'fixture-model', effort: 'high', account: 'fixture-account' } };
+          }
+        `)}
+      };
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      assert.equal(row.review_status, 'posted');
+      assert.equal(row.reviewer, 'codex');
+      const runtime = globalThis.__watcherClaimLoopReviewerSpawns.find(p => p.subjectContext.prNumber === 101);
+      assert.ok(runtime);
+      assert.equal(runtime.sessionUuid, row.reviewer_session_uuid);
+      assert.equal(runtime.subjectContext.reviewerArm, undefined);
+    ` }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 20_000 });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.ok(/osg-reviewer reason=(runtime-unsupported|account-changed|error-account-unavailable)/.test(output), output.split('\n').filter(line => line.includes('osg')).join('\n'));
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

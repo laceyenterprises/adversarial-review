@@ -1,3 +1,4 @@
+import { applyReviewerArm, applyReviewerArmEffectiveRoute, reviewerArmExecution } from './osg-reviewer-arm.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { codexReviewerAccountForGrounding, readCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
@@ -31,6 +32,7 @@ import { summarizeChecksConclusion } from './checks-summary.mjs';
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
 import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
+import { transferReviewerFallbackSession } from './reviewer-fallback-session.mjs';
 import { readReviewerGeminiPoolAvailability, readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
@@ -1751,7 +1753,7 @@ export async function processReviewSubject(entry, ctx) {
         subject = reconciled.subject;
       }
       let crossModelWaiverReason = null;
-      const baseRoute = routeSubject(subject, {
+      let baseRoute = routeSubject(subject, {
         domainId,
         geminiReviewerMode: 'off',
       });
@@ -1867,7 +1869,13 @@ export async function processReviewSubject(entry, ctx) {
             `fail-closed to reviewer.gemini.mode=off`
         );
       }
-      const geminiBaseRoute = applyEffectiveReviewerRoute({
+      baseRoute = await applyReviewerArm({ baseRoute, domainId, repoPath, prNumber,
+        reviewerMode: geminiReviewerMode,
+        routeTable: domainAdapterSet.routeTable,
+        primaryReviewerQuotaCapped: geminiReviewerMode === 'fallback'
+          && primaryReviewerQuotaCappedForRow(existing, { expectedReviewerModel: baseRoute.reviewerModel }),
+      });
+      const geminiBaseRoute = applyReviewerArmEffectiveRoute({
         builderClass: baseRoute.builderClass,
         baseRoute,
         mode: geminiReviewerMode,
@@ -3876,6 +3884,8 @@ export async function processReviewSubject(entry, ctx) {
               // Share the refreshed account with both fallback selection stages.
               afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
+                ...reviewerArmExecution(route),
+                ...(route.reviewerArmDefaultRoute ? { reviewerArmDefaultRoute: route.reviewerArmDefaultRoute } : {}),
                 branch: subject.headRefName || subject.branch || null,
                 claudeAccountSelection: selectedClaudeAccount || null,
                 repo: repoPath,
@@ -3976,6 +3986,14 @@ export async function processReviewSubject(entry, ctx) {
                 return handoffPromise;
               };
               const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
+              if (spawnReviewerArgs.reviewerArm) spawnReviewerArgs.onReviewerArmFallback = (fallback) => {
+                // Arm admission fails before runtime start: retain the same
+                // session and do not touch Gemini quota/probe reservations.
+                transferReviewerFallbackSession(db, {
+                  ...fallback, repo: repoPath, prNumber, previousSessionUuid: reviewerSessionUuid,
+                });
+                reviewerSessionUuid = fallback.reviewerSessionUuid;
+              };
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
                 const rowSettlementStartedAt = Date.now();

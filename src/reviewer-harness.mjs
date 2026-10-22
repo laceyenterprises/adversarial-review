@@ -415,6 +415,7 @@ function claudeAuthOutputIndicatesLoggedOut(stdout = '', stderr = '', message = 
 }
 
 async function assertClaudeOAuth({
+  model = null,
   spawnClaudeImpl = spawnClaude,
   retryDelaysMs,
   sleepImpl,
@@ -431,6 +432,7 @@ async function assertClaudeOAuth({
   }
 
   const auth = await prepareClaudeOAuthEnvImpl({
+    ...(model ? { model } : {}),
     sourceEnv: process.env,
     fetchImpl,
     mintClaudeCodeBrokerTokenImpl,
@@ -788,10 +790,12 @@ async function reviewWithClaude(diff, extraContext = '', {
   // ARGUSDRAIN-01: a caller with its own rubric (the Argus security drain)
   // supplies the whole prompt and keeps the rest of this harness.
   promptOverride = null,
+  modelPin = '', reasoningPin = '',
 } = {}) {
   const readNowMs = () => (typeof nowMs === 'function' ? nowMs() : Date.now());
   const claudeStartedAtMs = readNowMs();
-  const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform });
+  const auth = await assertClaudeOAuthImpl({ resolveClaudeLaunchctlUidImpl, logger, platform,
+    ...(modelPin ? { model: modelPin } : {}) });
 
   const prompt = promptOverride ?? buildReviewerPrompt({
     promptPrefix: withSnapshotBoundaryPrompt(buildReviewerPromptPrefix({ stage: promptStage })), extraContext, diff,
@@ -804,7 +808,7 @@ async function reviewWithClaude(diff, extraContext = '', {
   }
   const env = hasAuthEnv ? auth.env : scrubOAuthFallbackEnv(process.env).env;
   const subprocessEnv = withReviewerSubprocessCwdEnv(env, reviewerSubprocessCwd);
-  const reviewerExecution = resolveReviewerExecution('claude', { env: subprocessEnv, log: logger });
+  const reviewerExecution = resolveReviewerExecution('claude', { env: subprocessEnv, modelPin, reasoningPin, log: logger });
   const authTransport = hasAuthEnv ? (auth?.transport || resolveClaudeReviewerOAuthTransport(subprocessEnv)) : 'keychain';
   // The retry runs inside the SAME reviewer pass, so it must share that pass's
   // wall-clock budget. Without this a silent first attempt plus a fresh full
@@ -926,7 +930,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         reviewerDeadlineMs: reviewerBudgetDeadlineMs,
         silentRetryAttempts: silentRetryAttempts - 1,
         startTokenProxyImpl,
-        promptOverride,
+        promptOverride, modelPin, reasoningPin,
       });
     }
     if (tokenProxy?.rotationPending()) {
@@ -1109,11 +1113,11 @@ function readCodexConfigTopLevelValues(keys, {
   return values;
 }
 
-function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, log = console } = {}) {
-  const pin = harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '';
+function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, modelPin = '', reasoningPin = '', log = console } = {}) {
+  const pin = modelPin || (harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '');
   // Account routing changes the broker binding, not the governed reviewer role.
   const className = `${harness}-reviewer`;
-  const resolution = resolveRemediationModel(className, { env, pin, fallbackModel });
+  const resolution = resolveRemediationModel(className, { env, pin, reasoningPin, fallbackModel });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
   const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;
@@ -1122,10 +1126,10 @@ function resolveReviewerExecution(harness, { env = process.env, fallbackModel = 
   return { model, effort, modelSource, effortSource };
 }
 
-function resolveCodexExecOverrides({ env = process.env, log = console } = {}) {
+function resolveCodexExecOverrides({ env = process.env, modelPin = '', reasoningPin = '', log = console } = {}) {
   const values = readCodexConfigTopLevelValues(CODEX_EXEC_CONFIG_FORWARD_KEYS);
   const resolved = resolveReviewerExecution('codex', {
-    env, fallbackModel: values.model || null, fallbackEffort: values.model_reasoning_effort || null, log,
+    env, modelPin, reasoningPin, fallbackModel: values.model || null, fallbackEffort: values.model_reasoning_effort || null, log,
   });
   const configOverrides = Object.entries(values)
     .filter(([key]) => key !== 'model' && key !== 'model_reasoning_effort')
@@ -1233,6 +1237,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
   promptOverride = null,
+  modelPin = '', reasoningPin = '',
 } = {}) {
   console.error('[reviewWithCodex] asserting OAuth...');
   await assertCodexOAuth();
@@ -1265,7 +1270,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);
-  const codexExecOverrides = resolveCodexExecOverrides();
+  const codexExecOverrides = resolveCodexExecOverrides({ modelPin, reasoningPin });
   const changedLines = countChangedLines(diff);
   const effort = codexExecOverrides.reasoningEffort;
   onProgress?.({ changedLines, effort });
@@ -3466,12 +3471,15 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
   signal,
+  reviewerArm = null,
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
+  const pins = reviewerArm?.harness === effectiveModel
+    ? { modelPin: reviewerArm.model, reasoningPin: reviewerArm.effort === 'default' ? '' : reviewerArm.effort } : {};
   if (effectiveModel === 'claude') {
-    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins });
     // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
     // json). Tolerate a bare string too (legacy / mocked impls) so callers and
     // tests that predate the json capture keep working.
@@ -3494,7 +3502,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       needsSanitize: false,
     };
   }
-  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress });
+  const codexResult = await reviewWithCodexImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, onProgress, ...pins });
   return {
     rawReviewText: codexResult.reviewText,
     reviewText: null,
@@ -3835,6 +3843,7 @@ const __test__ = {
   resolveCodexAuthPath,
   resolveCodexCliPath,
   resolveCodexExecOverrides,
+  resolveReviewerExecution,
   resolveCqpBrokerConfig,
   resolveGeminiAntigravityModel,
   resolveGeminiCheckoutConflictBackoffMs,
@@ -3873,6 +3882,7 @@ const __test__ = {
 };
 
 export {
+  resolveReviewerExecution,
   dispatchReviewerModel,
   reviewAgyOversizedInChunks,
   reviewWithClaude,

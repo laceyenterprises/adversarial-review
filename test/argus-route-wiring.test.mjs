@@ -56,7 +56,9 @@ test('the additive enqueue precedes routeSubject and every hop that can return e
   const additiveCall = indexOfOrFail('const argusOutcome = await routeSecuritySurfaceSafe(existing);');
   const retriggerLabel = indexOfOrFail('prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)');
   const postedRow = indexOfOrFail("existing?.review_status === 'posted'");
-  const routeSubjectCall = indexOfOrFail('const baseRoute = routeSubject(subject, {');
+  // Arm selection may reassign the base route; its declaration kind does not
+  // change the ordering contract pinned here.
+  const routeSubjectCall = indexOfOrFail('baseRoute = routeSubject(subject, {');
 
   assert.ok(additiveCall < retriggerLabel, 'must run before the retrigger-label hop');
   assert.ok(additiveCall < postedRow, 'must run before the posted-review hop');

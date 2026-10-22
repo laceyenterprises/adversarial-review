@@ -1845,6 +1845,7 @@ async function main() {
     reviewerSessionUuid,
     reviewerSpawnToken,
     reviewerAttribution = null,
+    reviewerArm = null,
     labels = [],
     ticketPipelinePaused = false,
     advisoryFindings = [],
@@ -2114,6 +2115,7 @@ async function main() {
             signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
+            reviewerArm,
             promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,

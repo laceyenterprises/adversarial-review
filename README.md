@@ -1853,8 +1853,8 @@ The strict loader accepts `osg.version: 1`, `osg.mode` (`off`, `shadow`, `apply`
 and `osg.arms`. Defaults are mode `off` and an empty arm catalog. Each arm
 requires role, harness, worker class, model, effort and a non-secret account ID.
 `src/osg-config-schema.v1.json` is the versioned schema mirror; synthetic shared
-vectors live in `test/fixtures/osg-config.v1.json`. These declarations do not
-change reviewer or remediation routing.
+vectors live in `test/fixtures/osg-config.v1.json`. Reviewer routing consumes them
+only through the optional seam below; remediation routing remains unchanged.
 
 ### Reviewed routing policy (OSG-18)
 
@@ -1863,7 +1863,8 @@ change reviewer or remediation routing.
 configuration package at
 `platform/agent-os-config/src/agent_os_core/osg-routing-policy.v1.json`.
 The caller supplies its already-resolved path; there is no second policy copy.
-OSG-12/14 will connect the resolver to their review/remediation seams.
+OSG-12 delegates reviewer policy resolution to the parent owner; the remediation
+seam is separate.
 
 The v1 document is `{version: 1, entries: [...]}`. Each entry has `role`,
 `stratum: {task_type, size}`, `arm` and `promotions`. Roles are builder, reviewer
@@ -1927,3 +1928,48 @@ unavailable or invalid arm retains the default route with a bounded reason.
 The hammer's logical identity, prompt, lease, rebase and merge rules are unchanged.
 See [the execution contract](docs/OSG-remediator-execution.md) for evidence and
 rollout ordering. Existing lifecycle states and smoke promises are unchanged.
+
+### Per-PR reviewer arms (OSG-12)
+
+`src/osg-reviewer-arm.mjs` runs between subject routing and effective reviewer
+selection. Mode off returns the original route with no owner process, account
+proposal or policy read. Shadow records a proposal and keeps the same route.
+Apply can replace the default with an approved native reviewer arm. The normal
+cross-family and Gemini integrity guards still run; title routing, posting,
+verdicts, signed reviewed attestations and merge authority retain their owners.
+
+The bounded, secret-free stdio request invokes `cwp_dispatch.osg_reviewer` from
+the installed Agent OS Python environment, retaining the full `owner/repo` identity
+and resolving the incumbent against the domain route table. That owner reads the canonical arm
+contract, policy and budget, exact publication provenance and classified stratum,
+and persists one immutable assignment per ticket before returning an arm. An
+unavailable owner or missing classification returns the default. The whole owner
+process has a 1.5 second ceiling; it never installs dependencies or migrates a
+ledger. Only stable fallback tokens are logged. All modes ship off; host flips
+belong to the configuration writer's operating runbook.
+
+The initial executable surface is native Codex/Claude under `cli-direct`, with
+declared ITP accounts. Other runtimes, open-model arms and unmeasured accounts
+are unavailable proposals. An incumbent whose account cannot be measured, including
+holder-based Gemini, keeps current routing. ITP still authorizes the model, chooses the account
+and acquires its execution lease at spawn. A changed/held account discards the
+experiment pins and uses the ordinary default; a family change transfers the
+existing review claim through a model-neutral compare-and-swap callback. The
+fallback reuses the resolved incumbent route and sends stable reason notices
+through the caller's contextual logger when provided.
+The claim, runtime and settlement retain one session UUID; this pre-spawn fallback
+does not invoke Gemini quota handling or release Gemini credential probes. No trial pins cross
+a subsequent family fallback. CLI arguments carry model/effort to the existing
+`reasoningPin`, including Claude broker model preparation and silent retries.
+
+There are no new review states, lease states, transitions or smoke promises.
+Offline validation uses `osg-reviewer-{arm,effort,spawn}.test.mjs`, the watcher
+claim-loop, ITP account, spawn/settlement and reviewed-attestation fixtures. The
+assigned/default fixture compares the real posting path's verdict and attestation
+payload with injected effects; it never calls GitHub, a signer or a provider.
+
+Run selected suites through `node test/run-tests.mjs <test files>` to isolate
+production state from the checkout. Restricted workers can set
+`ADVERSARIAL_REVIEW_TEST_TEMP_BASE` to an owned temporary parent; this disables
+the runner's short-path `/tmp` fallback. Socket-based tests still need a parent
+short enough for the platform's Unix socket path limit.

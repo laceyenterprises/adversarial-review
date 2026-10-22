@@ -214,6 +214,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     repo: subjectContext.repo,
     prNumber: subjectContext.prNumber,
     reviewerModel: subjectContext.reviewerModel || subjectContext.model,
+    ...(subjectContext.reviewerArm ? { reviewerArm: subjectContext.reviewerArm } : {}),
     botTokenEnv: subjectContext.botTokenEnv,
     linearTicketId: subjectContext.linearTicketId,
     labels: subjectContext.labels,

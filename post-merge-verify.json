@@ -19,6 +19,7 @@
         "Node 22..26, npm dependencies installed, local git, POSIX process groups"
       ],
       "exclusions": [
+        "OSG-12 activation and live account/provider execution; the reviewer seam ships off and is covered by the bounded offline fixtures documented in README.md, including cross-family account fallback claim/runtime UUID consistency and lost-claim refusal",
         "Live GitHub, paid models, deployed daemon health",
         "ITP-13 attribution projection, sanitized CLI/recovery projection retention, zero generations, same-family metadata refusal, historic signature preservation and family/token matrix are covered by the bounded offline tests in README.md; no live signer or host cutover is exercised",
         "ITP-14 privileged pool enrollment and dispatcher account binding; offline tests cover canonical dispatch, reserve task kind and unknown holds",

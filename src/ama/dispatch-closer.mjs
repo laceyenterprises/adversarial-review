@@ -14,7 +14,7 @@ import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
-import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked, launchRequestMeaning, launchRequestOwned } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -1085,7 +1085,7 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
 ]);
 
 export function isTerminalHammerScratchRecord(record) {
-  if (!record || record.state === 'dispatching') return false;
+  if (!record || record.state === 'dispatching' || launchRequestMeaning(record.lastObservedStatus).parked) return false;
   return record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
     || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
       .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value))
@@ -1743,6 +1743,18 @@ function* reconcileAmaCloserLeaseSteps({
       return retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity: { repo, prNumber, headSha: held.headSha },
         record: readAmaCloserDispatchRecord(rootDir, identity), launchRequestId, now, logger });
     }
+    if (launchRequestParked(probe)) {
+      const dispatchIdentity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
+      const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+      if (record && (record.state === 'dispatching'
+        || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, current =>
+        current?.launchRequestId === launchRequestId && current.state !== 'dispatching'
+          ? { ...current, lastObservedStatus: withLiveLaunchRetry(probe).row.status } : null);
+      return finalizeAmaCloserLeaseBestEffort({ rootDir,
+        leaseIdentity: { repo, prNumber, headSha: held.headSha }, terminalOutcome: 'deferred',
+        launchRequestId, now, logger, repo, prNumber });
+    }
     const status = normalizeWorkerRunStatus(probe.row?.status);
     if (!AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
     const identity = { repo, prNumber, headSha: held.headSha };
@@ -2055,6 +2067,7 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
   // Intent ownership is enforced for its own PR/head before admission. It is
   // never evidence of a fleet launch, even while its writer holds the fence.
   if (isPreReceiptIntent(record)) return false;
+  if (record?.state === 'dispatched' && launchRequestMeaning(record.lastObservedStatus).parked) return true;
   // Terminal ledger evidence releases immediately; a non-terminal or failed
   // ledger read must still respect the existing record and lease age escapes.
   if (options.ledgerActive === false) return false;
@@ -2268,6 +2281,11 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       throwIfAborted(options.signal);
       if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) continue;
       const status = String(probe?.row?.status || '').trim().toLowerCase();
+      if (launchRequestParked(probe) || (launchRequestMeaning(record.lastObservedStatus).parked
+        && (!probe?.ok || launchRequestOwned(probe) === null || probe.retryChainUnreadable))) {
+        active.push({ ...record, prNumber, dispatchPath, holdsCapacity: false });
+        continue;
+      }
       // A historical terminal observation can only be overridden by a live
       // descendant. Missing/unreadable probes cannot poison other reservations.
       if (probe?.retryChainUnreadable) {
@@ -2280,7 +2298,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       if (observedTerminal) {
         if (!probe?.ok) continue;
       } else if (probe?.ok && status) {
-        terminalStatus = isTerminalLaunchRequestStatus(status) ? status : null;
+        terminalStatus = isTerminalLaunchRequestStatus(probe.row) ? status : null;
         if (terminalStatus && !observedTerminal) counts.terminal += 1;
       } else if (probe?.reason === 'missing-launch-request-row') {
         counts.missing += 1;
@@ -4723,6 +4741,26 @@ async function maybeDispatchAmaCloserAttempt({
         ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      if (launchRequestParked(statusProbe)) {
+        const current = readAmaCloserLease(reconciliationRoot,
+          { repo: reconciliationRepo, prNumber, headSha: held.headSha });
+        const record = readAmaCloserDispatchRecord(reconciliationRoot,
+          { repo: reconciliationRepo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha });
+        if (current?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && current.lrqId === held.lease.lrqId
+          && (!record || (record.state !== 'dispatching' && record.launchRequestId === held.lease.lrqId))) {
+          updateAmaCloserDispatchRecord(reconciliationRoot,
+            { repo: reconciliationRepo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha },
+            current => current?.launchRequestId === held.lease.lrqId && current.state !== 'dispatching'
+              ? { ...current, lastObservedStatus: withLiveLaunchRetry(statusProbe).row.status } : null);
+          finalizeAmaCloserLeaseBestEffort({ rootDir: reconciliationRoot,
+            leaseIdentity: { repo: reconciliationRepo, prNumber, headSha: held.headSha },
+            terminalOutcome: 'deferred', launchRequestId: held.lease.lrqId,
+            now: dispatchContext.dispatchedAt, logger, repo: reconciliationRepo, prNumber });
+        }
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: dispatchStatusReason(withLiveLaunchRetry(statusProbe).row.status),
+          preservePredecessorArtifacts: true, launchRequestId: held.lease.lrqId });
+      }
       if (statusProbe?.retryChainUnreadable) {
         logRetryChainUnreadable(logger, statusProbe, { repo: reconciliationRepo, prNumber });
         return noAmaDispatch({ dispatched: false,
@@ -4739,6 +4777,29 @@ async function maybeDispatchAmaCloserAttempt({
       if (settled) reconciledDispatchedLease = readAmaCloserLease(reconciliationRoot, {
         repo: reconciliationRepo, prNumber, headSha: held.headSha,
       });
+    }
+  }
+
+  if (reconciliationRoot && reconciliationRepo) {
+    for (const record of readAmaCloserDispatchRecordsForPR(reconciliationRoot, { repo: reconciliationRepo, prNumber })) {
+      if (!record.launchRequestId || record.state !== 'dispatched'
+        || (!launchRequestMeaning(record.lastObservedStatus).parked
+          && dispatchContext?.orphanRecovery?.ownerProof !== true)) continue;
+      const probe = earlyLaunchRequestProbe?.launchRequestId === record.launchRequestId
+        ? earlyLaunchRequestProbe.probe : await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+          launchRequestId: record.launchRequestId, rootDir: reconciliationRoot,
+          hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
+          ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
+        })).catch(() => ({ ok: false }));
+      if (launchRequestParked(probe)) {
+        updateAmaCloserDispatchRecord(reconciliationRoot, record, current =>
+          current?.launchRequestId === record.launchRequestId && current.state === record.state
+            ? { ...current, lastObservedStatus: withLiveLaunchRetry(probe).row.status } : null);
+      }
+      if (launchRequestParked(probe) || (launchRequestMeaning(record.lastObservedStatus).parked
+        && (!probe?.ok || launchRequestOwned(probe) === null || probe.retryChainUnreadable))) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: dispatchStatusReason(launchRequestParked(probe) ? withLiveLaunchRetry(probe).row.status : record.lastObservedStatus),
+        preservePredecessorArtifacts: true, launchRequestId: record.launchRequestId });
     }
   }
 
@@ -5402,6 +5463,11 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
+    if (launchRequestParked(probe)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: dispatchStatusReason(withLiveLaunchRetry(probe).row.status),
+        preservePredecessorArtifacts: true, launchRequestId: existingRecord.launchRequestId });
+    }
     if (probe?.retryChainUnreadable) {
       logRetryChainUnreadable(logger, probe, { repo, prNumber });
       return noAmaDispatch({ dispatched: false,

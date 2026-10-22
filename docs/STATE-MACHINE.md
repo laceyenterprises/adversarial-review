@@ -751,6 +751,21 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+(`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
+Boolean wire `terminal` and `succeeded` values take precedence when present;
+status-only ledger rows use the producer definitions. `blocked_needs_decision`
+and vocabulary-defined `blocked_`/`waiting_` states are parked: they consume no
+closer capacity and settle an active lease as terminal `deferred`, but their
+unchanged dispatch identity still owns the PR. They cannot be reclaimed,
+redispatched by ordinary or orphan recovery, or lose their scratch directory
+while parked. Parked observations are re-read rather than cached as final.
+A later resolved producer status restores the existing retry/settlement policy.
+The legacy stored spellings map through producer values: `completed` →
+`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
+`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+status-only evidence remains unknown. No new durable states or fields are added.
+
 TERMLEASE-01 adds terminal non-merge lease removal before fresh acquisition:
 `superseded`, `failed-without-merge` and `deferred` stop owning the current head
 when launch terminality or absence is proven. Positive live/retry evidence and

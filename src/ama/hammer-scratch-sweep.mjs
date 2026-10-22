@@ -7,7 +7,7 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { readLatestWorkerRunStatusFromLedgerAsync, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
-import { isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
+import { isTerminalLaunchRequestStatus, withLiveLaunchRetry, launchRequestParked } from './launch-request-status.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
   hammerScratchLeaseHeld,
@@ -277,7 +277,7 @@ async function isTerminalOwner(record, options, getDeadline, readLedger) {
     if (probe?.ok) {
       if (probe.retryChainUnreadable) return false;
       // Explicit live or unknown ledger state outranks stale record/PR state.
-      return isTerminalLaunchRequestStatus(probe.row?.status);
+      return !launchRequestParked(probe) && isTerminalLaunchRequestStatus(probe.row);
     }
   }
   if (isTerminalHammerScratchRecord(record)) return true;

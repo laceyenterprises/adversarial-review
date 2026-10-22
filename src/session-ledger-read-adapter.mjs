@@ -7,8 +7,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { loadConfig } from './config-loader.mjs';
-import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
-import { readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
+import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStatus, launchRequestMeaning } from './ama/launch-request-status.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -1027,8 +1026,8 @@ export async function readLaunchRequestObservationFromLedgerAsync({
   const effective = withLiveLaunchRetry(launch);
   const chainReadable = Array.isArray(launch?.retryChain) && launch.retryChainUnreadable !== true;
   const ownershipProbe = chainReadable ? effective : { ...effective, retryChainUnreadable: true };
-  const statusKnown = Boolean(readLaunchRequestStatus(effective?.row?.status).status)
-    || isTerminalLaunchRequestStatus(effective?.row?.status);
+  const statusKnown = Boolean(launchRequestMeaning(effective?.row).status)
+    || typeof effective?.row?.terminal === 'boolean';
   let worker = null;
   if (effective?.ok && ['starting', 'running'].includes(effective.row?.status)) {
     worker = await readWorkerStatusImpl({ ...args,
@@ -1046,8 +1045,8 @@ export async function readLaunchRequestObservationFromLedgerAsync({
       worker: worker?.ok ? worker.row : null,
       inFlight: statusKnown ? launchRequestInFlight(ownershipProbe) : null,
       terminal: statusKnown && launchRequestInFlight(ownershipProbe) === false
-        && isTerminalLaunchRequestStatus(effective?.row?.status),
-      processSucceeded: effective?.row?.status === 'succeeded',
+        && isTerminalLaunchRequestStatus(effective?.row),
+      processSucceeded: launchRequestMeaning(effective?.row).succeeded,
       // The PR observation owns merged/closed receipts, independently.
       remoteMerge: null,
     },

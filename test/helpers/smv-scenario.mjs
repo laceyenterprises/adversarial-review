@@ -59,6 +59,16 @@ const tick = (overrides = {}) => watcherTick({ ...identity(), evidence: { headSh
 const scenario = process.argv[2];
 let evidence = {};
 if (scenario === 'clean') {
+  // LRQSTATUS-01: scheduling terminality does not release a parked PR owner.
+  const { launchRequestInFlight, launchRequestOwned } = await import('../../src/ama/launch-request-status.mjs');
+  const { launchHoldsCloserCapacity } = await import('../../src/ama/closure-capacity.mjs');
+  for (const status of ['blocked_needs_decision', 'waiting_approval', 'waiting_input']) {
+    const probe = { ok: true, row: { status } };
+    assert.equal(launchRequestInFlight(probe), false);
+    assert.equal(launchRequestOwned(probe), true);
+    assert.equal(launchHoldsCloserCapacity(probe.row), false);
+  }
+
   // HAMATTEST-02: the shared, head-bound decision selects ownership only.
   const reviewState = { verdict: 'approved', headSha: base, blockingFindingCount: 0,
     blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' };

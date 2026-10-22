@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { findLiveAmaCloserLease } from './closer-lease.mjs';
 import { readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
-import { launchRequestInFlight } from './launch-request-status.mjs';
+import { launchRequestOwned } from './launch-request-status.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { readHammerRetryCapLedger, HAMMER_RETRY_CAP_EXHAUSTED_REASON,
   HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON,
@@ -64,8 +64,8 @@ export async function operatorNoticeInFlight(rootDir, identity, {
     } catch { /* Unknown liveness cannot retire a recorded active launch. */ }
     // Shared with the in-flight closure blocker and closer lease reclamation;
     // a requested/admitted/leased/running launch has no age escape here.
-    const inFlight = launchRequestInFlight(probe);
-    const recordedInFlight = launchRequestInFlight({ ok: true,
+    const inFlight = launchRequestOwned(probe);
+    const recordedInFlight = launchRequestOwned({ ok: true,
       row: { status: record.terminalLaunchStatus || record.lastObservedStatus } });
     if (inFlight === true || (inFlight === null && (probe?.retryChainUnreadable || recordedInFlight !== false))) {
       return 'closer-in-flight';

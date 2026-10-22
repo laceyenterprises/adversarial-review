@@ -167,3 +167,19 @@ holds the affected account with `codex-account-evidence-unknown` until the next
 successful weekly probe; unknown evidence alone does not trigger AFH model
 fallback. A reason key must never promote short-window evidence to weekly
 capacity. Existing lifecycle states and offline smoke promises are unchanged.
+
+
+LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+(`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
+Boolean wire `terminal` and `succeeded` values take precedence when present;
+status-only ledger rows use the producer definitions. `blocked_needs_decision`
+and vocabulary-defined `blocked_`/`waiting_` states are parked: they consume no
+closer capacity and settle an active lease as terminal `deferred`, but their
+unchanged dispatch identity still owns the PR. They cannot be reclaimed,
+redispatched by ordinary or orphan recovery, or lose their scratch directory
+while parked. Parked observations are re-read rather than cached as final.
+A later resolved producer status restores the existing retry/settlement policy.
+The legacy stored spellings map through producer values: `completed` →
+`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
+`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+status-only evidence remains unknown. No new durable states or fields are added.

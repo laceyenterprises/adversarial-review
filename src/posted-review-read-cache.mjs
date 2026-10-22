@@ -31,8 +31,8 @@ export function observePostedReviewHead(repo, prNumber, headSha) {
 }
 
 export function readPostedReviewResource(kind, repo, prNumber, {
-  execFileImpl, env = process.env, currentHeadSha = null,
-} = {}, run, { now = Date.now } = {}) {
+  execFileImpl, env = process.env, currentHeadSha = null, signal = null,
+} = {}, run, { now = Date.now, headOf = null } = {}) {
   const scope = storage.getStore();
   if (!scope?.open || scope.repo !== repo || scope.prNumber !== prNumber) return run();
   const time = now();
@@ -48,14 +48,30 @@ export function readPostedReviewResource(kind, repo, prNumber, {
   let reads = scope.readers.get(execFileImpl);
   if (!reads) { reads = new Map(); scope.readers.set(execFileImpl, reads); }
   // Private ephemeral identity only; never log argv, credentials or payloads.
-  const key = JSON.stringify([kind, scope.headSha, env.GH_TOKEN, env.GITHUB_TOKEN,
+  const cacheKey = () => JSON.stringify([kind, scope.headSha, env.GH_TOKEN, env.GITHUB_TOKEN,
     env.GH_HOST, env.GH_CONFIG_DIR, env.HOME, env.USERPROFILE, env.GHA_ADAPTER_BIN,
     env.AGENT_OS_GITHUB_ADAPTER_BIN, env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY]);
+  let key = cacheKey();
   let entry = reads.get(key);
+  // Pending work belongs to its cancellation scope. Completed advisory facts
+  // can be reused until the existing head/age/effect boundary.
+  if (entry && !entry.settled && entry.signal !== signal) entry = null;
   if (!entry) {
-    entry = { promise: null };
+    entry = { promise: null, signal, settled: false };
     entry.promise = Promise.resolve().then(run).then(value => {
+      signal?.throwIfAborted();
+      entry.settled = true;
       if (scope.open && scope.readers.get(execFileImpl) === reads && reads.get(key) === entry) {
+        const observedHead = headOf?.(value);
+        if (observedHead && observedHead !== scope.headSha) {
+          observePostedReviewHead(repo, prNumber, observedHead);
+          // Rebind only this successful PR read, whose response establishes
+          // the new head. Every other previous-head observation was discarded.
+          reads = new Map();
+          scope.readers.set(execFileImpl, reads);
+          key = cacheKey();
+          reads.set(key, entry);
+        }
         scope.firstCompletedAt ??= now();
       }
       return value;

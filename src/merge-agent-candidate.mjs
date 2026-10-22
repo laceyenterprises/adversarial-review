@@ -1,5 +1,5 @@
 import { observePostedReviewHead, withPostedReviewReadCache } from './posted-review-read-cache.mjs';
-import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
+import { fetchMergeAgentCandidateSnapshot, settleCandidateSnapshotReads } from './merge-agent-candidate-snapshot.mjs';
 import { cachedStackedBaseDefaultBranch, guardStackedBase } from './ama/stacked-base.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -56,7 +56,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   fetchCachedAdversarialGateBranchProtectionImpl = fetchCachedAdversarialGateBranchProtection,
   guardStackedBaseImpl = guardStackedBase,
 } = {}) {
-  const parsed = preparedSnapshot || await fetchMergeAgentCandidateSnapshot(repo, prNumber, { execFileImpl, signal });
+  const parsed = preparedSnapshot || await fetchMergeAgentCandidateSnapshot(repo, prNumber, { execFileImpl, signal, env });
   observePostedReviewHead(repo, prNumber, parsed.headRefOid);
   const labels = parsed.labels || [];
   const normalizedLabels = normalizeLabelNames(labels);
@@ -64,15 +64,15 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
   // Four independent tasks, bounded per PR. The stacked-base guard (including
   // its hold receipt) still finishes before a candidate can authorize routing.
-  const results = await Promise.allSettled([
-    String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
+  const results = await settleCandidateSnapshotReads([
+    () => String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
       ? guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
         repo, prNumber, baseBranch: parsed.baseRefName, defaultBranch: parsed.defaultBranch,
         execFileImpl, signal, logger }) : null,
-    hasOperatorApproved && operatorApprovalEvent === undefined
+    () => hasOperatorApproved && operatorApprovalEvent === undefined
       ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl, env })
       : operatorApprovalEvent ?? null,
-    hasMergeAgentRequested && mergeAgentRequestEvent === undefined
+    () => hasMergeAgentRequested && mergeAgentRequestEvent === undefined
       ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl, env })
       : mergeAgentRequestEvent ?? null,
     (async () => {
@@ -96,7 +96,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
         }
       }
       return branchProtection;
-    })(),
+    }),
   ]);
   // Settle the guard and other readers even on failure; no orphaned task may
   // write a hold receipt after the caller has abandoned this candidate.
@@ -132,6 +132,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
     // NOOWNER-01: a moved base is one of the inputs that releases a hammer stop hold.
     baseSha: parsed.baseRefOid || null,
     headSha: parsed.headRefOid || null,
+    isDraft: typeof parsed.isDraft === 'boolean' ? parsed.isDraft : null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     mergeStateStatus: parsed.mergeStateStatus || null,
     checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(parsed.statusCheckRollup, { env, cfg: checksCfg }),

@@ -4,6 +4,27 @@ const storage = new AsyncLocalStorage();
 const MAX_READS = 256;
 const MAX_READ_BYTES = 16 * 1024 * 1024;
 
+// Copy before freezing: a reader or another consumer must not be able to change
+// evidence already handed to this pass. Reject executable/non-JSON values.
+export function immutableSnapshotValue(value, ancestors = new Set()) {
+  if (value === null || ['string', 'boolean', 'undefined'].includes(typeof value)) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'object' || ancestors.has(value)
+    || (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value)))) {
+    throw new TypeError('snapshot evidence must be a plain acyclic value');
+  }
+  ancestors.add(value);
+  try {
+    const copy = Array.isArray(value) ? new Array(value.length) : {};
+    for (const key of Object.keys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('snapshot evidence cannot contain accessors');
+      Object.defineProperty(copy, key, { value: immutableSnapshotValue(descriptor.value, ancestors), enumerable: true });
+    }
+    return Object.freeze(copy);
+  } finally { ancestors.delete(value); }
+}
+
 function evict(scope, entry) {
   scope.entries.delete(entry);
   scope.bytes -= entry.bytes;
@@ -20,7 +41,7 @@ export async function withClosureEvaluationReadCache(run) {
 export function readClosureImmutable(reader, identity, run, executor = reader, signal = null) {
   signal?.throwIfAborted();
   const scope = storage.getStore();
-  if (!scope?.open) return run();
+  if (!scope?.open) return Promise.resolve().then(run).then(immutableSnapshotValue);
   let executors = scope.readers.get(reader);
   if (!executors) { executors = new Map(); scope.readers.set(reader, executors); }
   let reads = executors.get(executor);
@@ -36,7 +57,7 @@ export function readClosureImmutable(reader, identity, run, executor = reader, s
     if (entry) evict(scope, entry);
     const promise = Promise.resolve().then(run).then(value => {
       signal?.throwIfAborted();
-      return value;
+      return immutableSnapshotValue(value);
     });
     entry = { reads, key, promise, signal, settled: false, bytes: 0 };
     reads.set(key, entry);

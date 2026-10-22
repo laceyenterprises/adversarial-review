@@ -1,5 +1,5 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
-import { readClosureImmutable } from '../closure-evaluation-cache.mjs';
+import { immutableSnapshotValue, readClosureImmutable } from '../closure-evaluation-cache.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
@@ -43,7 +43,7 @@ export function createHistoryReader(options = {}) {
         // CLI reads must defer an exhausted shared quota instead of entering an
         // unbounded throttle sleep. Daemon callers retain their existing scope.
         const { stdout } = await (currentGitHubBudgetScope() ? run() : withGitHubBudgetScope({}, run));
-        return JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, ''));
+        return immutableSnapshotValue(JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')));
       };
       const env = ghOptions.env || process.env;
       return await (immutable
@@ -60,7 +60,11 @@ export function createHistoryReader(options = {}) {
   };
   const cached = (path, jq) => {
     const key = `${path}:${jq}`;
-    if (!cache.has(key)) cache.set(key, json(path, jq));
+    if (!cache.has(key)) {
+      const pending = json(path, jq);
+      cache.set(key, pending);
+      pending.catch(() => { if (cache.get(key) === pending) cache.delete(key); });
+    }
     return cache.get(key);
   };
   const tree = async (repo, ref) => {

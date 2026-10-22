@@ -60,6 +60,13 @@ snapshot diagnostics.
 File evidence and reversal citations use the collector's shapes in
 `src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
+Within a closure evaluation, object-addressed transport responses can also be
+reused across history readers. These shared response values are deeply frozen;
+consumers cannot rewrite evidence seen by a sibling. Pending reads share only
+their cancellation signal, while completed reads can serve a new operation
+signal. Failed tree/blob promises are evicted from the per-reader cache. The
+existing context budget still bounds a retry. This NXA-01 collection change
+does not change the durable record shape, key or reversal-proof semantics.
 
 Entries in `rejectedReversalAuthorizations` retain their existing `reason` codes.
 An `original-reversal-not-proven-before-supersession` entry also carries optional

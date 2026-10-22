@@ -30,10 +30,28 @@ Native reconciliation now owns interrupted `dispatching` intents. A persisted
 per-attempt HQ key and fenced prepared/submitting phase either recover an exact
 receipt (`dispatched`) or prove no submission (`no-dispatch`, terminal deferred
 pending lease, one intent-budget rollback). A later wake refusal or stale-lease
-reaper cannot infer no launch from age or caller death. Unknown retains same-PR
-ownership, reaches a fixed inspection diagnostic deadline, and releases only
-its bounded fleet-capacity reservation. Live/replaced leases and retry caps
-remain authoritative; no receipt grants merge authority.
+reaper cannot infer no launch from age or caller death. CLOSERGATE-01 scopes
+unknown ownership to the intent's own PR and head. Pre-receipt intents never
+appear in global launch admission or consume concurrent-launch capacity, even
+when fresh or held by a live writer. Keyless legacy records retain the existing
+stale/orphan escapes in active-record listings. Authoritative merged/closed PR
+state holds nothing. At the fixed inspection deadline, one durable alert names
+the PR, head and reason; repeated polls and restarts reuse its attempt identity.
+Live/replaced leases and retry caps remain authoritative; no receipt grants
+merge authority.
+
+Reconciliation reads authoritative PR lifecycle metadata, never dispatch-record
+state. The native per-PR caller supplies its PR snapshot; directory/CLI repair
+uses a bounded live GitHub REST read (or the injected state resolver). Confirmed
+closed/merged PRs retire fenced intents at any head as `completed`, reason
+`pr-terminal`, with `preReceiptReconciliation.status: pr-terminal` and
+`observedAt`. This ends intent holds and inspection paging without asserting
+no submission, canceling a worker, changing leases or refunding retry budgets.
+Unreadable PR state permits canonical exact-key receipt recovery, but otherwise
+holds without mutation or paging. Live PR reads allow one transient retry with
+a 3-second per-call timeout and a 5-second total budget. A terminal PR discovered
+during reconciliation immediately stops downstream dispatch admission. After any yielding read
+or alert enqueue, an unreadable or changed lease defers the write safely.
 
 See the [owner recovery procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
 and [persistent evidence contract](data-model/ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).
@@ -3305,11 +3323,11 @@ dispatch falls back to the configured floor on census failure. Invalid JSON is q
 Diagnostics grant no merge authority.
 
 The cap reconciles session-ledger launches within the
-existing dispatch-record and lease reclaim windows, plus pending lease-held
-dispatches inside the bounded launch window. Terminal
-launches immediately stop consuming capacity when the next dispatch scans the
-records. Dispatching intents retain capacity inside the bounded pending-launch
-window. Unreadable, missing or budget-skipped ledger evidence preserves same-PR
+existing dispatched-record and lease reclaim windows. Terminal launches
+immediately stop consuming capacity when the next dispatch scans the records.
+CLOSERGATE-01 excludes all pre-receipt `dispatching` intents from global launch
+admission and capacity, including fresh pending lease-held attempts. Unreadable,
+missing or budget-skipped ledger evidence for receipted launches preserves same-PR
 ownership under existing liveness rules and reserves fleet capacity while the
 record is inside the bounded pending-launch window. Unreadable retry chains reserve the
 same bounded capacity even when the ancestor is terminal. Live ledger
@@ -3419,7 +3437,7 @@ changes. The normal dispatch capacity scan reconciles only launches still within
 the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
-HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes, including in-process SQLite reads without snapshot rows, admit queries for at most one second. Unprobed, missing and unreadable records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes, including in-process SQLite reads without snapshot rows, admit queries for at most one second. Unprobed, missing and unreadable receipted records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; pre-receipt intents never reserve fleet capacity; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
 

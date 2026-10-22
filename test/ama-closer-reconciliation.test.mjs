@@ -57,7 +57,7 @@ for (const state of ['dispatching', 'dispatched']) {
     }));
     let probes = 0;
     const options = { now, readLaunchRequestStatusImpl: () => { probes += 1; return { ok: true, row: { status: 'running' } }; } };
-    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, state === 'dispatching' ? 1 : 0);
+    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
     assert.equal(probes, 0, 'an intent must not query a predecessor LRQ');
     assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(root, identity))).state, state,
       'age expiry alone does not fabricate a terminal outcome');
@@ -235,8 +235,9 @@ test('historical cleanup remains available through explicit reconciliation', asy
 test('daemon and CLI retain unknown same-head retry intent without probing its predecessor', async (t) => {
   const root = fixture(t, 'retry');
   const path = dispatchRecord(root, 1, { state: 'dispatching', lastObservedStatus: 'failed' });
-  const options = { now: NOW, readLaunchRequestStatusImpl: () => assert.fail('must not probe the previous LRQ') };
-  assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 1);
+  const options = { now: NOW, readPullRequestStateImpl: async () => ({ state: 'OPEN' }), deliverAlertImpl: async () => {},
+    readLaunchRequestStatusImpl: () => assert.fail('must not probe the previous LRQ') };
+  assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
   assert.equal((await reconcileAmaCloserDispatches(root, options)).active.length, 1);
   const record = JSON.parse(readFileSync(path));
   assert.equal(record.state, 'dispatching');
@@ -408,4 +409,19 @@ test('HAMRETRY-01: unreadable retry traversal reserves bounded capacity', async 
   });
   assert.equal(active.length, 1);
   assert.equal(active[0].holdsCapacity, true, 'base terminality cannot release an unreadable descendant');
+});
+
+test('CLOSERGATE-01: capacity ignores legacy, keyed, orphaned and terminal-PR intents', async t => {
+  const root = fixture(t, 'closergate-capacity');
+  for (const [i, patch] of [
+    { dispatchIdempotencyKey: null, lastAttemptedAt: '2020-01-01T00:00:00Z' },
+    { dispatchIdempotencyKey: null },
+    { dispatchIdempotencyKey: 'synthetic-key' },
+    { dispatchIdempotencyKey: 'synthetic-inspection', preReceiptReconciliation: { status: 'inspection-required' } },
+    { prState: 'MERGED' }, { prState: 'CLOSED' },
+  ].entries()) dispatchRecord(root, i + 1, { state: 'dispatching', ...patch });
+  const options = { now: NOW,
+    readIntentReceiptImpl: () => assert.fail('capacity must not inspect unrelated intents'),
+    readLaunchRequestStatusImpl: () => assert.fail('capacity must not query a predecessor LRQ') };
+  assert.deepEqual(await findActiveAmaCloserLaunches(root, options), []);
 });

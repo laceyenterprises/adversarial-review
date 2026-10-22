@@ -7,12 +7,26 @@
 
 ## Interrupted dispatch intents (LAC-2081)
 
-A persisted `dispatching` record reserves its PR across all heads until native
-reconciliation resolves the attempt. Age, a dead watcher, a missing lease,
-null launch IDs, and a previous head's terminal launch do not prove no launch.
-The launch subprocess can enqueue after its caller disappears. These records
-never age-cancel; after the pending capacity window they retain same-PR
-exclusion without occupying a fleet launch slot.
+CLOSERGATE-01: an unresolved `dispatching` record holds only its own PR/head.
+Pre-receipt records never appear as global active launches or consume concurrent
+launch capacity. Keyed intents retain their own exclusion regardless of age;
+keyless legacy records retain stale/orphan escapes in active-record listings.
+Authoritative merged/closed PR metadata bypasses intent holds. No age escape
+fabricates a no-launch outcome or cancels a keyed intent. Age, a dead watcher,
+a missing lease and a predecessor's terminal launch cannot prove no submission.
+
+Reconciliation reads authoritative PR lifecycle metadata, never dispatch-record
+state. The native per-PR caller supplies its PR snapshot; directory/CLI repair
+uses a bounded live GitHub REST read (or the injected state resolver). Confirmed
+closed/merged PRs retire fenced intents at any head as `completed`, reason
+`pr-terminal`, with `preReceiptReconciliation.status: pr-terminal` and
+`observedAt`. This ends intent holds and inspection paging without asserting
+no submission, canceling a worker, changing leases or refunding retry budgets.
+Unreadable PR state permits canonical exact-key receipt recovery, but otherwise
+holds without mutation or paging. Live PR reads allow one transient retry with
+a 3-second per-call timeout and a 5-second total budget. A terminal PR discovered
+during reconciliation immediately stops downstream dispatch admission. After any yielding read
+or alert enqueue, an unreadable or changed lease defers the write safely.
 
 New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
 `hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,
@@ -40,8 +54,12 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
   `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
   deadline is the original dispatch timeout (30 minutes from first observation
   if unavailable). On expiry status becomes `inspection-required`; ownership
-  remains held. Repeated diagnostics write at most once per minute and log only
-  status changes. No accumulating history or launch-timestamp refresh is added.
+  remains held for its own PR/head. The existing alert outbox emits a SEV1
+  inspection page naming PR, head and reason. Its identity uses the attempt key
+  (legacy fallback: original attempt timestamp), so enqueue retries after a
+  crash cannot duplicate a page. `alertedAt` records successful enqueue; failures
+  log and retry without releasing ownership. Dry-run never enqueues. Repeated
+  diagnostics write at most once per minute and log only status changes. No accumulating history or launch-timestamp refresh is added.
 
 ### Legacy ticket/time evidence (LEGACYINTENT-01)
 
@@ -94,13 +112,15 @@ operator reason, invocation ID and query evidence. Audit-write failure before
 mutation refuses settlement. An authorization row without a completion row
 means interrupted apply; rerun the command to inspect current state. Inconclusive
 evidence exits nonzero and cannot release ownership. The command only handles
-legacy intents and performs no GitHub operation or dispatch.
+legacy intents, reads authoritative PR state through the shared reconciler,
+and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
 `--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
-created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
-A source-code change does not authorize production apply.
+created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
+A source-code change does not authorize production apply. Do not run apply
+against PR 8918 under the LAC-2081 source-fix authorization.
 Missing credentials or inaccessible rows mean unknown, not absence. Preserve
 prompt/scratch evidence while ownership remains unknown. No new configuration
 keys, launch route, retry allowance or merge/finalization gate is introduced.
@@ -200,7 +220,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
 | `dispatchIdempotencyKey` | optional string | Unique native HQ admission key for this attempt; unchanged across its inline retries. Absent on legacy intents. |
 | `dispatchPhase` | optional `prepared` or `submitting` | Submission boundary, meaningful only with the new key/fence protocol. Never inferred from age. |
-| `preReceiptReconciliation` | optional object | Bounded status/reason and observation/deadline evidence described above. `receipt-recovered` and `no-launch` store `observedAt`; legacy outcomes also store the bounded `query` evidence above. Unknown uses the fixed inspection horizon. |
+| `preReceiptReconciliation` | optional object | Bounded status/reason and observation/deadline evidence described above. `receipt-recovered` and `no-launch` store `observedAt`; legacy outcomes also store the bounded `query` evidence above. Unknown uses the fixed inspection horizon; `alertedAt` optionally records the durable inspection alert enqueue. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |

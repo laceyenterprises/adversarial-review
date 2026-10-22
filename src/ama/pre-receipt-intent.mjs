@@ -8,6 +8,8 @@ import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinc
 import { amaCloserDispatchFilePath } from './dispatch-record-read.mjs';
 import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
+import { deliverAlert } from '../alert-delivery.mjs';
+import { execGhWithRetry } from '../gh-cli.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -46,6 +48,24 @@ const readBytes = path => {
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const isPreReceiptIntent = record => record?.state === 'dispatching';
+// Accept PR metadata only: dispatch lifecycle state is a separate contract.
+export const isTerminalCloserPullRequest = pr => pr?.isOpen === false
+  || pr?.isMerged === true || pr?.merged === true
+  || ['CLOSED', 'MERGED'].includes(String(pr?.prState || pr?.state || '').toUpperCase());
+
+async function readPullRequestState({ repo, prNumber }, options) {
+  const { stdout } = await execGhWithRetry({
+    args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged}'],
+    execFileImpl: options.execFileImpl, env: options.env || process.env,
+    signal: options.signal, retries: 1, timeoutMs: 3000, totalTimeoutMs: 5000,
+  });
+  return JSON.parse(stdout);
+}
+
+function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
+  try { return readBytes(path) === bytes && same(readAmaCloserLease(rootDir, identity), lease); }
+  catch { return false; }
+}
 
 export async function reconcilePreReceiptIntent(rootDir, identity, options = {}) {
   const release = tryAcquireCloserIntentLock(rootDir, identity);
@@ -64,6 +84,22 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     try { lease = readAmaCloserLease(rootDir, leaseIdentity); }
     catch { return { status: 'held', reason: 'lease-unreadable' }; }
     const now = options.now || new Date().toISOString();
+    let pr;
+    try {
+      pr = options.prMetadata || await (options.readPullRequestStateImpl || readPullRequestState)(record, options);
+    } catch { /* Missing or unreadable PR state cannot authorize retirement or a page. */ }
+    options.signal?.throwIfAborted();
+    if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
+      return { status: 'held', reason: 'intent-or-lease-changed' };
+    }
+    if (isTerminalCloserPullRequest(pr)) {
+      // PR retirement says nothing about submission or worker liveness. Preserve
+      // lease, launch evidence and budgets; only end this intent's PR hold/page.
+      const next = { ...record, state: 'completed', reason: 'pr-terminal',
+        preReceiptReconciliation: { status: 'pr-terminal', observedAt: now } };
+      if (!options.dryRun) writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+      return { status: 'pr-terminal', changed: true, record: next };
+    }
     const localDead = lease?.status === 'pending' && !lease.lrqId
       && (!lease.holderHost || lease.holderHost === hostname())
       && isAmaCloserPidAlive(lease.watcherPid, options.processKillImpl) === false;
@@ -100,7 +136,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     }
     // Evidence reads yield. Re-read the entire record and lease, preserving even
     // unrelated annotations or a same-timestamp replacement owner.
-    if (readBytes(path) !== bytes || !same(readAmaCloserLease(rootDir, leaseIdentity), lease)) {
+    if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
       return { status: 'held', reason: 'intent-or-lease-changed' };
     }
     const rows = probe?.ok && Array.isArray(probe.rows) ? probe.rows : null;
@@ -126,6 +162,12 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           headSha: record.targetRemediationSha || record.headSha,
           dispatchKey: record.dispatchIdempotencyKey, preserveSuppression: true, now });
       } catch { budgetUnreadable = true; }
+    }
+    // Canonical receipt recovery is local evidence, independent of GitHub
+    // availability. Unreadable PR state still cannot authorize absence or paging.
+    if ((!recoverableReceipt || budgetUnreadable)
+      && !(pr?.isOpen === true || String(pr?.prState || pr?.state || '').toUpperCase() === 'OPEN')) {
+      return { status: 'held', reason: 'pr-state-unreadable' };
     }
     let next;
     let status;
@@ -196,11 +238,35 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           ? 'legacy-launch-in-range' : 'legacy-intent-without-key')
         : !rows ? 'receipt-lookup-unreadable' : rows.length ? 'receipt-identity-ambiguous' : 'submission-absence-unproven';
       next = { ...record, preReceiptReconciliation: { status: diagnosticStatus,
-        firstObservedAt, deadlineAt, observedAt: now, reason, ...(evidence ? { query: evidence } : {}) } };
+        firstObservedAt, deadlineAt, observedAt: now, reason,
+        ...(evidence ? { query: evidence } : {}),
+        ...(prior?.alertedAt ? { alertedAt: prior.alertedAt } : {}) } };
       // Bounded diagnostics: no launch timestamp refresh, no unbounded history,
       // no polling write/log storm. The deadline never clears ownership.
       if (prior?.status === diagnosticStatus && prior?.reason === reason
         && Date.parse(now) - Date.parse(prior.observedAt) < 60_000) next = record;
+    }
+    if (!options.dryRun && next.preReceiptReconciliation?.status === 'inspection-required'
+      && !next.preReceiptReconciliation.alertedAt) {
+      try {
+        await (options.deliverAlertImpl || deliverAlert)(
+          `Closer intent requires inspection for ${record.repo}#${record.prNumber}, head ${record.headSha}: `
+          + `${next.preReceiptReconciliation.reason}. This PR/head is held; other closers may proceed.`,
+          { event: 'ama_closer.pre_receipt_inspection_required', env: options.env || process.env,
+            now: new Date(now), payload: { repo: record.repo, prNumber: record.prNumber,
+              headSha: record.headSha, reason: next.preReceiptReconciliation.reason,
+              dispatchIdempotencyKey: record.dispatchIdempotencyKey || null,
+              lastAttemptedAt: record.lastAttemptedAt || null } });
+        next = { ...next, preReceiptReconciliation: { ...next.preReceiptReconciliation, alertedAt: now } };
+      } catch (error) {
+        options.logger?.warn?.(JSON.stringify({ event: 'ama_closer.pre_receipt_alert_failed',
+          repo: record.repo, prNumber: record.prNumber, headSha: record.headSha,
+          error: error.message }));
+      }
+      // Alert enqueue can yield too. Never overwrite a replacement owner.
+      if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
+        return { status: 'held', reason: 'intent-or-lease-changed' };
+      }
     }
     if (!options.dryRun && next !== record) {
       writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);

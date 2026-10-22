@@ -14,12 +14,27 @@ condition is resolved.
 
 ## Interrupted dispatch intents (LAC-2081)
 
-A persisted `dispatching` record reserves its PR across all heads until native
-reconciliation resolves the attempt. Age, a dead watcher, a missing lease,
-null launch IDs, and a previous head's terminal launch do not prove no launch.
-The launch subprocess can enqueue after its caller disappears. These records
-never age-cancel; after the pending capacity window they retain same-PR
-exclusion without occupying a fleet launch slot.
+CLOSERGATE-01: an unresolved `dispatching` record holds only its own PR/head.
+It never appears in the global active-launch census or consumes concurrent
+launch capacity. Keyless legacy records retain stale/orphan escapes in active
+record listings. Authoritative merged/closed PR metadata bypasses intent holds.
+Keyed ownership is not age-canceled: a missing lease, caller death or an old
+receipt cannot prove no submission. At the fixed inspection deadline, the
+existing durable alert outbox pages once with PR, head and reason; repeated
+polls and restarts reuse the attempt identity and its `alertedAt` receipt.
+
+Reconciliation reads authoritative PR lifecycle metadata, never dispatch-record
+state. The native per-PR caller supplies its PR snapshot; directory/CLI repair
+uses a bounded live GitHub REST read (or the injected state resolver). Confirmed
+closed/merged PRs retire fenced intents at any head as `completed`, reason
+`pr-terminal`, with `preReceiptReconciliation.status: pr-terminal` and
+`observedAt`. This ends intent holds and inspection paging without asserting
+no submission, canceling a worker, changing leases or refunding retry budgets.
+Unreadable PR state permits canonical exact-key receipt recovery, but otherwise
+holds without mutation or paging. Live PR reads allow one transient retry with
+a 3-second per-call timeout and a 5-second total budget. A terminal PR discovered
+during reconciliation immediately stops downstream dispatch admission. After any yielding read
+or alert enqueue, an unreadable or changed lease defers the write safely.
 
 New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
 `hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,
@@ -104,13 +119,15 @@ operator reason, invocation ID and query evidence. Audit-write failure before
 mutation refuses settlement. An authorization row without a completion row
 means interrupted apply; rerun the command to inspect current state. Inconclusive
 evidence exits nonzero and cannot release ownership. The command only handles
-legacy intents and performs no GitHub operation or dispatch.
+legacy intents, reads authoritative PR state through the shared reconciler,
+and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
 `--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
-created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
-A source-code change does not authorize production apply.
+created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
+A source-code change does not authorize production apply. Do not run apply
+against PR 8918 under the LAC-2081 source-fix authorization.
 Missing credentials or inaccessible rows mean unknown, not absence. Preserve
 prompt/scratch evidence while ownership remains unknown. No new configuration
 keys, launch route, retry allowance or merge/finalization gate is introduced.

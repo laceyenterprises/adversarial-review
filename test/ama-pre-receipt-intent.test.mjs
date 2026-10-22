@@ -11,7 +11,7 @@ import { reconcileRecoveryLaunches } from '../src/ama/recovery-launch-reconcilia
 import { reconcilePreReceiptIntent, tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord,
-  findActiveAmaCloserLaunches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+  findActiveAmaCloserLaunches, reconcileAmaCloserDispatches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { main as settleLegacyIntent } from '../bin/settle-legacy-closer-intent.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -38,7 +38,8 @@ function fixture(t, patch = {}, lease = true) {
   updateAmaCloserDispatchRecord(rootDir, identity, () => record);
   if (lease) acquireAmaCloserLease({ rootDir, ...identity, now: started, watcherPid: 12345 });
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
-    processKillImpl: dead, logger: { warn() {} } };
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+    processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };
   return { rootDir, options, record,
     read: () => readAmaCloserDispatchRecord(rootDir, identity),
     reconcile: extra => reconcilePreReceiptIntent(rootDir, identity, { ...options, ...extra }),
@@ -100,14 +101,15 @@ test('legacy and submitted intents keep same-PR ownership past any age; diagnost
     const deadline = f.read().preReceiptReconciliation.deadlineAt;
     await f.reconcile({ now: '2030-01-01T00:00:00Z' });
     assert.equal(f.read().preReceiptReconciliation.deadlineAt, deadline);
-    assert.equal(isActiveAmaCloserDispatchRecord(f.read(), { now: '2030-01-01' }), true);
+    assert.equal(isActiveAmaCloserDispatchRecord(f.read(), { now: '2030-01-01' }), Boolean(dispatchIdempotencyKey));
     const active = await findActiveAmaCloserLaunches(f.rootDir, { ...f.options, now: '2030-01-01T00:00:00Z' });
-    assert.equal(active.length, 1);
-    assert.equal(active[0].holdsCapacity, false, 'unknown PR does not hold a fleet slot indefinitely');
+    assert.deepEqual(active, [], 'an unresolved intent never appears in the fleet launch census');
     let launches = 0;
     const decision = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+      prMetadata: { isOpen: true },
       dispatchContext: { rootDir: f.rootDir, ...identity, dispatchedAt: now },
       readLegacyIntentLaunchesImpl: f.options.readLegacyIntentLaunchesImpl,
+      deliverAlertImpl: async () => {},
       execFileImpl: () => { launches++; throw Error('must not launch'); }, logger: { warn() {} } });
     assert.equal(decision.reason, 'existing-dispatch-unknown');
     assert.equal(decision.skipMergeAgent, true);
@@ -505,7 +507,206 @@ test('legacy absence proof does not depend on whether the original watcher is st
 
 test('automatic launch reconciliation uses the same legacy ledger proof', async t => {
   const f = fixture(t, { dispatchIdempotencyKey: null });
+  const before = f.read();
   assert.deepEqual(await findActiveAmaCloserLaunches(f.rootDir, f.options), []);
+  assert.deepEqual(f.read(), before, 'the fleet census excludes pre-receipt intents without mutation');
+  const result = await reconcileAmaCloserDispatches(f.rootDir, f.options);
+  assert.equal(result.preReceipt.noLaunch, 1);
+  assert.deepEqual(result.active, []);
   assert.equal(f.read().reason, 'legacy-no-launch-proven');
   assert.equal(f.read().preReceiptReconciliation.query.ok, true);
 });
+
+test('CLOSERGATE-01: inspection pages once per intent across repeated reconciliation', async t => {
+  const f = fixture(t, {}, false);
+  const pages = [];
+  const deliverAlertImpl = async (text, options) => { pages.push({ text, ...options }); };
+  await f.reconcile({ deliverAlertImpl });
+  await f.reconcile({ deliverAlertImpl, now: '2030-01-01T00:00:00Z' });
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].event, 'ama_closer.pre_receipt_inspection_required');
+  assert.match(pages[0].text, /fixture\/repo#8/);
+  assert.ok(pages[0].text.includes(identity.headSha));
+  assert.ok(pages[0].text.includes('submission-absence-unproven'));
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, now);
+});
+
+test('CLOSERGATE-01: dry-run never pages; failed enqueue retries without releasing ownership', async t => {
+  const f = fixture(t, {}, false);
+  const before = f.read();
+  let calls = 0;
+  const deliverAlertImpl = async () => { calls++; throw Error('synthetic outbox unavailable'); };
+  await f.reconcile({ dryRun: true, deliverAlertImpl });
+  assert.equal(calls, 0);
+  assert.deepEqual(f.read(), before);
+  await f.reconcile({ deliverAlertImpl });
+  assert.equal(calls, 1);
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, undefined);
+  assert.equal(f.read().state, 'dispatching');
+  await f.reconcile({ deliverAlertImpl: async () => { calls++; } });
+  assert.equal(calls, 2);
+  assert.equal(f.read().preReceiptReconciliation.alertedAt, now);
+});
+
+test('CLOSERGATE-01: yielding alert enqueue cannot overwrite a replacement intent', async t => {
+  const f = fixture(t, {}, false);
+  const result = await f.reconcile({ deliverAlertImpl: async () => {
+    writeFileSync(amaCloserDispatchFilePath(f.rootDir, identity), JSON.stringify({ ...f.read(), replacement: true }));
+  } });
+  assert.equal(result.status, 'held');
+  assert.equal(f.read().replacement, true);
+  assert.equal(f.read().preReceiptReconciliation, undefined);
+});
+
+for (const pr of [{ state: 'closed', merged: false }, { state: 'closed', merged: true }]) {
+  test(`directory reconciliation retires raw intent for ${pr.merged ? 'merged' : 'closed'} PR without paging`, async t => {
+    const f = fixture(t);
+    const leaseBefore = readFileSync(amaCloserLeaseFilePath(f.rootDir, identity), 'utf8');
+    let stateReads = 0;
+    const options = { ...f.options, readPullRequestStateImpl: async record => {
+      stateReads++;
+      assert.equal(record.repo, identity.repo);
+      assert.equal(record.prNumber, identity.prNumber);
+      return pr;
+    }, readIntentReceiptImpl: () => assert.fail('terminal PR needs no receipt'),
+    deliverAlertImpl: () => assert.fail('terminal PR must not page') };
+    const before = f.read();
+    const dry = await reconcileAmaCloserDispatches(f.rootDir, { ...options, dryRun: true });
+    assert.equal(dry.preReceipt.retired, 1);
+    assert.deepEqual(f.read(), before);
+    const result = await reconcileAmaCloserDispatches(f.rootDir, options);
+    assert.equal(result.preReceipt.retired, 1);
+    assert.deepEqual(result.active, []);
+    assert.equal(f.read().state, 'completed');
+    assert.equal(f.read().preReceiptReconciliation.status, 'pr-terminal');
+    assert.equal(f.read().retryCount, before.retryCount);
+    assert.equal(f.read().dispatchIdempotencyKey, key);
+    assert.equal(readFileSync(amaCloserLeaseFilePath(f.rootDir, identity), 'utf8'), leaseBefore);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    assert.equal(isActiveAmaCloserDispatchRecord(f.read()), false);
+    await reconcileAmaCloserDispatches(f.rootDir, options);
+    assert.equal(stateReads, 2, 'retired intents are not re-probed');
+  });
+}
+
+test('default PR resolver reads bounded REST metadata rather than stored dispatch state', async t => {
+  const f = fixture(t, {}, false);
+  const result = await f.reconcile({ readPullRequestStateImpl: undefined,
+    execFileImpl: async (command, args, options) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['api', 'repos/fixture/repo/pulls/8', '--jq', '{state, merged}']);
+      assert.ok(options.timeout > 0 && options.timeout <= 3000);
+      return { stdout: JSON.stringify({ state: 'closed', merged: true }) };
+    }, deliverAlertImpl: () => assert.fail('terminal PR must not page') });
+  assert.equal(result.status, 'pr-terminal');
+});
+
+test('default PR resolver retries transient GitHub failures within its bounded budget', async t => {
+  const f = fixture(t, {}, false);
+  let attempts = 0;
+  const result = await f.reconcile({ readPullRequestStateImpl: undefined,
+    execFileImpl: async (_command, _args, options) => {
+      assert.ok(options.timeout > 0 && options.timeout <= 3000);
+      if (++attempts === 1) throw Object.assign(new Error('temporary outage'), { stderr: 'HTTP 503' });
+      return { stdout: JSON.stringify({ state: 'closed', merged: true }) };
+    } });
+  assert.equal(attempts, 2);
+  assert.equal(result.status, 'pr-terminal');
+});
+
+test('default PR resolver stops after one transient retry', async t => {
+  const f = fixture(t, {}, false);
+  let attempts = 0;
+  const result = await f.reconcile({ readPullRequestStateImpl: undefined,
+    execFileImpl: async () => {
+      attempts++;
+      throw Object.assign(new Error('temporary outage'), { stderr: 'HTTP 503' });
+    } });
+  assert.equal(attempts, 2);
+  assert.equal(result.reason, 'pr-state-unreadable');
+  assert.deepEqual(f.read(), f.record);
+});
+
+for (const dryRun of [false, true]) {
+  test(`local receipt recovery survives unreadable PR state (dryRun=${dryRun})`, async t => {
+    const f = fixture(t);
+    f.insert(receipt);
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({ dryRun,
+      readPullRequestStateImpl: async () => { throw Error('GitHub unavailable'); },
+      deliverAlertImpl: () => assert.fail('receipt recovery must not page') });
+    assert.equal(result.status, 'receipt-recovered');
+    if (dryRun) {
+      assert.deepEqual(f.read(), f.record);
+      assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    } else {
+      assert.equal(f.read().state, 'dispatched');
+      assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+      assert.equal(readAmaCloserLease(f.rootDir, identity).lrqId, receipt.launch_request_id);
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+    }
+  });
+}
+
+for (const readPullRequestStateImpl of [async () => { throw Error('unavailable'); }, async () => ({})]) {
+  test('unreadable PR lifecycle evidence holds ownership without paging or mutation', async t => {
+    const f = fixture(t, {}, false);
+    const before = f.read();
+    const result = await f.reconcile({ readPullRequestStateImpl,
+      deliverAlertImpl: () => assert.fail('unreadable PR state must not page') });
+    assert.equal(result.status, 'held');
+    assert.equal(result.reason, 'pr-state-unreadable');
+    assert.deepEqual(f.read(), before);
+  });
+}
+
+test('PR resolver yield preserves a concurrent record annotation before terminal retirement', async t => {
+  const f = fixture(t, {}, false);
+  const result = await f.reconcile({ readPullRequestStateImpl: async () => {
+    writeFileSync(amaCloserDispatchFilePath(f.rootDir, identity), JSON.stringify({ ...f.read(), replacement: true }));
+    return { state: 'CLOSED' };
+  } });
+  assert.equal(result.status, 'held');
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(f.read().replacement, true);
+});
+
+test('terminal PR dispatch gate retires lingering intents at every head', async t => {
+  const f = fixture(t, {}, false);
+  const older = { ...identity, headSha: 'b'.repeat(40) };
+  updateAmaCloserDispatchRecord(f.rootDir, older, () => ({ ...f.record, ...older }));
+  const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    dispatchContext: { rootDir: f.rootDir, ...identity },
+    prMetadata: { isOpen: false, state: 'MERGED', headSha: identity.headSha },
+    deliverAlertImpl: () => assert.fail('terminal PR must not page') });
+  assert.equal(result.reason, 'pr-not-mergeable');
+  assert.equal(f.read().state, 'completed');
+  assert.equal(readAmaCloserDispatchRecord(f.rootDir, older).state, 'completed');
+});
+
+test('terminal PR discovered by reconciliation stops dispatch before downstream admission', async t => {
+  const f = fixture(t, {}, false);
+  const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    dispatchContext: { rootDir: f.rootDir, ...identity },
+    readPullRequestStateImpl: async () => ({ state: 'CLOSED', merged: true }),
+    execFileImpl: () => assert.fail('terminal PR must not reach downstream admission'),
+    deliverAlertImpl: () => assert.fail('terminal PR must not page') });
+  assert.equal(result.reason, 'pr-not-mergeable');
+  assert.equal(result.dispatched, false);
+  assert.equal(f.read().state, 'completed');
+});
+
+for (const boundary of ['receipt', 'alert']) {
+  test(`lease corruption during ${boundary} yield defers without throwing or overwriting`, async t => {
+    const f = fixture(t);
+    const leasePath = amaCloserLeaseFilePath(f.rootDir, identity);
+    const corrupt = async () => { writeFileSync(leasePath, '{bad json'); return { ok: true, rows: [] }; };
+    const result = await f.reconcile(boundary === 'receipt'
+      ? { readIntentReceiptImpl: corrupt } : { deliverAlertImpl: corrupt });
+    assert.equal(result.status, 'held');
+    assert.equal(result.reason, 'intent-or-lease-changed');
+    assert.deepEqual(f.read(), f.record);
+    assert.equal(readFileSync(leasePath, 'utf8'), '{bad json');
+  });
+}

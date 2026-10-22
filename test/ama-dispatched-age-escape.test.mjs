@@ -62,7 +62,7 @@ test('a live dispatched record is never raced', () => {
   }
 });
 
-test('a live dispatching record is never raced by a stale launch stamp', () => {
+test('legacy dispatching records use the freshest observation and retain the stale escape', () => {
   // Same shadowing hazard on the `dispatching` branch, which shares the
   // most-recent-timestamp helper.
   assert.equal(
@@ -78,9 +78,22 @@ test('a live dispatching record is never raced by a stale launch stamp', () => {
       { state: 'dispatching', lastAttemptedAt: ago(24), lastObservedAt: ago(24) },
       { now: NOW }
     ),
-    true,
-    'an unknown unreceipted launch cannot age out'
+    false,
+    'a stale keyless legacy intent retains the active-list age escape'
   );
+});
+
+test('keyed dispatching ownership stays active regardless of timestamp age or lease absence', () => {
+  for (const timestamps of [
+    { lastAttemptedAt: ago(24), lastObservedAt: NOW },
+    { lastAttemptedAt: ago(24), lastObservedAt: ago(24) },
+    {},
+  ]) {
+    assert.equal(isActiveAmaCloserDispatchRecord({
+      state: 'dispatching', dispatchIdempotencyKey: 'synthetic-attempt', ...timestamps,
+    }, { now: NOW, lease: null }), true,
+    'keyed intent ownership cannot be retired using age or missing lease evidence');
+  }
 });
 
 test('a dispatched record with no parseable timestamp stays held', () => {

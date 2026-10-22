@@ -57,6 +57,7 @@ function testDeps() {
   const calls = [];
   return {
     calls,
+    deliverAlertImpl: async () => {},
     readPullRequestStateImpl: () => null,
     execFileImpl: async (cmd, args, options = {}) => {
       calls.push({ cmd, args, options });
@@ -294,7 +295,7 @@ test('LCR: hq dispatch preserves an already stricter worker provision timeout', 
   assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '30');
 });
 
-test('LCR: configured ceiling of three dispatching launches holds a fourth', async (t) => {
+test('CLOSERGATE-01: legacy keyless dispatching records never defer another PR at capacity', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-active-launch-defers-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   for (const prNumber of [997, 998, 999]) {
@@ -328,12 +329,81 @@ test('LCR: configured ceiling of three dispatching launches holds a fourth', asy
     ...deps,
   });
 
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'ama-closer-launch-in-progress');
-  assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.activeLaunch.prNumber, 997);
-  assert.equal(deps.calls.length, 0, 'do not start another hq dispatch before the first has an lrq');
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.activeLaunch, undefined);
+  assert.equal(deps.calls.length, 1);
 });
+
+for (const kind of ['legacy-stale', 'orphan', 'unknown', 'held', 'inspection-required']) {
+  test(`CLOSERGATE-01: ${kind} intents for other PRs do not consume launch capacity`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closergate-other-pr-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, {
+      cfg: { amaCloserMaxConcurrentLaunches: 1, amaCloserConcurrentLaunchCeiling: 1 },
+    });
+    const other = { repo: 'fixture/other', prNumber: 99, headSha: 'b'.repeat(40) };
+    updateAmaCloserDispatchRecord(rootDir, other, () => ({ ...other, state: 'dispatching',
+      dispatchIdempotencyKey: kind === 'legacy-stale' ? null : 'synthetic-intent-key',
+      lastAttemptedAt: kind === 'legacy-stale' ? '2026-01-01T00:00:00Z' : args.dispatchContext.dispatchedAt,
+      preReceiptReconciliation: { status: kind, reason: 'synthetic-unresolved' } }));
+    const deps = testDeps();
+    const events = [];
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readIntentReceiptImpl: () => assert.fail('another PR must not trigger intent lookup'),
+      logger: { ...deps.logger, info: line => events.push(JSON.parse(line)) } });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(result.activeLaunch, undefined);
+    assert.equal(events.find(event => event.event === 'ama.closer_queue_depth').liveLaunches, 0);
+    assert.equal(deps.calls.length, 1);
+  });
+}
+
+for (const keyed of [false, true]) {
+  test(`CLOSERGATE-01: inspection holds only its own PR/head (keyed=${keyed})`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closergate-own-head-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const own = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    updateAmaCloserDispatchRecord(rootDir, own, () => ({ ...own, state: 'dispatching',
+      dispatchIdempotencyKey: keyed ? 'synthetic-own-intent' : null,
+      lastAttemptedAt: '2026-01-01T00:00:00Z', dispatchTimeoutMs: 600_000,
+      preReceiptReconciliation: { status: 'inspection-required', reason: 'submission-absence-unproven' } }));
+    const deps = testDeps();
+    let pages = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      deliverAlertImpl: async () => { pages++; },
+      readIntentReceiptImpl: () => ({ ok: false }) });
+    assert.equal(result.reason, 'existing-dispatch-unknown');
+    assert.equal(result.activeLaunch.headSha, HEAD);
+    assert.equal(deps.calls.length, 0);
+    assert.equal(pages, 1);
+    const next = await maybeDispatchAmaCloser({ ...args, ...deps,
+      prMetadata: { ...args.prMetadata, headSha: 'c'.repeat(40) },
+      reviewState: { ...args.reviewState, headSha: 'c'.repeat(40) },
+      dispatchContext: { ...args.dispatchContext, reviewedSha: 'c'.repeat(40) },
+      deliverAlertImpl: () => assert.fail('old head must not page'),
+      readIntentReceiptImpl: () => assert.fail('old head must not be reconciled') });
+    assert.equal(next.dispatched, true, JSON.stringify(next));
+  });
+}
+
+for (const state of ['CLOSED', 'MERGED']) {
+  test(`CLOSERGATE-01: authoritative ${state} metadata bypasses intent holds`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closergate-terminal-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const own = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    updateAmaCloserDispatchRecord(rootDir, own, () => ({ ...own, state: 'dispatching',
+      dispatchIdempotencyKey: 'synthetic-terminal', lastAttemptedAt: args.dispatchContext.dispatchedAt }));
+    const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+      prMetadata: { ...args.prMetadata, isOpen: false, state },
+      readIntentReceiptImpl: () => assert.fail('terminal PR must not look up receipts'),
+      execFileImpl: () => assert.fail('terminal PR must not launch') });
+    assert.equal(result.reason, 'pr-not-mergeable');
+    assert.equal(result.inFlight, undefined);
+    assert.equal(result.activeLaunch, undefined);
+  });
+}
 
 for (const unreadable of [false, true]) {
   test(`HAMRETRY-01: production dispatch shares one PostgreSQL capacity snapshot (unreadable=${unreadable})`, async t => {
@@ -399,7 +469,7 @@ test('HAMRETRY-01: wrapped per-launch readers fail closed at fleet cap on unread
   assert.equal(deps.calls.length, 0);
 });
 
-test('LCR: an active prior head holds its PR even when other-PR capacity remains', async (t) => {
+test('CLOSERGATE-01: an unresolved prior-head intent does not hold the current head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-same-pr-prior-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const oldHead = 'b'.repeat(40);
@@ -415,9 +485,9 @@ test('LCR: an active prior head holds its PR even when other-PR capacity remains
     ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
     ...deps,
   });
-  assert.equal(result.reason, 'existing-dispatch-unknown');
-  assert.equal(result.activeLaunch.headSha, oldHead);
-  assert.equal(deps.calls.length, 0);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.activeLaunch, undefined);
+  assert.equal(deps.calls.length, 1);
 });
 
 test('LCR: a dispatched worker on a prior head holds its PR', async (t) => {
@@ -1874,39 +1944,41 @@ for (const headSource of ['prMetadata', 'reviewState', 'dispatchContext', 'args'
   });
 }
 
-test('concurrent capacity admission preserves the existing launch cap before acknowledgements settle', async t => {
+test('CLOSERGATE-01: slow pre-receipt acknowledgements serialize only their own PR', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'concurrent-launch-cap-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const waiters = [];
   const starts = [];
-  const attempts = [1, 2, 3, 4].map(prNumber => {
-    const deps = testDeps();
-    return maybeDispatchAmaCloser({
-      ...findingsRemediationArgs(rootDir, {
-        prMetadata: { prNumber },
-        cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 3 },
-        dispatchContext: { repo: 'fixture/project', prNumber,
-          prUrl: `https://github.com/fixture/project/pull/${prNumber}` },
-      }), ...deps,
-      observeCloserBacklogImpl: async () => 4,
-      execFileImpl: async () => {
-        starts.push(prNumber);
-        await new Promise(resolve => waiters.push(resolve));
-        return { stdout: JSON.stringify({ dispatchId: `fixture-${prNumber}`, launchRequestId: `fixture-${prNumber}` }), stderr: '' };
-      },
-    });
+  let allStarted;
+  const started = new Promise(resolve => { allStarted = resolve; });
+  const argsFor = prNumber => findingsRemediationArgs(rootDir, {
+    prMetadata: { prNumber },
+    cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 3 },
+    dispatchContext: { repo: 'fixture/project', prNumber,
+      prUrl: `https://github.com/fixture/project/pull/${prNumber}` },
   });
+  const attempts = [1, 2, 3, 4].map(prNumber => maybeDispatchAmaCloser({
+    ...argsFor(prNumber), ...testDeps(),
+    observeCloserBacklogImpl: async () => 4,
+    execFileImpl: async () => {
+      starts.push(prNumber);
+      await new Promise(resolve => {
+        waiters.push(resolve);
+        if (starts.length === 4) allStarted();
+      });
+      return { stdout: JSON.stringify({ dispatchId: `lrq_fixture_${prNumber}`, launchRequestId: `lrq_fixture_${prNumber}` }), stderr: '' };
+    },
+  }));
   try {
-    // Three independent launches can await acknowledgement concurrently. The
-    // fourth census must see their durable intents and refuse admission.
     const timeout = new Promise((_, reject) => {
-      const timer = setTimeout(() => reject(new Error('capacity admission did not settle')), 5000);
+      const timer = setTimeout(() => reject(new Error('unrelated intent held admission')), 5000);
       t.after(() => clearTimeout(timer));
     });
-    const refused = await Promise.race([...attempts, timeout]);
-    assert.equal(refused.dispatched, false);
-    assert.equal(refused.reason, 'ama-closer-launch-in-progress');
-    assert.equal(starts.length, 3);
+    await Promise.race([started, timeout]);
+    assert.equal(starts.length, 4);
+    const duplicate = await maybeDispatchAmaCloser({ ...argsFor(1), ...testDeps(),
+      execFileImpl: () => assert.fail('same PR/head must not launch twice') });
+    assert.equal(duplicate.reason, 'existing-dispatch-unknown');
   } finally {
     waiters.forEach(resolve => resolve());
     await Promise.all(attempts);

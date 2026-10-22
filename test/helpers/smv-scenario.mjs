@@ -694,14 +694,23 @@ if (scenario === 'clean') {
   assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
   assert.equal(existsSync(promptPath), true);
   const recoveryNow = '2026-01-02T00:00:00Z';
+  const inspectionPages = [];
   const unknownIntent = await reconcilePreReceiptIntent(rootDir, identity(), {
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+    deliverAlertImpl: async (text, options) => { inspectionPages.push({ text, ...options }); },
     now: recoveryNow, readIntentReceiptImpl: () => assert.fail('legacy intent has no keyed lookup'),
   });
   assert.equal(unknownIntent.status, 'unknown');
   assert.equal(unknownIntent.record.preReceiptReconciliation.status, 'inspection-required');
+  assert.equal(inspectionPages.length, 1);
+  assert.equal(inspectionPages[0].payload.headSha, headSha);
+  assert.deepEqual(await findActiveAmaCloserLaunches(rootDir, { now: recoveryNow }), []);
+  await reconcilePreReceiptIntent(rootDir, identity(), {
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }), now: recoveryNow, deliverAlertImpl: refuse });
   updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
     dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-smoke-prepared' }));
   const noLaunch = await reconcilePreReceiptIntent(rootDir, identity(), {
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); },
   });
@@ -713,6 +722,7 @@ if (scenario === 'clean') {
     lastAttemptedAt: recoveryNow, retryCount: 1 }));
   acquireAmaCloserLease({ rootDir, ...legacyIdentity, now: recoveryNow, watcherPid: 12345 });
   const legacyOptions = { now: recoveryNow,
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); } };
   const legacyHeld = await reconcilePreReceiptIntent(rootDir, legacyIdentity, {
     ...legacyOptions, readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'synthetic unreadable' }),
@@ -731,6 +741,7 @@ if (scenario === 'clean') {
     dispatchPhase: 'submitting', dispatchIdempotencyKey: 'ama-closer-smoke-receipt',
     lastAttemptedAt: recoveryNow, retryCount: 1 }));
   const recovered = await reconcilePreReceiptIntent(rootDir, receiptIdentity, {
+    readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [{
       idempotency_key: 'ama-closer-smoke-receipt', launch_request_id: 'lrq_smoke_recovered',
       ticket_ref: `AMA-PR-${receiptIdentity.prNumber}`, target_repo: repo,
@@ -738,6 +749,15 @@ if (scenario === 'clean') {
   });
   assert.equal(recovered.status, 'receipt-recovered');
   assert.equal(recovered.record.launchRequestId, 'lrq_smoke_recovered');
+  const terminalIdentity = { ...identity(), prNumber: prNumber + 2 };
+  updateAmaCloserDispatchRecord(rootDir, terminalIdentity, () => ({ ...intent, ...terminalIdentity }));
+  const { reconcileAmaCloserDispatches } = await import('../../src/ama/dispatch-closer.mjs');
+  await reconcileAmaCloserDispatches(rootDir, {
+    now: recoveryNow, readPullRequestStateImpl: async () => ({ state: 'CLOSED' }),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+    readIntentReceiptImpl: refuse, deliverAlertImpl: refuse,
+  });
+  assert.equal(readAmaCloserDispatchRecord(rootDir, terminalIdentity).state, 'completed');
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
@@ -745,7 +765,8 @@ if (scenario === 'clean') {
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
-    nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
+    nativeFinalHammerWake: true, terminalIntentRetiredWithoutPage: true, inspectionPagedOnce: true, unresolvedIntentHoldsNoFleetCapacity: true,
+    repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {

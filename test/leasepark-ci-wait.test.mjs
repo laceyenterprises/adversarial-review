@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, inspectMergeLease, readMergeLeaseAttempts, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const rootDir = resolve(new URL('..', import.meta.url).pathname);
@@ -17,6 +17,44 @@ const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '7702')
   .replaceAll('<<HQ_ROOT>>', quote(rootDir)).replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
   .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');
+
+test('CI retry renewal consumes the inspection lease alias and fences other holders', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-retry-renewal-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const identity = { rootDir: dir, repo: 'fixture/repo', base: 'main' };
+  const acquired = acquireMergeLease({ ...identity, holderPr: 7702, holderHead: head,
+    holderPid: process.pid, now: '2026-06-20T18:00:00Z' });
+  assert.equal(acquired.acquired, true);
+  const renewal = merge.slice(merge.indexOf('ham_renew_ci_retry_lease()'),
+    merge.indexOf('# Rebuild head-bound remediation authority'))
+    .replace("rootDir: '<<ROOT_DIR>>'", `rootDir: ${JSON.stringify(dir)}`)
+    .replaceAll('<<ROOT_DIR>>', rootDir).replaceAll('<<REPO>>', identity.repo);
+  const run = (leaseId, pr = 7702) => spawnSync('/bin/bash', ['-c', `
+HAM_NODE_BIN=${quote(process.execPath)}
+HAM_MERGE_LEASE_ID=${quote(leaseId)}
+BASE_BRANCH=main
+${renewal.replaceAll('<<PR_NUMBER>>', String(pr))}
+ham_renew_ci_retry_lease
+`], { encoding: 'utf8', timeout: 5000 });
+  const result = run(acquired.lease.leaseId);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  const renewed = inspectMergeLease(identity);
+  assert.equal(renewed.lease, renewed.holder);
+  assert.equal(renewed.lease.leaseId, acquired.lease.leaseId);
+  assert.equal(renewed.lease.previousAcquiredAt, acquired.lease.acquiredAt);
+  assert.notEqual(renewed.lease.acquiredAt, acquired.lease.acquiredAt);
+  for (const [leaseId, pr] of [['wrong-lease', 7702], [acquired.lease.leaseId, 7703]]) {
+    const refused = run(leaseId, pr);
+    assert.equal(refused.error, undefined);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.deepEqual(inspectMergeLease(identity).lease, renewed.lease);
+  }
+  assert.equal(releaseMergeLease({ ...identity, ...renewed.lease }).released, true);
+  const missing = run(acquired.lease.leaseId);
+  assert.equal(missing.error, undefined);
+  assert.equal(missing.status, 1, missing.stderr);
+});
 
 function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));

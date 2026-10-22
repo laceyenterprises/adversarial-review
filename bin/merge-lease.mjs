@@ -10,6 +10,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -27,6 +28,7 @@ import {
   reconcileMergeLeases,
   readMergeLeaseWaiters,
   readMergeLeaseHistory,
+  mergeLeaseHistoryFilePath,
   releaseMergeLease,
   releaseMergeLeaseForRetryableAbort,
   refundMergeLeaseGateAttempt,
@@ -346,18 +348,35 @@ async function runAcquire(argv, deps) {
   let lastProgressMs = startedMs;
   let previousPosition = null;
   let lastServiceEvent = null;
+  let historyVersion;
+  const historyPath = mergeLeaseHistoryFilePath(rootDir, { repo, base });
   const holders = new Map();
   const rememberHolder = holder => {
     if (!holder || (Number(holder.holderPr) === pr && holder.holderHead === head)) return;
-    holders.set(holder.leaseId, holder);
+    const key = holder.leaseId || JSON.stringify([
+      holder.holderPr, holder.holderHead, holder.holderHost, holder.holderPid, holder.acquiredAt,
+    ]);
+    holders.set(key, holder);
     if (holders.size > 128) holders.delete(holders.keys().next().value);
   };
   const observeProgress = result => {
     rememberHolder(result.lease || result.existingLease);
-    const history = readMergeLeaseHistory(rootDir, { repo, base });
-    const service = history.filter(row => Date.parse(row.at) >= startedMs && row.event !== 'renew');
-    for (const row of service) rememberHolder(row);
-    const latest = service.at(-1)?.eventId;
+    let version = null;
+    try {
+      const stat = statSync(historyPath, { bigint: true });
+      // History is atomically replaced, including when the bounded tail is full.
+      version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+    }
+    let latest = lastServiceEvent;
+    if (version !== historyVersion) {
+      const history = deps.readMergeLeaseHistory(rootDir, { repo, base });
+      const service = history.filter(row => Date.parse(row.at) >= startedMs && row.event !== 'renew');
+      for (const row of service) rememberHolder(row);
+      latest = service.at(-1)?.eventId;
+      historyVersion = version;
+    }
     if ((latest && latest !== lastServiceEvent)
       || (result.queuePosition != null && previousPosition != null && result.queuePosition < previousPosition)) {
       lastProgressMs = deps.nowMs();
@@ -726,6 +745,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     selfPid: process.pid,
     host: hostname(),
     acquireMergeLease,
+    readMergeLeaseHistory,
     assessMergeLeaseNeedsRevalidation,
     execFileImpl: execFile,
     maxGateAttempts: parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),

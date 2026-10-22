@@ -27,7 +27,7 @@ test('CI retry renewal consumes the inspection lease alias and fences other hold
     holderPid: process.pid, now: '2026-06-20T18:00:00Z' });
   assert.equal(acquired.acquired, true);
   const renewal = merge.slice(merge.indexOf('ham_renew_ci_retry_lease()'),
-    merge.indexOf('# Rebuild head-bound remediation authority'))
+    merge.indexOf('ham_validate_ci_retry()'))
     .replace("rootDir: '<<ROOT_DIR>>'", `rootDir: ${JSON.stringify(dir)}`)
     .replaceAll('<<ROOT_DIR>>', rootDir).replaceAll('<<REPO>>', identity.repo);
   const run = (leaseId, pr = 7702) => spawnSync('/bin/bash', ['-c', `

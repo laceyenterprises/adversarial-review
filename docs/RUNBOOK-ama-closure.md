@@ -3752,6 +3752,11 @@ Reservations expire after 120 seconds without a fresh eligible attempt, so an
 abandoned or newly ineligible head cannot indefinitely block closers. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 
+Progress polling reparses the bounded history only when its file identity or
+metadata changes, including equal-size atomic replacements at the retention
+limit. Timeout evidence also retains holders without lease IDs using their PR,
+head, host, PID and acquisition time as a fallback identity.
+
 The hammer releases before its first remote-CI wait, including snapshots,
 transient reads and UNKNOWN sampling/backoffs. After green CI it reacquires
 through the same priority queue, so deferred daemon merges are served first.

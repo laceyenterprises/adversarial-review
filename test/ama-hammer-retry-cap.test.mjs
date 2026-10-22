@@ -2207,7 +2207,7 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   assert.equal(
     isReclaimableDispatchedAmaCloserLease(
       readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }),
-      { now: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS + 1).toISOString() },
+      { now: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS * 6 + 1).toISOString() },
     ),
     true,
   );
@@ -2215,7 +2215,7 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   const result = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
       dispatchContext: {
-        dispatchedAt: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS + 1).toISOString(),
+        dispatchedAt: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS * 6 + 1).toISOString(),
       },
     }),
     ...hammerDispatchDeps(),

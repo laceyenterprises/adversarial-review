@@ -1837,3 +1837,8 @@ check and idempotent ledger-ticket interface for demotion alarms. A policy-file
 revert restores the previous route. Report analysis and service wiring are
 separate changes; no startup read, provider request, config flip, CI gate,
 authority change or daemon restart is introduced here.
+
+The shared strict OSG configuration schema also declares `osg.budget` monetary
+and account-share limits. Defaults are inert; schema parity fixtures exercise
+lower values and reject invalid/above-approved limits. This schema update does
+not activate routing or change review/merge authority.

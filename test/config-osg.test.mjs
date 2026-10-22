@@ -29,6 +29,10 @@ test('OSG-01 defaults are inert', () => {
     assert.equal(cfg.get('osg.mode'), 'off');
     assert.deepEqual(cfg.get('osg.arms'), []);
     assert.equal(cfg.get('osg.policy.enabled'), false);
+    assert.deepEqual(cfg.get('osg.budget'), {
+      monthly_usd: 300, open_model_usd: 200, judge_usd: 70, jev_usd: 30,
+      trial_share_pct: 15, double_blind_share_pct: 5,
+    });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

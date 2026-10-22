@@ -32,7 +32,18 @@ the original dispatch record after the PR head changes.
 The terminal `terminalOutcome` is one of `succeeded`,
 `failed-without-merge`, `deferred`, `superseded`, `pr-merged-externally`,
 `pr-closed-externally`, `no-merge:concurrent-writer`, or
-`no-merge:pr-merged-externally`. Terminal leases are never demoted. The
+`no-merge:pr-merged-externally`. Terminal leases are never demoted in place. TERMLEASE-01 removes a terminal
+`superseded`, `failed-without-merge` or `deferred` lease immediately when its
+launch is terminal in the ledger or a matching dispatch record, or the ledger
+confirms the launch is absent. Positive live launch/retry evidence and unreadable
+retry chains retain ownership. Unknown evidence without a terminal dispatch
+record retains the lease. Reclamation uses a nonblocking sibling `.reclaim.lock`,
+revalidates the observed lease after evidence reads, then removes it and uses the
+existing exclusive acquisition CAS on the same pass. It emits
+`ama_closer.terminal_lease_reclaimed`; retry and lifetime caps still apply.
+`succeeded` remains sticky. A superseded dispatch records its outcome on the
+dispatch record and releases its matching rekeyed lease, preserving any successor
+lease and completed review handoff. No store fields or status values change. The
 pending reclaim age includes the configured dispatch timeout and retry and
 token-poll windows; dispatched leases use their separate stale boundary. A
 launch-only dispatch record remains active for that full pending reclaim

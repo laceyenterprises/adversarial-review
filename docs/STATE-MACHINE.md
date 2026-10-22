@@ -751,6 +751,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+TERMLEASE-01 adds terminal non-merge lease removal before fresh acquisition:
+`superseded`, `failed-without-merge` and `deferred` stop owning the current head
+when launch terminality or absence is proven. Positive live/retry evidence and
+unknown liveness without terminal dispatch evidence hold; `succeeded` remains
+sticky. Superseded rekeyed leases are released with the outcome retained on the
+dispatch record. Reclamation revalidates the owner under a nonblocking lock and
+reuses exclusive acquisition on the same pass. Existing merge and retry authority
+is unchanged; no new status values are added.
+
 ITP-14: declared hammer/remediator account pools propose canonical privileged
 roles through the shared selection owner. Unknown evidence retains existing
 pre-launch deferral/claim release without consuming retry budget; unsupported

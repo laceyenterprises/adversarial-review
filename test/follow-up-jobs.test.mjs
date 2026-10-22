@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import { activeRemediationStopDecision } from '../src/follow-up-lifecycle.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
-import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -5427,8 +5427,15 @@ for (const scenario of [
     assert.equal(reads, scenario.pending ? 0 : 1);
     assert.equal(prReads, scenario.status === 'succeeded' && !scenario.merged ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
-    assert.equal(lease.status, scenario.outcome ? 'terminal' : scenario.pending ? 'pending' : 'dispatched');
-    assert.equal(lease.terminalOutcome, scenario.outcome || null);
+    if (scenario.outcome === 'superseded') {
+      assert.equal(lease, null, 'supersession releases the matching rekeyed lease');
+      const record = readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: 'synthetic-head' });
+      assert.equal(record.state, 'launch-terminal');
+      assert.equal(record.outcome, 'superseded', 'the original dispatch retains the terminal outcome');
+    } else {
+      assert.equal(lease.status, scenario.outcome ? 'terminal' : scenario.pending ? 'pending' : 'dispatched');
+      assert.equal(lease.terminalOutcome, scenario.outcome || null);
+    }
     assert.equal(logs.length, scenario.outcome ? 1 : 0);
     if (scenario.outcome) assert.equal(logs[0].terminalOutcome, scenario.outcome);
   });

@@ -6,6 +6,8 @@ import {
   isReclaimableDispatchedAmaCloserLease,
 } from '../src/ama/dispatch-closer.mjs';
 
+import { isReclaimableTerminalAmaCloserLease } from '../src/ama/closer-lease.mjs';
+
 // 2026-09-05: the hammer self-deadlocked on its own lease.
 //
 // It acquired the closer lease at the pre-remediation head, pushed its terminal
@@ -69,4 +71,22 @@ test('non-dispatched leases are still out of scope', () => {
 
 test('the reclaim age bound is the shared dispatched-lease constant', () => {
   assert.equal(AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, 30 * 60 * 1000);
+});
+
+
+test('TERMLEASE-01: terminal dispatch fallback never overrides live or unreadable retry evidence', () => {
+  const lease = { ...base, status: 'terminal', terminalOutcome: 'superseded' };
+  const dispatchRecord = { state: 'launch-terminal', launchRequestId: base.lrqId, lastObservedStatus: 'succeeded' };
+  const reclaimTerminal = launchStatusProbe => isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord });
+  assert.equal(reclaimTerminal({ ok: true, row: { status: 'running' } }), false);
+  assert.equal(reclaimTerminal({ ok: true, row: { status: 'succeeded' },
+    retryChain: [{ status: 'running', launch_request_id: 'synthetic-retry' }] }), false);
+  assert.equal(reclaimTerminal({ ok: true, row: { status: 'succeeded' }, retryChainUnreadable: true }), false);
+  assert.equal(reclaimTerminal({ ok: false, reason: 'query-failed' }), true);
+  assert.equal(isReclaimableTerminalAmaCloserLease(lease, {
+    dispatchRecord: { ...dispatchRecord, launchRequestId: 'unrelated-launch' },
+  }), false);
+  assert.equal(isReclaimableTerminalAmaCloserLease({ ...lease, terminalOutcome: 'succeeded' }, {
+    launchStatusProbe: { ok: true, row: { status: 'succeeded' } }, dispatchRecord,
+  }), false);
 });

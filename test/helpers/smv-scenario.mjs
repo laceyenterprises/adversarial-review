@@ -278,6 +278,27 @@ if (scenario === 'clean') {
       resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
       readBuildCompletionSignalForPrImpl: () => ({ ok: false }), readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }), logger: quiet,
     };
+    // TERMLEASE-01: terminal no-merge ownership ends without an ownerless delay.
+    for (const outcome of ['superseded', 'failed-without-merge', 'deferred']) {
+      const terminalRoot = join(rootDir, `terminal-lease-${outcome}`);
+      const terminalIdentity = { rootDir: terminalRoot, repo, prNumber, headSha };
+      acquireAmaCloserLease(terminalIdentity);
+      updateAmaCloserLease({ ...terminalIdentity, status: 'dispatched', lrqId: 'synthetic-ended' });
+      updateAmaCloserLease({ ...terminalIdentity, status: 'terminal', terminalOutcome: outcome });
+      let launches = 0;
+      const result = await maybeDispatchAmaCloser({ ...closerArgs,
+        dispatchContext: { ...closerArgs.dispatchContext, rootDir: terminalRoot,
+          hqRoot: join(terminalRoot, 'hq'), closerTokenRollupPollDelaysMs: [] },
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+        execFileImpl: async (_cmd, args) => {
+          assert.ok(args.includes('dispatch')); launches++;
+          return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-fresh' }) };
+        },
+      });
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.equal(launches, 1);
+      assert.equal(readAmaCloserLease(terminalRoot, terminalIdentity).lrqId, 'synthetic-fresh');
+    }
     const normalLiveProbe = closerArgs.dispatchContext.livePrProbeImpl;
     let branchReadable = false;
     closerArgs.dispatchContext.livePrProbeImpl = () => __testables__.defaultAmaLivePrProbe({
@@ -490,7 +511,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
   evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
-    headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
+    headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {

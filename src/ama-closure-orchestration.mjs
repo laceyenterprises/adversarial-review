@@ -2724,6 +2724,10 @@ async function dispatchAmaClosureFor({
             catch (error) { logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
           }
           if (ok) logHammerLaunchLatency(settledResult);
+          if (ok && settledResult?.closureBlocker) {
+            logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
+              reason: settledResult.closureBlocker }));
+          }
           logger?.log?.(
             `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
               (ok
@@ -2980,7 +2984,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   throwIfAborted(signal);
   logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
     reason: amaClosureResult?.dispatched ? 'hammer-running'
-      : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
+      : amaClosureResult?.closureBlocker || amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }

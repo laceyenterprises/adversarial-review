@@ -219,7 +219,7 @@ held 1. These are fleet totals; the two incident records were already
 eight existing target intent, lease and retry-budget JSON files were unchanged
 across the dry-run. Unreadable results do not prove missing launches.
 
-The [existing operator procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
+The [LAC-2081 interrupted-dispatch operator procedure](./follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
 remains applicable: inspect the complete intent and its bounded diagnostic,
 use owner-qualified canonical dry-run first, preserve same-PR custody and
 scratch evidence, and obtain exact current-attempt receipt/submission evidence

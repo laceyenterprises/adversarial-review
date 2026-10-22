@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const rootDir = resolve(new URL('..', import.meta.url).pathname);
+const subprocessTimeout = loadAwareTimeoutMs(20_000);
 const merge = readFileSync(join(rootDir, 'bin/hammer-merge.sh'), 'utf8');
 const verify = readFileSync(join(rootDir, 'bin/hammer-verify-head.sh'), 'utf8');
 const head = 'a'.repeat(40);
@@ -108,7 +110,7 @@ NODE
   echo "exit:$phase_status" >> "$TEST_ROOT/audits"
 done
 `;
-  const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 20_000, cwd: fixture?.repo || dir });
+  const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: subprocessTimeout, cwd: fixture?.repo || dir });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   return { dir, audit: readFileSync(join(dir, 'audits'), 'utf8'),

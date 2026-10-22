@@ -1861,6 +1861,10 @@ or concurrency algorithm changed.
 
 ### OSG configuration declarations
 
+OSG-13 adds the shared `osg.sample_rate` declaration: a number from 0 through
+1, defaulting to 0.5. The dispatch owner consumes it; this loader preserves
+Python/shell parity and leaves all modes off by default.
+
 The strict loader accepts `osg.version: 1`, `osg.mode` (`off`, `shadow`, `apply`)
 and `osg.arms`. Defaults are mode `off` and an empty arm catalog. Each arm
 requires role, harness, worker class, model, effort and a non-secret account ID.

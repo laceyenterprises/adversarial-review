@@ -25,7 +25,10 @@ export function tryAcquireCloserIntentLock(rootDir, identity) {
     if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return null;
     throw error;
   }
-  const release = () => { heldLocks.delete(release); closeSync(fd); };
+  const release = () => {
+    if (!heldLocks.delete(release)) return;
+    closeSync(fd);
+  };
   heldLocks.set(release, path);
   return release;
 }

@@ -149,6 +149,20 @@ for (const replacement of ['record', 'lease', 'deleted']) test(`yielding lookup 
   assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
 });
 
+test('intent lock release is idempotent and preserves a subsequent holder', t => {
+  const f = fixture(t);
+  const release = tryAcquireCloserIntentLock(f.rootDir, identity);
+  assert.equal(typeof release, 'function');
+  release();
+  const nextRelease = tryAcquireCloserIntentLock(f.rootDir, identity);
+  assert.equal(typeof nextRelease, 'function');
+  try {
+    assert.doesNotThrow(() => release());
+    assert.equal(tryAcquireCloserIntentLock(f.rootDir, identity), null);
+  } finally { nextRelease(); }
+  assert.doesNotThrow(() => release());
+});
+
 test('one reconciliation owns the PR fence while ledger evidence yields', async t => {
   const f = fixture(t);
   let finish;

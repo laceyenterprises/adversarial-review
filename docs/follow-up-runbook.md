@@ -28,6 +28,9 @@ submission and receipt persistence. `dispatchPhase: prepared` precedes
 updates take the same fence. A busy fence defers a competing writer; it cannot
 replace an owner's intent. Reconciliation rechecks the complete record and lease
 after yielding for evidence, preserving replacements and concurrent annotations.
+Intent-lock release is idempotent. The fenced lease update compares the complete
+expected snapshot by field values, ignoring object key order; changed, missing
+or additional fields still defer repair with `ESTALE`.
 
 The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same repair:
 

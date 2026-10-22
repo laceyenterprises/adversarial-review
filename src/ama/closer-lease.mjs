@@ -43,6 +43,7 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { closeSync, openSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -631,6 +632,7 @@ export function acquireAmaCloserLease({
  * @param {string=} args.lrqId
  * @param {string=} args.terminalOutcome
  * @param {string=} args.now
+ * @param {object=} args.expectedLease Complete observed lease snapshot; object key order is ignored.
  * @returns {{ leasePath: string, lease: object }}
  */
 export function updateAmaCloserLease({
@@ -670,7 +672,7 @@ export function updateAmaCloserLease({
     throw Object.assign(new Error('closer lease is owned by another mutation'), { code: 'EBUSY' });
   }
   const existing = readLeaseFile(leasePath);
-  if (expectedLease !== undefined && JSON.stringify(existing) !== JSON.stringify(expectedLease)) {
+  if (expectedLease !== undefined && !isDeepStrictEqual(existing, expectedLease)) {
     throw Object.assign(new Error('closer lease changed during evidence lookup'), { code: 'ESTALE' });
   }
   if (!existing) {

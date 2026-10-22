@@ -15,6 +15,7 @@ for (const vector of vectors.cases) {
       if (vector.valid) {
         const cfg = loadConfig({ topPath, env: {} });
         assert.equal(cfg.get('osg.mode'), vector.config.mode ?? 'off');
+        assert.equal(cfg.get('osg.sample_rate'), vector.config.sample_rate ?? 0.5);
         assert.equal(cfg.get('osg.policy.enabled'), vector.config.policy?.enabled ?? false);
       } else {
         assert.throws(() => loadConfig({ topPath, env: {} }));
@@ -27,6 +28,7 @@ test('OSG-01 defaults are inert', () => {
   try {
     const cfg = loadConfig({ topPath: join(dir, 'config.yaml'), env: {} });
     assert.equal(cfg.get('osg.mode'), 'off');
+    assert.equal(cfg.get('osg.sample_rate'), 0.5);
     assert.deepEqual(cfg.get('osg.arms'), []);
     assert.equal(cfg.get('osg.policy.enabled'), false);
     assert.deepEqual(cfg.get('osg.budget'), {

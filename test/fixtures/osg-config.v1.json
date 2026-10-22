@@ -541,6 +541,62 @@
         }
       },
       "valid": false
+    },
+    {
+      "name": "sample-rate-zero",
+      "config": {
+        "sample_rate": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "sample-rate-half",
+      "config": {
+        "sample_rate": 0.5
+      },
+      "valid": true
+    },
+    {
+      "name": "sample-rate-one",
+      "config": {
+        "sample_rate": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "sample-rate-negative",
+      "config": {
+        "sample_rate": -0.1
+      },
+      "valid": false
+    },
+    {
+      "name": "sample-rate-above",
+      "config": {
+        "sample_rate": 1.1
+      },
+      "valid": false
+    },
+    {
+      "name": "sample-rate-bool",
+      "config": {
+        "sample_rate": true
+      },
+      "valid": false
+    },
+    {
+      "name": "sample-rate-null",
+      "config": {
+        "sample_rate": null
+      },
+      "valid": false
+    },
+    {
+      "name": "sample-rate-string",
+      "config": {
+        "sample_rate": "0.5"
+      },
+      "valid": false
     }
   ]
 }

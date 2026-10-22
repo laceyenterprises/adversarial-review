@@ -133,6 +133,13 @@
           "__enforce_max": true
         }
       }
+    },
+    "sample_rate": {
+      "__type": "float",
+      "__default": 0.5,
+      "__min": 0,
+      "__max": 1,
+      "__enforce_max": true
     }
   }
 }

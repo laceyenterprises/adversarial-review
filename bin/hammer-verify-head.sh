@@ -49,7 +49,7 @@ ham_wait_for_published_head() {
       probe_exit=$?
       cat "$probe_dir/stderr" >&2
       # Keep the last valid read; transport failures consume the visibility budget.
-      if [ "$probe_exit" -eq 142 ] || grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$probe_dir/stderr"; then
+      if [ "$probe_exit" -eq 142 ] || sed '/^\[load-aware-timeout\]/d' "$probe_dir/stderr" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout'; then
         rm -rf "$probe_dir"
         continue
       fi
@@ -144,7 +144,7 @@ ham_lease_pr_view() {
       rc=$?
     fi
     cat "$err" >&2
-    if [ "$rc" -eq 142 ] || grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$err"; then
+    if [ "$rc" -eq 142 ] || sed '/^\[load-aware-timeout\]/d' "$err" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout'; then
       HAM_LEASE_PROBE_TRANSIENT=1
     else
       HAM_LEASE_PROBE_TRANSIENT=0
@@ -293,7 +293,7 @@ NODE
     HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_MARKER
 HAM closing status — no merge. The gate-attempt cap stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
     ham_gate_cap_gh_transient() {
-      grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+      sed '/^\[load-aware-timeout\]/d' "$1" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
     }
     # All comment operations share the same bounded retry and transient test.
     ham_gate_cap_gh() {
@@ -397,7 +397,7 @@ ham_update_branch_conflict() {
 }
 
 ham_update_branch_transient() {
-  grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+  sed '/^\[load-aware-timeout\]/d' "$1" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
 }
 
 ham_is_full_sha() {
@@ -502,6 +502,7 @@ ham_base_touches_pr_files() {
   local current_base_sha comparison_base pr_ref pr_files base_files
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
+  HAM_CURRENT_BASE_SHA="$current_base_sha"
   comparison_base="${HAM_VALIDATION_BASE_SHA:-}"
   pr_ref=HEAD
   if [ "${1:-}" = "validated-head" ]; then
@@ -519,56 +520,10 @@ ham_base_touches_pr_files() {
   comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .
 }
 
-# Resolve whether the target branch REQUIRES the PR to be up to date before merge
-# (GitHub required_status_checks.strict). This decides whether a BEHIND head must
-# be chased with a rebase or may merge as-is. FAIL CLOSED: any error, or an
-# undetermined result, keeps the historical always-rebase-until-not-BEHIND
-# behavior (=1). Where no strict rule exists, a BEHIND that arises only because
-# OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
-# MERGEABLE PR), so chasing it with a rebase would only re-run the full required
-# check suite on identical code (agent-os#5464).
-HAM_REQUIRES_UP_TO_DATE=1
-ham_rsc_json="<<RUN_DIR>>/required-status-checks.json"
-ham_rsc_err="<<RUN_DIR>>/required-status-checks.stderr"
-ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
-if ham_gh api \
-    "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
-    > "$ham_rsc_json" 2> "$ham_rsc_err"; then
-  if [ "$(jq -r '.strict // empty' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
-    HAM_REQUIRES_UP_TO_DATE=0
-  fi
-elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
-  # No branch protection / no required-status-checks object → no strict rule.
-  HAM_REQUIRES_UP_TO_DATE=0
-fi
-echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
-
-# Keep this identity across verify/publish/merge in the persistent shell. Only
-# our successful publication or server-side rebase may replace it.
-HAM_PRODUCED_HEAD=$(git rev-parse HEAD) || return 1
-export HAM_PRODUCED_HEAD
-while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
-  if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
-    HAM_PHASE_OUTCOME=head-changed
-    HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the hammer-produced head; released for the next hammer pass."
-    ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
-    ham_release_merge_lease || return 1
-    return 20
-  fi
-  # A lagging BEHIND snapshot may avoid a redundant rebase only when the
-  # validated head already contains the entire fetched current base. A disjoint
-  # file diff alone cannot authorize reusing CI after releasing the base lease.
-  if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
-     && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
-     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
-     && ! ham_base_touches_pr_files validated-head; then
-    echo "HAM: validated head already contains the current base; avoiding a redundant rebase while GitHub recomputes BEHIND." >&2
-    break
-  fi
-  if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
-    ham_acquire_merge_lease || return $?
-  fi
-  if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
+# Shared by initial verification and the single in-run CI retry. GitHub publishes
+# the rebased head atomically; fetch that exact result into the scratch checkout.
+ham_rebase_head() {
+  if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ] && [ "${1:-}" != --ci-retry ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
     ham_release_merge_lease
     HAM_PHASE_OUTCOME=rebase-attempt-cap-exceeded
@@ -615,6 +570,60 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     return 1
   fi
   HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"
+  return 0
+}
+
+# Resolve whether the target branch REQUIRES the PR to be up to date before merge
+# (GitHub required_status_checks.strict). This decides whether a BEHIND head must
+# be chased with a rebase or may merge as-is. FAIL CLOSED: any error, or an
+# undetermined result, keeps the historical always-rebase-until-not-BEHIND
+# behavior (=1). Where no strict rule exists, a BEHIND that arises only because
+# OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
+# MERGEABLE PR), so chasing it with a rebase would only re-run the full required
+# check suite on identical code (agent-os#5464).
+HAM_REQUIRES_UP_TO_DATE=1
+ham_rsc_json="<<RUN_DIR>>/required-status-checks.json"
+ham_rsc_err="<<RUN_DIR>>/required-status-checks.stderr"
+ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
+if ham_gh api \
+    "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
+    > "$ham_rsc_json" 2> "$ham_rsc_err"; then
+  # jq's // treats false as absent; preserve an explicit non-strict rule.
+  if [ "$(jq -r '.strict' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+    HAM_REQUIRES_UP_TO_DATE=0
+  fi
+elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
+  # No branch protection / no required-status-checks object → no strict rule.
+  HAM_REQUIRES_UP_TO_DATE=0
+fi
+echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
+
+# Keep this identity across verify/publish/merge in the persistent shell. Only
+# our successful publication or server-side rebase may replace it.
+HAM_PRODUCED_HEAD=$(git rev-parse HEAD) || return 1
+export HAM_PRODUCED_HEAD
+while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
+  if [ "$POST_REMEDIATION_SHA" != "$HAM_PRODUCED_HEAD" ]; then
+    HAM_PHASE_OUTCOME=head-changed
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. The live head differs from the hammer-produced head; released for the next hammer pass."
+    ham_mark_merge_lease_retryable_abort "$HAM_PHASE_OUTCOME"
+    ham_release_merge_lease || return 1
+    return 20
+  fi
+  # A lagging BEHIND snapshot may avoid a redundant rebase only when the
+  # validated head already contains the entire fetched current base. A disjoint
+  # file diff alone cannot authorize reusing CI after releasing the base lease.
+  if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
+     && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
+     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
+     && ! ham_base_touches_pr_files validated-head; then
+    echo "HAM: validated head already contains the current base; avoiding a redundant rebase while GitHub recomputes BEHIND." >&2
+    break
+  fi
+  if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+    ham_acquire_merge_lease || return $?
+  fi
+  ham_rebase_head || return $?
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then

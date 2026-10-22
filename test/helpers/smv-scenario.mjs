@@ -75,6 +75,18 @@ if (scenario === 'clean') {
   const served = acquireDaemonMergeLease(daemonRequest);
   assert.equal(served.acquired, true);
   assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...served.lease }).released, true);
+  // LEASEFAIR-02: after priority service, the closer retry owns the lane
+  // throughout its one synthetic CI wait; a new daemon cannot overtake it.
+  const retry = acquireMergeLease(closerRequest);
+  assert.equal(retry.acquired, true);
+  await Promise.resolve();
+  const duringRetry = acquireDaemonMergeLease(daemonRequest);
+  assert.equal(duringRetry.acquired, false);
+  assert.equal(duringRetry.existingLease.leaseId, retry.lease.leaseId);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...retry.lease }).released, true);
+  const afterRetry = acquireDaemonMergeLease(daemonRequest);
+  assert.equal(afterRetry.acquired, true);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...afterRetry.lease }).released, true);
   const review = await createFixtureStubReviewerRuntimeAdapter({ rootDir, reviewerBodies: [cleanBody] }).spawnReviewer({ sessionUuid: 'synthetic-review' });
   assert.equal(review.reviewBody, cleanBody); assert.equal(readReviewerRunRecord(rootDir, 'synthetic-review').state, 'completed');
   await tick(); assert.equal(store.merged, true);

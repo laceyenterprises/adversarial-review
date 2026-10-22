@@ -1469,7 +1469,10 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    before merging. LEASEFAIR-01 releases the lease during remote CI, then
    requires the fetched current base to be contained in that exact validated
    head after reacquisition. Any base advancement, including disjoint changes
-   and non-strict branches, defers for rebase and fresh CI. A lagging `BEHIND`
+   and non-strict branches, triggers one in-run rebase and exact-head CI wait
+   under the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain
+   priority before reacquisition; conflict, red CI or timeout release with their
+   actual reasons. A lagging `BEHIND`
    snapshot avoids a redundant rebase only if the validated head already
    contains the entire current base.
 3. **Keep canonical docs current.** Doc-currency is part of the terminal
@@ -3749,15 +3752,34 @@ Reservations expire after 120 seconds without a fresh eligible attempt, so an
 abandoned or newly ineligible head cannot indefinitely block closers. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 
-The hammer releases before entering remote-CI polling, including the first
-snapshot, transient reads, polling cadence and UNKNOWN sampling/backoffs. Once
-CI is green it reacquires, fetches the current base, and requires that base to
-be contained in the exact validated head. Any advancement, even disjoint files,
-records `deferred / base-advanced-during-ci-wait`, refunds the reacquisition's
-provisional attempt, and returns to the existing bounded hammer retry lane for
-rebase and fresh CI. It never treats old-head CI as validation of a new base.
-A busy strict-base lane can require another CI run; no idle lease is retained
-to prevent that, and the existing hammer retry/lifetime caps remain in force.
+The hammer releases before its first remote-CI wait, including snapshots,
+transient reads and UNKNOWN sampling/backoffs. After green CI it reacquires
+through the same priority queue, so deferred daemon merges are served first.
+The entire current base must be contained in the exact validated head, even
+for disjoint changes. LEASEFAIR-02 handles an absent base in this same run:
+rebase/publish through GitHub's existing update-branch path, fetch and detach
+the exact resulting SHA, and wait once for that head's required CI while
+retaining the lease. Both CI windows share one absolute deadline initialized
+before the first wait from the nominal wait scaled once. The intervening rebase,
+polling, backoffs and gate reads consume the remaining deadline. This single
+serialized retry prevents cooperating mergers from overtaking the closer again. The
+existing holder-fenced lease renewal runs at the retry wait boundaries so audit
+expiry allows the full window; renewal never extends the CI deadline. The
+single retry is independent of the initial rebase-attempt cap.
+
+After retry CI succeeds, the closer republishes its head-bound remediation
+audit and rebuilds the full predicate from fresh head, reviews, timeline, commit,
+range and primary-change evidence. The shared `hammer-publish` phase first
+re-proves and rewrites `range.json` for the retry head and renders the published
+audit body. Only then does the closer reconstruct `retry-terminal-remediation.json`
+with that body and pass the refreshed range to `ama-check.mjs`. A range proof
+failure stops publication and predicate evaluation. It never transfers an
+eligible verdict or old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
+reports `github-gate-red`; pending-only expiry reports `required-checks-pending`
+with the existing resume receipt, and other expiry reports `github-gate-timeout`.
+All release the lease. Real read, publication, head-race and authority failures
+continue to fail closed. A non-cooperating base writer during the serialized
+retry refuses as `retry-base-not-contained`; no unbounded retry loop is added.
 The final live head/required-check gate is refreshed under the lease, preserving
 stale-head, current-review, remediation, primary-change and merge authority checks.
 
@@ -3765,8 +3787,8 @@ No migration, configuration change or new CI check is needed. Deploy through the
 normal submodule float and daemon rollout; already running closers finish with
 their original procedure and are never interrupted by a reservation. After
 rollout, inspect waiter service order and logs for a deferred clean head taking
-the first eligible acquisition ahead of closer retries. Check that remote-CI
-waits show no base holder and that any advanced base defers without a merge.
+the first eligible acquisition ahead of closer retries. Check that the first remote-CI wait shows no base holder and an advanced base
+rebases in the same closer run, holding the lease through only its retry CI wait.
 The lifecycle graph is unchanged. The clean offline smoke also verifies
 priority service without preemption; focused synthetic regressions cover
 reacquisition, CI and current-base behavior.

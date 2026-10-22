@@ -599,7 +599,7 @@ esac
 if [ "$1" = +%s ]; then
   value=$(cat "$TMPDIR/clock")
   echo "$value"
-  echo $((value + ${scenario === 'red CI after pending' ? 30 : 1000})) > "$TMPDIR/clock"
+  echo $((value + ${scenario === 'gate timeout' ? 1000 : 0})) > "$TMPDIR/clock"
 else exec /bin/date "$@"; fi
 `, { mode: 0o755 });
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
@@ -609,7 +609,7 @@ ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
 ham_base_touches_pr_files() { return 1; }
 ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
-sleep() { :; }
+sleep() { value=$(cat "$TMPDIR/clock"); echo $((value + $1)) > "$TMPDIR/clock"; }
 source "$1"
 echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM_MERGE_EXIT"
 `;
@@ -658,6 +658,7 @@ case "$*" in
 esac
 n=0; [ ! -f "$TMPDIR/calls" ] || n=$(cat "$TMPDIR/calls")
 n=$((n + 1)); echo "$n" > "$TMPDIR/calls"
+echo '[load-aware-timeout] CPU sample unavailable; using full load-based corroboration' >&2
 if [ "$SCENARIO" = permanent ]; then echo 'HTTP 403 forbidden' >&2; exit 1; fi
 if [ "$SCENARIO" = exhaust ] || [ "$n" = 1 ]; then
   echo 'GitHub read failed' >&2; echo 'TLS handshake timeout' >&2; exit 1
@@ -677,7 +678,7 @@ echo '{"head":{"sha":"${'a'.repeat(40)}"},"labels":[]}'
     assert.equal(verify.status, 0, verify.stderr);
     assert.equal(merge.status, 0, merge.stderr);
     const helper = verify.stdout.match(/ham_pr\(\) \{[^\n]+/)[0] + '\n' + verify.stdout.slice(verify.stdout.indexOf('ham_lease_pr_view() {'), verify.stdout.indexOf('ham_acquire_merge_lease() {'));
-    const block = merge.stdout.slice(merge.stdout.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&'), merge.stdout.indexOf('HAM_PRE_MERGE_ELIGIBLE=1\n\nHAM_MERGE_ATTEMPTS'));
+    const block = merge.stdout.slice(merge.stdout.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&'), merge.stdout.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files'));
     const result = run('/bin/bash', ['-c', `${helper}
 sleep() { :; }
 ham_acquire_merge_lease() { ham_lease_pr_view --json headRefOid,statusCheckRollup >/dev/null; }
@@ -777,6 +778,7 @@ case "$2" in
   */statuses\\?*) echo "$2" >> "$TMPDIR/check-api-reads"; printf '[]'; exit 0 ;;
 esac
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
+echo '[load-aware-timeout] CPU sample unavailable; using full load-based corroboration' >&2
 if [ "$n" -eq 3 ]; then cp "$HAM_RUN_DIR/pr-after.json" "$TMPDIR/cache-after-probe"; fi
 if [ "$n" -ge 2 ]; then
   case "$HAM_TEST_SCENARIO" in
@@ -953,6 +955,8 @@ test('GHBUDGET-01: rendered pending CI uses at most eleven REST check snapshots 
     HAM_NODE_BIN: process.execPath, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
   };
+  writeFileSync(join(dir, 'timeout-config.yaml'), 'version: 1\nadversarial:\n  reviewer:\n    load_aware:\n      enabled: false\n');
+  env.AGENT_OS_CONFIG_PATH = join(dir, 'timeout-config.yaml');
   writeFileSync(join(dir, 'clock'), '1700000000');
   writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
   writeFileSync(join(dir, 'sleep'), `#!${process.execPath}
@@ -972,10 +976,10 @@ else process.exit(1);
   const rendered = renderPhase('hammer-merge', env);
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.doesNotMatch(rendered.stdout, /(?:ham_gh|gh) pr checks[^\n]*--watch/);
-  const helperStart = rendered.stdout.indexOf('ham_wait_for_check_poll() {');
+  const helperStart = rendered.stdout.indexOf('ham_ci_sleep() {');
   const helperEnd = rendered.stdout.indexOf('ham_merge_error_retryable() {');
   const loopStart = rendered.stdout.indexOf('HAM_LOCAL_CI_STATUS=');
-  const loopEnd = rendered.stdout.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&');
+  const loopEnd = rendered.stdout.indexOf('\nHAM_PRE_MERGE_ELIGIBLE=1');
   const script = `${rendered.stdout.slice(helperStart, helperEnd)}
 HAM_NODE_BIN=${process.execPath}
 HAM_REMOTE_CI_POLL_SECONDS=30 HAM_REMOTE_CI_WAIT_SECONDS=300 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=3
@@ -988,11 +992,11 @@ ham_mark_merge_lease_retryable_abort() { :; }
 close() { ${rendered.stdout.slice(loopStart, loopEnd)} }
 close
 `;
-  const result = spawnSync('/bin/bash', ['-c', script], { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 30_000 });
+  const result = spawnSync('/bin/bash', ['-c', script], { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 60_000 });
   assert.equal(result.status, 20, result.stderr);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const checks = calls.filter(call => call.args[1].includes('/check-runs?'));
-  assert.equal(checks.length, 11);
+  assert.equal(checks.length, 10, 'deadline stops before reading at t=300s');
   for (let i = 1; i < checks.length; i++) assert.ok(checks[i].at - checks[i - 1].at >= 30);
   assert.equal(calls.filter(call => call.args.includes('graphql')).length, 0);
   assert.equal(calls.filter(call => call.args.includes('--watch')).length, 0);

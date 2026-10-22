@@ -368,14 +368,14 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
 });
 
-test('hammer CI timeout records its outcome after the charged pre-poll release', () => {
-  const start = HAMMER_PROMPT.indexOf('HAM_REMOTE_CI_STATUS=remote-ci-timeout');
-  const end = HAMMER_PROMPT.indexOf('# Remote CI does not own', start);
-  assert.ok(start > 0 && end > start);
+test('hammer CI timeout releases a serialized retry without refunding its charge', () => {
+  const start = HAMMER_PROMPT.indexOf('ham_ci_timeout()');
+  const end = HAMMER_PROMPT.indexOf('ham_merge_error_retryable()', start);
   const timeoutBranch = HAMMER_PROMPT.slice(start, end);
   assert.match(timeoutBranch, /if ham_required_gate_pending_only/);
   assert.match(timeoutBranch, /failed-without-merge github-gate-timeout/);
-  assert.doesNotMatch(timeoutBranch, /ham_mark_merge_lease_retryable_abort|ham_release_merge_lease/);
+  assert.match(timeoutBranch, /ham_release_merge_lease/);
+  assert.doesNotMatch(timeoutBranch, /ham_mark_merge_lease_retryable_abort/);
 });
 
 test('hammer merge capability shell fallback mirrors JS token-class discovery', () => {
@@ -614,14 +614,14 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
   assert.match(HAMMER_PROMPT, /resumeOwed: \(\$reason == "required-checks-pending"\)/);
   assert.match(HAMMER_PROMPT, /resumeHead:.*\$validatedHead/);
   assert.match(HAMMER_PROMPT, /hammer-ci-pending-resume-owed head=\$POST_REMEDIATION_SHA/);
-  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| return 20/);
+  assert.match(HAMMER_PROMPT, /if ham_append_terminal_audit deferred required-checks-pending; then/);
 });
 
 for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, false], [true, true]]) {
-  test(`CI timeout retains the pre-poll release charge with pending-only=${pendingOnly}, audit fails=${auditFails}`, () => {
+  test(`CI timeout releases the retry lease without refund with pending-only=${pendingOnly}, audit fails=${auditFails}`, () => {
     const source = readFileSync(join(REPO_ROOT, 'bin', 'hammer-merge.sh'), 'utf8');
-    const start = source.indexOf('HAM_ALREADY_MERGED_VALIDATED_HEAD=0\nham_release_merge_lease');
-    const end = source.indexOf('\n  # Remote CI does not own', start);
+    const start = source.indexOf('ham_ci_timeout()');
+    const end = source.indexOf('ham_merge_error_retryable()', start);
     assert.ok(start > 0 && end > start);
     const script = `
       ham_refresh_github_gate() {
@@ -643,19 +643,16 @@ for (const [pendingOnly, auditFails] of [[false, false], [false, true], [true, f
       HAM_REMOTE_CI_DEADLINE=0
       HAM_GATE_JSON=/dev/null
       POST_REMEDIATION_SHA=validated-head
-      run_pending_gate() {
-        ${source.slice(start, end)}
-        done
-      }
-      run_pending_gate
+      ${source.slice(start, end)}
+      ham_ci_timeout
+      exit 20
     `;
     const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
     assert.equal(result.status, 20, result.stderr);
     assert.deepEqual(result.stdout.trim().split('\n'), [
-      'release:none',
-      'gate-read',
       pendingOnly ? 'audit:deferred:required-checks-pending' : 'audit:failed-without-merge:github-gate-timeout',
+      'release:none',
     ]);
     assert.equal(result.stderr.includes('hammer-ci-pending-resume-owed head=validated-head'), pendingOnly && !auditFails);
   });

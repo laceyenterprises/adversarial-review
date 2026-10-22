@@ -5,9 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { evaluateHammerStopHold, hammerStopInputs, readHammerStopForHead, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
 
 const head = 'a'.repeat(40);
+const subprocessTimeout = loadAwareTimeoutMs(30_000);
 const green = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head, liveHead: head,
   mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', checksConclusion: 'SUCCESS', reasons: [] };
 const unknown = { ...green, ok: false, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', reasons: ['pr-mergeability-unknown'] };
@@ -41,7 +43,8 @@ if (args[0] === '--input-type=module') {
   }
 } else if (args[0].endsWith('/ama-audit.mjs')) {
   const value = key => args[args.indexOf(key) + 1];
-  log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))) });
+  log({ outcome: value('--outcome'), attempt: JSON.parse(fs.readFileSync(value('--attempt-json'))),
+    at: Number(fs.readFileSync(dir + '/clock')) });
 } else if (args[0].endsWith('/metered-gh.mjs')) {
   log({ merge: args });
 } else if (args[0].endsWith('/hammer-pr-read.mjs')) {
@@ -73,7 +76,7 @@ date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }
 source "$1"
 exit "$?"
-`, '_', script], { encoding: 'utf8', timeout: 15_000, env: {
+`, '_', script], { encoding: 'utf8', timeout: subprocessTimeout, env: {
     PATH: process.env.PATH, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: pythonStub,
   } });
   assert.equal(result.error, undefined);
@@ -133,8 +136,11 @@ test('HAMUNKNOWN-02: pending CI with persistent UNKNOWN waits for the CI deadlin
   assert.equal(result.status, 20, result.stderr);
   const samples = result.events.filter(event => event.gate);
   const waited = samples.at(-1).at - samples[0].at;
-  assert.ok(waited >= 900 && waited <= 960, `bounded CI wait: ${waited}s`);
+  // Stop before reading another gate at the deadline; the last poll is one
+  // cadence earlier, while the deferral itself must consume the full budget.
+  assert.equal(waited, 870, 'no gate read starts at or after the 900s deadline');
   const deferred = result.events.find(event => event.outcome === 'deferred');
+  assert.equal(deferred.at - samples[0].at, 900, 'deferral occurs at the CI deadline');
   assert.equal(deferred.attempt.reason, 'pr-mergeability-unknown');
   assert.equal(deferred.attempt.remoteCiStatus, 'mergeability-unknown-ci-timeout');
   assert.equal(deferred.attempt.githubGate.checksConclusion, 'PENDING');

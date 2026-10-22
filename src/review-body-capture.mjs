@@ -1,3 +1,4 @@
+import { persistReviewFindingsSafe } from './review-finding-records.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -293,62 +294,65 @@ function updateReviewerPassBodyCapture(rootDir, {
     const db = openReviewStateDb(rootDir);
     try {
       ensureReviewStateSchema(db);
-      const row = db.prepare(
-        `SELECT pass_id, body_md, metadata_json
-           FROM reviewer_passes
-          WHERE repo = ?
-            AND pr_number = ?
-            AND attempt_number = ?
-            AND pass_kind = ?`
-      ).get(repo, Number(prNumber), Number(attemptNumber), kind);
-      let result = { changes: 0 };
-      if (row && (
-        row.body_md === null ||
-        row.body_md === undefined ||
-        (
-          allowExistingBodyUpdate &&
-          normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
-        )
-      )) {
-        const capturePatch = execution ? { ...metadataPatch, reviewerExecution: execution } : metadataPatch;
-        const metadata = capturePatch
-          ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), capturePatch)
-          : parseMetadataJson(row.metadata_json);
-        result = db.prepare(
-          `UPDATE reviewer_passes
-              SET verdict = ?,
-                  body_md = ?,
-                  gh_comment_id = ?,
-                  body_captured_at = ?,
-                  reviewer_model = COALESCE(?, reviewer_model),
-                  reasoning_effort = COALESCE(?, reasoning_effort),
-                  metadata_json = ?
-            WHERE pass_id = ?`
-        ).run(
-          verdict,
-          bodyMd,
-          ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
-          capturedAt,
-          execution?.model || null,
-          execution?.effort || null,
-          stringifyMetadataJson(metadata),
-          row.pass_id,
-        );
-      }
-      // Surface silent misses: a 0-row UPDATE means the row we expected to
-      // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
-      // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
-      // comment is real and posted; the local mirror has no row to link it
-      // to. Without this warn, attempt-number / passKind drift between the
-      // row creator and the capture call is invisible.
-      if (result?.changes === 0) {
-        log.warn?.(
-          `[review-body-capture] capture matched 0 rows for ${repo}#${prNumber} ` +
-          `attempt=${Number(attemptNumber)} pass_kind=${kind}; ` +
-          `body and gh_comment_id were NOT linked to any reviewer_passes row`
-        );
-      }
-      return result;
+      return db.transaction(() => {
+        const row = db.prepare(
+          `SELECT pass_id, body_md, metadata_json
+             FROM reviewer_passes
+            WHERE repo = ?
+              AND pr_number = ?
+              AND attempt_number = ?
+              AND pass_kind = ?`
+        ).get(repo, Number(prNumber), Number(attemptNumber), kind);
+        let result = { changes: 0 };
+        if (row && (
+          row.body_md === null ||
+          row.body_md === undefined ||
+          (
+            allowExistingBodyUpdate &&
+            normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
+          )
+        )) {
+          const capturePatch = execution ? { ...metadataPatch, reviewerExecution: execution } : metadataPatch;
+          const metadata = capturePatch
+            ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), capturePatch)
+            : parseMetadataJson(row.metadata_json);
+          result = db.prepare(
+            `UPDATE reviewer_passes
+                SET verdict = ?,
+                    body_md = ?,
+                    gh_comment_id = ?,
+                    body_captured_at = ?,
+                    reviewer_model = COALESCE(?, reviewer_model),
+                    reasoning_effort = COALESCE(?, reasoning_effort),
+                    metadata_json = ?
+              WHERE pass_id = ?`
+          ).run(
+            verdict,
+            bodyMd,
+            ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
+            capturedAt,
+            execution?.model || null,
+            execution?.effort || null,
+            stringifyMetadataJson(metadata),
+            row.pass_id,
+          );
+          persistReviewFindingsSafe(db, row.pass_id, log);
+        }
+        // Surface silent misses: a 0-row UPDATE means the row we expected to
+        // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
+        // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
+        // comment is real and posted; the local mirror has no row to link it
+        // to. Without this warn, attempt-number / passKind drift between the
+        // row creator and the capture call is invisible.
+        if (result?.changes === 0) {
+          log.warn?.(
+            `[review-body-capture] capture matched 0 rows for ${repo}#${prNumber} ` +
+            `attempt=${Number(attemptNumber)} pass_kind=${kind}; ` +
+            `body and gh_comment_id were NOT linked to any reviewer_passes row`
+          );
+        }
+        return result;
+      })();
     } finally {
       db.close();
     }

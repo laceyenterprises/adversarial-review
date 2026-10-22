@@ -1,4 +1,5 @@
 import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
+import { captureFindingRemediationSafe } from './finding-remediation-capture.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { followUpJobFilePrefix, sanitizeRepo } from './follow-up-job-names.mjs';
 import {
@@ -3186,7 +3187,7 @@ function markFollowUpJobCompleted({
     preview: completionPreview,
   };
 
-  return moveTerminalJobRecord({
+  const completed = moveTerminalJobRecord({
     rootDir,
     jobPath,
     destinationKey: 'completed',
@@ -3239,6 +3240,8 @@ function markFollowUpJobCompleted({
       return nextJob;
     },
   });
+  captureFindingRemediationSafe({ rootDir, job: completed.job });
+  return completed;
 }
 
 function computeFollowUpJobStoppedState({

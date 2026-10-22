@@ -475,10 +475,11 @@ ham_already_merged_validated_head() {
 }
 
 ham_ci_timeout() {
-  # The deadline prevents a final gate read. Preserve the UNKNOWN deferral
-  # from the last successful snapshot rather than turning it into a veto.
+  # Deadline checks may run before the next read. Preserve the last exact-head
+  # UNKNOWN snapshot's retryable classification instead of terminalizing it.
   if ham_required_gate_mergeability_unknown && ! ham_live_head_moved \
-    && jq -e '.state == "OPEN" and .checksConclusion == "PENDING"' "$HAM_GATE_JSON" >/dev/null; then
+    && jq -e '.state == "OPEN" and (.checksConclusion == "PENDING" or .checksConclusion == "SUCCESS") and
+      (.reasons | all(.[]; . == "ci-not-green" or . == "pr-mergeability-unknown" or . == "pr-not-mergeable"))' "$HAM_GATE_JSON" >/dev/null; then
     ham_defer_unknown_mergeability
     return
   fi

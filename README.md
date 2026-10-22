@@ -1067,7 +1067,9 @@ mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expir
 remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
 Retryable UNKNOWN deferral requires an open PR at the validated head; moved
-heads and closed PRs retain their terminal refusal.
+heads and closed PRs retain their terminal refusal. A shared CI deadline reached
+before the next snapshot retains that classification from the last exact-head
+UNKNOWN snapshot; real hold reasons still receive their ordinary refusal.
 Packaging stops and deferrals retain earlier deterministic hammer refusals until
 success. Packaging-only audit history also reasserts an unreleased persisted
 refusal before all dispatch routes, including ownerless recovery, without state

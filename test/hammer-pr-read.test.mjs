@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 
 const head = 'a'.repeat(40);
 const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
@@ -28,7 +29,7 @@ test('REST mergeCommit represents a completed merge, never an open PR test merge
   assert.equal(snapshot.mergeCommit, null);
 });
 
-test('REST snapshot preserves the lease green assertion for runs and contexts', async () => {
+test('REST snapshot preserves the lease green assertion for runs and contexts', async t => {
   const snapshot = await fetchHammerPr('fixture/repo', 42, { read: async path => {
     if (path.includes('/check-runs?')) return { check_runs: ['success', 'neutral', 'skipped'].map(conclusion => ({
       name: conclusion, status: 'completed', conclusion,
@@ -39,11 +40,24 @@ test('REST snapshot preserves the lease green assertion for runs and contexts', 
   } });
   assert.equal(classifyCheckRollup(snapshot.checks), 'SUCCESS');
   assert.deepEqual(snapshot.labels, [{ id: label.node_id, name: label.name, color: label.color }]);
-  const source = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
-  const filter = source.match(/if jq -e --arg head "\$POST_REMEDIATION_SHA"\s+'([^']+)'/)[1];
-  const green = value => spawnSync('jq', ['-e', '--arg', 'head', head, filter], {
-    input: JSON.stringify(value), encoding: 'utf8', timeout: 5000,
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-green-snapshot-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const source = renderHammerProcedure('hammer-verify-head', {
+    ROOT_DIR: fileURLToPath(new URL('..', import.meta.url)), RUN_DIR: dir, HQ_ROOT: dir,
+    REPO: 'fixture/repo', PR_NUMBER: '42', PR_URL: 'fixture-url', REVIEWED_SHA: head,
+    TARGET_REMEDIATION_SHA: head, MERGE_METHOD: 'squash', REVIEWER: 'fixture', RISK_CLASS: 'low',
   });
+  const start = source.indexOf('  ham_lease_snapshot_green() {');
+  const end = source.indexOf('\n  if ham_lease_snapshot_green; then', start);
+  assert.ok(start >= 0 && end > start, 'extract the actual rendered lease snapshot helper');
+  const helper = source.slice(start, end);
+  const green = value => {
+    writeFileSync(join(dir, 'pre-acquire-checks.json'), JSON.stringify(value));
+    return spawnSync('/bin/bash', ['-c', `${helper}\nham_lease_snapshot_green`], {
+      encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, HAM_NODE_BIN: process.execPath, POST_REMEDIATION_SHA: head },
+    });
+  };
   assert.equal(green(snapshot).status, 0);
   for (const value of [{ ...snapshot, headRefOid: 'b'.repeat(40) }, { ...snapshot, statusCheckRollup: [] },
     { ...snapshot, statusCheckRollup: [{ __typename: 'CheckRun', status: 'QUEUED', conclusion: null }] },

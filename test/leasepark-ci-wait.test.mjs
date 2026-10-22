@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { acquireMergeLease, inspectMergeLease, readMergeLeaseAttempts, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
@@ -60,7 +61,13 @@ function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launch
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gate.json'), JSON.stringify({ headMatches: true, state: 'OPEN', ...gate }));
-  const helpers = render(merge.slice(merge.indexOf('ham_required_gate_ok()'), merge.indexOf('ham_merge_error_retryable()')));
+  const renderedMerge = renderHammerProcedure('hammer-merge', {
+    ROOT_DIR: rootDir, RUN_DIR: '$TEST_ROOT', HQ_ROOT: rootDir, REPO: 'fixture/repo', PR_NUMBER: '7702',
+    PR_URL: 'fixture-url', REVIEWED_SHA: head, TARGET_REMEDIATION_SHA: head,
+    MERGE_METHOD: 'squash', REVIEWER: 'claude', RISK_CLASS: 'critical',
+  });
+  const helpers = renderedMerge.slice(renderedMerge.indexOf('ham_required_gate_ok()'),
+    renderedMerge.indexOf('ham_merge_error_retryable()'));
   const release = verify.slice(verify.indexOf('ham_mark_merge_lease_retryable_abort()'), verify.indexOf('ham_acquire_merge_lease()'));
   const loop = render(merge.slice(merge.indexOf('HAM_LOCAL_CI_STATUS=local-battery'), merge.indexOf('\nHAM_MERGE_ATTEMPTS=0')));
   const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')))

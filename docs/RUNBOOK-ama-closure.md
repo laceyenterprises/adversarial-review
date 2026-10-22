@@ -3263,7 +3263,12 @@ removes it and competes through the existing exclusive acquisition CAS, logging
 `ama_closer.terminal_lease_reclaimed`. Retry, review, CI and lifetime gates remain.
 Supersession is recorded on the dispatch record; its matching rekeyed lease is
 released rather than terminalized at the superseding head. A replacement lease
-or completed review handoff is preserved. Inline and settled background
+or completed review handoff is preserved. A missing or replacement-owned lease
+counts as already retired when finalizing a superseded dispatch; it is left
+untouched and does not prevent recording the predecessor's terminal outcome.
+The state-machine catalog hashes state projections (writers, guards and enums),
+not whole files; logging-only changes need no producer hash refresh.
+Inline and settled background
 `ama.closure_blocker` events identify a retained terminal lease by launch ID and
 outcome (including live or unproven liveness), replacing the provisional
 `ama-closer-dispatch-backgrounded` status once the refusal is known.

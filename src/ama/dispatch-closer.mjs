@@ -1875,7 +1875,7 @@ function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl = proc
   }
 }
 
-function finalizeAmaCloserLeaseBestEffort({
+export function finalizeAmaCloserLeaseBestEffort({
   rootDir,
   leaseIdentity,
   terminalOutcome,
@@ -1895,7 +1895,9 @@ function finalizeAmaCloserLeaseBestEffort({
         return deleteAmaCloserLeaseIfCurrent(rootDir, carried);
       }
       const exact = readAmaCloserLease(rootDir, leaseIdentity);
-      if (exact?.lrqId !== launchRequestId) return false;
+      // An absent lease is already retired; a replacement belongs to another
+      // launch. Neither prevents finalizing the predecessor's dispatch record.
+      if (exact?.lrqId !== launchRequestId) return true;
       if (exact.rekeyedFromHeadSha && exact.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED) {
         return deleteAmaCloserLeaseIfCurrent(rootDir, exact);
       }

@@ -286,10 +286,10 @@ test('sibling hammer phase classifiers retry GraphQL server errors and refuse pe
     ['hammer-merge', 'ham_merge_error_retryable'],
   ]) {
     const source = readFileSync(join(root, 'bin', `${file}.sh`), 'utf8');
-    const body = source.match(new RegExp(`${name}\\(\\) \\{\\n\\s*(grep -Eiq [^\\n]+)\\n\\s*\\}`))?.[1];
+    const body = source.match(new RegExp(`${name}\\(\\) \\{\\n\\s*([^\\n]+)\\n\\s*\\}`))?.[1];
     assert.ok(body, `${file}: ${name}`);
     for (const error of [...errors, 'HTTP 403: permission denied']) {
-      writeFileSync(errorPath, error);
+      writeFileSync(errorPath, `[load-aware-timeout] CPU sample unavailable; using full load-based corroboration\n${error}`);
       const result = spawnSync('/bin/bash', ['-c', `${name}() { ${body}; }\n${name} "$1"`, '_', errorPath],
         { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, error.includes('403') ? 1 : 0, `${name}: ${error}: ${result.stderr}`);

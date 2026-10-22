@@ -94,6 +94,71 @@ test('OSG-03: remediation links an overlapping commit and leaves untouched findi
   assert.equal(linkFindingRemediation(db, { job: wrongHead, workspaceDir: root }).linked, 0);
 });
 
+test('single-line citations are addressed by a pure insertion at the cited line', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'finding-insertion-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).trim();
+  git('init', '-q');
+  git('config', 'user.name', 'Fixture');
+  git('config', 'user.email', 'fixture@example.invalid');
+  const lines = Array.from({ length: 15 }, (_, i) => `line ${i + 1}\n`);
+  writeFileSync(join(root, 'input.mjs'), lines.join(''));
+  git('add', 'input.mjs');
+  git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Initial fixture');
+  const start = git('rev-parse', 'HEAD');
+  lines.splice(10, 0, 'validation guard\n');
+  writeFileSync(join(root, 'input.mjs'), lines.join(''));
+  git('add', 'input.mjs');
+  git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Insert validation');
+  const fixed = git('rev-parse', 'HEAD');
+  assert.match(git('diff', '--unified=0', start, fixed), /@@ -10,0 \+11 @@/);
+  const { db, pass } = fixture(t, { capture: false, headSha: start });
+  const { linkFindingRemediation, readReviewFindings } = await api();
+  for (const citation of ['10', '10-10']) {
+    const reviewBody = body.replace('**Lines:** 2-3', `**Lines:** ${citation}`);
+    db.prepare('UPDATE reviewer_passes SET body_md=? WHERE pass_id=?').run(reviewBody, pass.pass_id);
+    const job = { jobId: `insertion-${citation}`, repo: 'sample/service', prNumber: 7,
+      revisionRef: start, reviewBody, remediationPlan: { currentRound: 1, rounds: [{ round: 1,
+        startHeadSha: start, publishedHeadSha: fixed }] }, remediationReply: { payload: {
+        addressed: [{ title: 'Validate the input', files: ['input.mjs'] }],
+      } } };
+    linkFindingRemediation(db, { job, workspaceDir: root });
+    const [finding] = readReviewFindings(db);
+    assert.equal(finding.status, 'addressed', citation);
+    assert.equal(finding.remediations[0].commit_sha, fixed);
+    assert.equal(finding.remediations[0].reason, 'overlapping-diff');
+  }
+});
+
+test('dispute backfill waits for a posted comment and remains idempotent after posting', async t => {
+  const { db, pass } = fixture(t, { capture: false });
+  const { blockingFindingIdentity } = await import('../src/ama/hammer-adjudication.mjs');
+  const { parseReviewFindings } = await import('../src/kernel/review-findings.mjs');
+  const identity = blockingFindingIdentity(parseReviewFindings(body).blocking.findings[0]);
+  db.prepare(`INSERT INTO ham_finding_disputes(repo, pr_number, identity, head_sha,
+    finding_reviewed_head) VALUES (?, ?, ?, ?, ?)`)
+    .run('sample/service', 7, identity, 'b'.repeat(40), 'a'.repeat(40));
+  db.prepare('UPDATE reviewer_passes SET body_md=? WHERE pass_id=?').run(body, pass.pass_id);
+  const { backfillReviewFindings, persistReviewFindings, syncFindingDisputes, readReviewFindings } = await api();
+  assert.equal(backfillReviewFindings(db).inserted, 2);
+  persistReviewFindings(db, pass.pass_id);
+  syncFindingDisputes(db);
+  assert.deepEqual(readReviewFindings(db)[0].disputes, []);
+  assert.equal(readReviewFindings(db)[0].status, 'unaddressed');
+  db.prepare(`UPDATE ham_finding_disputes SET comment_id=?, resolution='withdrawn-by-hammer'
+    WHERE identity=?`).run('posted-comment', identity);
+  syncFindingDisputes(db);
+  backfillReviewFindings(db);
+  const [finding] = readReviewFindings(db);
+  assert.equal(finding.status, 'withdrawn');
+  assert.deepEqual(finding.disputes.map(d => d.comment_id), ['posted-comment']);
+  // Backfill must also link evidence posted before the finding was captured.
+  db.prepare('DELETE FROM review_finding_disputes').run();
+  assert.equal(syncFindingDisputes(db, { passId: pass.pass_id }), 1);
+  assert.deepEqual(readReviewFindings(db)[0].disputes, finding.disputes);
+});
+
 test('OSG-03: hammer withdrawal is recorded only for the reviewed finding head', async t => {
   const { db } = fixture(t);
   const { blockingFindingIdentity } = await import('../src/ama/hammer-adjudication.mjs');
@@ -196,6 +261,26 @@ test('same-file changes outside the finding range do not count as addressing it'
         : args.includes('diff') ? '@@ -7 +7 @@\n-old\n+new\n' : '' });
   assert.equal(result.get('fixture').commitSha, null);
   assert.equal(result.get('fixture').reason, 'no-overlapping-commit');
+});
+
+test('pure insertion boundaries include the last cited line and shift earlier insertions', () => {
+  const start = 'a'.repeat(40), prefix = 'b'.repeat(40), fixed = 'c'.repeat(40);
+  const findings = ['10', '10-10', '8-10', '10-12', '11', '1'].map(lines => ({
+    finding_id: lines, file: 'input.mjs', lines,
+  }));
+  const result = attributeFindingCommits({ findings, workspaceDir: '/synthetic', startHead: start, publishedHead: fixed,
+    exec: (_command, args) => args.includes('rev-list') ? `${fixed}\n${prefix}`
+      : args.includes('rev-parse') ? (args.includes(`${prefix}^1`) ? start : prefix)
+        : args.includes('diff') ? (args.includes(prefix) && args.includes(fixed)
+          ? '@@ -11 +11 @@\n-old\n+new\n' : '@@ -10,0 +11 @@\n+guard\n') : '' });
+  for (const lines of ['10', '10-10', '8-10', '10-12']) {
+    assert.equal(result.get(lines).commitSha, prefix, lines);
+  }
+  // Inserting before line 11 shifts it to 12; changing line 11 later cannot
+  // supply evidence for the original line 11. A distant finding is untouched.
+  for (const lines of ['11', '1']) {
+    assert.deepEqual(result.get(lines), { commitSha: null, reason: 'no-overlapping-commit' }, lines);
+  }
 });
 
 test('attribution shares reviewer line formats and rejects invalid coordinates', () => {

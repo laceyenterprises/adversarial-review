@@ -3,7 +3,7 @@
 **Owner:** review-body capture and remediation completion observations
 **Store:** `data/reviews.db`
 **Schema:** `migrations/20261021_review_findings.sql`
-**Implementation:** `src/review-finding-records.mjs`,
+**Source of truth:** `src/review-finding-records.mjs`,
 `src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
@@ -50,7 +50,9 @@ published heads. The base must lie on the published head's first-parent chain.
 Line fields use the shared `src/kernel/finding-lines.mjs` parser, also consumed
 by the existing primary-change authorization shim without policy changes.
 For each commit, zero-context diffs are compared with the finding's old line
-range; earlier unrelated insertions and deletions shift the range. A file touch
+range. Pure insertions anchored after any cited line, including the last line
+of a range or a single-line citation, count as overlap; insertions anchored
+before the first cited line only shift the range, as do earlier deletions. A file touch
 outside that range supplies no attribution. Missing locations, missing history,
 nonlinear history and time or size limits leave the finding unaddressed.
 Attribution is bounded to two seconds, 128 commits and 4 MiB per git output.
@@ -71,7 +73,9 @@ attestation, dispatch, closure predicates or lifecycle transitions.
 head, comment ID, resolution, evidence digest and request/refusal counters.
 SQLite insert/update triggers link disputes only to blocking findings of the
 same repository, PR, finding identity and reviewed head. Finding backfill links
-already-stored disputes too. Replacing the hammer's latest row for a newer
+already-stored disputes too. Both paths require a non-null posted comment ID;
+pending disputes are not projected before their comment is recorded.
+Replacing the hammer's latest row for a newer
 review does not erase older finding evidence. A missing reviewed head cannot
 link a dispute. These records describe historical evidence; they grant no merge
 authority and do not carry a withdrawal forward to an arbitrary evaluated head.

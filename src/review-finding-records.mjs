@@ -32,12 +32,13 @@ export function persistReviewFindings(db, passId) {
       ON CONFLICT(finding_id) DO UPDATE SET reviewer_identity=excluded.reviewer_identity,
         reviewer_model=excluded.reviewer_model, reasoning_effort=excluded.reasoning_effort,
         head_sha=excluded.head_sha, current_body=1`);
+    const exists = db.prepare('SELECT 1 FROM review_findings WHERE finding_id=?');
     let inserted = 0;
     for (const [index, { f, blocking }] of findings.entries()) {
       const content = findingContent(f, blocking);
       const hash = digest(content);
       const id = `${passId}:${index + 1}:${hash}`;
-      if (!db.prepare('SELECT 1 FROM review_findings WHERE finding_id=?').get(id)) inserted++;
+      if (!exists.get(id)) inserted++;
       insert.run({ id, pass: passId, ordinal: index + 1, hash, ...content,
         json: JSON.stringify(content), identity: metadata?.reviewerAttribution?.identity || pass.reviewer_class,
         model: pass.reviewer_model, effort: pass.reasoning_effort, head: pass.head_sha,
@@ -63,7 +64,7 @@ export function syncFindingDisputes(db, { passId = null } = {}) {
     FROM review_findings f JOIN reviewer_passes p ON p.pass_id=f.pass_id
     JOIN ham_finding_disputes d ON d.repo=p.repo AND d.pr_number=p.pr_number
       AND d.identity=f.hammer_identity AND d.finding_reviewed_head=f.head_sha
-    WHERE f.blocking=1 AND (? IS NULL OR f.pass_id=?)
+    WHERE f.blocking=1 AND d.comment_id IS NOT NULL AND (? IS NULL OR f.pass_id=?)
     ON CONFLICT(finding_id, head_sha, comment_id) DO UPDATE SET
       resolution=excluded.resolution, evidence_sha256=excluded.evidence_sha256,
       requests=excluded.requests, refusals=excluded.refusals`).run(passId, passId).changes;
@@ -134,16 +135,16 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
 // reported to the corpus caller; it must not turn missing data into zero findings.
 export function readReviewFindings(db, { repo = null, prNumber = null, afterPassId = 0, afterOrdinal = 0, limit = 500 } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be 1..5000');
+  const remediationQuery = db.prepare(`SELECT m.*, r.job_id, r.round_number, r.reply_path,
+    r.start_head_sha, r.published_head_sha FROM review_finding_remediations m
+    JOIN review_finding_replies r ON r.reply_id=m.reply_id WHERE finding_id=? ORDER BY r.round_number, r.reply_id`);
+  const disputeQuery = db.prepare('SELECT * FROM review_finding_disputes WHERE finding_id=? ORDER BY head_sha, comment_id');
   return db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at FROM review_findings f
     JOIN reviewer_passes p ON p.pass_id=f.pass_id WHERE f.current_body=1 AND (f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))
       AND (? IS NULL OR p.repo=?) AND (? IS NULL OR p.pr_number=?)
     ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(afterPassId, afterPassId, afterOrdinal, repo, repo, prNumber, prNumber, limit).map(row => {
-    const remediations = db.prepare(`SELECT m.*, r.job_id, r.round_number, r.reply_path,
-      r.start_head_sha, r.published_head_sha FROM review_finding_remediations m
-      JOIN review_finding_replies r ON r.reply_id=m.reply_id WHERE finding_id=? ORDER BY r.round_number, r.reply_id`)
-      .all(row.finding_id);
-    const disputes = db.prepare('SELECT * FROM review_finding_disputes WHERE finding_id=? ORDER BY head_sha, comment_id')
-      .all(row.finding_id);
+    const remediations = remediationQuery.all(row.finding_id);
+    const disputes = disputeQuery.all(row.finding_id);
     const status = disputes.some(d => d.resolution === 'withdrawn-by-hammer' && d.comment_id)
       ? 'withdrawn' : row.verdict === 'dismissed' ? 'dismissed'
         : remediations.some(m => m.commit_sha) ? 'addressed' : 'unaddressed';

@@ -55,9 +55,11 @@ export function attributeFindingCommits({ findings, workspaceDir, startHead, pub
           '--no-textconv', '--no-color', '--no-renames', '--unified=0', parent, commit, '--', file])));
         const hunks = [...diffs.get(file).matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)]
           .map(m => ({ old: Number(m[1]), removed: Number(m[2] ?? 1), added: Number(m[4] ?? 1) }));
+        // A zero-removal hunk is anchored after its old line. Include the
+        // last cited line, including when the citation contains only one line.
         const overlaps = hunks.some(h => ranges.some(([a, b]) => h.removed
           ? h.old <= b && h.old + h.removed - 1 >= a
-          : h.old >= a && h.old < b));
+          : h.old >= a && h.old <= b));
         if (overlaps) result.set(f.finding_id, { commitSha: commit, reason: 'overlapping-diff' });
         else item.ranges = ranges.map(([a, b]) => {
           const shift = hunks.filter(h => h.removed ? h.old + h.removed - 1 < a : h.old < a)

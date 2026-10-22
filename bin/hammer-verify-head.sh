@@ -588,7 +588,8 @@ ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
 if ham_gh api \
     "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
     > "$ham_rsc_json" 2> "$ham_rsc_err"; then
-  if [ "$(jq -r '.strict // empty' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+  # jq's // treats false as absent; preserve an explicit non-strict rule.
+  if [ "$(jq -r '.strict' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
     HAM_REQUIRES_UP_TO_DATE=0
   fi
 elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then

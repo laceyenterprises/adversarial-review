@@ -114,6 +114,9 @@ source "$FIXTURE_DIR/hammer-verify-head.sh"
 status=$?
 echo "verify=$status outcome=$HAM_PHASE_OUTCOME head=\${HAM_PRODUCED_HEAD:-} revalidate=\${HAM_NEEDS_REVALIDATION:-}"
 [ "$status" -eq 0 ] || exit "$status"
+if [ "$SCENARIO" = ci-disjoint ]; then
+  [ "$HAM_REQUIRES_UP_TO_DATE" -eq 0 ] || exit 94
+fi
 if [ "$HAM_NEEDS_REVALIDATION" = true ]; then
   env -u NODE_TEST_CONTEXT "$REAL_NODE" --test surface.test.mjs || exit 1
   git rev-parse HEAD > "$FIXTURE_DIR/tested-head"

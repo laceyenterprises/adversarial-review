@@ -668,10 +668,47 @@ async function spawnReviewerOnce(args) {
   if (reviewerRefusesBuilder(args.builderTag, args.reviewerModel)) return spawnReviewerOnceWithAccount(args);
   const sessionUuid = args.reviewerSessionUuid || randomUUID();
   const env = args.quotaCheckEnv || process.env;
-  const receipt = await (args.selectReviewerTokenAccountImpl || selectReviewerTokenAccount)({
-    reviewerModel: args.reviewerModel, requestId: sessionUuid, acquire: true, env,
-    rootDir: args.rootDir || ROOT,
-  });
+  const arm = args.reviewerArm?.harness === normalizeReviewerModel(args.reviewerModel) ? args.reviewerArm : null;
+  const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
+  const defaultArgs = () => {
+    const route = args.reviewerArmDefaultRoute;
+    return { ...args, reviewerArm: null, reviewerArmDefaultRoute: null,
+      ...(route ? { reviewerModel: route.reviewerModel, botTokenEnv: route.botTokenEnv,
+        codexBrokerProvider: route.codexBrokerProvider || 'codex', claudeAccountSelection: null } : {}) };
+  };
+  const runDefault = async () => {
+    const next = defaultArgs();
+    if (arm && next.reviewerModel !== args.reviewerModel) {
+      await args.onReviewerArmFallback?.({ reviewerModel: next.reviewerModel,
+        codexBrokerProvider: next.codexBrokerProvider, reviewerSessionUuid: sessionUuid });
+    }
+    return spawnReviewer(next);
+  };
+  if (arm && runtimeId !== 'cli-direct') {
+    console.info('[watcher] osg-reviewer reason=runtime-unsupported');
+    return runDefault();
+  }
+  let receipt;
+  try {
+    receipt = await (args.selectReviewerTokenAccountImpl || selectReviewerTokenAccount)({
+      reviewerModel: args.reviewerModel, requestId: sessionUuid, acquire: true, env,
+      rootDir: args.rootDir || ROOT,
+      ...(arm ? { model: arm.model } : {}),
+    });
+  } catch (error) {
+    if (!arm) throw error;
+    console.info('[watcher] osg-reviewer reason=error-account-unavailable');
+    return runDefault();
+  }
+  if (arm && (receipt?.hold || !receipt?.lease || receipt.tokenAccountId !== arm.account)) {
+    if (receipt?.lease) {
+      try {
+        await (args.updateReviewerTokenLeaseImpl || updateReviewerTokenLease)(receipt, 'release', { env, rootDir: args.rootDir || ROOT });
+      } catch { console.info('[watcher] osg-reviewer reason=error-account-release'); }
+    }
+    console.info('[watcher] osg-reviewer reason=account-changed');
+    return runDefault();
+  }
   if (receipt?.hold) {
     const result = { ok: false, failureClass: 'reviewer-account-held',
       effectiveReviewerModel: args.reviewerModel, reviewerSessionUuid: sessionUuid,
@@ -688,7 +725,6 @@ async function spawnReviewerOnce(args) {
       throw error;
     }
   }
-  const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
   if (receipt && !(args.accountBindingRuntimeIds || ['cli-direct', 'acpx']).includes(runtimeId)) {
     // These runtimes do not yet carry an execution binding to their credential
     // owner. Never claim the selected token was used by an unbound dispatch.
@@ -785,6 +821,7 @@ async function spawnReviewerOnceWithAccount({
   codexBrokerProvider = 'codex',
   claudeAccountSelection = null,
   reviewerAccountReceipt = null,
+  reviewerArm = null,
   onReviewerPgid = () => {},
   onReviewerRuntimeStarted = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
@@ -1016,6 +1053,7 @@ async function spawnReviewerOnceWithAccount({
           codexBrokerProvider,
           claudeBrokerProvider,
           reviewerAccountReceipt,
+          ...(reviewerArm?.harness === normalizeReviewerModel(reviewerModel) ? { reviewerArm } : {}),
           reviewerAttribution,
           ...(agyIdentity ? { agyIdentity } : {}),
           // Persisted in the run record so a restarted watcher keeps this

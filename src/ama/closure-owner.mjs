@@ -11,6 +11,7 @@ export const CLOSURE_OWNER_WAIT_MS = 30_000;
 // ownership, never merge authority: execution still runs the live exact-head
 // eligibility predicate and lease CAS. Diagnostic labels confer no ownership.
 export function decideClosureOwner({ reviewState = {}, currentHead, attested = false,
+  closerAuthoredStale = null,
   lease = null, retryExhausted = false, lifetimeExhausted = false,
   mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
   waitExhausted = false, primaryChange = null, reviewCeilingReached = false,
@@ -34,6 +35,13 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
       ? action('page', 'in-flight-lease-expired')
       : action('wait', `in-flight:${lease.lrqId || lease.watcherPid || 'closer-lease'}`,
         { boundedMs: AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, retryAfterMs: CLOSURE_OWNER_WAIT_MS });
+  }
+  // HAMATTEST-02: project the shared verdict-carry decision into ownership
+  // (also consumed by rescue), without independently trusting a closer tip.
+  if (closerAuthoredStale && currentHead && closerAuthoredStale.currentHead === currentHead
+    && closerAuthoredStale.reviewedHead === reviewState.headSha) {
+    if (closerAuthoredStale.decision === 'rereview-exact-head') return action('review', 'exact-head-review');
+    if (closerAuthoredStale.carryForward === true) attested = true;
   }
   const capped = retryExhausted || lifetimeExhausted;
   const hammer = reason => capped

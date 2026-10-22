@@ -1702,7 +1702,7 @@ async function dispatchAmaClosureFor({
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,
     lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
   });
-  const closureOwnerInput = { rootDir, reviewState, currentHead: currentPrHeadSha, strictMode,
+  const closureOwnerInput = { rootDir, reviewState, currentHead: currentPrHeadSha, strictMode, closerAuthoredStale,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
     lease: handoffLease,

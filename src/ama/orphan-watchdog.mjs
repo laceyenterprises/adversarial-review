@@ -14,6 +14,7 @@ import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-leas
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { summarizePRRemediationLedger } from '../follow-up-jobs.mjs';
 import { hammerOwnerRouteOf } from './review-cycle-cap-route.mjs';
+import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
 const terminalLaunches = new Map();
@@ -230,7 +231,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const idleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let ownership;
-    if (isOrphanRecoveryWait(result)) {
+    if (isOrphanRecoveryWait(result) && result?.closerAuthoredStale?.decision !== 'rereview-exact-head') {
       // A proof timeout must return at its serial deadline. Observing this
       // wait only needs the clock; no ownership probe or recovery can run.
       ownership = { owned: false };
@@ -249,14 +250,25 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const pending = { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
     if (!idleSince) {
       db.prepare('UPDATE ownership SET idleSince=? WHERE id=1').run(now);
-      db.prepare('UPDATE heads SET idleSince=? WHERE head=?').run(now, headSha);
-      pending.amaClosureResult = { ...pending.amaClosureResult, ownerlessIdleMs: 0, ownerlessSince: now };
-      return pending;
     }
-    const idleMs = Date.parse(now) - Date.parse(idleSince);
+    if (!state.idleSince) db.prepare('UPDATE heads SET idleSince=? WHERE head=?').run(idleSince || now, headSha);
+    const idleMs = Date.parse(now) - Date.parse(idleSince || now);
     if (!Number.isFinite(idleMs)) throw new Error('orphan watchdog ownership clock is malformed');
     pending.amaClosureResult = { ...pending.amaClosureResult, ownerlessIdleMs: idleMs,
-      ownerlessSince: idleSince };
+      ownerlessSince: idleSince || now };
+    const exactHeadReview = result?.closerAuthoredStale?.decision === 'rereview-exact-head';
+    // HAMATTEST-02: execute the shared decision on this pass, before historical
+    // hammer ownership or the idle timer can leave an unprovable head actorless.
+    // Unknown ownership is a read wait, never permission to race a live closer.
+    if (exactHeadReview) {
+      if (ownership?.uncertain) return pending;
+      if (idleMs < ownerlessBoundMs(env)) {
+        const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
+          reviewStateRow, requestRereviewImpl, logger, db,
+          decisionReasons: result.closerAuthoredStale.reasons || [] });
+        return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
+      }
+    }
     // The route already owns a proof/read/dispatch wait. Keep the ownerless
     // clock, but neither spend recovery nor page an exhausted launch budget.
     if (isOrphanRecoveryWait(result) || idleMs < ownerlessBoundMs(env)) return pending;
@@ -304,9 +316,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       || (external && (external.conclusion !== 'SUCCESS'
         || external.failedChecks.length > 0 || external.pendingChecks.length > 0));
     const hammerHead = facts?.headSha === headSha && facts.liveHeadCloserAuthored === true;
-    const action = hammerHead || hasReview || reviewerRefused || await rereviewClosed({
+    const action = !exactHeadReview && (hammerHead || hasReview || reviewerRefused || await rereviewClosed({
       rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger,
-    }) ? 'hammer' : 'review';
+    })) ? 'hammer' : 'review';
     const attempt = { action, reason: 'outcome-unknown', at: now };
     outcomes.push(attempt);
     db.prepare('UPDATE heads SET attempts=attempts+1, outcomes=?, evidence=? WHERE head=?')

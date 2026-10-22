@@ -57,7 +57,9 @@ try {
       contents: after.get(path)?.mode === '100644' ? git('cat-file', 'blob', after.get(path).oid).toString('base64') : undefined }));
   const result = await publishHammerTree({ repo, branch: info.headRefName, expectedHead: info.headRefOid,
     localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api });
-  fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName };
+  fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName,
+    // Preserve the verified publication even if subsequent fetch/reset fails.
+    ...(result.route === 'published' ? { pushedHead: result.head } : {}) };
   if (result.route === 'published') {
     await network('git', ['fetch', 'origin', result.head]);
     if (git('rev-parse', `${result.head}^{tree}`).toString().trim() !== result.tree) throw new Error('fetched tree mismatch');

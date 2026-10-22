@@ -24,7 +24,24 @@ positive numeric override; invalid values retain the default. `ownership.idleSin
 the first PR-wide observation without a proven owner, across head changes. Poll frequency does not affect
 the bound. Held, draft and terminal PRs do not enter recovery.
 
-After the bound, current-head review evidence chooses the next action: request
+HAMATTEST-02 executes an explicit shared `rereview-exact-head` decision before
+the idle bound when the PR has no live owner and ownership reads are certain.
+The existing `heads.rereview` reservation permits one successful request per
+head. Local queue failures refund that reservation. The request uses the
+existing `system-orphan-head-review:<head>` marker, which the watcher honors
+through closer-tip and old review-budget suppression, while exact-head deduplication
+and live-owner checks remain in force. `heads.evidence` records
+`{ action: "review", reason: "rereview-exact-head", reasons: [...] }`; the watcher
+also logs the reasons. The immediate request starts both `ownership.idleSince` and `heads.idleSince`,
+even if queueing fails or the current-head review is already failed. At the idle
+bound, an unowned head retains the review route for the existing two recovery
+attempts and one exhaustion page. A new head has its own reservation. Authenticated pushed
+and validated App edges share the stale-head predicate; neither historical
+hammer identity nor a closed review budget overrides an explicit review decision.
+Drafts, terminal PRs, operator holds, live owners and uncertain ownership retain
+their existing admission behavior.
+
+Without that explicit shared decision, after the bound, current-head review evidence chooses the next action: request
 review if absent and re-review remains open, otherwise request a hammer.
 HAMNOREREVIEW-01 carries `ownerProofFacts.liveHeadCloserAuthored` from closure
 orchestration, bound by `ownerProofFacts.headSha`. Recognized current-head hammer
@@ -79,9 +96,9 @@ unknown summaries. `evidence` retains the latest summary for existing readers.
 
 Migration adds a singleton `ownership` clock table, nullable `heads.idleSince`, JSON `outcomes` (default `[]`) and the
 legacy reservation column if absent. Old tick and uncertainty columns remain
-readable but no longer control recovery. The independent closer-head review
-helper is retired by HAMNOREREVIEW-01; ownerless recovery uses the
-shared two-attempt budget instead.
+readable but no longer control recovery. The independent closer-head recovery seam remains retired. Ordinary ownerless
+recovery uses the shared two-attempt budget; execution of an explicit
+`rereview-exact-head` decision uses the existing per-head `rereview` reservation.
 
 Every recovery emits one `ownerless-recovery` log line containing repo, PR,
 head, elapsed idle minutes, last reason and action. Separate diagnostics record

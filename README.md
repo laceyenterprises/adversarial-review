@@ -919,6 +919,22 @@ posted under that bot identity using the
 [owner runbook](docs/RUNBOOK-gemini-reviewer-app.md#required-pr-context-reads-lac-2082);
 source publication alone is not live recovery.
 
+HAMATTEST-02 records authenticated hammer publication provenance before CI can
+stop a run. Pushed edges carry the reviewed verdict through the same chain
+reader as validated edges; exact-head CI remains mandatory. An explicit
+`rereview-exact-head` decision executes through the existing pending-review
+transition and per-head orphan reservation as soon as ownership is certainly
+absent. The reasons persist in watchdog evidence. The clean sandbox smoke
+checks that closure ownership honors that head-bound decision even at the review
+ceiling, and carries an attested clean verdict into ordinary merge eligibility.
+Immediate review requests start the ownerless idle clocks; a failed or refused
+request reaches bounded review recovery and one exhaustion page. Known API
+publications survive scratch-sync failures without a fallback push, and transient
+post-rebase snapshot reads retry within the update-branch cap.
+No lifecycle states are added. Focused offline acceptance is in
+`test/hammer-pushed-attestation.test.mjs`, `test/remorphan-01.test.mjs` and the
+rendered publish/rebase and watcher claim-loop fixtures.
+
 Review-body capture records individual findings and remediation evidence in
 `data/reviews.db`. The read-only JSON command
 `node bin/review-findings.mjs show --db <database>` exposes them to corpus
@@ -1511,7 +1527,7 @@ stateDiagram-v2
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 recompute ownership: wait
     [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
-    [*] --> s4: closure-owner.05 recompute ownership: review
+    [*] --> s4: closure-owner.05 recompute ownership: review (including a head-bound shared rereview-exact-head decision before historical hammer ownership)
     [*] --> s5: closure-owner.06 recompute ownership: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
     [*] --> s7: closure-owner.08 recompute ownership: conflict-rebase

@@ -36,17 +36,25 @@ export function exactHammerValidation(comment, headSha) {
 
 // Only GitHub's authenticated comment author binds these edges. Commit metadata
 // and builder-authored copies of the same trailers confer no authority.
+export function hammerProvenanceEdge(comment) {
+  const author = comment?.author?.login || comment?.author || comment?.user?.login;
+  if (login(author) === 'clio-airlock' || !hamAuditCommentAuthorMatches(author)) return null;
+  const lines = String(comment?.body || '').split(/\r?\n/).map(line => line.trim());
+  const values = key => lines.filter(line => line.startsWith(`${key}:`))
+    .map(line => line.slice(key.length + 1).trim());
+  const bases = values('HAM-Base-Head');
+  const validated = values('HAM-Validated-Head');
+  const pushed = values('HAM-Pushed-Head');
+  if (bases.length !== 1 || !bases[0] || validated.length + pushed.length !== 1) return null;
+  const head = validated[0] || pushed[0];
+  if (!head || (validated.length && !exactHammerValidation(comment, head))) return null;
+  return { base: bases[0], head, validated: validated.length === 1 };
+}
+
 export function hammerAttestationChain(comments, reviewedHead, currentHead) {
   if (!reviewedHead || !currentHead || currentHead === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
-  const edges = (Array.isArray(comments) ? comments : []).flatMap(comment => {
-    const normalized = { ...comment, author: comment.author?.login || comment.author || comment.user?.login };
-    const lines = String(comment.body || '').split(/\r?\n/).map(line => line.trim());
-    const bases = lines.filter(line => line.startsWith('HAM-Base-Head: ')).map(line => line.slice(15));
-    const heads = lines.filter(line => line.startsWith('HAM-Validated-Head: ')).map(line => line.slice(20));
-    if (bases.length !== 1 || heads.length !== 1 || !exactHammerValidation(normalized, heads[0])) return [];
-    return [{ base: bases[0], head: heads[0] }];
-  });
+  const edges = (Array.isArray(comments) ? comments : []).map(hammerProvenanceEdge).filter(Boolean);
   for (let pass = 0; pass < edges.length; pass++) {
     let changed = false;
     for (const edge of edges) {

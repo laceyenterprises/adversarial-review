@@ -2806,12 +2806,18 @@ predicates. Its primary-line edits require HAMINTENT-03 per-finding
 `Reversal-Authorized-By` trailers or restoration of reverted lines. See the
 [watchdog data model](data-model/orphan-watchdog.md) for migration and evidence.
 
-HAMNOREREVIEW-01 retires LEASEDEFER-01 exact-head review recovery. Recognized
-closer heads remain with hammer validation, including after a rebase breaks the
-starting-base proof. A missing round record widens the audit range to the last
-reviewed SHA. Ownership probes, safety holds, dispatch leases and retry limits
-remain in force; ownership never certifies a merge. Current-head closer evidence
-also prevents automated and ownerless recovery from requesting source review.
+HAMNOREREVIEW-01 retires LEASEDEFER-01's independent exact-head recovery rule.
+A live hammer can widen a missing starting-base proof to the last reviewed SHA
+and validate that whole range. After exit, HAMATTEST-02's authenticated pushed
+or validated App edges carry that verdict forward; commit identity alone does
+not. An explicit shared `rereview-exact-head` decision instead requests review
+once per head when ownership is certainly absent, including when a closer-looking
+tip or earlier ceiling would otherwise suppress it. This immediate request also
+starts the PR and head idle clocks. If no owner takes over before the idle bound,
+the existing two recovery attempts retain the exact-head review route and page
+on exhaustion, including after a queue refusal or a failed review. Ownership probes, safety
+holds, dispatch leases and retry limits remain in force; ownership never certifies
+a merge.
 
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
 hammer wake (also exposed to agent-os rescue). OWNERPROOF-01 does not require
@@ -3789,9 +3795,15 @@ failure stops publication and predicate evaluation. It never transfers an
 eligible verdict or old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
 reports `github-gate-red`; pending-only expiry reports `required-checks-pending`
 with the existing resume receipt, and other expiry reports `github-gate-timeout`.
-All release the lease. Real read, publication, head-race and authority failures
-continue to fail closed. A non-cooperating base writer during the serialized
-retry refuses as `retry-base-not-contained`; no unbounded retry loop is added.
+All release the lease. A post-rebase PR snapshot retries transient failures with
+the update-branch retry cap and exponential backoff, retaining the last valid
+snapshot. Exhaustion or a permanent failure reports `pr-refresh-failed`
+and releases the lease before returning, including during the in-run CI retry.
+PR node-ID resolution shares the update-branch transient retry cap and backoff;
+permanent lookup failures stop immediately. Real read, publication, head-race and
+authority failures continue to fail closed. A non-cooperating base writer during
+the serialized retry refuses as `retry-base-not-contained`; no unbounded retry
+loop is added.
 The final live head/required-check gate is refreshed under the lease, preserving
 stale-head, current-review, remediation, primary-change and merge authority checks.
 
@@ -3897,7 +3909,23 @@ attempts, 15 seconds each, with 500/1000 ms backoff. Permanent errors or an
 invalid SHA abort startup before edits rather than exporting an empty base.
 It is trustworthy when it is the review record's reviewed head or when
 App-authored comments connect that reviewed head to it through exact
-`HAM-Base-Head` / `HAM-Validated-Head` edges. GitHub authenticates each comment's
+`HAM-Base-Head` / `HAM-Validated-Head` or `HAM-Base-Head` / `HAM-Pushed-Head`
+edges (HAMATTEST-02). The versioned publisher records the pushed pair immediately
+after git/API publication, including server rebases, before CI or lease waits.
+Server rebases use the expected-head-bound mutation result SHA; a later foreign
+branch tip is never recorded as a hammer-produced head.
+It marks CI as not validated and overrides both `GH_TOKEN` and `GITHUB_TOKEN`
+with the entitled hammer App token. If API publication succeeded but scratch
+synchronization failed, attest that published SHA and stop with
+`published-head-sync-failed`; never force-push unsynchronized local state over it. Keep
+that exact pair in a no-merge closing audit after CI, credential or other stops;
+never claim `HAM-Validated-Head` until exact-head CI passes. Publication
+provenance comments are distinct from the successful in-lease validation audit.
+`hammerAttestationChain` reads both kinds for the closer's range proof and the
+shared stale-head rule consumed by watcher closure, hammer wake and rescue.
+Pushed provenance carries the verdict but never certifies CI; the closer reads
+and validates current exact-head required checks before merging.
+GitHub authenticates each comment's
 author; a builder token cannot post or edit a hammer App comment. Commit SHAs
 bind immutable content, while the reviewed head comes from the review record.
 Builder-authored text, commit authors, committers and signatures are not needed
@@ -4461,3 +4489,15 @@ with `leaseWaitExhausted: true`; the next pass retries without failure-counter
 charges or deferral backoff. A moved head, terminal PR or non-green snapshot
 cannot receive this green-exhaustion exemption. Final acquisition still requires
 all existing base, review, required-check, audit and merge predicates.
+
+
+HAMATTEST-02: when the shared rule returns `rereview-exact-head` and live
+ownership is absent, the watcher immediately queues the exact-head review once
+through the existing orphan request reservation. It records the decision's
+reasons in watchdog evidence and logs. This decision takes precedence over
+historical closer-tip identity and final-round ownership; unproven heads cannot
+wait for a hammer that was never launched. Live/uncertain owners, terminal PRs,
+drafts and operator holds retain their existing protections. Queue failures
+remain retryable. After deployment, inspect an ownerless synthetic replay's
+request marker and per-head evidence, and confirm pushed edges never satisfy
+`exactHammerValidation`. No configuration, CI status or merge gate is added.

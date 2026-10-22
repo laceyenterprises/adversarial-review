@@ -1,5 +1,5 @@
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
-import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
+import { fetchHammerHeadRange, hammerAttestationChain } from '../src/ama/hammer-head-validation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -227,7 +227,12 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
 test('API fallback push rejection releases the lease under set -e for both push routes', t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-fallback-push-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'publisher'), `#!/bin/sh
+case "$1" in
+  */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
+  *) printf '%s\\n' "$PUBLISH_RESULT" ;;
+esac
+`, { mode: 0o755 });
   writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
     .replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
@@ -237,9 +242,13 @@ test('API fallback push rejection releases the lease under set -e for both push 
   for (const result of [
     { route: 're-review', branch: 'worker', fallbackHead: 'a'.repeat(40) },
     { route: 're-review', reason: 'API publication timed out' },
+    { route: 're-review', branch: 'worker', fallbackHead: 'b'.repeat(40),
+      previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
   ]) {
+    rmSync(join(dir, 'push-args'), { force: true });
     const env = { HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
-      PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'), PATH: `${dir}:${process.env.PATH}` };
+      PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'),
+      ATTESTATION_ARGS_FILE: join(dir, 'attestation-args'), PATH: `${dir}:${process.env.PATH}` };
     const failure = run('/bin/bash', ['-c', `set -e
 HAM_MERGE_LEASE_HELD=1
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
@@ -250,9 +259,15 @@ echo SHOULD_NOT_CONTINUE
     assert.equal(failure.status, 1, failure.stderr);
     assert.match(failure.stdout, /LEASE_RELEASED\nHELD=0/);
     assert.doesNotMatch(failure.stdout, /SHOULD_NOT_CONTINUE/);
-    assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
-      ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
-      : 'push --force-with-lease');
+    if (result.pushedHead) {
+      assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
+        `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${result.previousHead} ${result.pushedHead}`);
+      assert.equal(existsSync(env.PUSH_ARGS_FILE), false, 'unsynchronized local HEAD must never be pushed');
+    } else {
+      assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
+        ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
+        : 'push --force-with-lease');
+    }
   }
 });
 test('merge refuses an ineligible predicate before reading the green gate', (t) => {
@@ -920,7 +935,15 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
     const dir = mkdtempSync(join(tmpdir(), 'hammer-pushed-head-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const before = 'a'.repeat(40), pushed = 'b'.repeat(40);
-    writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
+    writeFileSync(join(dir, 'publisher'), `#!/bin/sh
+case "$1" in
+  */hammer-pushed-attestation.mjs)
+    printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"
+    [ "\${PUSH_ATTESTATION_FAIL:-0}" -eq 0 ] || exit 1
+    echo '{"published":true}' ;;
+  *) printf '%s\\n' "$PUBLISH_RESULT" ;;
+esac
+`, { mode: 0o755 });
     writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$1" in rev-parse) echo ${pushed};; push) exit 0;; *) exit 1;; esac\n`, { mode: 0o755 });
     const publication = route === 'API commit' ? { route: 'published', head: pushed, previousHead: before }
       : { route: 're-review', ...(route === 'git fallback' ? { previousHead: before, fallbackHead: before, branch: 'repair' } : {}) };
@@ -930,7 +953,8 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
       HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'), HAM_BASE_HEAD: before,
       POST_REMEDIATION_SHA: '',
       HAM_REMOTE_CI_STARTED_AT: '1', HAM_NO_MERGE_NOTE: 'stale wait',
-      PATH: `${dir}:${process.env.PATH}`, PUBLISH_RESULT: JSON.stringify(publication) };
+      PATH: `${dir}:${process.env.PATH}`, PUBLISH_RESULT: JSON.stringify(publication),
+      ATTESTATION_ARGS_FILE: join(dir, 'attestation-args') };
     const render = renderPhase('hammer-publish', env);
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'publish.sh');
@@ -942,6 +966,16 @@ echo "PUSHED=$HAM_PUSHED_HEAD FROM=$HAM_PUSHED_FROM_HEAD CHECK_START=\${HAM_REMO
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`PUSHED=${pushed} FROM=${before} CHECK_START=unset NOTE=$`, 'm'));
     assert.match(result.stdout, /CHILD_HEAD_WAIT=0 CHILD_CHECK_WAIT=0/);
+    assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
+      `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${before} ${pushed}`);
+    const failedAudit = run('/bin/bash', ['-c', 'source "$1"; status=$?; echo "STATUS=$status NOTE=$HAM_NO_MERGE_NOTE"', '_', script],
+      { ...env, PUSH_ATTESTATION_FAIL: '1' });
+    assert.match(failedAudit.stdout, /STATUS=1 NOTE=HAM closing status — no merge/);
+    assert.ok(failedAudit.stdout.includes(`HAM-Base-Head: ${before}`));
+    assert.ok(failedAudit.stdout.includes(`HAM-Pushed-Head: ${pushed}`));
+    assert.doesNotMatch(failedAudit.stdout, /HAM-Validated-Head:/);
+    assert.deepEqual(hammerAttestationChain([{ author: 'hammer-worker', body: failedAudit.stdout }], before, pushed),
+      [pushed], 'the copied no-merge status retains a machine-readable pushed edge');
   });
 }
 

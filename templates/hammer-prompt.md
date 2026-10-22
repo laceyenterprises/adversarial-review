@@ -319,8 +319,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    validated current head: refresh the live head, reacquire the lease, rerun only
    the fail-closed live-head validation below, and
    complete the merge/closing-comment sequence idempotently. Do not restart remediation.
-0b. **A run that does not merge must say so exactly once on the PR.** Release changed heads or incomplete validation for the next pass. While open, state what the run completed, the exact blocker and where it stopped, whether the merge lease was released, and what happens next. For an existing audit, edit it in place; do not leave the audit and add a second comment.
-   The single in-lease audit comment remains the only comment for the successful merge path.
+0b. **A run that does not merge must say so exactly once on the PR.** Release changed heads or incomplete validation for the next pass. While open, report completed work, blocker, stop point, lease release and next actor. Edit an existing audit in place.
+   Preserve App publication comments and their `HAM-Base-Head` / `HAM-Pushed-Head`
+   pair in no-merge audits (CI unvalidated). Retry failed delivery with that pair.
+   Only green exact-head CI permits `HAM-Validated-Head`; keep one in-lease audit.
    Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures;
    do not request source re-review for delivery failure. Otherwise include the
    note or measured `HAM_HEAD_WAITED_SECONDS` and `HAM_REQUIRED_CHECKS_WAITED_SECONDS`.

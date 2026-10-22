@@ -490,10 +490,21 @@ ham_capture_current_base_sha() {
 }
 
 ham_update_branch_with_retries() {
+  local ham_update_pr_id
   ham_update_attempt=1
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if ham_gh pr update-branch <<PR_URL>> --rebase > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
-      return 0
+    if ham_update_pr_id=$(ham_pr --json id --jq '.id' 2> "<<RUN_DIR>>/update-branch.stderr"); then
+      [ -n "$ham_update_pr_id" ] && [ "$ham_update_pr_id" != null ] || return 1
+      # Bind provenance to the mutation result, never a later mutable branch tip.
+      # https://docs.github.com/en/graphql/reference/pulls#updatepullrequestbranch
+      if ham_gh api graphql \
+        -f 'query=mutation($id: ID!, $head: GitObjectID!) { updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) { pullRequest { headRefOid } } }' \
+        -f id="$ham_update_pr_id" -f head="$POST_REMEDIATION_SHA" \
+        > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
+        HAM_REBASE_PUBLISHED_HEAD=$(jq -er '.data.updatePullRequestBranch.pullRequest.headRefOid |
+          select(type == "string" and test("^[a-f0-9]{40}$"))' "<<RUN_DIR>>/update-branch.stdout") || return 1
+        return 0
+      fi
     fi
     if ham_update_branch_conflict "<<RUN_DIR>>/update-branch.stderr"; then
       return 2
@@ -543,6 +554,7 @@ ham_base_touches_pr_files() {
 # Shared by initial verification and the single in-run CI retry. GitHub publishes
 # the rebased head atomically; fetch that exact result into the scratch checkout.
 ham_rebase_head() {
+  local ham_rebase_from="$POST_REMEDIATION_SHA"
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ] && [ "${1:-}" != --ci-retry ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
     ham_release_merge_lease
@@ -574,8 +586,50 @@ ham_rebase_head() {
     HAM_PHASE_OUTCOME=update-branch-failed
     return 1
   fi
-  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
-  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
+  POST_REMEDIATION_SHA="$HAM_REBASE_PUBLISHED_HEAD"
+  # A server-side rebase publishes a head too. Record its edge before scratch
+  # synchronization or exact-head CI can fail, using the same App publisher.
+  if ham_is_full_sha "$POST_REMEDIATION_SHA" && [ "$ham_rebase_from" != "$POST_REMEDIATION_SHA" ]; then
+    HAM_PUSHED_FROM_HEAD="$ham_rebase_from"
+    HAM_PUSHED_HEAD="$POST_REMEDIATION_SHA"
+    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
+    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+      <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
+      HAM_PHASE_OUTCOME=pushed-attestation-unavailable
+      printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
+        'HAM closing status — no merge. Rebase provenance delivery failed; retry this audit through the hammer App.' \
+        "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"
+      echo "$HAM_NO_MERGE_NOTE" >&2
+      ham_release_merge_lease || return 1
+      return 1
+    fi
+  fi
+  local ham_snapshot_attempt=1
+  while true; do
+    if ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      > "<<RUN_DIR>>/pr-after.snapshot.json" 2> "<<RUN_DIR>>/update-branch.stderr"; then
+      mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+        ham_release_merge_lease || return 1
+        return 1
+      }
+      break
+    fi
+    if [ "$ham_snapshot_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ] \
+      || ! ham_update_branch_transient "<<RUN_DIR>>/update-branch.stderr"; then
+      cat "<<RUN_DIR>>/update-branch.stderr" >&2
+      rm -f "<<RUN_DIR>>/pr-after.snapshot.json"
+      HAM_PHASE_OUTCOME=pr-refresh-failed
+      ham_release_merge_lease || return 1
+      return 1
+    fi
+    sleep $((5 * (1 << (ham_snapshot_attempt - 1))))
+    ham_snapshot_attempt=$((ham_snapshot_attempt + 1))
+  done
+  if [ "$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")" != "$POST_REMEDIATION_SHA" ]; then
+    HAM_PHASE_OUTCOME=head-changed
+    ham_release_merge_lease || return 1
+    return 20
+  fi
   # Fetch the exact result, never a branch tip that a later author push could
   # move. Refuse dirty tracked files rather than carrying them onto that head.
   if ! ham_is_full_sha "$POST_REMEDIATION_SHA" \

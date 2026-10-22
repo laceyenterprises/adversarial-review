@@ -58,6 +58,7 @@ function fixture(t, scenario) {
   executable('gh', '#!/bin/sh\nexec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"\n');
   executable('date', '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$FIXTURE_DIR/clock"; else exec /bin/date "$@"; fi\n');
   executable('sleep', `#!/bin/sh
+echo "$1" >> "$FIXTURE_DIR/sleeps"
 value=$(cat "$FIXTURE_DIR/clock")
 increment="$1"
 if [ "$SCENARIO" = ci-pending ]; then increment=300; fi
@@ -83,6 +84,7 @@ case "$1" in
   */ama-check.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" predicate "$@" ;;
   */primary-change-context.mjs) echo '{}' ;;
   */load-aware-timeout.mjs) if [ "$2" = 900 ]; then echo scale >> "$FIXTURE_DIR/wait-scales"; fi; echo "$2" ;;
+  */hammer-pushed-attestation.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" pushed "$@" ;;
   */hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" range "$@" ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs|*/dismiss-withdrawn-reviews.mjs|*/stacked-base-check.mjs) echo '{}' ;;
   *) exec "$REAL_NODE" "$@" ;;
@@ -114,7 +116,7 @@ ham_fixture_completion() { :; }
 if [ "$SCENARIO" = dirty ]; then echo dirty >> surface.txt; fi
 source "$FIXTURE_DIR/hammer-verify-head.sh"
 status=$?
-echo "verify=$status outcome=$HAM_PHASE_OUTCOME head=\${HAM_PRODUCED_HEAD:-} revalidate=\${HAM_NEEDS_REVALIDATION:-}"
+echo "verify=$status outcome=$HAM_PHASE_OUTCOME head=\${HAM_PRODUCED_HEAD:-} revalidate=\${HAM_NEEDS_REVALIDATION:-} held=$HAM_MERGE_LEASE_HELD"
 [ "$status" -eq 0 ] || exit "$status"
 if [ "$SCENARIO" = ci-disjoint ]; then
   [ "$HAM_REQUIRES_UP_TO_DATE" -eq 0 ] || exit 94
@@ -143,19 +145,80 @@ exit "$status"
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 
-for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 'foreign-recovery', 'conflict', 'dirty']) {
+for (const scenario of ['snapshot-failed', 'ci-snapshot-failed', 'snapshot-permanent']) {
+  test(`post-rebase snapshot failure releases the lease before returning: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    const diagnostics = result.stdout + result.stderr;
+    assert.equal(result.signal, null, diagnostics);
+    assert.equal(result.status, 1, diagnostics);
+    assert.match(diagnostics, new RegExp(`${scenario.startsWith('ci-') ? 'merge' : 'verify'}=1 outcome=pr-refresh-failed .*held=0`));
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).snapshotReads,
+      scenario.endsWith('permanent') ? 1 : 3);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(events.some(e => e.kind === 'pushed-edge' && e.value.pushedHead ===
+      (scenario.startsWith('ci-') ? f.nextRebased : f.rebased)), 'provenance survives failed snapshot');
+    assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    assert.equal(f.git(['rev-parse', 'HEAD']), scenario.startsWith('ci-') ? f.rebased : f.original,
+      'no scratch sync or further validation after snapshot failure');
+  });
+}
+
+for (const scenario of ['snapshot-transient', 'ci-snapshot-transient']) {
+  test(`post-rebase snapshot retries a transient error and merges: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /outcome=merged/);
+    const state = JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8'));
+    assert.equal(state.snapshotFailures, 1);
+    // CI retry performs one additional final PR refresh after snapshot recovery.
+    assert.equal(state.snapshotReads, scenario.startsWith('ci-') ? 3 : 2);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+  });
+}
+
+for (const [scenario, idReads, updates, status] of [
+  ['id-transient', 2, 1, 0], ['id-exhausted', 3, 0, 1], ['id-permanent', 1, 0, 1],
+]) {
+  test(`branch update bounds PR ID resolution retries: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    const diagnostics = result.stdout + result.stderr;
+    assert.equal(result.signal, null, diagnostics);
+    assert.equal(result.status, status, diagnostics);
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).idReads, idReads);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, updates);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    assert.match(diagnostics, status === 0 ? /outcome=merged/ : /verify=1 outcome=update-branch-failed .*held=0/);
+    const sleeps = existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').trim().split('\n').map(Number) : [];
+    assert.deepEqual(sleeps.slice(0, idReads - 1), Array.from({ length: idReads - 1 }, (_, i) => (i + 1) * 5),
+      'existing bounded backoff applies before retrying ID resolution');
+    if (status !== 0) assert.equal(sleeps.length, idReads - 1, 'no sleep after permanent failure or exhaustion');
+  });
+}
+
+for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 'foreign-recovery', 'foreign-after-rebase', 'conflict', 'dirty']) {
   test(`HAMSELFREBASE-01: ${scenario}`, t => {
     const f = fixture(t, scenario);
     const result = f.run();
     const diagnostics = result.stdout + result.stderr;
-    const stops = ['foreign', 'foreign-recovery', 'conflict', 'dirty'].includes(scenario);
+    const stops = ['foreign', 'foreign-recovery', 'foreign-after-rebase', 'conflict', 'dirty'].includes(scenario);
     assert.equal(result.signal, null, diagnostics);
+    if (scenario === 'foreign-after-rebase') {
+      const pushed = readFileSync(join(f.dir, 'pushed-comments'), 'utf8');
+      assert.ok(pushed.includes(`HAM-Pushed-Head: ${f.rebased}`));
+      assert.doesNotMatch(pushed, new RegExp(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).foreign));
+      assert.match(diagnostics, /outcome=head-changed/);
+    }
     assert.equal(result.status, scenario === 'conflict' ? 21 : scenario === 'dirty' ? 1 : stops ? 20 : 0, diagnostics);
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), !stops ? 'acquire\nrelease\nacquire\nrelease\n' : 'acquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     if (!stops) assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'update-branch').length, 1);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
     if (!stops) {
       assert.match(diagnostics, /merge=0 outcome=merged held=0/);
       assert.doesNotMatch(diagnostics, /head-changed|next hammer/);
@@ -223,6 +286,15 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
       } else assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
         scenario === 'ci-red' ? 'outcome=github-gate-red' : scenario === 'ci-head-moved' ? 'outcome=live-head-moved-before-merge' :
           scenario === 'ci-predicate-refused' ? 'outcome=retry-predicate-not-eligible' : 'outcome=required-checks-pending'));
+    }
+    if (['ci-red', 'ci-pending'].includes(scenario)) {
+      const pushed = readFileSync(join(f.dir, 'pushed-comments'), 'utf8');
+      assert.ok(pushed.includes(`HAM-Base-Head: ${f.rebased}`));
+      assert.ok(pushed.includes(`HAM-Pushed-Head: ${f.nextRebased}`));
+      assert.doesNotMatch(pushed, /HAM-Validated-Head:/);
+      assert.ok(events.findIndex(e => e.kind === 'pushed-edge' && e.value.pushedHead === f.nextRebased)
+        < events.findIndex(e => e.kind === 'checks' && e.value.head === f.nextRebased),
+      'publication provenance must precede the first CI check on the rebased head');
     }
     assert.doesNotMatch(diagnostics, /outcome=base-advanced-during-ci-wait/);
   });

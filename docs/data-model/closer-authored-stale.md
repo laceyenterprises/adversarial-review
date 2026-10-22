@@ -8,7 +8,7 @@
 ## Purpose
 
 The orchestrator records which settled reviewed verdict is carried forward to
-a newer head composed only of proven single-parent closer commits. It calls
+a newer head connected by authenticated hammer App provenance edges. It calls
 `writeCloserAuthoredStaleAudit` when the shared predicate is eligible, after
 the protective-predecessor policy gate, before requesting the eligible hammer
 wake. The audit is evidence of carry-forward, not a merge receipt or a grant of
@@ -28,8 +28,8 @@ outside letters, digits, `.`, `_` and `-` with `__`.
 | `prNumber` | integer | Pull request number. |
 | `headSha` | string | Exact current closer head authorized by the shared predicate. |
 | `reviewedHead` | string | Head on which the carried verdict was posted. |
-| `anchorHead` | string | Reviewed head or recorded comment-only final-round push where the proven closer chain ends. |
-| `closerCommits` | string array | Proven closer commits, newest first, excluding the anchor. |
+| `anchorHead` | string | Reviewed head where the authenticated App chain begins. |
+| `closerCommits` | string array | App-bound pushed or validated heads, newest first, excluding the anchor. |
 | `carriedVerdict` | string or null | Verdict supplied by the orchestrator, such as `comment-only`. |
 | `blockingFindingCount` | number | Carried verdict's blocking count; eligible heads have zero. |
 | `nonBlockingFindingCount` | number | Carried verdict's non-blocking count; strict closure may still require hammer remediation. |
@@ -37,11 +37,18 @@ outside letters, digits, `.`, `_` and `-` with `__`.
 
 ## Operational contract
 
-The shared predicate requires a proven closer-only chain, a settled success
+The shared predicate requires an authenticated hammer App chain, a settled success
 verdict with known zero blockers, successful exact-head checks and `MERGEABLE`
-mergeability. Pending checks or unknown mergeability defer eligibility; resolved
-non-mergeable states (including `CONFLICTING`) are hard misses. A foreign commit,
-merge commit, broken chain or overlong chain requires exact-head review. A live
+mergeability. HAMATTEST-02 accepts either one `HAM-Base-Head` /
+`HAM-Pushed-Head` pair or one `HAM-Base-Head` / `HAM-Validated-Head` pair per
+comment. Pushed edges record provenance only, with `HAM-CI-Validated: false`;
+they never satisfy exact-head validation. All chain readers use
+`hammerAttestationChain`, including the closer's range validation. Commit
+trailers and authors confer no authority. Pending checks or unknown mergeability defer eligibility; resolved
+non-mergeable states (including `CONFLICTING`) are hard misses. An unbound later head, broken chain or overlong chain requires exact-head review.
+The watcher executes that shared decision through the
+[orphan watchdog](orphan-watchdog.md) on the next ownerless observation, once
+per head, recording its reasons; it does not wait for the idle recovery bound. A live
 review on the closer head supersedes carry-forward.
 
 Writes are atomic and create-only (`overwrite: false`): repeated observations

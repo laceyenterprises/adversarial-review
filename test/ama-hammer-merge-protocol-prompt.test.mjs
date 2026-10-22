@@ -342,10 +342,11 @@ test('hammer prompt requires bounded post-rebase sync and one truthful no-merge 
   assert.match(HAMMER_PROMPT, /A run that does not merge must say so exactly once on the PR/);
   assert.match(
     HAMMER_PROMPT,
-    /what the run completed[\s\S]*exact[\s\S]*where it stopped[\s\S]*whether the merge lease was released[\s\S]*what happens next/,
+    /report completed work, blocker, stop point, lease release and next actor/,
   );
-  assert.match(HAMMER_PROMPT, /single in-lease audit comment[\s\S]*successful merge path/);
-  assert.match(HAMMER_PROMPT, /edit it in place[\s\S]*do not leave the audit and add a second comment/);
+  assert.match(HAMMER_PROMPT, /Only green exact-head CI permits `HAM-Validated-Head`; keep one in-lease audit/);
+  assert.match(HAMMER_PROMPT, /Edit an existing audit in place/);
+  assert.match(HAMMER_PROMPT, /Preserve App publication comments[\s\S]*`HAM-Base-Head` \/ `HAM-Pushed-Head`[\s\S]*CI unvalidated/);
 });
 
 test('hammer fires watcher wake only after durable eligible audit append', () => {

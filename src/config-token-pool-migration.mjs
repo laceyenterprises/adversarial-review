@@ -4,7 +4,7 @@ import { canonicalWorkerClass } from './worker-class-aliases.mjs';
 
 export function validateLegacyPoolOverrides(cfg) {
   const pools = cfg.get('oauth.identity_token_pools', {});
-  if (!Object.keys(pools).length) return;
+  if (pools == null || !Object.keys(pools).length) return;
   const source = key => cfg.resolutionTrace?.(key)?.at(-1)?.source || 'code-default';
   const refuse = key => {
     throw new Error(`${key}: conflicting legacy/new account policy (${source(key)}); inspect migration report`);
@@ -16,8 +16,8 @@ export function validateLegacyPoolOverrides(cfg) {
     'roles.build_pack_default_worker_class': {},
   };
   for (const [key, renames] of Object.entries(paths)) {
-    const value = cfg.get(key);
-    const role = Object.hasOwn(renames, value) ? renames[value] : canonicalWorkerClass(value);
+    const value = canonicalWorkerClass(cfg.get(key));
+    const role = Object.hasOwn(renames, value) ? renames[value] : value;
     if (Object.hasOwn(pools, role) && source(key) !== 'code-default') refuse(key);
   }
   const key = 'roles.codex_worker_account_order';

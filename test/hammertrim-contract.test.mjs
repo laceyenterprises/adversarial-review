@@ -658,6 +658,7 @@ case "$*" in
 esac
 n=0; [ ! -f "$TMPDIR/calls" ] || n=$(cat "$TMPDIR/calls")
 n=$((n + 1)); echo "$n" > "$TMPDIR/calls"
+echo '[load-aware-timeout] CPU sample unavailable; using full load-based corroboration' >&2
 if [ "$SCENARIO" = permanent ]; then echo 'HTTP 403 forbidden' >&2; exit 1; fi
 if [ "$SCENARIO" = exhaust ] || [ "$n" = 1 ]; then
   echo 'GitHub read failed' >&2; echo 'TLS handshake timeout' >&2; exit 1
@@ -777,6 +778,7 @@ case "$2" in
   */statuses\\?*) echo "$2" >> "$TMPDIR/check-api-reads"; printf '[]'; exit 0 ;;
 esac
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
+echo '[load-aware-timeout] CPU sample unavailable; using full load-based corroboration' >&2
 if [ "$n" -eq 3 ]; then cp "$HAM_RUN_DIR/pr-after.json" "$TMPDIR/cache-after-probe"; fi
 if [ "$n" -ge 2 ]; then
   case "$HAM_TEST_SCENARIO" in

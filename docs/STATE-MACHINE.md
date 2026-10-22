@@ -873,6 +873,8 @@ Retryable UNKNOWN deferral requires the same open head. Moved heads and closed
 PRs retain terminal refusals; pending CI at expiry is distinguished in the audit.
 When the deadline prevents another gate read, the last successful snapshot of
 the same open head with pending CI and UNKNOWN mergeability retains that deferral.
+GitHub error classification excludes the load-aware timeout helper's diagnostic
+lines, so a sampler warning cannot turn a permanent API refusal into a retry.
 Findings, reversal refusals, current-head
 review authority, dispatch retry caps and the lifetime ceiling remain enforced.
 

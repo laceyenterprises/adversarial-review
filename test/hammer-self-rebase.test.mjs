@@ -6,10 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { recordPendingAttestation } from '../src/ama/hammer-pending-attestation.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+const subprocessTimeout = loadAwareTimeoutMs(45_000);
 
 function fixture(t, scenario) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-self-rebase-'));
@@ -137,7 +139,7 @@ source "$FIXTURE_DIR/hammer-merge.sh"
 status=$?
 echo "merge=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 exit "$status"
-`], { cwd: scratch, env, encoding: 'utf8', timeout: 45000 });
+`], { cwd: scratch, env, encoding: 'utf8', timeout: subprocessTimeout });
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 

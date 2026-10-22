@@ -5,9 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { evaluateHammerStopHold, hammerStopInputs, readHammerStopForHead, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
 
 const head = 'a'.repeat(40);
+const subprocessTimeout = loadAwareTimeoutMs(30_000);
 const green = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head, liveHead: head,
   mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', checksConclusion: 'SUCCESS', reasons: [] };
 const unknown = { ...green, ok: false, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', reasons: ['pr-mergeability-unknown'] };
@@ -74,7 +76,7 @@ date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }
 source "$1"
 exit "$?"
-`, '_', script], { encoding: 'utf8', timeout: 15_000, env: {
+`, '_', script], { encoding: 'utf8', timeout: subprocessTimeout, env: {
     PATH: process.env.PATH, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: pythonStub,
   } });
   assert.equal(result.error, undefined);

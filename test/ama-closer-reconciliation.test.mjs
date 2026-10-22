@@ -235,7 +235,7 @@ test('historical cleanup remains available through explicit reconciliation', asy
 test('daemon and CLI retain unknown same-head retry intent without probing its predecessor', async (t) => {
   const root = fixture(t, 'retry');
   const path = dispatchRecord(root, 1, { state: 'dispatching', lastObservedStatus: 'failed' });
-  const options = { now: NOW, deliverAlertImpl: async () => {},
+  const options = { now: NOW, readPullRequestStateImpl: async () => ({ state: 'OPEN' }), deliverAlertImpl: async () => {},
     readLaunchRequestStatusImpl: () => assert.fail('must not probe the previous LRQ') };
   assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
   assert.equal((await reconcileAmaCloserDispatches(root, options)).active.length, 1);

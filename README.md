@@ -1117,6 +1117,9 @@ alone cannot establish an unreviewed CI-repair head. LAC-2081 supersedes wake-re
 same-PR/head exclusion regardless of age. CLOSERGATE-01 excludes all pre-receipt
 intents from global launch admission and capacity; keyless legacy records retain
 stale/orphan active-record escapes, and terminal PR metadata bypasses holds.
+Native per-PR snapshots and bounded live directory/CLI PR reads retire confirmed
+closed/merged intents as `completed` (`pr-terminal`) without changing leases or
+retry budgets. Unreadable PR state holds without paging.
 Inspection raises one durable page per attempt naming PR, head and reason.
 A unique HQ idempotency key and a fenced
 prepared/submitting boundary let native reconciliation recover an exact receipt
@@ -1308,7 +1311,7 @@ prepared no-submission settlement, fixed unknown inspection diagnostics and
 idempotent retry accounting (`test/ama-pre-receipt-intent.test.mjs`). LEGACYINTENT-01
 extends the smoke with legacy unreadable-evidence holds and empty ticket/time
 settlement to a deferred lease; unit fixtures cover in-range evidence and audited
-operator dry-run/apply. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents. Wake and
+operator dry-run/apply. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
 ownership agree for `FAILURE`, `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`,
 `ACTION_REQUIRED` and `ERROR`.
 The smoke also verifies foreign-host pending ownership waits without a local PID
@@ -1570,6 +1573,7 @@ stateDiagram-v2
     state "completed" as s10
     s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository; preserve retry charge once
     s0 --> s9: hammer-dispatch.30 fenced prepared attempt with dead matching owner and absent key, or legacy empty successful ticket/time ledger query, proves no submission; defer lease and refund intent retry once
+    s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
     s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission

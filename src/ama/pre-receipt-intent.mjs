@@ -9,6 +9,7 @@ import { amaCloserDispatchFilePath } from './dispatch-record-read.mjs';
 import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
+import { execGhWithRetry } from '../gh-cli.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -47,9 +48,24 @@ const readBytes = path => {
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const isPreReceiptIntent = record => record?.state === 'dispatching';
-export const isTerminalCloserPullRequest = record => record?.isOpen === false
-  || record?.isMerged === true
-  || ['CLOSED', 'MERGED'].includes(String(record?.prState || record?.state || '').toUpperCase());
+// Accept PR metadata only: dispatch lifecycle state is a separate contract.
+export const isTerminalCloserPullRequest = pr => pr?.isOpen === false
+  || pr?.isMerged === true || pr?.merged === true
+  || ['CLOSED', 'MERGED'].includes(String(pr?.prState || pr?.state || '').toUpperCase());
+
+async function readPullRequestState({ repo, prNumber }, options) {
+  const { stdout } = await execGhWithRetry({
+    args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged}'],
+    execFileImpl: options.execFileImpl, env: options.env || process.env,
+    signal: options.signal, retries: 0, timeoutMs: 1000, totalTimeoutMs: 1000,
+  });
+  return JSON.parse(stdout);
+}
+
+function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
+  try { return readBytes(path) === bytes && same(readAmaCloserLease(rootDir, identity), lease); }
+  catch { return false; }
+}
 
 export async function reconcilePreReceiptIntent(rootDir, identity, options = {}) {
   const release = tryAcquireCloserIntentLock(rootDir, identity);
@@ -58,7 +74,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const path = amaCloserDispatchFilePath(rootDir, identity);
     const bytes = readBytes(path);
     const record = bytes && JSON.parse(bytes);
-    if (!isPreReceiptIntent(record) || isTerminalCloserPullRequest(record)) return { status: 'unchanged' };
+    if (!isPreReceiptIntent(record)) return { status: 'unchanged' };
     if (record.repo !== identity.repo || Number(record.prNumber) !== Number(identity.prNumber)
       || record.headSha !== identity.headSha) return { status: 'held', reason: 'intent-identity-mismatch' };
     if (options.legacyOnly && record.dispatchIdempotencyKey) return { status: 'held', reason: 'keyed-intent' };
@@ -68,6 +84,25 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     try { lease = readAmaCloserLease(rootDir, leaseIdentity); }
     catch { return { status: 'held', reason: 'lease-unreadable' }; }
     const now = options.now || new Date().toISOString();
+    let pr;
+    try {
+      pr = options.prMetadata || await (options.readPullRequestStateImpl || readPullRequestState)(record, options);
+    } catch { /* Missing or unreadable PR state cannot authorize retirement or a page. */ }
+    options.signal?.throwIfAborted();
+    if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
+      return { status: 'held', reason: 'intent-or-lease-changed' };
+    }
+    if (isTerminalCloserPullRequest(pr)) {
+      // PR retirement says nothing about submission or worker liveness. Preserve
+      // lease, launch evidence and budgets; only end this intent's PR hold/page.
+      const next = { ...record, state: 'completed', reason: 'pr-terminal',
+        preReceiptReconciliation: { status: 'pr-terminal', observedAt: now } };
+      if (!options.dryRun) writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+      return { status: 'pr-terminal', changed: true, record: next };
+    }
+    if (!(pr?.isOpen === true || String(pr?.prState || pr?.state || '').toUpperCase() === 'OPEN')) {
+      return { status: 'held', reason: 'pr-state-unreadable' };
+    }
     const localDead = lease?.status === 'pending' && !lease.lrqId
       && (!lease.holderHost || lease.holderHost === hostname())
       && isAmaCloserPidAlive(lease.watcherPid, options.processKillImpl) === false;
@@ -104,7 +139,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     }
     // Evidence reads yield. Re-read the entire record and lease, preserving even
     // unrelated annotations or a same-timestamp replacement owner.
-    if (readBytes(path) !== bytes || !same(readAmaCloserLease(rootDir, leaseIdentity), lease)) {
+    if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
       return { status: 'held', reason: 'intent-or-lease-changed' };
     }
     const rows = probe?.ok && Array.isArray(probe.rows) ? probe.rows : null;
@@ -226,7 +261,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           error: error.message }));
       }
       // Alert enqueue can yield too. Never overwrite a replacement owner.
-      if (readBytes(path) !== bytes || !same(readAmaCloserLease(rootDir, leaseIdentity), lease)) {
+      if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
         return { status: 'held', reason: 'intent-or-lease-changed' };
       }
     }

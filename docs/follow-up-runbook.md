@@ -23,6 +23,16 @@ receipt cannot prove no submission. At the fixed inspection deadline, the
 existing durable alert outbox pages once with PR, head and reason; repeated
 polls and restarts reuse the attempt identity and its `alertedAt` receipt.
 
+Reconciliation reads authoritative PR lifecycle metadata, never dispatch-record
+state. The native per-PR caller supplies its PR snapshot; directory/CLI repair
+uses a bounded live GitHub REST read (or the injected state resolver). Confirmed
+closed/merged PRs retire fenced intents at any head as `completed`, reason
+`pr-terminal`, with `preReceiptReconciliation.status: pr-terminal` and
+`observedAt`. This ends intent holds and inspection paging without asserting
+no submission, canceling a worker, changing leases or refunding retry budgets.
+Unreadable PR state holds without mutation or paging. After any yielding read
+or alert enqueue, an unreadable or changed lease defers the write safely.
+
 New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
 `hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,
 submission and receipt persistence. `dispatchPhase: prepared` precedes
@@ -111,8 +121,8 @@ legacy intents and performs no GitHub operation or dispatch.
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
 `--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
-created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
-A source-code change does not authorize production apply.
+created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
+A source-code change does not authorize production apply. Do not run apply against PR 8918 under the LAC-2081 source-fix authorization.
 Missing credentials or inaccessible rows mean unknown, not absence. Preserve
 prompt/scratch evidence while ownership remains unknown. No new configuration
 keys, launch route, retry allowance or merge/finalization gate is introduced.

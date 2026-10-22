@@ -1526,9 +1526,8 @@ async function deliverAlert(text, {
   if (FIXED_RECOVERY_EVENTS.includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
-    doc.id = event === 'ama.closure_lag.slo_breach' ? fixedAlertId('ama-closure-lag', crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'))
-      : fixedAlertId('ama-recovery', crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex'));
-    const legacyRecoveryId = event === 'ama.automated_recovery.exhausted' ? doc.id : null;
+    const legacyRecoveryId = event === 'ama.automated_recovery.exhausted'
+      ? fixedAlertId('ama-recovery', crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')) : null;
     if (legacyRecoveryId) {
       doc.id = fixedAlertId('ama-recovery', crypto.createHash('sha256').update(JSON.stringify([
         payload?.repo, payload?.pr, payload?.head, payload?.reason,
@@ -1550,16 +1549,18 @@ async function deliverAlert(text, {
         return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
       }
     }
-    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
-      || HAMMER_OWNER_PAGE_EVENTS.includes(event)) {
-      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex'));
-    }
     if (event === 'ama_closer.pre_receipt_inspection_required') {
       // Same attempt, including a crash after enqueue but before alertedAt.
       doc.id = fixedAlertId(event, crypto.createHash('sha256').update(JSON.stringify([
         payload?.repo, payload?.prNumber, payload?.headSha,
         payload?.dispatchIdempotencyKey || payload?.lastAttemptedAt,
       ])).digest('hex'));
+    } else if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
+      || HAMMER_OWNER_PAGE_EVENTS.includes(event)) {
+      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex'));
+    } else if (event !== 'ama.automated_recovery.exhausted') {
+      doc.id = event === 'ama.closure_lag.slo_breach' ? fixedAlertId('ama-closure-lag', crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'))
+        : fixedAlertId('ama-recovery', crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex'));
     }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);

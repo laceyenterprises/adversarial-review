@@ -679,8 +679,10 @@
     {
       "id": "ama-closer-dispatches",
       "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "preReceiptReconciliation"],
-      "preReceiptSemantics": "LAC-2081 / LEGACYINTENT-01: native fenced keyed receipt recovery or proof of no submission; legacy no-key attempts settle legacy-no-launch-proven only on a successful empty inclusive ticket/time ledger query recorded in preReceiptReconciliation.query; unresolved ownership holds only its PR/head, never fleet launch admission or capacity; keyless active listings retain stale/orphan escapes; inspection pages once per attempt; audited single-PR command defaults to dry-run",
+      "preReceiptSemantics": "LAC-2081 / LEGACYINTENT-01: native fenced keyed receipt recovery or proof of no submission; legacy no-key attempts settle legacy-no-launch-proven only on a successful empty inclusive ticket/time ledger query recorded in preReceiptReconciliation.query; unresolved ownership holds only its PR/head, never fleet launch admission or capacity; keyless active listings retain stale/orphan escapes; authoritative closed/merged PR state retires intents as completed/pr-terminal without lease or budget changes; unreadable PR state holds without paging; inspection pages once per attempt; audited single-PR command defaults to dry-run",
       "preReceiptAlertFields": ["preReceiptReconciliation.alertedAt"],
+      "preReceiptTerminalStatus": "pr-terminal",
+      "preReceiptCounts": ["recovered", "noLaunch", "retired", "unknown", "held"],
       "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps after the readable 60-second terminal grace, with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",

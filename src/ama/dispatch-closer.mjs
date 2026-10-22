@@ -2054,7 +2054,7 @@ function isAmaCloserMissingLrqTimedOut(record, options = {}) {
 export function isAmaCloserLaunchInProgress(record, options = {}) {
   // Intent ownership is enforced for its own PR/head before admission. It is
   // never evidence of a fleet launch, even while its writer holds the fence.
-  if (isTerminalCloserPullRequest(record) || isPreReceiptIntent(record)) return false;
+  if (isPreReceiptIntent(record)) return false;
   // Terminal ledger evidence releases immediately; a non-terminal or failed
   // ledger read must still respect the existing record and lease age escapes.
   if (options.ledgerActive === false) return false;
@@ -2075,7 +2075,6 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
 
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return false;
-  if (isTerminalCloserPullRequest(record)) return false;
   if (isPreReceiptIntent(record) && record.dispatchIdempotencyKey) return true;
   const state = String(record.state || '').trim().toLowerCase();
   if (options.lease?.status === 'handed-to-review'
@@ -2201,8 +2200,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     const record = readJsonFile(dispatchPath);
     const prNumber = Number(record?.prNumber);
     if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0
-      || !['dispatched', 'dispatching'].includes(record.state)
-      || isTerminalCloserPullRequest(record)) return [];
+      || !['dispatched', 'dispatching'].includes(record.state)) return [];
     let lease = null;
     try { lease = readAmaCloserLease(rootDir, record); }
     catch { /* Preserve the existing lease-less liveness rules. */ }
@@ -2229,8 +2227,9 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
             readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'scan-budget-exhausted' }) } : {}),
       });
       if (recovery.changed) counts.changed += 1;
-      counts.preReceipt ||= { recovered: 0, noLaunch: 0, unknown: 0, held: 0 };
+      counts.preReceipt ||= { recovered: 0, noLaunch: 0, retired: 0, unknown: 0, held: 0 };
       counts.preReceipt[recovery.status === 'receipt-recovered' ? 'recovered'
+        : recovery.status === 'pr-terminal' ? 'retired'
         : recovery.status === 'no-launch' ? 'noLaunch'
         : recovery.status === 'unknown' ? 'unknown' : 'held'] += 1;
       if (['unknown', 'held'].includes(recovery.status)) {
@@ -4538,23 +4537,22 @@ export async function maybeDispatchAmaCloser(args) {
   let preservePredecessor = false;
   try {
     throwIfAborted(args.signal);
-    if (args.cfg?.enabled && isTerminalCloserPullRequest(args.prMetadata)) {
-      return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
-    }
+    const terminalPr = isTerminalCloserPullRequest(args.prMetadata);
     const targetHead = args.prMetadata?.headSha || args.reviewState?.headSha
       || dispatchContext?.headSha || dispatchContext?.reviewedSha || args.headSha;
     if (args.cfg?.enabled && dispatchContext?.rootDir && targetRepo && targetPrNumber) {
       for (const intent of readAmaCloserDispatchRecordsForPR(dispatchContext.rootDir,
         { repo: targetRepo, prNumber: targetPrNumber }).filter(record => isPreReceiptIntent(record)
-          && !isTerminalCloserPullRequest(record) && (!targetHead || record.headSha === targetHead))) {
+          && (terminalPr || !targetHead || record.headSha === targetHead))) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
           readLegacyIntentLaunchesImpl: args.readLegacyIntentLaunchesImpl,
           processKillImpl: args.processKillImpl, env: args.env || process.env,
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
-          deliverAlertImpl: args.deliverAlertImpl,
+          deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
+          readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
         });
-        if (['unknown', 'held'].includes(recovery.status)) return noAmaDispatch({
+        if (!terminalPr && ['unknown', 'held'].includes(recovery.status)) return noAmaDispatch({
           dispatched: false, skipMergeAgent: true, inFlight: true,
           reason: 'existing-dispatch-unknown', recovery: recovery.reason
             || recovery.record?.preReceiptReconciliation?.reason,
@@ -4562,6 +4560,9 @@ export async function maybeDispatchAmaCloser(args) {
             headSha: intent.headSha, lastAttemptedAt: intent.lastAttemptedAt || null },
         });
       }
+    }
+    if (args.cfg?.enabled && terminalPr) {
+      return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
     }
     const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber,
       headSha: args.prMetadata?.headSha || args.reviewState?.headSha || dispatchContext?.reviewedSha || args.headSha };

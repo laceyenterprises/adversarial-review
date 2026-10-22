@@ -113,7 +113,13 @@ for (const stderr of ['HTTP 400: Bad Request', 'unknown sink: synthetic', 'HTTP 
   });
 }
 
-for (const stderr of ['HTTP 429: retry later', 'HTTP 503: unavailable', 'temporary credential lookup failure']) {
+for (const stderr of [
+  'HTTP 429: retry later', 'HTTP 503: unavailable', 'temporary credential lookup failure',
+  'HTTP 502: Bad Request from upstream',
+  'HTTP status: 503: Bad Request from upstream',
+  'HTTP status=504: Bad Request from upstream',
+  ...[408, 409, 425, 429].map(status => `HTTP ${status}: Bad Request from upstream`),
+]) {
   test(`transient canonical exit retries after backoff: ${stderr}`, async t => {
     const { env } = queuedFixture(t);
     const runAlertScript = async () => ({ code: 1, stderr });

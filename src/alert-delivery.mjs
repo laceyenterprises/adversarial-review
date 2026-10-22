@@ -948,8 +948,11 @@ function canonicalAlertScriptTimeoutMs(loadOptions = {}) {
 function isPermanentDeliveryError(error) {
   if (error?.code === 'ETIMEDOUT') return false;
   const message = String(error?.message || error);
-  const status = message.match(/\bHTTP(?:\s+status)?\s*[:=]?\s*(4\d\d)\b/iu);
-  if (status) return ![408, 409, 425, 429].includes(Number(status[1]));
+  const status = message.match(/\bHTTP(?:\s+status)?\s*[:=]?\s*([45]\d\d)\b/iu);
+  if (status) {
+    const code = Number(status[1]);
+    return code < 500 && ![408, 409, 425, 429].includes(code);
+  }
   return /\b(?:bad request|unknown sink|unsupported sink|invalid (?:url|recipient))\b/iu.test(message)
     || error?.code === 'ERR_INVALID_URL';
 }

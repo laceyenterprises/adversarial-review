@@ -42,9 +42,9 @@ test('local example keeps load-aware policy inside the shared adversarial review
       assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
       assert.equal(cfg.get('timeouts'), null);
     }
-    // Do not reintroduce a root that older Python/shell strict loaders reject.
-    writeFileSync(join(dir, 'config.local.yaml'), 'timeouts:\n  load_aware:\n    enabled: true\n');
-    assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key: 'timeouts' });
+    // Undeclared roots must still fail even when foreign sections are allowed.
+    writeFileSync(join(dir, 'config.local.yaml'), 'unknown_example_root:\n  enabled: true\n');
+    assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError', key: 'unknown_example_root' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

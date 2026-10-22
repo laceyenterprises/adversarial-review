@@ -507,7 +507,12 @@ test('legacy absence proof does not depend on whether the original watcher is st
 
 test('automatic launch reconciliation uses the same legacy ledger proof', async t => {
   const f = fixture(t, { dispatchIdempotencyKey: null });
+  const before = f.read();
   assert.deepEqual(await findActiveAmaCloserLaunches(f.rootDir, f.options), []);
+  assert.deepEqual(f.read(), before, 'the fleet census excludes pre-receipt intents without mutation');
+  const result = await reconcileAmaCloserDispatches(f.rootDir, f.options);
+  assert.equal(result.preReceipt.noLaunch, 1);
+  assert.deepEqual(result.active, []);
   assert.equal(f.read().reason, 'legacy-no-launch-proven');
   assert.equal(f.read().preReceiptReconciliation.query.ok, true);
 });

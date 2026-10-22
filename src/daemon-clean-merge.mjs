@@ -25,7 +25,7 @@ import { SETTLED_SUCCESS_VERDICTS, hasOperatorApprovedOverride } from './ama/eli
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './ama/audit.mjs';
 import { clobberGuardBlocks, evaluateMovedHeadClobberGuard } from './ama/clobber-guard.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
-import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -1088,7 +1088,8 @@ export async function runDaemonCleanMergeAttempt({
     // Non-blocking single-shot acquire: contention defers this tick (the watcher
     // must not block its poll loop waiting on a lease).
     acquireLeaseImpl: () => {
-      const res = acquireMergeLeaseImpl({
+      const res = acquireDaemonMergeLease({
+        acquireMergeLeaseImpl,
         rootDir,
         repo: repoPath,
         base,
@@ -1098,7 +1099,7 @@ export async function runDaemonCleanMergeAttempt({
         holderHost: hostname(),
         now: new Date().toISOString(),
       });
-      return { acquired: Boolean(res?.acquired), lease: res?.lease, existingLease: res?.existingLease };
+      return { ...res, acquired: Boolean(res?.acquired) };
     },
     releaseLeaseImpl: (lease) => {
       releaseMergeLeaseImpl({

@@ -459,16 +459,13 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit. **Rebase the PR onto a recent base (`main`) and CONFIRM THE
-   REBASE HOLDS — but do NOT chase a moving base.** When the target branch
-   requires the PR to be up to date before merge
-   (`required_status_checks.strict`), rebase until `mergeStateStatus` is no
-   longer `BEHIND`, exactly as before. When it does NOT (the shell resolves this
-   into `HAM_REQUIRES_UP_TO_DATE`), rebase ONCE onto a recent base and then merge
-   the validated head even if it is `BEHIND` again — provided the PR is
-   `MERGEABLE` and the newer base does not touch any file this PR changes
-   (`ham_base_touches_pr_files`). GitHub can squash-merge that head; chasing
-   unrelated base advances needlessly repeats CI (agent-os#5464). A conflict (`DIRTY`) or a
-   changed-file overlap still forces a rebase.
+   REBASE HOLDS.** Required checks must pass on the exact head containing the
+   current base. The procedure releases the base merge lease during remote CI,
+   then reacquires before merge and checks the fetched current base again. If
+   that base advanced, including disjoint file changes, defer for another rebase
+   and fresh exact-head CI; never merge the old CI-validated head on a new base.
+   A lagging GitHub `BEHIND` snapshot may avoid a redundant rebase only when the
+   exact validated head already contains the entire fetched current base.
    Before entering the final rebase→remote-CI→merge window, acquire the
    merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
@@ -941,12 +938,10 @@ hard-blocker report, and do not re-dispatch.
   floated current main instead of creating a gitlink-only PR.
 - No merging a superproject PR that is still blocked on an unmerged submodule
   fix PR.
-- No merging a branch that is `BEHIND` without first rebasing onto a recent
-  `main` and re-validating that head (required checks + changed-surface tests
-  green). The only exception is the narrow no-strict up-to-date lane above:
-  after at least one recent rebase and validation, a `BEHIND` head may merge
-  only when the base has no strict required-status-checks rule, the PR remains
-  `MERGEABLE`, and the newer base has no changed-file overlap with this PR.
+- No merging a head that does not contain the fetched current base after the
+  CI-wait lease release. Rebase and re-validate (required checks plus changed-
+  surface tests) whenever that base advances, even with disjoint changes or a
+  non-strict branch-protection rule.
 - No hammer merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

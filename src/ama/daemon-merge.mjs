@@ -660,6 +660,8 @@ async function attemptDaemonCleanMergeInner({
     return {
       disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
       reason: 'lease-contended',
+      queuePosition: leaseResult?.queuePosition ?? null,
+      waitMessage: `waiting for the merge lease, position ${leaseResult?.queuePosition ?? 'unknown'}`,
       merged: false,
       attempts: 0,
       leaseAcquired: false,

@@ -493,10 +493,10 @@ ham_update_branch_with_retries() {
 ham_base_touches_pr_files() {
   # Returns 0 (overlap → a rebase+revalidation is still required) when any file
   # this PR changes is also touched by base commits that landed SINCE the base we
-  # last validated against. In validated-head mode, compare only base commits
-  # not already contained in the exact CI-validated head, including when the
-  # parallel-phase validation base is missing; returns 1 (disjoint → safe to
-  # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
+  # last validated against. After releasing for CI, validated-head mode requires
+  # the entire current base to be contained in the exact CI-validated head.
+  # Even disjoint base changes require another rebase/CI pass in that mode.
+  # Other callers retain the ordinary disjoint-file decision. Fail closed to 0 on any fetch/diff
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
   ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
   local current_base_sha comparison_base pr_ref pr_files base_files
@@ -508,6 +508,8 @@ ham_base_touches_pr_files() {
     pr_ref="$POST_REMEDIATION_SHA"
     ham_is_full_sha "$pr_ref" || return 0
     comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
+    [ "$comparison_base" = "$current_base_sha" ] || return 0
+    return 1
   fi
   ham_is_full_sha "$comparison_base" || return 0
   pr_files=$(git diff --name-only "$current_base_sha...$pr_ref" 2>/dev/null) || return 0
@@ -553,19 +555,14 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     ham_release_merge_lease || return 1
     return 20
   fi
-  # STOP CHASING A MOVING BASE (agent-os#5464). Once we have rebased onto a recent
-  # base at least once (HAM_REBASE_ATTEMPTS>=1) and (a) the base has no strict
-  # up-to-date rule, (b) the PR is MERGEABLE, and (c) the newer base does not touch
-  # any file this PR changes, merge the VALIDATED head as-is: GitHub incorporates
-  # the newer base in the squash-merge commit, and re-rebasing to chase a base that
-  # advanced only because OTHER PRs merged would re-run the full required-check
-  # suite on identical code. Keep chasing when the base REQUIRES up-to-date, on a
-  # genuine conflict, or on changed-file overlap (all fall through to the rebase).
+  # A lagging BEHIND snapshot may avoid a redundant rebase only when the
+  # validated head already contains the entire fetched current base. A disjoint
+  # file diff alone cannot authorize reusing CI after releasing the base lease.
   if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
      && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
      && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
-     && ! ham_base_touches_pr_files; then
-    echo "HAM: base BEHIND only because other PRs merged (no strict up-to-date rule, PR MERGEABLE, no changed-file overlap) — merging the validated head without a re-rebase to avoid CI churn on identical code." >&2
+     && ! ham_base_touches_pr_files validated-head; then
+    echo "HAM: validated head already contains the current base; avoiding a redundant rebase while GitHub recomputes BEHIND." >&2
     break
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then

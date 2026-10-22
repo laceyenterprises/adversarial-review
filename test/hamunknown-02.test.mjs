@@ -67,6 +67,7 @@ HAM_VERDICT_FILE="$TMPDIR/verdict.json" HAM_VERDICT_READY_FILE="$TMPDIR/verdict.
 HAM_NODE_BIN="$TMPDIR/fixture-node.cjs"
 ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" >> "$TMPDIR/release"; HAM_MERGE_LEASE_HELD=0; }
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
+ham_base_touches_pr_files() { return 1; }
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
 date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }

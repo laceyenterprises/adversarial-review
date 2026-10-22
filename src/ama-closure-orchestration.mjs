@@ -2334,7 +2334,7 @@ async function dispatchAmaClosureFor({
       // Fall through to the hammer dispatch below. Do NOT return here.
     } else {
       logger?.log?.(
-        `[watcher] AMA daemon deferred ${repoPath}#${prNumber}: ${daemonCleanMerge.reason}; ` +
+        `[watcher] AMA daemon deferred ${repoPath}#${prNumber}: ${daemonCleanMerge.waitMessage || daemonCleanMerge.reason}; ` +
           'the shared recovery router will retry or report SEV1 exhaustion',
       );
       // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
@@ -2343,7 +2343,7 @@ async function dispatchAmaClosureFor({
       const boundedWait = daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED
         && !daemonCleanMerge.reason?.startsWith('fleet-stop-')
         ? await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
-          reason: daemonCleanMerge.reason, env }) : null;
+          reason: daemonCleanMerge.waitMessage || daemonCleanMerge.reason, env }) : null;
       return withAmaDispatchMetadata(
         {
           dispatched: false,

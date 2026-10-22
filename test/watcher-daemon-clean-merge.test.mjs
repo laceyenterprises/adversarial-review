@@ -1,5 +1,5 @@
 import './helpers/load-aware-timeout-fixture.mjs';
-import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { updateAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -708,8 +708,14 @@ test('daemon deferred (lease contention) → skips closer dispatch this tick', a
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
         reason: 'lease-contended',
+        queuePosition: 1,
+        waitMessage: 'waiting for the merge lease, position 1',
         merged: false,
       }),
+      observeClosureWaitImpl: async ({ reason }) => {
+        assert.equal(reason, 'waiting for the merge lease, position 1');
+        return { reason, exhausted: true, retryAfterMs: 30_000 };
+      },
       maybeDispatchAmaCloserImpl: async () => {
         closerCalls += 1;
         return { dispatched: true };
@@ -719,10 +725,44 @@ test('daemon deferred (lease contention) → skips closer dispatch this tick', a
     assert.equal(closerCalls, 0);
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.DEFERRED}`);
+    assert.equal(result.boundedWait.reason, 'waiting for the merge lease, position 1');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+for (const [exhausted, otherHold] of [[false, false], [true, false], [true, true]]) {
+  test(`LEASEFAIR-01 ${otherHold ? "co-occurring safety hold:" : ""} ${exhausted ? 'overdue' : 'pending'} lease notice names queue position without a safety hold`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = baseArgs(rootDir);
+    const logs = [];
+    const result = await handlePostedReviewRow({
+      ...args, existing: args.reviewStateRow,
+      currentReviewRowReader: () => args.reviewStateRow,
+      latestFollowUpJobFinder: () => null,
+      latestPostedReviewBodyFinder: () => CLEAN_COMMENT_ONLY_REVIEW_BODY,
+      projectGateStatusSafe: async () => ({ decision: { state: 'success', reason: 'review-settled' } }),
+      fetchMergeAgentCandidateImpl: async () => args.candidate,
+      buildMergeAgentDispatchJobImpl: () => args.dispatchJob,
+      dispatchMergeAgentForPRImpl: () => assert.fail('no other merge path'),
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: exhausted ? 'await-operator' : 'ama-pending',
+        amaClosureResult: { reason: otherHold ? 'label-no-merge-hold' : 'daemon-deferred', skipMergeAgent: true,
+          daemonCleanMerge: { reason: 'lease-contended', queuePosition: 2,
+            waitMessage: 'waiting for the merge lease, position 2' } },
+      }),
+      logger: { log: message => logs.push(message), warn() {}, error: message => assert.fail(message) },
+    });
+    assert.equal(result.handled, true);
+    if (otherHold) {
+      assert.match(logs.join('\n'), /safety hold requires operator action/);
+    } else {
+      assert.match(logs.join('\n'), /waiting for the merge lease, position 2/);
+      assert.doesNotMatch(logs.join('\n'), /safety hold requires operator action/);
+    }
+  });
+}
 
 test('daemon not-taken (findings present) → falls through to the closer/hammer dispatch', async () => {
   const rootDir = tempRoot();
@@ -2483,6 +2523,30 @@ test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked
     assert.ok(mergeCalls >= 1, 'the merge button is actually clicked once eligible');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('LEASEFAIR-01 production daemon wiring registers a stable priority reservation', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const optionsSeen = [];
+  const result = await runDaemonCleanMergeAttempt({
+    ...realRollupHelpers({ rootDir, prNumber: 700, head: 'clean-head' }),
+    fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'clean-head', labels: [],
+      checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+    acquireMergeLeaseImpl: options => {
+      optionsSeen.push(options);
+      return { acquired: false, queuePosition: 2, existingLease: { holderPr: 99 } };
+    },
+    execFileImpl: () => assert.fail('no merge without the lease'),
+  });
+  assert.equal(result.reason, 'lease-contended');
+  assert.equal(result.waitMessage, 'waiting for the merge lease, position 2');
+  assert.equal(optionsSeen.length, 3);
+  for (const options of optionsSeen) {
+    assert.equal(options.registerWaiter, true);
+    assert.equal(options.waiterPriority, 'daemon');
+    assert.equal(options.waiterId, 'daemon_700_clean-head');
   }
 });
 

@@ -41,6 +41,22 @@ const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
 const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 const MUTATION_LOCK_STALE_MS = 5000;
 const FULL_SHA_RE = /^[0-9a-f]{40}$/iu;
+// A missed watcher tick must not abandon a reservation, but a disappeared or
+// newly ineligible daemon must not block the lane indefinitely either.
+export const DAEMON_MERGE_RESERVATION_SECONDS = 120;
+
+export function daemonMergeWaiterId(pr, head) {
+  return `daemon_${normalizeHolderPr(pr, 'pr')}_${head}`;
+}
+
+export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLease, ...options }) {
+  return acquireMergeLeaseImpl({
+    ...options,
+    registerWaiter: true,
+    waiterPriority: 'daemon',
+    waiterId: daemonMergeWaiterId(options.holderPr, options.holderHead),
+  });
+}
 
 // Hammer helpers and the lease CLI use the same gate-failure decision. An
 // unrecognized failure remains chargeable; only known transient reads/states
@@ -344,9 +360,11 @@ function normalizeHolderPid(value) {
 
 function sortWaiters(waiters) {
   return [...waiters].sort((a, b) => {
+    const priority = Number(b.priority === 'daemon') - Number(a.priority === 'daemon');
+    if (priority !== 0) return priority;
     const arrived = String(a.arrivedAt || '').localeCompare(String(b.arrivedAt || ''));
-    if (arrived !== 0) return arrived;
-    return String(a.waiterId || '').localeCompare(String(b.waiterId || ''));
+    // Stable sort retains insertion order for requests in the same clock tick.
+    return arrived;
   });
 }
 
@@ -372,41 +390,41 @@ function readWaiterDoc(filePath) {
 }
 
 function waiterExpired(waiter, nowIso) {
-  const ageSeconds = ageSecondsFrom(waiter.arrivedAt, nowIso);
+  const ageSeconds = ageSecondsFrom(waiter.priority === 'daemon' ? waiter.updatedAt : waiter.arrivedAt, nowIso);
   if (ageSeconds === null) return false;
   const deadlineSeconds = parseDeadlineSeconds(waiter.deadlineSeconds);
   return ageSeconds >= deadlineSeconds;
 }
 
 function waiterProcessDead(waiter, host, pidAliveFn) {
+  // Daemon reservations belong to a PR/head, not a particular watcher process.
+  if (waiter.priority === 'daemon') return false;
   if (!waiter.holderHost || waiter.holderHost !== host) return false;
   const pid = Number(waiter.holderPid);
   return Number.isInteger(pid) && pid > 0 && !pidAliveFn(pid);
 }
 
-function pruneMergeLeaseWaiters({ rootDir, repo, base, now, host, pidAliveFn }) {
-  return withWaiterMutationLock({ rootDir, repo, base }, () => {
-    const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
-    const doc = readWaiterDoc(waitersPath);
-    if (doc.waiters.length === 0) return { pruned: [], waiters: [] };
-    const currentHost = host || hostname();
-    const updatedAt = now || isoNow();
-    const waiters = [];
-    const pruned = [];
-    for (const waiter of doc.waiters) {
-      const expired = waiterExpired(waiter, updatedAt);
-      const dead = waiterProcessDead(waiter, currentHost, pidAliveFn);
-      if (expired || dead) {
-        pruned.push({ ...waiter, staleReason: dead ? 'dead-waiter-pid' : 'expired-waiter' });
-      } else {
-        waiters.push(waiter);
-      }
+function pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base, now, host, pidAliveFn }) {
+  const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+  const doc = readWaiterDoc(waitersPath);
+  if (doc.waiters.length === 0) return { pruned: [], waiters: [] };
+  const currentHost = host || hostname();
+  const updatedAt = now || isoNow();
+  const waiters = [];
+  const pruned = [];
+  for (const waiter of doc.waiters) {
+    const expired = waiterExpired(waiter, updatedAt);
+    const dead = waiterProcessDead(waiter, currentHost, pidAliveFn);
+    if (expired || dead) {
+      pruned.push({ ...waiter, staleReason: dead ? 'dead-waiter-pid' : 'expired-waiter' });
+    } else {
+      waiters.push(waiter);
     }
-    if (pruned.length > 0) {
-      writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt));
-    }
-    return { pruned, waiters: sortWaiters(waiters) };
-  });
+  }
+  if (pruned.length > 0) {
+    writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt));
+  }
+  return { pruned, waiters: sortWaiters(waiters) };
 }
 
 function holderMatches(lease, fence = {}) {
@@ -746,28 +764,32 @@ export function upsertMergeLeaseWaiter({
   arrivedAt,
   updatedAt,
   attempt = 1,
+  priority,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   return withWaiterMutationLock({ rootDir, repo, base }, () => {
     const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
     const now = updatedAt || arrivedAt || isoNow();
     const doc = readWaiterDoc(waitersPath);
-    const existing = doc.waiters.find((w) => w.waiterId === waiterId);
+    const existing = doc.waiters.find((w) => w.waiterId === waiterId && !waiterExpired(w, now));
     const nextWaiter = {
       repo,
       base,
       pr: normalizeHolderPr(pr, 'pr'),
       head: String(head || ''),
       waiterId,
+      ...(priority === 'daemon' ? { priority } : {}),
       arrivedAt: existing?.arrivedAt || arrivedAt || now,
       updatedAt: now,
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
-      deadlineSeconds: loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
+      deadlineSeconds: priority === 'daemon' ? DAEMON_MERGE_RESERVATION_SECONDS
+        : loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
     };
-    const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
-    waiters.push(nextWaiter);
+    const waiters = existing
+      ? doc.waiters.map((w) => w.waiterId === waiterId ? nextWaiter : w)
+      : [...doc.waiters.filter((w) => w.waiterId !== waiterId), nextWaiter];
     writeJsonFile(waitersPath, waiterFileDoc(waiters, now));
     return { waitersPath, waiter: nextWaiter, waiters: sortWaiters(waiters) };
   });
@@ -846,6 +868,7 @@ export function acquireMergeLease({
   now,
   waiterId,
   registerWaiter = false,
+  waiterPriority,
   attempt = 1,
   pidAliveFn = pidIsLive,
   _afterHolderWrite,
@@ -870,6 +893,7 @@ export function acquireMergeLease({
       holderPid,
       holderHost,
       deadlineSeconds,
+      priority: waiterPriority,
     });
     waiter = registered.waiter;
   }
@@ -885,65 +909,82 @@ export function acquireMergeLease({
       pidAliveFn,
     });
     if (!reclaim.reclaimed) {
-      return { acquired: false, leasePath, lease: existingLease, existingLease, waiter, reclaim };
+      const { waiters } = withWaiterMutationLock({ rootDir, repo, base }, () =>
+        pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base, now: acquiredAt, host: holderHost, pidAliveFn }));
+      const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
+      return { acquired: false, leasePath, lease: existingLease, existingLease, waiter, reclaim,
+        queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
     }
   }
 
-  const waiterState = pruneMergeLeaseWaiters({
-    rootDir,
-    repo,
-    base,
-    now: acquiredAt,
-    host: holderHost,
-    pidAliveFn,
-  });
-  const waiters = waiterState.waiters;
-  if (waiters.length > 0) {
-    if (!waiter?.waiterId) {
-      return { acquired: false, leasePath, lease: null, existingLease: null, waiters, prunedWaiters: waiterState.pruned };
-    }
-    if (waiters[0]?.waiterId !== waiter.waiterId) {
-      return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters, prunedWaiters: waiterState.pruned };
-    }
-  }
-
-  const lease = {
-    schemaVersion: LEASE_SCHEMA_VERSION,
-    repo,
-    base,
-    leaseId: suppliedLeaseId || leaseId(),
-    holderPr: normalizeHolderPr(holderPr),
-    holderHead: String(holderHead || ''),
-    holderPid: normalizeHolderPid(holderPid),
-    holderHost: holderHost || hostname(),
-    ...(holderProcessGroup != null ? { holderProcessGroup: Number(holderProcessGroup) } : {}),
-    acquiredAt,
-    deadlineSeconds: loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
-    updatedAt: acquiredAt,
-  };
-
-  try {
-    writeFileAtomic(leasePath, `${JSON.stringify(lease, null, 2)}\n`, {
-      mode: LEASE_FILE_MODE,
-      overwrite: false,
+  // Serialize queue selection, holder creation and served-waiter removal.
+  // A second lock acquisition could strand the served priority reservation.
+  const result = withWaiterMutationLock({ rootDir, repo, base }, () => {
+    const waiterState = pruneMergeLeaseWaitersUnlocked({
+      rootDir,
+      repo,
+      base,
+      now: acquiredAt,
+      host: holderHost,
+      pidAliveFn,
     });
-  } catch (err) {
-    if (err?.code === 'EEXIST') {
-      const beat = readJsonFile(leasePath, null);
-      return { acquired: false, leasePath, lease: beat, existingLease: beat, waiter };
+    const waiters = waiterState.waiters;
+    if (waiters.length > 0) {
+      if (!waiter?.waiterId) {
+        return { acquired: false, leasePath, lease: null, existingLease: null, waiters, prunedWaiters: waiterState.pruned };
+      }
+      if (waiters[0]?.waiterId !== waiter.waiterId) {
+        const queueIndex = waiters.findIndex((w) => w.waiterId === waiter.waiterId);
+        return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters,
+          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null, prunedWaiters: waiterState.pruned };
+      }
     }
-    throw err;
-  }
 
-  if (typeof _afterHolderWrite === 'function') _afterHolderWrite({ leasePath, lease });
-  if (waiter?.waiterId) {
+    const lease = {
+      schemaVersion: LEASE_SCHEMA_VERSION,
+      repo,
+      base,
+      leaseId: suppliedLeaseId || leaseId(),
+      holderPr: normalizeHolderPr(holderPr),
+      holderHead: String(holderHead || ''),
+      holderPid: normalizeHolderPid(holderPid),
+      holderHost: holderHost || hostname(),
+      ...(holderProcessGroup != null ? { holderProcessGroup: Number(holderProcessGroup) } : {}),
+      acquiredAt,
+      deadlineSeconds: loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
+      updatedAt: acquiredAt,
+    };
+
     try {
-      removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
+      writeFileAtomic(leasePath, `${JSON.stringify(lease, null, 2)}\n`, {
+        mode: LEASE_FILE_MODE,
+        overwrite: false,
+      });
     } catch (err) {
-      if (!isMutationLockBusyError(err)) throw err;
+      if (err?.code === 'EEXIST') {
+        const beat = readJsonFile(leasePath, null);
+        const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
+        return { acquired: false, leasePath, lease: beat, existingLease: beat, waiter,
+          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
+      }
+      throw err;
     }
-  }
-  return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned, reclaim };
+
+    if (waiter?.waiterId) {
+      try {
+        writeJsonFile(mergeLeaseWaitersFilePath(rootDir, { repo, base }),
+          waiterFileDoc(waiters.filter((w) => w.waiterId !== waiter.waiterId), acquiredAt));
+      } catch (err) {
+        // Do not leave an unreported holder if persisting waiter removal fails.
+        // The mutation lock still fences this newly created holder.
+        rmSync(leasePath, { force: true });
+        throw err;
+      }
+    }
+    return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned, reclaim };
+  });
+  if (result.acquired && typeof _afterHolderWrite === 'function') _afterHolderWrite(result);
+  return result;
 }
 
 export function releaseMergeLease({

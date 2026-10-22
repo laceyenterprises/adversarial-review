@@ -563,7 +563,7 @@ test('merge-lease acquire maps mutation-lock contention at deadline to retryable
   }
 });
 
-test('merge-lease acquire succeeds when waiter cleanup lock is busy after holder write', async () => {
+test('merge-lease acquire removes waiter before a post-acquisition lock becomes busy', async () => {
   const rootDir = freshRoot();
   try {
     const { code, io } = await runCli(rootDir, [
@@ -589,6 +589,7 @@ test('merge-lease acquire succeeds when waiter cleanup lock is busy after holder
     assert.equal(out.holder, 128);
     assert.equal(out.holderHead, 'post-write-lock');
     assert.equal(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).holder.holderPid, 8128);
+    assert.deepEqual(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).waiters, []);
     assert.equal(io.stderrText, '');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

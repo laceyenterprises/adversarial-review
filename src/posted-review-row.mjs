@@ -710,6 +710,10 @@ async function handlePostedReviewRowWithinReadCache({
         },
       };
     }
+    const leaseWaitMessage = coexistenceDecision.amaClosureResult?.reason === 'daemon-deferred'
+      && coexistenceDecision.amaClosureResult?.daemonCleanMerge?.reason === 'lease-contended'
+      ? coexistenceDecision.amaClosureResult.daemonCleanMerge.waitMessage
+        || 'waiting for the merge lease, position unknown' : null;
     if (coexistenceDecision.outcome === 'ama-dispatched'
       || coexistenceDecision.amaClosureResult?.reason === 'ama-closer-launch-in-progress') {
       // Reconciliation can find the old process's launch without submitting to
@@ -760,7 +764,7 @@ async function handlePostedReviewRowWithinReadCache({
       // instead of every poll; a new head/reason/worker identity still logs.
       const retainGateKey = `${repoPath}#${prNumber}`;
       const retainSignature =
-        `${currentRevisionRef || ''}#${amaClosureResult.reason || 'ama-dispatch-pending'}` +
+        `${currentRevisionRef || ''}#${leaseWaitMessage || amaClosureResult.reason || 'ama-dispatch-pending'}` +
         `#${amaClosureResult.launchRequestId || ''}#${amaClosureResult.dispatchId || ''}` +
         `#${amaClosureResult.workerClass || ''}`;
       const retainDecision = logGate.note(retainGateKey, retainSignature);
@@ -770,7 +774,7 @@ async function handlePostedReviewRowWithinReadCache({
           : '';
         logger.log(
           `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
-          `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+          `${leaseWaitMessage || amaClosureResult.reason || 'ama-dispatch-pending'} ` +
           (isAmaCloserLaunching(amaClosureResult) ? 'closer is launching; ' : '') +
           `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
           `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
@@ -778,6 +782,7 @@ async function handlePostedReviewRowWithinReadCache({
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
         ...(operatorHoldReason || amaClosureResult?.reason === 'deferred-by-drain'
+          || leaseWaitMessage
           ? { amaClosureResult } : {}),
         ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true
@@ -807,7 +812,9 @@ async function handlePostedReviewRowWithinReadCache({
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
         `(${namedReason}; reasons: ${reasonsHint}` +
         `${amaClosureResult?.missingEvidence?.summary ? `; missing evidence: ${amaClosureResult.missingEvidence.summary}` : ''}` +
-        (isAmaCloserLaunching(amaClosureResult)
+        (leaseWaitMessage
+          ? `); ${leaseWaitMessage}`
+          : isAmaCloserLaunching(amaClosureResult)
           ? '); closer is launching; awaiting dispatch outcome'
           : '); safety hold requires operator action ' + recoveryHint)
       );

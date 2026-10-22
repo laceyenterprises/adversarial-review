@@ -919,6 +919,16 @@ posted under that bot identity using the
 [owner runbook](docs/RUNBOOK-gemini-reviewer-app.md#required-pr-context-reads-lac-2082);
 source publication alone is not live recovery.
 
+HAMATTEST-02 records authenticated hammer publication provenance before CI can
+stop a run. Pushed edges carry the reviewed verdict through the same chain
+reader as validated edges; exact-head CI remains mandatory. An explicit
+`rereview-exact-head` decision executes through the existing pending-review
+transition and per-head orphan reservation as soon as ownership is certainly
+absent. The reasons persist in watchdog evidence. No lifecycle states or smoke
+promises are added. Focused offline acceptance is in
+`test/hammer-pushed-attestation.test.mjs`, `test/remorphan-01.test.mjs` and the
+rendered publish/rebase and watcher claim-loop fixtures.
+
 Review-body capture records individual findings and remediation evidence in
 `data/reviews.db`. The read-only JSON command
 `node bin/review-findings.mjs show --db <database>` exposes them to corpus

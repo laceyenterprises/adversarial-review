@@ -7,7 +7,9 @@ import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS, isOrphanRecoveryWait } from '../src/ama/orphan-watchdog.mjs';
 import Database from 'better-sqlite3';
-import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdict } from '../src/review-state.mjs';
+import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
+import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
+import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdict, requestReviewRereview } from '../src/review-state.mjs';
 
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
@@ -578,3 +580,97 @@ for (const factHead of ['current', 'prior']) {
     assert.equal(calls.reviews.length, factHead === 'current' ? 0 : 1);
   });
 }
+
+
+test('HAMATTEST-02: watcher executes an unproven-head decision once, before its idle bound', async t => {
+  const { args, tick, calls } = setup(t);
+  const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'reviewed', currentHead: 'current',
+    // A hammer tip above a foreign commit cannot bridge the reviewed head.
+    comments: [{ author: 'hammer-worker', body: 'HAM-Base-Head: foreign\nHAM-Pushed-Head: current' }] });
+  const decision = closerAuthoredStaleEligible({ headProof });
+  assert.equal(decision.decision, 'rereview-exact-head');
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
+    result: { amaEnabled: true, reason: 'not-eligible', closerAuthoredStale: decision,
+      ownerProofFacts: { headSha: 'current', liveHeadCloserAuthored: true, reviewCycleExhausted: true } } };
+  const first = await tick(0, overrides);
+  assert.equal(first.amaClosureResult.reviewRequest.triggered, true);
+  await tick(1, overrides);
+  await tick(60, overrides);
+  assert.equal(calls.reviews.length, 1);
+  assert.equal(calls.launches.length, 0, 'historical hammer evidence cannot override the shared decision');
+  const request = calls.reviews[0];
+  assert.equal(request.targetRevisionRef, 'current');
+  assert.equal(request.ownerlessRecovery, true);
+  assert.equal(isOrphanHeadReviewRequested({ rereview_requested_at: '2026-10-22T00:00:00Z',
+    revision_ref: request.targetRevisionRef, rereview_reason: request.reason }, 'current'), true,
+  'the durable request bypasses closer-tip suppression in real watcher admission');
+  const state = recoveryState(args.rootDir);
+  assert.equal(state.rereview, 1);
+  assert.deepEqual(JSON.parse(state.evidence), { action: 'review', reason: 'rereview-exact-head',
+    reasons: ['hammer-app-attestation-missing'] });
+  assert.equal(state.attempts, 0);
+  assert.match(calls.logs.join('\n'), /requested exact-head re-review.*hammer-app-attestation-missing/);
+});
+
+for (const ownership of [{ owned: true }, { owned: false, uncertain: true }]) {
+  test(`HAMATTEST-02: shared re-review decision respects ownership ${JSON.stringify(ownership)}`, async t => {
+    const { tick, calls } = setup(t);
+    await tick(0, { hasOwnerImpl: async () => ownership,
+      result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head' } } });
+    assert.equal(calls.reviews.length, 0);
+    assert.equal(calls.launches.length, 0);
+  });
+}
+
+test('HAMATTEST-02: local request failure remains retryable, while later heads get their own request', async t => {
+  const { tick, calls } = setup(t);
+  let attempts = 0;
+  const overrides = { result: { amaEnabled: true, closerAuthoredStale: {
+    decision: 'rereview-exact-head', reasons: ['hammer-app-attestation-missing'] } },
+  requestRereviewImpl: async options => {
+    if (++attempts === 1) throw new Error('synthetic local database busy');
+    calls.reviews.push(options);
+    return { triggered: true };
+  } };
+  await tick(0, overrides);
+  await tick(1, overrides);
+  await tick(2, overrides);
+  assert.equal(attempts, 2);
+  await tick(3, { ...overrides, headSha: 'next', candidate: { prState: 'open', headSha: 'next' } });
+  assert.deepEqual(calls.reviews.map(request => request.targetRevisionRef), ['current', 'next']);
+});
+
+
+test('HAMATTEST-02: watcher coexistence durably queues the shared review decision once', async t => {
+  const { args, calls } = setup(t);
+  const db = openReviewStateDb(args.rootDir);
+  t.after(() => db.close());
+  ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+    review_status,reviewer_head_sha,revision_ref) VALUES (?,?,'2026-10-22','codex','open','posted','reviewed','current')`)
+    .run(args.repo, args.prNumber);
+  const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'reviewed', currentHead: 'current', comments: [] });
+  let requests = 0;
+  const run = () => resolveMergeAgentCoexistenceForWatcher({ rootDir: args.rootDir,
+    repoPath: args.repo, prNumber: args.prNumber, candidate: args.candidate, labelNames: [],
+    currentRevisionRef: args.headSha, logger: args.logger,
+    reviewStateRow: db.prepare('SELECT * FROM reviewed_prs').get(),
+    maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+      skipMergeAgent: true, reason: 'not-eligible', closerAuthoredStale: closerAuthoredStaleEligible({ headProof }) }),
+    orphanOptions: { hasOwnerImpl: async () => ({ owned: false }), pageImpl: args.pageImpl,
+      requestRereviewImpl: options => {
+        requests++;
+        return requestReviewRereview({ ...options, db });
+      } },
+    recoverAmaAutomationImpl: () => assert.fail('shared review decision already has an actor'),
+  });
+  await run();
+  const first = db.prepare('SELECT * FROM reviewed_prs').get();
+  assert.equal(first.review_status, 'pending');
+  assert.equal(isOrphanHeadReviewRequested(first, 'current'), true);
+  await run();
+  assert.equal(requests, 1);
+  assert.equal(db.prepare('SELECT rereview_requested_at FROM reviewed_prs').get().rereview_requested_at,
+    first.rereview_requested_at);
+  assert.equal(calls.launches.length, 0);
+});

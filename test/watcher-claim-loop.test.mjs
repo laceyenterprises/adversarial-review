@@ -63,7 +63,15 @@ process.stdout.write(${JSON.stringify(JSON.stringify({ ...claudeAccountFixture()
 }))});
 `);
   chmodSync(hqPath, 0o755);
-  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: hqPath };
+  // Raw hq fallbacks must also stay inside this synthetic service boundary.
+  const cliBin = path.join(tmp, 'fixture-cli-bin');
+  mkdirSync(cliBin, { recursive: true });
+  const hqShim = path.join(cliBin, 'hq');
+  writeFileSync(hqShim, `#!/bin/sh
+if [ "$1" = dag ] && [ "$2" = autowalk-on-merge ]; then echo '{}'; exit 0; fi
+exec "$AGENT_OS_HQ_BIN" "$@"
+`, { mode: 0o755 });
+  return { PATH: `${cliBin}${path.delimiter}${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: hqPath };
 }
 
 function fileUrl(...parts) {
@@ -3405,7 +3413,7 @@ fi
   });
 }
 
-for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a final-round handoff once, stranded=${stranded}`, () => {
+for (const stranded of [false, true, 'shared-rule']) test(`HAMCLOSE-04/HAMATTEST-02 real pollOnce admits a bounded exact-head request once, stranded=${stranded}`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-review-'));
   try {
     const head = 'b'.repeat(40);
@@ -3453,11 +3461,30 @@ for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a f
       const boundedRequest = args => requestBoundedOrphanReview({ ...args,
         requestRereviewImpl: options => requestReviewRereview({ ...options, db }),
       });
-      if (${stranded}) await boundedRequest(identity);
-      acquireAmaCloserLease(identity);
-      updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
-      await boundedRequest(identity);
-      if (${stranded}) db.prepare("UPDATE reviewed_prs SET review_status='pending', revision_ref=?, rereview_reason='auto-refresh: PR head moved', rereview_requested_at=? WHERE pr_number=101").run(identity.headSha, new Date().toISOString());
+      if (${stranded === true}) await boundedRequest(identity);
+      if (${stranded === 'shared-rule'}) {
+        const { recoverOrphan } = await import(${JSON.stringify(fileUrl('src', 'ama', 'orphan-watchdog.mjs'))});
+        const { proveCloserAuthoredStaleHead, closerAuthoredStaleEligible } = await import(${JSON.stringify(fileUrl('src', 'closer-authored-stale.mjs'))});
+        const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'a'.repeat(40),
+          currentHead: identity.headSha, comments: [] });
+        const decision = closerAuthoredStaleEligible({ headProof });
+        assert.equal(decision.decision, 'rereview-exact-head');
+        let requests = 0;
+        const recover = () => recoverOrphan({ ...identity, candidate: { prState: 'open' },
+          reviewStateRow: db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get(),
+          result: { amaEnabled: true, closerAuthoredStale: decision },
+          hasOwnerImpl: async () => ({ owned: false }),
+          requestRereviewImpl: options => { requests++; return requestReviewRereview({ ...options, db }); },
+          pageImpl: () => assert.fail('synthetic review request must succeed') });
+        await recover();
+        await recover();
+        assert.equal(requests, 1);
+      } else {
+        acquireAmaCloserLease(identity);
+        updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
+        await boundedRequest(identity);
+      }
+      if (${stranded === true}) db.prepare("UPDATE reviewed_prs SET review_status='pending', revision_ref=?, rereview_reason='auto-refresh: PR head moved', rereview_requested_at=? WHERE pr_number=101").run(identity.headSha, new Date().toISOString());
       db.prepare(\`INSERT INTO review_cycle_verdicts(pr_url,head_sha,verdict_count,verdict_at)
         VALUES (?, ?, 6, ?)\`).run('https://github.com/' + repo + '/pull/101', 'a'.repeat(40), new Date().toISOString());
       for (let attempt = 1; attempt <= 36; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,

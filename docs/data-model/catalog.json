@@ -673,7 +673,7 @@
       "path": "docs/data-model/closer-authored-stale.md",
       "store": "data/closer-authored-stale/",
       "schemaSurface": "src/closer-authored-stale.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/hammer-head-validation.mjs", "src/ama/hammer-pushed-attestation.mjs"],
       "owner": "AMA closer-authored stale-head verdict carry-forward"
     },
     {
@@ -982,9 +982,10 @@
       ],
       "owner": "AMA ownerless recovery (OWNERPROOF-01)",
       "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
-      "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged"],
+      "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged", "heads.rereview"],
       "attemptOutcomeFields": ["action", "reason", "holdReason", "at", "dispatched", "launchRequestId", "triggered"],
       "attemptHoldReasonNormalization": "Explicit result holdReason takes precedence; otherwise extract the harness-hold: suffix from reason for outcomes and evidence summaries.",
+      "sharedRereviewDecision": "rereview-exact-head queues once per head immediately when ownership is certainly absent; heads.evidence records action, reason and reasons; local queue failure refunds heads.rereview",
       "recoveryAttemptLimit": 2,
       "pagedTerminalReceiptStatuses": ["delivered", "dead-letter"]
     },

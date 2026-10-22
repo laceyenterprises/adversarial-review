@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 // Share REMORPHAN-01's durable guard and lock. Reserve before the external
-// request so a failed request or interrupted process cannot spend it twice.
+// local queue request so concurrent observers or interrupted processes cannot
+// spend it twice. A proven local queue failure refunds the reservation.
 export async function requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
-  reviewStateRow, requestRereviewImpl, logger, db = null }) {
+  reviewStateRow, requestRereviewImpl, logger, db = null, decisionReasons = null }) {
   if (reviewStateRow?.review_status === 'failed' && reviewStateRow.reviewer_head_sha === headSha) return null;
   let ownedDb;
   let fd;
@@ -25,8 +26,26 @@ export async function requestBoundedOrphanReview({ rootDir, repo, prNumber, head
     }
     db.prepare('INSERT OR IGNORE INTO heads(head) VALUES (?)').run(headSha);
     if (!db.prepare('UPDATE heads SET rereview=1 WHERE head=? AND rereview=0').run(headSha).changes) return null;
-    return await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
-      reason: `system-orphan-head-review:${headSha}`, logger });
+    let request;
+    try {
+      request = await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
+        reason: `system-orphan-head-review:${headSha}`,
+        ...(decisionReasons ? { ownerlessRecovery: true } : {}), logger });
+    } catch (error) {
+      // This collaborator queues local durable intent; a failed queue operation
+      // must not permanently spend the once-per-head request.
+      db.prepare('UPDATE heads SET rereview=0 WHERE head=?').run(headSha);
+      throw error;
+    }
+    if (request?.triggered !== true) {
+      db.prepare('UPDATE heads SET rereview=0 WHERE head=?').run(headSha);
+    } else if (decisionReasons) {
+      // Evidence/log failures after a successful queue must not refund it.
+      const evidence = { action: 'review', reason: 'rereview-exact-head', reasons: decisionReasons };
+      db.prepare('UPDATE heads SET evidence=? WHERE head=?').run(JSON.stringify(evidence), headSha);
+      logger?.log?.(`[watcher] requested exact-head re-review for ${repo}#${prNumber}@${headSha}: ${decisionReasons.join(', ')}`);
+    }
+    return request;
   } finally {
     try { ownedDb?.close(); } finally { if (fd !== undefined) closeSync(fd); }
   }

@@ -95,6 +95,8 @@ for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-p
       assert.ok(!f.calls().some(call => call.key === 'reset'));
       if (target !== 'pr') assert.equal(result.fallbackHead,
         ['verification', 'fetch-published'].includes(target) ? 'published' : 'before');
+      if (target === 'fetch-published') assert.equal(result.pushedHead, 'published',
+        'scratch fetch failure must retain the verified API publication for provenance');
     });
   }
 }
@@ -227,12 +229,15 @@ const commit = sha => {
 };
 if (args[0] === 'pr' && args[1] === 'comment') {
   const comments = JSON.parse(fs.readFileSync(commentsPath));
-  comments.push({ id: 1, user: { login: 'hammer-worker' }, body: args[args.indexOf('--body') + 1] });
+  comments.push({ id: comments.length + 1, user: { login: 'hammer-worker' }, body: args[args.indexOf('--body') + 1] });
   fs.writeFileSync(commentsPath, JSON.stringify(comments)); output({ id: 1 });
 } else if (args[0] !== 'api') fail('unexpected fake service command');
 else if (args[1] === 'graphql') {
   if (args.some(arg => arg.includes('viewer { login databaseId }'))) {
     output({ login: 'hammer-worker', databaseId: 77 }); process.exit(0);
+  }
+  if (args.some(arg => arg.includes('viewer { login }'))) {
+    output({ data: { viewer: { login: 'hammer-worker' } } }); process.exit(0);
   }
   if (route !== 'api') fail('HTTP 422 unsupported API publication');
   const input = JSON.parse(fs.readFileSync(0, 'utf8')).variables.input;
@@ -264,7 +269,12 @@ else if (args[1] === 'graphql') {
     { name: 'agent-os/adversarial-gate', status: 'completed', conclusion: 'success' } ] });
   else if (path.includes('/statuses?')) output([]);
   else if (path.includes('/comments')) {
-    const comments = JSON.parse(fs.readFileSync(commentsPath)); output(args.includes('--slurp') ? [comments] : comments);
+    const comments = JSON.parse(fs.readFileSync(commentsPath));
+    const bodyField = args.find(arg => arg.startsWith('body='));
+    if (bodyField) {
+      const comment = { id: comments.length + 1, user: { login: 'hammer-worker' }, body: bodyField.slice(5) };
+      comments.push(comment); fs.writeFileSync(commentsPath, JSON.stringify(comments)); output(comment);
+    } else output(args.includes('--slurp') ? [comments] : comments);
   } else if (path.includes('/compare/')) {
     const [from, to] = path.split('/compare/')[1].split('...');
     const patch = git(['diff', from, to, '--', '${filename}']).replace(/^[\\s\\S]*?(?=@@)/, '');
@@ -319,11 +329,14 @@ source "$1"
       get, rootDir: root }, { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }) });
     const snapshot = await fetchHammerPr('fixture/repo', pr, { read: get });
     const comments = JSON.parse(readFileSync(commentsPath, 'utf8'));
-    assert.equal(comments.length, 1);
-    assert.match(comments[0].body, /^Doc-currency: not applicable; changed files covered: src\/feature.mjs$/m);
-    assert.doesNotMatch(comments[0].body, /stale wording/);
+    assert.equal(comments.length, 2);
+    assert.ok(comments[0].body.includes(`HAM-Pushed-Head: ${published}`));
+    assert.doesNotMatch(comments[0].body, /HAM-Validated-Head:/);
+    const auditComment = comments[1];
+    assert.match(auditComment.body, /^Doc-currency: not applicable; changed files covered: src\/feature.mjs$/m);
+    assert.doesNotMatch(auditComment.body, /stale wording/);
     const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({ reviewedHead: reviewed,
-      verifiedCommit: normalizeVerifiedCloserCommit(rawCommit), verifiedAuditComment: comments[0] });
+      verifiedCommit: normalizeVerifiedCloserCommit(rawCommit), verifiedAuditComment: auditComment });
     const paths = { pr: snapshot, reviews: { reviews: [{ state: 'CHANGES_REQUESTED',
       author: { login: amaAuthoritativeReviewerLoginsForModel('codex')[0] }, commit: { oid: reviewed },
       submittedAt: '2026-01-01T00:00:00Z', body: '## Blocking issues\n- **Fix feature** Repair the feature.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' }] },

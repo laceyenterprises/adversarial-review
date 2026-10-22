@@ -83,6 +83,7 @@ case "$1" in
   */ama-check.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" predicate "$@" ;;
   */primary-change-context.mjs) echo '{}' ;;
   */load-aware-timeout.mjs) if [ "$2" = 900 ]; then echo scale >> "$FIXTURE_DIR/wait-scales"; fi; echo "$2" ;;
+  */hammer-pushed-attestation.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" pushed "$@" ;;
   */hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" range "$@" ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs|*/dismiss-withdrawn-reviews.mjs|*/stacked-base-check.mjs) echo '{}' ;;
   *) exec "$REAL_NODE" "$@" ;;
@@ -143,19 +144,25 @@ exit "$status"
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 
-for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 'foreign-recovery', 'conflict', 'dirty']) {
+for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 'foreign-recovery', 'foreign-after-rebase', 'conflict', 'dirty']) {
   test(`HAMSELFREBASE-01: ${scenario}`, t => {
     const f = fixture(t, scenario);
     const result = f.run();
     const diagnostics = result.stdout + result.stderr;
-    const stops = ['foreign', 'foreign-recovery', 'conflict', 'dirty'].includes(scenario);
+    const stops = ['foreign', 'foreign-recovery', 'foreign-after-rebase', 'conflict', 'dirty'].includes(scenario);
     assert.equal(result.signal, null, diagnostics);
+    if (scenario === 'foreign-after-rebase') {
+      const pushed = readFileSync(join(f.dir, 'pushed-comments'), 'utf8');
+      assert.ok(pushed.includes(`HAM-Pushed-Head: ${f.rebased}`));
+      assert.doesNotMatch(pushed, new RegExp(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).foreign));
+      assert.match(diagnostics, /outcome=head-changed/);
+    }
     assert.equal(result.status, scenario === 'conflict' ? 21 : scenario === 'dirty' ? 1 : stops ? 20 : 0, diagnostics);
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), !stops ? 'acquire\nrelease\nacquire\nrelease\n' : 'acquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     if (!stops) assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'update-branch').length, 1);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
     if (!stops) {
       assert.match(diagnostics, /merge=0 outcome=merged held=0/);
       assert.doesNotMatch(diagnostics, /head-changed|next hammer/);
@@ -223,6 +230,15 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
       } else assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
         scenario === 'ci-red' ? 'outcome=github-gate-red' : scenario === 'ci-head-moved' ? 'outcome=live-head-moved-before-merge' :
           scenario === 'ci-predicate-refused' ? 'outcome=retry-predicate-not-eligible' : 'outcome=required-checks-pending'));
+    }
+    if (['ci-red', 'ci-pending'].includes(scenario)) {
+      const pushed = readFileSync(join(f.dir, 'pushed-comments'), 'utf8');
+      assert.ok(pushed.includes(`HAM-Base-Head: ${f.rebased}`));
+      assert.ok(pushed.includes(`HAM-Pushed-Head: ${f.nextRebased}`));
+      assert.doesNotMatch(pushed, /HAM-Validated-Head:/);
+      assert.ok(events.findIndex(e => e.kind === 'pushed-edge' && e.value.pushedHead === f.nextRebased)
+        < events.findIndex(e => e.kind === 'checks' && e.value.head === f.nextRebased),
+      'publication provenance must precede the first CI check on the rebased head');
     }
     assert.doesNotMatch(diagnostics, /outcome=base-advanced-during-ci-wait/);
   });

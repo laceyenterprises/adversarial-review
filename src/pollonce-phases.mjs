@@ -2856,7 +2856,10 @@ export async function processReviewSubject(entry, ctx) {
       // still accept the older GitHub label-object shape for historical rows.
       if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
-      const handoffReviewAdmission = hammerHandoffReviewBypass({ db, rootDir: ROOT,
+      // HAMATTEST-02: the bounded exact-head recovery request must reach an
+      // actor even when earlier heads exhausted the ordinary review budget.
+      const handoffReviewAdmission = isOrphanHeadReviewRequested(current, subject.headSha)
+        || hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: current });
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,
@@ -3737,7 +3740,7 @@ export async function processReviewSubject(entry, ctx) {
             if (passKind === 'rereview') {
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
-              const handoffReviewBypass = hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+              const handoffReviewBypass = orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current });
               const closerHead = await readPreflight('closer');
               if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {

@@ -14,6 +14,7 @@ import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-leas
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { summarizePRRemediationLedger } from '../follow-up-jobs.mjs';
 import { hammerOwnerRouteOf } from './review-cycle-cap-route.mjs';
+import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
 const terminalLaunches = new Map();
@@ -230,7 +231,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const idleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let ownership;
-    if (isOrphanRecoveryWait(result)) {
+    if (isOrphanRecoveryWait(result) && result?.closerAuthoredStale?.decision !== 'rereview-exact-head') {
       // A proof timeout must return at its serial deadline. Observing this
       // wait only needs the clock; no ownership probe or recovery can run.
       ownership = { owned: false };
@@ -247,6 +248,16 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       return null;
     }
     const pending = { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
+    // HAMATTEST-02: execute the shared decision on this pass, before historical
+    // hammer ownership or the idle timer can leave an unprovable head actorless.
+    // Unknown ownership is a read wait, never permission to race a live closer.
+    if (result?.closerAuthoredStale?.decision === 'rereview-exact-head') {
+      if (ownership?.uncertain) return pending;
+      const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
+        reviewStateRow, requestRereviewImpl, logger, db,
+        decisionReasons: result.closerAuthoredStale.reasons || [] });
+      return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
+    }
     if (!idleSince) {
       db.prepare('UPDATE ownership SET idleSince=? WHERE id=1').run(now);
       db.prepare('UPDATE heads SET idleSince=? WHERE head=?').run(now, headSha);

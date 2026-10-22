@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs
 import { join } from 'node:path';
 import { classifyCheckRollup } from '../../src/checks-summary.mjs';
 import { evaluateMergeEligibility } from '../../src/ama/merge-eligibility.mjs';
+import { publishPushedHammerAttestation } from '../../src/ama/hammer-pushed-attestation.mjs';
 import { hammerRangeMatches } from '../../src/ama/hammer-head-validation.mjs';
 
 const dir = process.env.FIXTURE_DIR;
@@ -17,7 +18,19 @@ const localHead = () => git('rev-parse', 'HEAD');
 const args = process.argv.slice(2);
 const retryScenario = process.env.SCENARIO.startsWith('ci-');
 
-if (args[0] === 'gate') {
+if (args[0] === 'pushed') {
+  const [baseHead, pushedHead] = args.slice(-2);
+  assert.equal(pushedHead, state.head);
+  await publishPushedHammerAttestation({ repo: 'fixture/repo', prNumber: 42, baseHead, pushedHead,
+    api: async (endpoint, input) => {
+      if (endpoint === 'graphql') return { data: { viewer: { login: 'hammer-worker' } } };
+      if (!input) return [];
+      assert.ok(!input.body.includes('HAM-Validated-Head:'));
+      appendFileSync(join(dir, 'pushed-comments'), input.body + '\n');
+      log('pushed-edge', { baseHead, pushedHead });
+      return { id: 42 };
+    } });
+} else if (args[0] === 'gate') {
   const expected = process.env.POST_REMEDIATION_SHA;
   assert.equal(expected, state.retried ? state.nextRebased : state.rebased);
   assert.equal(localHead(), expected);
@@ -70,8 +83,10 @@ if (args[0] === 'gate') {
 } else if (args[0] === 'gh') {
   args.shift();
   log('gh', args);
-  if (args[0] === 'pr' && args[1] === 'update-branch') {
-    assert.ok(args.includes('--rebase'));
+  if (args[0] === 'api' && args[1] === 'graphql' && args.some(arg => arg.includes('updatePullRequestBranch'))) {
+    assert.ok(args.some(arg => arg.includes('updateMethod: REBASE')));
+    assert.ok(args.includes(`head=${state.head}`));
+    assert.ok(args.includes('id=synthetic-pr'));
     assert.equal(localHead(), state.head);
     assert.ok(existsSync(join(dir, 'lease-held')));
     if (process.env.SCENARIO === 'conflict' || (state.checkReads && process.env.SCENARIO === 'ci-conflict')) {
@@ -88,7 +103,12 @@ if (args[0] === 'gate') {
     }
     state.behind = false;
     save();
+    console.log(JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: { headRefOid: target } } } }));
   } else if (args[0] === 'pr' && args[1] === 'view') {
+    if (args.includes('id') && args.includes('--jq')) { console.log('synthetic-pr'); process.exit(0); }
+    if (process.env.SCENARIO === 'foreign-after-rebase' && state.behind === false) {
+      state.head = state.foreign; save();
+    }
     if (args.includes('headRefOid') && args.includes('--jq')) {
       state.headReads = (state.headReads || 0) + 1;
       if (process.env.SCENARIO === 'foreign-recovery' && state.headReads > 1) state.head = state.foreign;

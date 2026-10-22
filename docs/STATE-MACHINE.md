@@ -957,12 +957,22 @@ publication sets `HAM_BASE_HEAD` to the last reviewed SHA and certifies that who
 range to the built head. A provable base keeps its existing range. Both routes
 retain the merge lease, live-head CAS, exact-head required checks, HAMINTENT,
 head-bound attestation and signer checks. Head movement or validation failure
-releases for another hammer pass, never an exact-head review.
+releases for another hammer pass when authenticated provenance carries the
+reviewed verdict. HAMATTEST-02 records `HAM-Base-Head` / `HAM-Pushed-Head`
+publication edges before validation and uses the same chain reader as validated
+edges. These edges do not certify CI. An unbound foreign head instead receives
+`rereview-exact-head`; with no live owner and certain ownership reads, the
+watcher queues that review once per head immediately and records why. The
+existing pending-review transition and orphan reservation execute the decision;
+no new lifecycle states or merge authority are introduced.
 
 Historical `exact-head-review-required` and bare `stale-review-head` stops release
 with `hammer-responsibility` without a new review. Mixed safety refusals retain
 their holds. Recognized closer-head evidence is bound to the current head and
-carried into automated and ownerless recovery so both select hammer. These routes
+carried into automated and ownerless recovery for ordinary hammer selection.
+An explicit shared `rereview-exact-head` decision takes precedence over that
+historical ownership, with its per-head request marker honored through reviewer
+budget and closer-tip suppression. These routes
 confer dispatch ownership only; every merge predicate and retry cap still applies.
 The old handoff CLI now terminates its dispatch lease for a hammer retry without
 requesting review. Existing `handed-to-review` records remain readable during

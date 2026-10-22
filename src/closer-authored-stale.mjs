@@ -2,7 +2,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // STALECLOSER-03: ONE eligibility rule for a closer-authored stale head.
 //
 // A head is closer-authored-stale when the PR head moved past the reviewed head
-// only through the closer's own commits (`Closed-By: hammer` trailer). The
+// only through authenticated hammer App pushed or validated edges. The
 // reviewed verdict may then be carried forward to the closer head -- but only
 // through `closerAuthoredStaleEligible`, which the AMA closer, the hammer wake,
 // the orphan watchdog and agent-os `merge-agent rescue` all call. Rescue can no

@@ -327,6 +327,22 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   if [ -z "$HAM_PUSHED_FROM_HEAD" ]; then HAM_PUSHED_FROM_HEAD="$HAM_PUBLICATION_PREVIOUS_HEAD"; fi
   HAM_PUSHED_HEAD=""
 
+  # A verified API commit can already be live when scratch fetch/reset fails.
+  # Attest that exact result before the git fallback can itself fail.
+  HAM_API_KNOWN_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.pushedHead // empty')
+  if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
+    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+      <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"; then
+      HAM_PHASE_OUTCOME=pushed-attestation-unavailable
+      printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
+        'HAM closing status — no merge. API publication succeeded before scratch sync failed; retry this provenance through the hammer App.' \
+        "$HAM_PUSHED_FROM_HEAD" "$HAM_API_KNOWN_PUSHED_HEAD"
+      echo "$HAM_NO_MERGE_NOTE" >&2
+      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease; fi
+      return 1
+    fi
+  fi
+
   if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
     # Preserve the existing lease-protected git route. Validation and the audit
     # cover the full reviewed-to-built range when starting-base proof is absent.
@@ -356,6 +372,20 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   HAM_HEAD_WAITED_SECONDS=0
   HAM_REQUIRED_CHECKS_WAITED_SECONDS=0
   export HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
+  # Provenance belongs to publication, before any CI/credential/lease stop.
+  # This grants no CI validation or merge authority.
+  if [ -n "$HAM_PUSHED_HEAD" ] && [ "$HAM_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
+    if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
+      <<REPO>> <<PR_NUMBER>> "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
+      HAM_PHASE_OUTCOME=pushed-attestation-unavailable
+      printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
+        'HAM closing status — no merge. Pushed provenance delivery failed; retry this audit through the hammer App.' \
+        "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"
+      echo "$HAM_NO_MERGE_NOTE" >&2
+      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease; fi
+      return 1
+    fi
+  fi
 else
   ham_publish_phase
 fi

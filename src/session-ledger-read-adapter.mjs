@@ -939,6 +939,31 @@ export function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
   return runLedgerStepsAsync(readLaunchRequestSnapshotSteps(args), args);
 }
 
+// A missing row is only an observation, never proof that a submitted CLI cannot
+// still enqueue. Callers must independently prove that submission never began.
+export function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
+  return runLedgerStepsAsync(readLaunchRequestByIdempotencyKeySteps(args), args);
+}
+
+function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget, ledgerDbPath,
+  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
+  if (!normalizeText(idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
+  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
+    rootDir, hqRoot, requiredTables: ['launch_requests'] });
+  if (!resolution.ok) return resolution;
+  const columns = 'launch_request_id, idempotency_key, ticket_ref, target_repo, status, requested_at';
+  if (resolution.target.backend === 'sqlite') {
+    return querySqliteRows(resolution.target,
+      `SELECT ${columns} FROM launch_requests WHERE idempotency_key = @key LIMIT 2`,
+      { key: idempotencyKey });
+  }
+  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
+  return yield* queryPostgresRowsSteps(resolution.target,
+    `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
+       WHERE idempotency_key = :'intent_key' LIMIT 2) receipt`,
+    { spawnSyncImpl, readOnly: true, psqlVars: [['intent_key', idempotencyKey]] });
+}
+
 function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,
   rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,

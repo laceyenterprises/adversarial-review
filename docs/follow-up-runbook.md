@@ -12,6 +12,59 @@ while its label gate is red. The final pre-spawn lifecycle gate gives
 those stopped jobs cannot launch a conflict hammer before their stale-state
 condition is resolved.
 
+## Interrupted dispatch intents (LAC-2081)
+
+A persisted `dispatching` record reserves its PR across all heads until native
+reconciliation resolves the attempt. Age, a dead watcher, a missing lease,
+null launch IDs, and a previous head's terminal launch do not prove no launch.
+The launch subprocess can enqueue after its caller disappears. These records
+never age-cancel; after the pending capacity window they retain same-PR
+exclusion without occupying a fleet launch slot.
+
+New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
+`hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,
+submission and receipt persistence. `dispatchPhase: prepared` precedes
+`submitting`, which is durably written before invoking HQ. Native dispatch-record
+updates take the same fence. A busy fence defers a competing writer; it cannot
+replace an owner's intent. Reconciliation rechecks the complete record and lease
+after yielding for evidence, preserving replacements and concurrent annotations.
+
+The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same repair:
+
+- One canonical ledger row matching the exact key, AMA ticket and repository
+  recovers the receipt as `dispatched`. It promotes only a matching dead-owner
+  pending lease, resumes a matching already-promoted lease, or preserves lease
+  absence. Launch status and retry descendants then use ordinary reconciliation;
+  receipt recovery grants no merge authority.
+- A `prepared` attempt, matching locally dead pending owner, held PR fence and
+  successful empty key lookup proves no submission. It settles `no-dispatch`,
+  reason `interrupted-before-submission`, and terminalizes that pending lease
+  as `deferred`. The intent's retry increment rolls back once. A crash after
+  terminalization resumes this transition. The original owner may also settle
+  its own prepared intent on a pre-submit return while still holding the fence.
+- Submitted, legacy, ambiguous, missing or unreadable evidence stays explicitly
+  unknown. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
+  `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
+  deadline is the original dispatch timeout (30 minutes from first observation
+  if unavailable). On expiry status becomes `inspection-required`; ownership
+  remains held. Repeated diagnostics write at most once per minute and log only
+  status changes. No accumulating history or launch-timestamp refresh is added.
+
+Legacy attempts have no key or provable submission phase. In particular, a
+same-head retry's retained LRQ can belong to its predecessor. The native repair
+does not query or adopt that predecessor as the new attempt's receipt. An empty
+registry listing or failed ledger read cannot authorize retirement. A later wake
+refusal and the stale-lease reaper no longer reclaim such an intent.
+
+Run the existing reconciliation CLI **as the daemon owner**, with its explicit
+`--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
+Dry-run preserves intent, lease and budget bytes; a companion lock file may be
+created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
+Do not run apply against PR 8918 under the LAC-2081 source-fix authorization.
+Missing credentials or inaccessible rows mean unknown, not absence. Preserve
+prompt/scratch evidence while ownership remains unknown. No new configuration
+keys, launch route, retry allowance or merge/finalization gate is introduced.
+
 ## SDK cutover gate
 
 Full SDK cutover remains blocked until the airlock-owned deploy host returns
@@ -169,7 +222,9 @@ logged and retried on a later poll. See the
 - When the routed remediator has a confirmed quota cap, the follow-up consumer checks both Claude and Codex as automatic fallback candidates and selects only a candidate with confirmed available quota. The primary route resumes after its quota recovers. Reconcile reads quota evidence from both the worker log and final-message artifact; a generic account 429 in the artifact is held as `quota-exhausted`, not accepted as a completed remediation narrative.
 - When a worker exits without a usable final-message artifact, workspace resume takes precedence. If resume is unavailable and the terminal log diagnostic shows provider capacity or overload, reconcile requeues the same round as `provider-capacity` on the shared `remediationPlan.transientRetries` budget. The pending hold starts at five minutes and follows normal exponential backoff; `retryHistory[]` records the reason. In JSONL logs, the newest provider-level failure decides the classification; later progress closes the scan, and plain-text trailers are ignored. In plain-text logs, later normal output means an earlier capacity error was recovered. The missing artifact then remains an artifact failure. An unsuccessful HQ dispatch follows HQ failure classification. Exhaustion of the transient budget after a terminal capacity diagnostic ends with `failure.code = "provider-capacity"` and structured `failure.transientRetryBudget` evidence. A worker log containing `dyld[...]: Library not loaded` means the worker CLI died in the dynamic loader: the host node lost a Homebrew dylib. It is requeued as `infra-runtime-missing-library` on the same budget and ends with that code. Run `hq doctor dylib-drift` on the host and restart the named daemons; retrying without fixing the host only spends the budget.
 - Advancing from one remediation round to another runs **automatically** via the `ai.laceyenterprises.adversarial-follow-up` LaunchAgent (long-lived, internal 120s tick loop running entirely in a single node process). On startup the daemon registers App Contract telemetry subscriptions for configured `health.worker.*` topics. In `agent-os` mode this registration is staged until an inbound App Contract topic transport feeds `session.emitTopic(...)`; until then, no production telemetry wakeup is expected and the periodic scanner remains authoritative. Registration is best-effort and bounded by `ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS` (default 5000ms), so a slow broker disables only the listener for that start rather than blocking the tick loop. Once delivery is wired, delivered `health.worker.terminal.<launchRequestId>` events can wake `handleRemediationTelemetryEvent` before the next periodic tick. Startup prefers a `merge-agent` GitHub App installation token (`FOLLOW_UP_GH_AUTH_VIA_BROKER=true`, `FOLLOW_UP_GH_BROKER_ROLE=merge-agent`) for workspace preparation and push-back; ambient `gh auth token` is only a fail-safe fallback. Each tick first refreshes that runtime `GITHUB_TOKEN`/`GH_TOKEN`, then runs the reviewer-token refresh before reconciling or consuming work, so installation-token expiry and an unreadable operator Keychain item cannot strand the queue. The reviewer refresh re-resolves broker-enabled `GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, and `GH_GEMINI_REVIEWER_TOKEN` values before `consume` can spawn remediation workers that snapshot `process.env` and before `retry-comments` can post directly. For worker spawn handoff, the daemon passes the remediation-specific minimum remaining lifetime `ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS` (existing code default 22m), so cached broker tokens that are still long enough for a reviewer subprocess but too short for remediation handoff are rejected before `consume`. Broker failures leave any prior runtime/reviewer token in place and retry on a bounded schedule. At startup, transient broker transport/HTTP failures use a short launchd retry (`FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS`, default 60s, clamped to 1-300s); permanent configuration/response-contract failures retain the one-hour crash-loop suppression sleep when ambient `gh` cannot seed a token. A separate stopped-job archive sweep also runs on its own cadence within the same daemon loop. Capacity defaults to one active remediation worker; set `ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS=<n>` to allow bounded parallel workers across different PRs. The daemon clamps that env knob to `8` and logs when it had to clamp, so a typo cannot fan out an unbounded number of worker spawns in one tick. The daemon still refuses to spawn a second active remediation worker for the same `repo`/`prNumber`, using a case-insensitive repo/pr exclusion key because workers mutate the existing PR branch. If a SIGTERM arrives or one pending job fails during launch preparation, the daemon stops the current drain after the in-flight iteration and keeps filling any remaining safe capacity for unrelated PRs instead of aborting the whole tick. The tick loop itself runs in-process (no `node` subprocess fork on every tick), so macOS TCC trust is granted once for the daemon's `node` binary and reused for the daemon's lifetime — eliminates the per-tick "node would like to access data from other apps" prompts that an earlier subprocess-per-tick design produced. Per-spawn TCC popups when a fresh subprocess starts (a different problem, and one that fires on **both** the watcher's first-pass reviewer subprocess and the follow-up daemon's remediation worker — see `docs/MACOS-TCC.md` for which binaries each path execs and why FDA on those binaries is a security tradeoff worth reading before granting).
-- Follow-up consumption also treats active AMA closer dispatch records under `data/follow-up-jobs/ama-closer-dispatches/` as same-PR reservations. `dispatching` records reserve only while their launch timestamps are valid and within the reclaim window; missing or malformed timestamps are treated as stale so corrupt records do not hold the PR forever. `dispatched` records reserve while the observed worker status is active or unknown, and release once the record reports a terminal status such as `succeeded`, `completed`, `failed`, `failed-without-merge`, `cancelled`, `superseded`, or `not-found`, or once the record ages past the same reclaim window the `dispatching` branch uses. That age escape exists because a worker that dies without ever writing a terminal ledger status would otherwise keep a non-terminal status forever and wedge its PR out of the consume loop (`deferredSamePR=N` logged alongside `activeAtStart=0` and full capacity). Age is measured from the record's most recent timestamp across `lastObservedAt`, `lastAttemptedAt`, `dispatchedAt`, and `createdAt` -- the latest of them, not the first one present. That distinction is load-bearing: `dispatchedAt` and `lastAttemptedAt` are stamped once at launch and never refreshed, while `lastObservedAt` is re-stamped on every tick that observes a live worker, so reading a launch stamp first would age out a closer that is still running. Unlike `dispatching`, a `dispatched` record with no parseable timestamp at all keeps its reservation, because a launch-only record must stay held until it is first observed. Malformed or concurrently removed dispatch files are skipped during the scan so one bad record does not blind later active reservations.
+- Follow-up consumption treats unresolved `dispatching` records as same-PR
+  reservations without an age escape; see LAC-2081 above. The established
+  receipted `dispatched` status/observation rules remain separate.
 - A final lease-acquisition refusal occurs before HQ admission. Its persisted intent is settled as `state: no-dispatch`, `reason: lease-held`, with the prior retry count restored; the competing holder's existing lease and any historical receipt remain unchanged. This prevents a lease refusal from creating a separate same-PR reservation that blocks remediation after the real holder settles. The refusing dispatcher does not release the competing holder’s live lease, cancel its worker, or certify a merge.
 - Pre-admission rollback and PR-probe settlement update an existing intent only. If a concurrent cleanup removed that record, they do not recreate a partial receipt; the existing remediation/PR outcome and lease settlement still apply.
 

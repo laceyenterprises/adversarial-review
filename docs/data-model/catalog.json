@@ -652,6 +652,8 @@
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
+      "receiptChargeFields": ["chargedDispatchKeys"],
+      "receiptChargeSemantics": "LAC-2081: exact native attempt key charges once across receipt-persistence interruptions and review/head resets; recovery preserves suppression",
       "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps",
       "headContextFields": { "observedHeadSha": "optional string or null" },
@@ -676,6 +678,8 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "preReceiptReconciliation"],
+      "preReceiptSemantics": "LAC-2081: native fenced keyed receipt recovery or proof of no submission; unknown reaches a fixed inspection deadline but never age-cancels same-PR ownership",
       "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps after the readable 60-second terminal grace, with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; explicit watcher snapshot excludes proven terminal launches and unreadable evidence reserves bounded pending capacity.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",
@@ -683,6 +687,8 @@
       "schemaSurface": "src/ama/dispatch-closer.mjs",
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-record-read.mjs",
+        "src/ama/pre-receipt-intent.mjs",
+        "src/session-ledger-read-adapter.mjs",
         "src/ama/closer-terminal-cancel.mjs",
         "src/follow-up-stuck-claim-sweep.mjs",
         "src/ama/dead-hammer-rearm.mjs",
@@ -748,6 +754,7 @@
     },
     {
       "id": "ama-closer-leases",
+      "preReceiptReaper": "LAC-2081: unresolved dispatching intents preserve leases and retry budget; native proof owns settlement; lease mutations share reclaim flock and compare expected owner",
       "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky. TERMLEASE-01 reclaims terminal superseded/failed-without-merge/deferred on the same pass with proven ended/absent launch; live or unproven launches hold. Superseded dispatches release matching rekeyed leases and retain the dispatch outcome.",
       "title": "AMA Closer Leases",
       "path": "docs/data-model/ama-closer-leases.md",

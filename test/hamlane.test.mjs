@@ -145,7 +145,7 @@ function closerFixture(rootDir, onLaunch) {
 
 
 for (const launchedBeforeRestart of [false, true]) {
-  test(`HAMLANE-01 startup retries interrupted background dispatch once; already launched=${launchedBeforeRestart}`, async () => {
+  test(`HAMLANE-01 startup reconciles interrupted background dispatch once without relaunching unknown intents; already launched=${launchedBeforeRestart}`, async () => {
     const { rootDir, gate } = fixture();
     const key = background.amaHammerBackgroundKey({ repo: handler.repoPath,
       prNumber: handler.prNumber, headSha });
@@ -180,9 +180,10 @@ for (const launchedBeforeRestart of [false, true]) {
       await second.drain();
       assert.equal(attempts, 1);
       const settled = second.takeSettled(key);
-      assert.equal(launches, 1, JSON.stringify(settled) + (settled?.error?.message || ''));
+      assert.equal(launches, launchedBeforeRestart ? 1 : 0, JSON.stringify(settled) + (settled?.error?.message || ''));
       assert.equal(settled.ok, true);
-      assert.equal(settled.result.dispatched, !launchedBeforeRestart);
+      assert.equal(settled.result.dispatched, false);
+      if (!launchedBeforeRestart) assert.equal(settled.result.reason, 'existing-dispatch-unknown');
       assert.equal(background.readPendingAmaHammerDispatch(rootDir, pendingDispatch), null);
     } finally {
       release?.({ dispatched: false });

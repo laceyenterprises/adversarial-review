@@ -78,8 +78,8 @@ test('a live dispatching record is never raced by a stale launch stamp', () => {
       { state: 'dispatching', lastAttemptedAt: ago(24), lastObservedAt: ago(24) },
       { now: NOW }
     ),
-    false,
-    'a dispatching record with no fresh timestamp anywhere must still age out'
+    true,
+    'an unknown unreceipted launch cannot age out'
   );
 });
 

@@ -1089,12 +1089,12 @@ remediation or recorded final-round evidence to the final hammer only with live
 failed external checks on the candidate head, restricted to configured required
 contexts when present, carrying those names into its prompt. Ownership and wake admission
 exclude the pipeline's adversarial-gate status; an empty same-head verdict
-alone cannot establish an unreviewed CI-repair head. Only an invoked closer's
-settled refusal retires an unchanged unlaunched intent as `dispatch-failed` with
-`wake-refused:<closer result.reason>` only when its matching pending lease has a
-dead owner or has reached the bounded launch reclaim age, regardless of wake
-outcome; missing leases, launch receipts and live work remain owned. Settlement
-removes the unlaunched prompt only inside its generated prompt namespace.
+alone cannot establish an unreviewed CI-repair head. LAC-2081 supersedes wake-refusal cleanup. Unknown `dispatching` intents retain
+same-PR exclusion regardless of age. A unique HQ idempotency key and a fenced
+prepared/submitting boundary let native reconciliation recover an exact receipt
+or settle proven no-submission. Unprovable absence reaches a fixed diagnostic
+inspection deadline and retains ownership; no lease, budget or merge gate is
+waived. See [the owner runbook](docs/follow-up-runbook.md#interrupted-dispatch-intents-lac-2081).
 Hammer launch ownership includes all transitive dispatcher retries. A live
 logical-job claim refusal restores ownership only after a fresh probe proves a
 live descendant of a non-null predecessor LRQ. The original head keeps the LRQ,
@@ -1270,12 +1270,13 @@ holds still refuse that route. A completed comment-only final-round handoff stay
 completed under failed-CI admission and direct requeue refusal, including at the
 round cap; its start/result edge still proves the hammer's starting base. Suppression without the canonical
 `finalRound: "comment-only"` marker retains ordinary requeue handling.
-The native exhausted unreviewed head also clears wake admission, and a refused
-settled handoff with a reclaimable matching lease leaves the closer's terminal
-refusal reason regardless of wake outcome, while a fresh live-PID lease and its
-intent survive a plain refusal. Wake and ownership agree for `FAILURE`,
-`TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
-Settlement accepts a prompt first populated by that same captured attempt.
+The native exhausted unreviewed head also clears wake admission, and a later refused handoff preserves the earlier intent, pending lease and prompt
+regardless of wake outcome or caller death. LAC-2081's deterministic offline
+SIGKILL and concurrency regressions additionally cover keyed receipt recovery,
+prepared no-submission settlement, fixed unknown inspection diagnostics and
+idempotent retry accounting (`test/ama-pre-receipt-intent.test.mjs`). Wake and
+ownership agree for `FAILURE`, `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`,
+`ACTION_REQUIRED` and `ERROR`.
 The smoke also verifies foreign-host pending ownership waits without a local PID
 probe, then expires at the age boundary with numeric epoch milliseconds.
 A green moved head at the review ceiling wakes terminal
@@ -1533,6 +1534,9 @@ stateDiagram-v2
     state "dispatch-configuration-refused" as s8
     state "no-dispatch" as s9
     state "completed" as s10
+    s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository; preserve retry charge once
+    s0 --> s9: hammer-dispatch.30 fenced prepared attempt with matching dead pending owner and readable absent key proves no submission; roll back intent retry once
+    s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline and bounded diagnostics retain same-PR ownership without indefinite fleet capacity
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
     s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission
     s4 --> s9: hammer-dispatch.27 retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled
@@ -1543,7 +1547,7 @@ stateDiagram-v2
     s0 --> s9: hammer-dispatch.28 unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection
     s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
     s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
-    s0 --> s7: hammer-dispatch.06 launch failure or settled unlaunched closer refusal with matching reclaimable pending lease
+    s0 --> s7: hammer-dispatch.06 explicit launch failure; later wake refusal cannot settle an earlier interrupted intent
     s0 --> s9: hammer-dispatch.07 launch result: no-dispatch
     s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)

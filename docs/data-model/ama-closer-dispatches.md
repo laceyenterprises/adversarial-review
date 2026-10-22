@@ -5,6 +5,59 @@
 **Source of truth:** `src/ama/dispatch-closer.mjs`
 **Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
 
+## Interrupted dispatch intents (LAC-2081)
+
+A persisted `dispatching` record reserves its PR across all heads until native
+reconciliation resolves the attempt. Age, a dead watcher, a missing lease,
+null launch IDs, and a previous head's terminal launch do not prove no launch.
+The launch subprocess can enqueue after its caller disappears. These records
+never age-cancel; after the pending capacity window they retain same-PR
+exclusion without occupying a fleet launch slot.
+
+New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to
+`hq dispatch --idempotency-key`. A nonblocking per-PR flock spans preparation,
+submission and receipt persistence. `dispatchPhase: prepared` precedes
+`submitting`, which is durably written before invoking HQ. Native dispatch-record
+updates take the same fence. A busy fence defers a competing writer; it cannot
+replace an owner's intent. Reconciliation rechecks the complete record and lease
+after yielding for evidence, preserving replacements and concurrent annotations.
+
+The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same repair:
+
+- One canonical ledger row matching the exact key, AMA ticket and repository
+  recovers the receipt as `dispatched`. It promotes only a matching dead-owner
+  pending lease, resumes a matching already-promoted lease, or preserves lease
+  absence. Launch status and retry descendants then use ordinary reconciliation;
+  receipt recovery grants no merge authority.
+- A `prepared` attempt, matching locally dead pending owner, held PR fence and
+  successful empty key lookup proves no submission. It settles `no-dispatch`,
+  reason `interrupted-before-submission`, and terminalizes that pending lease
+  as `deferred`. The intent's retry increment rolls back once. A crash after
+  terminalization resumes this transition. The original owner may also settle
+  its own prepared intent on a pre-submit return while still holding the fence.
+- Submitted, legacy, ambiguous, missing or unreadable evidence stays explicitly
+  unknown. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
+  `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
+  deadline is the original dispatch timeout (30 minutes from first observation
+  if unavailable). On expiry status becomes `inspection-required`; ownership
+  remains held. Repeated diagnostics write at most once per minute and log only
+  status changes. No accumulating history or launch-timestamp refresh is added.
+
+Legacy attempts have no key or provable submission phase. In particular, a
+same-head retry's retained LRQ can belong to its predecessor. The native repair
+does not query or adopt that predecessor as the new attempt's receipt. An empty
+registry listing or failed ledger read cannot authorize retirement. A later wake
+refusal and the stale-lease reaper no longer reclaim such an intent.
+
+Run the existing reconciliation CLI **as the daemon owner**, with its explicit
+`--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
+Dry-run preserves intent, lease and budget bytes; a companion lock file may be
+created. `preReceipt` counts report recovered, no-launch, unknown and held cases.
+Do not run apply against PR 8918 under the LAC-2081 source-fix authorization.
+Missing credentials or inaccessible rows mean unknown, not absence. Preserve
+prompt/scratch evidence while ownership remains unknown. No new configuration
+keys, launch route, retry allowance or merge/finalization gate is introduced.
+
 ## Fleet retry ownership (SCRATCHRACE-01)
 
 Liveness reads follow launch-ledger `metadata.retryOf` descendants transitively;
@@ -98,6 +151,9 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `promptDir` | string or null | Directory holding durable AMA closer prompts. |
 | `hqRoot` | string or null | HQ root used for the dispatch. |
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
+| `dispatchIdempotencyKey` | optional string | Unique native HQ admission key for this attempt; unchanged across its inline retries. Absent on legacy intents. |
+| `dispatchPhase` | optional `prepared` or `submitting` | Submission boundary, meaningful only with the new key/fence protocol. Never inferred from age. |
+| `preReceiptReconciliation` | optional object | Bounded status/reason and observation/deadline evidence described above. `receipt-recovered` and `no-launch` store `observedAt`; unknown uses the fixed inspection horizon. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |
@@ -148,26 +204,8 @@ before expiry clears the timestamp; a new reviewed head or an operator reset of
 the dispatch record re-arms confirmation. This is an inspection hold, not an
 assertion that the PR or branch was deleted.
 
-After a native CI-blocked handoff actually invokes the closer and settles with
-`dispatched: false`, settlement
-retires its unchanged `dispatching` intent only when the matching unlaunched
-pending lease satisfies `isInterruptedInFlightAmaCloserDispatch`: its owner PID
-is dead or the bounded pending-launch reclaim age has elapsed. Missing leases,
-live launches, receipts, other-process ownership and replacement intents remain
-untouched. The matching lease is removed and the phantom retry rolled back once.
-If the captured intent had no prompt path, the same attempt may populate it
-before refusal settlement. A captured non-empty prompt path must still match;
-the attempt timestamp, target and reclaimable matching lease remain required.
-`reason` and `lastError` are `wake-refused:<closer result.reason>` (falling back
-to `wake-refused:dispatch-refused` when absent), independent of whether the
-wake was skipped, requested or duplicated. Wake eligibility reasons remain
-wake diagnostics. Background handoffs reconcile when their queue entry settles.
-Settlement grants no merge authority and adds no dispatch gate.
-Early daemon and background pre-dispatch returns leave interrupted intents
-untouched. Successful refusal settlement removes the retired unlaunched prompt
-only when it is an immediate child of `promptDir` and matches the PR's generated
-prompt filename namespace; launched prompts and paths outside that namespace
-remain untouched.
+A later CI-blocked wake refusal does not retire an earlier `dispatching` intent.
+The LAC-2081 reconciliation contract above supersedes dead-owner/age rollback.
 
 - A newly returned launch receipt retains `state: dispatched`, its launch IDs,
   and its active lease when ticket evidence is unavailable. It is charged
@@ -175,8 +213,8 @@ remain untouched.
   retires the record and refunds that charge once. Missing ticket evidence
   cannot create a `no-dispatch` record or authorize another spawn.
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
-  from follow-up consumption until the record reaches a terminal state or ages
-  past the documented reclaim window.
+  from follow-up consumption until native proof settles the intent; receipted
+  records retain their established status/observation window.
 - A same-worker provision-slot lock timeout with a proven live holder and no
   launch receipt settles as `dispatch-deferred-transient`, with
   `lastFailureTransient: true`, the refusal in `lastError`, and unchanged
@@ -185,7 +223,7 @@ remain untouched.
   A receipt retains ownership; a mixed diagnostic uses ordinary refusal rules.
 - Recovery checks age records from the latest parseable timestamp among
   `lastObservedAt`, `lastAttemptedAt`, `dispatchedAt`, and `createdAt`.
-- A `dispatching` record with no parseable timestamp is stale; a launch-only
+- A `dispatching` record without parseable timestamps retains unknown ownership; a launch-only
   `dispatched` record without timestamps remains held until first observation.
 - Dispatch capacity first applies record identity, age and lease liveness checks.
   Only launches that would otherwise consume a slot are probed in the ledger;
@@ -197,8 +235,8 @@ remain untouched.
   The watcher explicitly enables snapshots through its status wrapper and
   forwards the snapshot to every per-record read, including failed snapshots.
   Injected per-launch readers retain the one-second scan budget and stop further queries after an unreadable result. Cancellation is checked between
-  probes. `dispatching` intents are never probed or rewritten, since same-head
-  retries can still reference the previous LRQ.
+  probes. `dispatching` intents use the separate keyed reconciliation above; a retained
+  predecessor LRQ is never used as evidence for the replacement attempt.
 - The path and read-only JSON reader live in `src/ama/dispatch-record-read.mjs`,
   re-exported by the dispatcher for compatibility; hammer wakes import the leaf.
 - Reconciliation annotates confirmed terminal `dispatched` launches as

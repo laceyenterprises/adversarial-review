@@ -20,6 +20,13 @@ churn cannot reset quota protection. Fresh adversarial reviews may reset the
 per-series counter, but they do not reset the lifetime counter. Target-redrive
 state resets only when the live remediation target SHA changes.
 
+LAC-2081 adds optional `chargedDispatchKeys` (unique attempt keys). Receipt
+recovery and ordinary receipt persistence charge a key once, before writing the
+local receipt. Keys survive review/head resets and are not truncated while the
+PR ledger is retained. Reconciliation retains existing suppression/page markers
+and refuses to overwrite a corrupt retry ledger. Proven no-submission settlement
+rolls back only the intent's pre-increment; it does not refund a launch charge.
+
 ## Files
 
 Directory: `data/follow-up-jobs/hammer-retry-cap/`

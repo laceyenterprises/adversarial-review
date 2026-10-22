@@ -24,6 +24,22 @@ dispatcher debugging), see
 
 ---
 
+## Interrupted dispatch intents (LAC-2081)
+
+Native reconciliation now owns interrupted `dispatching` intents. A persisted
+per-attempt HQ key and fenced prepared/submitting phase either recover an exact
+receipt (`dispatched`) or prove no submission (`no-dispatch`, terminal deferred
+pending lease, one intent-budget rollback). A later wake refusal or stale-lease
+reaper cannot infer no launch from age or caller death. Unknown retains same-PR
+ownership, reaches a fixed inspection diagnostic deadline, and releases only
+its bounded fleet-capacity reservation. Live/replaced leases and retry caps
+remain authoritative; no receipt grants merge authority.
+
+See the [owner recovery procedure](follow-up-runbook.md#interrupted-dispatch-intents-lac-2081)
+and [persistent evidence contract](data-model/ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).
+Legacy #8918 remains outside automatic no-launch proof; LAC-2081 authorizes no
+production apply, new closer, teardown, remediation or merge for that PR.
+
 ## Load-aware per-call budgets
 
 The service scales GitHub lookups, quota-status reads, lock waits and
@@ -1857,20 +1873,11 @@ uses (`src/hammer-owner-route.mjs`).
   Both ownership and wake inputs exclude the pipeline's adversarial-gate status.
   An empty verdict on the current head does not establish an unreviewed head;
   exhausted ownership retains `page` / `review-rounds-exhausted` in that case.
-  Only a handoff that actually invoked the closer can settle a refusal. Early
-  daemon or background pre-dispatch exits leave the interrupted intent intact.
-  A refused, settled closer handoff retires an unchanged unlaunched intent as
-  `dispatch-failed`, reason `wake-refused:<closer result.reason>`, only with a
-  matching pending lease whose owner is dead or whose bounded launch reclaim
-  age elapsed. Missing leases, launch receipts and live work are preserved.
-  A prompt populated after intent capture belongs to that attempt when its
-  timestamp and target still match; an already captured prompt must match too.
-  Settlement follows the closer result regardless of the diagnostic wake outcome.
-  Prompt and pending-lease cleanup require successful durable dispatch-record
-  settlement; a failed write preserves both for recovery. Required-context
+  A later handoff refusal cannot settle an earlier unreceipted intent. LAC-2081
+  supersedes the age/dead-owner refusal cleanup: only native keyed receipt
+  recovery or proof of no submission may settle it. Required-context
   filtering normalizes missing or non-string check names before matching.
-  It removes the retired unlaunched prompt only when its path is an immediate
-  child of its prompt directory and matches this PR's generated prompt namespace.
+  Unknown attempts retain their prompt and scratch as evidence.
   CI-repair wake events stay in telemetry but are excluded from the
   `clean_verdict_to_hammer_wake` latency segment.
   Rescue derives final-hammer ownership from a `ci-blocked` row carrying

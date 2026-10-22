@@ -415,7 +415,7 @@ test('LCR: an active prior head holds its PR even when other-PR capacity remains
     ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
     ...deps,
   });
-  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(result.reason, 'existing-dispatch-unknown');
   assert.equal(result.activeLaunch.headSha, oldHead);
   assert.equal(deps.calls.length, 0);
 });

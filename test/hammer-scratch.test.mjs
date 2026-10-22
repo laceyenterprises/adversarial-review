@@ -844,7 +844,7 @@ for (const interrupted of ['prelaunch', 'dispatch']) {
     const controller = new AbortController();
     let newPrompt;
     let newScratch;
-    await assert.rejects(maybeDispatchAmaCloser({ ...args, signal: controller.signal,
+    const attempt = maybeDispatchAmaCloser({ ...args, signal: controller.signal,
       dispatchContext: { ...args.dispatchContext, ledgerTarget: launchRetryFixture(root, 'failed') },
       readPullRequestStateImpl: () => ({ state: 'OPEN' }),
       // The harness resolves after terminal predecessor cleanup is deferred,
@@ -863,13 +863,15 @@ for (const interrupted of ['prelaunch', 'dispatch']) {
         }
         return { stdout: JSON.stringify({ status: 'failed' }) };
       },
-    }), /synthetic admission abort/);
+    });
+    if (interrupted === 'prelaunch') await assert.rejects(attempt, /synthetic admission abort/);
+    else assert.equal((await attempt).reason, 'existing-dispatch-unknown');
     assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
     assert.equal(existsSync(first.promptPath), true);
     if (interrupted === 'dispatch') {
       assert.ok(newScratch);
-      assert.equal(existsSync(newScratch), false);
-      assert.equal(existsSync(newPrompt), false);
+      assert.equal(existsSync(newScratch), true, 'submitted unknown launch retains its scratch');
+      assert.equal(existsSync(newPrompt), true, 'submitted unknown launch retains its prompt');
     }
   });
 }

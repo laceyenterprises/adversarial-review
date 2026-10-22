@@ -5,6 +5,18 @@
 **Source of truth:** `src/ama/closer-lease.mjs`
 **Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`
 
+## Unreceipted intents (LAC-2081)
+
+A `dispatching` intent now prevents the stale-lease reaper from releasing its
+lease or refunding a presumed phantom attempt. The keyed native reconciler may
+promote a matching dead-owner pending lease after receipt proof, or terminalize
+it as `deferred` after proof that submission never began. Lease updates serialize on the existing reclaim flock; native repair
+compares the complete expected owner under that fence before transition. Busy
+or changed mutation ownership defers the repair. Live, foreign-host,
+replaced and unrelated receipted leases remain unchanged. Missing lease evidence
+alone never proves absence of a launch. See
+[the intent contract](ama-closer-dispatches.md#interrupted-dispatch-intents-lac-2081).
+
 ## Purpose
 
 One file per `(repo, prNumber, headSha)` protects a closer launch against

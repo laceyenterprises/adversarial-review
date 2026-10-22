@@ -975,7 +975,7 @@ NXA-01: posted-review consumers receive the same immutable observational
 `passSnapshot`; legacy decisions and live mutation checks continue unchanged.
 The [read-lifetime contract](docs/RUNBOOK-ama-closure.md#posted-review-read-lifetime-watcherlatency-01)
 documents generation invalidation, partial-read provenance and durable timing
-anchors. `node test/run-tests.mjs merge-agent-pass-snapshot.test.mjs` verifies
+anchors. `node test/run-tests.mjs test/merge-agent-pass-snapshot.test.mjs` verifies
 source counts across consumers/passes, head/effect invalidation, immutable history,
 terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.

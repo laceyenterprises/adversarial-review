@@ -47,6 +47,23 @@ test('one immutable generation serves three consumers; subjects, passes and effe
   assert.equal(reads, 4);
 });
 
+test('isCurrent rejects absent and unrelated snapshots throughout the pass lifetime', async () => {
+  const pass = createMergeAgentSnapshotPass();
+  const assertAbsent = () => {
+    for (const value of [null, undefined, {}, { subjectKey }]) assert.equal(pass.isCurrent(value), false);
+  };
+  assertAbsent();
+  const snapshot = await pass.collect({ subjectKey, head, sources: { pr: source({ headSha: head }) } });
+  assertAbsent();
+  assert.equal(pass.isCurrent(snapshot), true);
+  assert.equal(pass.isCurrent({ ...snapshot }), false);
+  pass.invalidate(subjectKey);
+  assertAbsent();
+  assert.equal(pass.isCurrent(snapshot), false);
+  pass.close();
+  assertAbsent();
+});
+
 test('head changes and invalidation during a read cannot make an old generation current', async () => {
   const pass = createMergeAgentSnapshotPass();
   const gate = deferred();
@@ -167,6 +184,22 @@ test('a failed tree read is retried by the same history reader within its origin
   assert.equal(evidence.filesComplete, true);
   assert.deepEqual(evidence.files, []);
   assert.equal(failedTreeReads, 2);
+});
+
+test('raw PR cache retries transient executor failures with default and identical signals', async () => {
+  for (const signal of [undefined, new AbortController().signal]) {
+    let calls = 0;
+    const options = { signal, env: {}, execFileImpl: async () => {
+      if (++calls === 1) throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' });
+      return { stdout: JSON.stringify({ headRefOid: head }) };
+    } };
+    await withPostedReviewReadCache({ repo: subjectKey, prNumber: 1, headSha: head }, async () => {
+      await assert.rejects(fetchMergeAgentCandidateSnapshot(subjectKey, 1, options), { code: 'ETIMEDOUT' });
+      const value = await fetchMergeAgentCandidateSnapshot(subjectKey, 1, options);
+      assert.equal(await fetchMergeAgentCandidateSnapshot(subjectKey, 1, options), value);
+      assert.equal(calls, 2);
+    });
+  }
 });
 
 test('raw PR cache retries malformed JSON and binds an initially unknown head once', async () => {

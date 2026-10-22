@@ -172,13 +172,16 @@ supplied UTC observation clock, requested/observed head, source provenance,
 Missing sources remain unknown; partial readers retain their explicit state and
 provenance. Polling never creates or slides durable action/deadline anchors.
 Head changes, explicit invalidation after effects and a new pass require fresh
-observations. `isCurrent` identifies invalidated in-flight results; it grants no
-execution authority. A pass must be closed when its owner finishes.
+observations. `isCurrent` identifies invalidated in-flight results and returns
+false for null or undefined input; it grants no execution authority. A pass must
+be closed when its owner finishes.
 
 The posted-review handler hands dispatch-job construction and coexistence the
 same `passSnapshot`, assembled from already-read candidate, checks, review,
-follow-up and control inputs. Uncollected ownership, policy and history evidence
-remains unknown. These consumers continue using their legacy action inputs;
+follow-up and control inputs. That generation remains current through coexistence;
+the handler's outer `finally` closes the pass on completion or failure.
+Uncollected ownership, policy and history evidence remains unknown. These
+consumers continue using their legacy action inputs;
 this collection change adds no decision, refusal, deadline enforcement or launch.
 Optional launch observations use the existing session-ledger retry traversal,
 prefer terminal launch evidence over stale worker projections, and preserve

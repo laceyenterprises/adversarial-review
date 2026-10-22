@@ -621,8 +621,8 @@ async function handlePostedReviewRowWithinReadCache({
           mergeAgentRequestEvent, adversarialMergeRequestedEvent }),
       } });
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb, passSnapshot });
-    // Executing consumers retain their own live exact-head/effect checks.
-    snapshotPass.invalidate(stepKey);
+    // Keep this generation current through coexistence; the owner's finally
+    // closes the pass. Executing consumers retain live exact-head/effect checks.
 
     if (gateDecision?.reason === 'operator-skip-label') {
       const terminalReason = liveCandidateTerminalReason(candidate);

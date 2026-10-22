@@ -110,7 +110,7 @@ export function createMergeAgentSnapshotPass({ now = Date.now, passId = randomUU
     return entry.promise;
   };
   return Object.freeze({ collect, invalidate,
-    isCurrent: snapshot => open && subjects.get(snapshot.subjectKey)?.value === snapshot,
+    isCurrent: snapshot => open && snapshot != null && subjects.get(snapshot.subjectKey)?.value === snapshot,
     close: () => { open = false; subjects.clear(); },
   });
 }

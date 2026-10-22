@@ -1,6 +1,5 @@
 /** OSG-18 read-only policy contract. Availability and route authority stay with callers. */
-import { openSync, readSync, closeSync, fstatSync, constants } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { openSync, readSync, closeSync, fstatSync, constants, readFileSync } from 'node:fs';
 
 const armFields = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8')).__keys.arms.__item.__keys;
 const roles = ['builder', 'reviewer', 'remediator'];
@@ -89,7 +88,9 @@ export function resolveDefault({ enabled, mode, policyPath, role, stratum, curre
   if (enabled !== true || mode !== 'apply') return { arm: current, reason: 'policy-inactive' };
   try {
     readStratum(stratum);
-    const policy = readPolicy(load(policyPath));
+    const loaded = load(policyPath);
+    // The built-in loader already validates and freezes; injected loaders must still be checked.
+    const policy = load === loadPolicy ? loaded : readPolicy(loaded);
     const entry = policy.entries.find(e => e.role === role && e.stratum.task_type === stratum.task_type && e.stratum.size === stratum.size);
     if (!entry) return { arm: current, reason: 'policy-missing-entry' };
     if (entry.arm === 'current') return { arm: current, reason: 'policy-current' };

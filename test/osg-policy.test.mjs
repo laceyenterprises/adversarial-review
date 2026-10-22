@@ -65,3 +65,36 @@ test('file reader rejects missing, oversized, non-UTF8, BOM and invalid JSON inp
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('file and injected loaders enforce the same policy contract', async () => {
+  const { loadPolicy, resolveDefault } = await import('../src/osg-policy.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'policy-contract-'));
+  const current = {};
+  try {
+    const policyPath = join(dir, 'policy.json');
+    for (const vector of vectors.cases) {
+      writeFileSync(policyPath, JSON.stringify(vector.policy));
+      const options = { enabled: true, mode: 'apply', policyPath, role: 'builder',
+        stratum: { task_type: 'fix', size: 'small' }, current, allowArm: () => true };
+      const expected = !vector.valid ? { arm: current, reason: 'policy-error' }
+        : vector.policy.entries[0].arm === 'current' ? { arm: current, reason: 'policy-current' }
+          : { arm: vector.policy.entries[0].arm, reason: 'policy-promoted' };
+      for (const load of [undefined, loadPolicy, () => vector.policy]) {
+        assert.deepEqual(resolveDefault({ ...options, load }), expected, vector.name);
+      }
+      if (!vector.valid) {
+        assert.throws(() => loadPolicy(policyPath), vector.name);
+      } else {
+        const policy = loadPolicy(policyPath);
+        assert.deepEqual(policy, vector.policy);
+        const assertFrozen = value => {
+          if (value !== null && typeof value === 'object') {
+            assert.ok(Object.isFrozen(value));
+            for (const child of Object.values(value)) assertFrozen(child);
+          }
+        };
+        assertFrozen(policy);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

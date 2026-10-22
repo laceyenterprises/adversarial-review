@@ -1,3 +1,4 @@
+import { canonicalWorkerClass, expandClassAliases, expandClassAliasRecord } from './worker-class-aliases.mjs';
 // Worker commit-provenance helpers for the follow-up remediation pipeline.
 //
 // Extracted VERBATIM from src/follow-up-remediation.mjs (ARC-19 wave12). Groups
@@ -56,20 +57,17 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // workers. All three were verified to hold contents:write on
 // laceyenterprises/{adversarial-review,agent-os} on 2026-08-08 via a
 // throwaway-ref create/delete probe against each App's broker-minted token.
-REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-codex-corp'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS.codex;
 REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-codex'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS.codex;
-REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-claude-corp'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS['claude-code'];
 REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-claude'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS['claude-code'];
+Object.assign(REMEDIATION_WORKER_IDENTITY_DEFAULTS, expandClassAliasRecord(REMEDIATION_WORKER_IDENTITY_DEFAULTS));
 
-const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = {
+const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = expandClassAliasRecord({
   codex: 'github-app-codex-agent',
   'remediator-codex': 'github-app-codex-agent',
-  'remediator-codex-corp': 'github-app-codex-agent',
   'remediator-claude': 'github-app-claude-agent',
-  'remediator-claude-corp': 'github-app-claude-agent',
   'claude-code': 'github-app-claude-agent',
   gemini: 'github-app-gemini-agent',
-};
+});
 
 // Merge-agent push provider. Used as a loud fallback when a physical harness has
 // no known push-capable App of its own, and as the intentional workflow-file
@@ -82,7 +80,7 @@ const WORKFLOW_PUSH_PROVIDER = 'github-app-merge-agent';
 // merge-agent fallback (loud + audited) rather than silently failing the push:
 // the operator action is to grant the per-harness App push access and add the
 // harness here.
-const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini', 'remediator-codex', 'remediator-codex-corp', 'remediator-claude', 'remediator-claude-corp']);
+const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(expandClassAliases(['codex', 'claude-code', 'gemini', 'remediator-codex', 'remediator-claude']));
 
 // Resolve the broker push provider for a physical harness class. Precedence:
 //   1. workflow-file remediation requirement -> merge-agent App, unless the
@@ -179,12 +177,11 @@ const GEMINI_REMEDIATION_WORKER_TRAILER_CLASS = 'gemini-remediation';
 // buildRemediationPrompt threads this through. Defaults to the codex trailer
 // for back-compat with callers that don't specify a class.
 function remediationWorkerTrailerClass(workerClass) {
-  switch (workerClass) {
+  switch (canonicalWorkerClass(workerClass)) {
     case 'gemini':
       return GEMINI_REMEDIATION_WORKER_TRAILER_CLASS;
     case 'claude-code':
     case 'remediator-claude':
-    case 'remediator-claude-corp':
       return 'claude-code-remediation';
     case 'codex':
     default:

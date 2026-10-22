@@ -1885,3 +1885,25 @@ The shared strict OSG configuration schema also declares `osg.budget` monetary
 and account-share limits. Defaults are inert; schema parity fixtures exercise
 lower values and reject invalid/above-approved limits. This schema update does
 not activate routing or change review/merge authority.
+
+### Configuration reconciliation (ITP-17)
+
+The strict config default for Codex account order is now `corporate-first`,
+matching the pooled hammer, remediator and reviewer selectors. Explicit legacy
+orders remain loadable before enrollment. Once a role pool is declared,
+`resolveIdentityTokenPools` refuses conflicting explicit legacy class pins or
+personal-first order with the exact config path and winning source. It never
+rewrites an override. The migration helper canonicalizes class aliases before
+mapping remediator harness names to their role pools. This does not expand the
+strict schema's accepted role values. Empty maps mean no enrollment; null pool
+declarations remain invalid and produce a sourced configuration error from the
+strict loader. The inspect-only proposal/report owner is
+`cwp_dispatch.config_token_pool_migration` in the registered agent-os repo;
+apply no proposal until the separately approved ITP-19 operator rollout.
+
+`src/worker-class-aliases.v1.json` is the byte-identical publication of the
+agent-os-config alias vocabulary. Hammer capability and remediation provenance
+maps derive their compatibility views from canonical roles. The compatibility
+reader grants no account lease, model, GitHub actor or merge authority. All
+legacy spellings remain readable through drain, and broker/refresh provider IDs
+retain their account names. This changes no durable state or smoke promise.

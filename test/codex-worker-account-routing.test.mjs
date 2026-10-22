@@ -33,7 +33,7 @@ test('CODEXORDER-01: loader and role accessor validate YAML and env account orde
   const envKey = 'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER';
   const options = { topPath, modulePaths: [], env: {} };
   writeFileSync(topPath, 'version: 1\n');
-  assert.equal(loadConfig(options).get(key), 'personal-first');
+  assert.equal(loadConfig(options).get(key), 'corporate-first');
   assert.equal(resolveCodexWorkerAccountOrder(options), 'corporate-first');
   assert.deepEqual(ENUM_CODEX_WORKER_ACCOUNT_ORDER, ['personal-first', 'corporate-first']);
   for (const value of ENUM_CODEX_WORKER_ACCOUNT_ORDER) {

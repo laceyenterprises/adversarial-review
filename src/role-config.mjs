@@ -20,6 +20,7 @@
 // or override `topPath` to make the cascade hermetic against the real
 // `~/agent-os/config.yaml` on the host.
 
+import { validateLegacyPoolOverrides } from './config-token-pool-migration.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
@@ -514,6 +515,7 @@ export function resolveGeminiReviewerIdentities({
 // Reader-only rollout: callers opt in; existing role/pin selectors are intact.
 export function resolveIdentityTokenPools(options = {}) {
   const cfg = loadRoleConfig({ ...options, contextKey: 'oauth.identity_token_pools' });
+  validateLegacyPoolOverrides(cfg);
   const rawLegacy = cfg.get('reviewer.gemini.identities', null);
   const legacy = Array.isArray(rawLegacy) ? rawLegacy.map(String) : rawLegacy;
   return readIdentityTokenPools({

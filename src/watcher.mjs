@@ -105,6 +105,7 @@ import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
+  MAX_POLL_DEADLINE_MS,
 } from './watcher-poll-guard.mjs';
 import {
   compareWatcherWakeSubjectEntries,
@@ -1723,7 +1724,7 @@ async function main() {
 
   const pollStarvation = createPollWatchdogBudget({ env: process.env, intervalMs,
     getDeadlineMs: () => Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0
-      ? configuredDeadlineMs : computeWorkloadAwarePollDeadlineMs({
+      ? Math.min(configuredDeadlineMs, MAX_POLL_DEADLINE_MS) : computeWorkloadAwarePollDeadlineMs({
         activeRepoCount: activeRepos.length, reviewerTimeoutMs: resolveReviewerTimeoutMs(),
       }),
   });
@@ -1732,7 +1733,7 @@ async function main() {
     : `repos: ${activeRepos.join(', ')}`;
   const deadlineLabel = Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0
     ? `${configuredDeadlineMs / 1000}s (configured)`
-    : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
+    : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s, ceiling ${MAX_POLL_DEADLINE_MS / 1000}s)`;
   console.log(
     `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | ` +
     `poll deadline: ${pollStarvation.deadlineMs / 1000}s (${deadlineLabel}) | stall watchdog: ${stallWatchdogMs / 1000}s | ` +

@@ -1655,6 +1655,12 @@ caps keep their existing behavior. Status reads cannot retire a replacement leas
 installed during the read.
 
 LOADAR-01: operational timeout bases use the existing shared load-aware helper.
+WATCHERTIMER-01: each nominal timeout is scaled once, with a platform ceiling
+of `2^31 - 1` ms even for `Infinity` policy caps. Composed reviewer timers clamp
+slack and sums without another multiplier. The poll watchdog consumes the
+already-scaled reviewer budget, keeps the 30-minute floor and caps every
+workload or configured deadline at 24 hours. Expiry retains the existing fatal
+recovery behavior; a timer overflow cannot manufacture an immediate expiry.
 Closure waits scale the 30-minute base or its existing env override; confirmed
 live launches report "still running after N minutes" at the effective bound.
 The exhaustion flag, retry cadence, page receipts, ownership states and

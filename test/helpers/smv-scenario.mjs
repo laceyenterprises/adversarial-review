@@ -675,6 +675,16 @@ if (scenario === 'clean') {
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
+  const { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } = await import('../../src/load-aware-timeout.mjs');
+  const { buildSafePollOnce, computeWorkloadAwarePollDeadlineMs, MAX_POLL_DEADLINE_MS } = await import('../../src/watcher-poll-guard.mjs');
+  const loaded = { enabled: true, maxMultiplier: 5, loadAvg1m: 3, cpuCount: 1, cpuBusyPercent: 100 };
+  const reviewerTimeoutMs = loadAwareTimeoutMs(20 * 60_000, { ...loaded, maxMs: Infinity });
+  assert.equal(reviewerTimeoutMs, 20 * 60_000 * 5);
+  assert.equal(computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 20, reviewerTimeoutMs }), MAX_POLL_DEADLINE_MS);
+  assert.equal((await buildSafePollOnce({ pollOnceImpl: async () => {},
+    deadlineMs: () => computeWorkloadAwarePollDeadlineMs({ activeRepoCount: 20, reviewerTimeoutMs }), log: quiet })()).ok, true);
+  assert.equal(loadAwareTimeoutMs(1e12, { ...loaded, maxMs: Infinity }), MAX_TIMER_DELAY_MS);
+  assert.ok(loadAwareTimeoutSeconds(1e12, { ...loaded, maxSeconds: Infinity }) * 1000 <= MAX_TIMER_DELAY_MS);
   const { amaAuditFilePath, writeAmaAuditEntry } = await import('../../src/ama/audit.mjs');
   const { evaluateHammerStopHold, readHammerStopForHead } = await import('../../src/ama/hammer-stop-hold.mjs');
   const holdIdentity = { rootDir, hqRoot: join(rootDir, 'hq'), repo, prNumber: prNumber + 2, headSha };

@@ -1,13 +1,81 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { resolveReviewerTimeoutMs } from '../src/reviewer-timeout.mjs';
 
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
+  MAX_POLL_DEADLINE_MS,
   DEFAULT_MAX_PRS_PER_REPO,
 } from '../src/watcher-poll-guard.mjs';
+
+test('WATCHERTIMER-01: discovered 20-repo poll at 5x load finishes without a 1ms deadline or warning', async t => {
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * 2.6, 0, 0]);
+  t.mock.method(childProcess, 'execFileSync', command => {
+    assert.equal(command, '/bin/ps');
+    return `${os.cpus().length * 100}\n`;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const reviewerTimeoutMs = resolveReviewerTimeoutMs({});
+  assert.equal(reviewerTimeoutMs, 20 * 60_000 * 5);
+  const warnings = [];
+  const onWarning = warning => warnings.push(warning);
+  process.on('warning', onWarning);
+  t.after(() => process.off('warning', onWarning));
+  const scheduled = [];
+  const realSetTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    scheduled.push(ms);
+    return realSetTimeout(fn, ms, ...args);
+  });
+  let activeRepoCount = 1;
+  let maxPrsPerRepo = 1;
+  const timeouts = [];
+  const safePollOnce = buildSafePollOnce({
+    pollOnceImpl: () => new Promise(resolve => realSetTimeout(resolve, 2000)),
+    deadlineMs: () => computeWorkloadAwarePollDeadlineMs({ activeRepoCount, maxPrsPerRepo, reviewerTimeoutMs }),
+    onTimeout: error => timeouts.push(error),
+    log: { error() {} },
+  });
+  assert.equal((await safePollOnce('startup')).ok, true);
+  // An uncapped composition proves the wrapper did not multiply again.
+  assert.equal(scheduled[0], reviewerTimeoutMs + 5 * 60_000);
+  activeRepoCount = 20;
+  maxPrsPerRepo = 50;
+  assert.equal((await safePollOnce('after discovery')).ok, true);
+  assert.equal(scheduled[1], MAX_POLL_DEADLINE_MS);
+  assert.ok(scheduled.every(ms => ms <= MAX_TIMER_DELAY_MS));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(timeouts, []);
+  assert.deepEqual(warnings.filter(warning => warning.name === 'TimeoutOverflowWarning'), []);
+});
+
+test('WATCHERTIMER-01: workload and custom deadlines cannot exceed the fixed hang ceiling', async t => {
+  assert.equal(MAX_POLL_DEADLINE_MS, 24 * 60 * 60_000);
+  for (const opts of [
+    { activeRepoCount: 20, reviewerTimeoutMs: 20 * 60_000 * 5 },
+    { activeRepoCount: Number.MAX_VALUE, reviewerTimeoutMs: Number.MAX_VALUE },
+    { floorMs: Number.MAX_VALUE },
+  ]) assert.equal(computeWorkloadAwarePollDeadlineMs(opts), MAX_POLL_DEADLINE_MS);
+  assert.equal(computeWorkloadAwarePollDeadlineMs({
+    maxPrsPerRepo: 1, reviewerTimeoutMs: 1, apiSlackMs: 0,
+  }), 30 * 60_000);
+  const scheduled = [];
+  t.mock.method(globalThis, 'setTimeout', (_fn, ms) => { scheduled.push(ms); return 1; });
+  t.mock.method(globalThis, 'clearTimeout', () => {});
+  for (const deadlineMs of [Number.MAX_VALUE, () => Number.MAX_VALUE]) {
+    assert.equal((await buildSafePollOnce({ pollOnceImpl() {}, deadlineMs })()).ok, true);
+  }
+  assert.deepEqual(scheduled, [MAX_POLL_DEADLINE_MS, MAX_POLL_DEADLINE_MS]);
+});
 
 function deferred() {
   let resolve;
@@ -242,7 +310,6 @@ test('safePollOnce supports many sequential calls without leaking timers', async
   });
 
   for (let i = 0; i < 5; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
     const result = await safePollOnce();
     assert.equal(result.ok, true);
   }
@@ -256,19 +323,13 @@ test('buildSafePollOnce throws if pollOnceImpl is missing', () => {
   );
 });
 
-test('buildSafePollOnce rejects a non-positive deadlineMs', () => {
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: 0 }),
-    /positive numeric deadlineMs/
-  );
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: -1 }),
-    /positive numeric deadlineMs/
-  );
-  assert.throws(
-    () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs: Number.NaN }),
-    /positive numeric deadlineMs/
-  );
+test('buildSafePollOnce rejects non-positive and non-finite numeric deadlines', () => {
+  for (const deadlineMs of [0, -1, NaN, Infinity, -Infinity]) {
+    assert.throws(
+      () => buildSafePollOnce({ pollOnceImpl: async () => {}, deadlineMs }),
+      /positive numeric deadlineMs/
+    );
+  }
 });
 
 test('DEFAULT_POLL_DEADLINE_MS is exported and is large enough for a multi-PR org-wide scan', () => {
@@ -307,17 +368,26 @@ test('safePollOnce accepts a deadlineMs function and resolves it per call', asyn
   assert.deepEqual(observed, ['startup pollOnce', 'scheduled pollOnce']);
 });
 
-test('safePollOnce throws when deadlineMs function returns a non-positive value', () => {
+test('safePollOnce rejects invalid dynamic deadlines before scheduling timers or poll work', async t => {
+  const scheduled = [];
+  t.mock.method(globalThis, 'setTimeout', (...args) => { scheduled.push(args); });
+  let pollCalls = 0;
+  let deadline = 0;
   const safePollOnce = buildSafePollOnce({
-    pollOnceImpl: async () => {},
+    pollOnceImpl: async () => { pollCalls++; },
     octokit: 'stub',
-    deadlineMs: () => 0,
+    deadlineMs: () => deadline,
     log: { log: () => {}, error: () => {} },
   });
 
   // Throws synchronously before pollOnceImpl runs — a misconfigured
   // dynamic deadline is a bug, not a poll-time failure to swallow.
-  assert.throws(() => safePollOnce(), /positive finite number/);
+  for (deadline of [0, -1, NaN, Infinity, -Infinity, undefined, null, '100']) {
+    assert.throws(() => safePollOnce(), /positive finite number/);
+  }
+  await Promise.resolve();
+  assert.equal(pollCalls, 0);
+  assert.deepEqual(scheduled, []);
 });
 
 test('safePollOnce times out using a function-resolved deadline', async () => {

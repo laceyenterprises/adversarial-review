@@ -10,7 +10,7 @@ without another multiplier. Slack lock acquisition fixes its deadline before
 retrying, so falling load cannot shorten an already-granted window. First-pass
 CI orphan configuration retains nominal deadline and worker-status budgets;
 scans and worker probes scale them when invoked. Long budgets explicitly lift
-the default one-hour cap.
+the default one-hour policy cap, but remain bounded by the platform timer limit.
 
 | File:line | Nominal value | Waits on |
 | --- | --- | --- |
@@ -342,3 +342,78 @@ metric/SLO thresholds, and settlement/cleanup ages remain fixed. In particular,
 sub-second polling bounds remain fixed throughout `src/`; only their enclosing
 operational deadlines scale. No CI check, guard, ratchet, label or config key is
 added. `src/ama/primary-change.mjs` is unchanged.
+
+
+## WATCHERTIMER-01 timer-safety audit
+
+`loadAwareTimeoutMs` clamps every result to `MAX_TIMER_DELAY_MS = 2 ** 31 - 1`,
+including `maxMs: Infinity`, idle/disabled scaling, and oversized nominal values.
+`loadAwareTimeoutSeconds` caps whole seconds at `floor(MAX_TIMER_DELAY_MS / 1000)`.
+The platform cap takes precedence over policy and nominal values. This central
+contract protects existing and future direct consumers; a timer-only wrapper
+would require every caller to remember a second operation. Compositions that add
+slack or sum scaled inputs use `timerDelayMs` without another multiplier. It
+rejects `NaN` and non-numeric inputs with `TypeError` before they reach Node's
+timers, rounds finite numbers up within 1 ms/platform bounds, and saturates
+numeric infinities at those bounds (including positive arithmetic overflow). Chunk
+plans retain their explicit over-cap refusal rather than silently truncating work.
+
+The table audits all 37 original `maxMs: Infinity` sites in 21 `src/` files.
+Line numbers identify the pre-change sites; function names remain navigable after
+edits. “Once” refers to each nominal base on a call, not the number of repeated
+polls. Age comparisons and persisted expiry values do not arm a timer.
+
+| Original site | Reaches a timer? | Scaling and disposition |
+| --- | --- | --- |
+| `reviewer-harness.mjs:2269` — fallback lock `waitMs` | No; lock deadline comparison, fixed short retry sleeps | Once; centrally clamped |
+| `argus-security-verdict.mjs:265` — stall deadline | No; elapsed-age comparison | Once; centrally clamped |
+| `reviewer-timeout.mjs:28` — chunk cap | Yes, through accepted chunk plan and process deadline | Once; cap clamped, over-cap plans refuse, process slack clamped |
+| `reviewer-timeout.mjs:64` — reviewer timeout | Yes; subprocess, wall-clock and poll watchdog budgets | Once; centrally clamped, poll no longer re-scales |
+| `reviewer-timeout.mjs:75` — progress timeout | Yes; subprocess idle timer | Once; centrally clamped |
+| `reviewer-timeout.mjs:91` — first-output timeout | Yes when enabled; zero remains disabled | Once; centrally clamped |
+| `reviewer-timeout.mjs:102` — agy print timeout | Yes through agy subprocess budget; also passed to CLI | Once; centrally clamped, added subprocess slack clamped |
+| `codex-oauth-responses.mjs:172` — direct response wall timeout | Yes; `setTimeout` | Once; centrally clamped, passed unchanged to consumer |
+| `recovery-reaper.mjs:120` — running reviewer threshold | No; elapsed-age comparison | Once; centrally clamped |
+| `recovery-reaper.mjs:132` — stale closer threshold | No; elapsed-age comparison | Once; centrally clamped |
+| `recovery-reaper.mjs:145` — dead closer threshold | No; elapsed-age comparison | Once; centrally clamped |
+| `recovery-reaper.mjs:362` — default running-pass threshold | No; elapsed-age comparison | Once; resolver overrides replace this default |
+| `recovery-reaper.mjs:740` — default stale-lease threshold | No; elapsed-age comparison | Once; resolver overrides replace this default |
+| `recovery-reaper.mjs:741` — default dead-holder threshold | No; elapsed-age comparison | Once; resolver overrides replace this default |
+| `recovery-reaper.mjs:778` — dispatched-lease age | No; elapsed-age comparison | Once; centrally clamped |
+| `ama/closer-lease.mjs:116` — pending reclaim age | No; elapsed-age comparison | Once; centrally clamped |
+| `ama/closer-lease.mjs:144` — dispatched reclaim age | No; elapsed-age comparison | Once; centrally clamped |
+| `ama/closer-lease.mjs:178` — pending expiry fallback | No; expiry comparison | Once; supplied effective dispatch budget is composed without scaling |
+| `ama/closer-lease.mjs:298` — held pending expiry | No; expiry comparison | Once; explicit effective expiry replaces this default |
+| `ama/dispatch-closer.mjs:1578` — auto-merge hold age | No; elapsed-age comparison | Once; centrally clamped |
+| `ama/dispatch-closer.mjs:2122` — active dispatch age | No; elapsed-age comparison | Once; centrally clamped |
+| `reviewed-attestation.mjs:336` — queue lock wait | No; lock deadline comparison, fixed short retry sleeps | Once; centrally clamped |
+| `ama-closure-orchestration.mjs:2477` — final-round CI wait | No; elapsed-age comparison | Once; centrally clamped |
+| `operator-decision-notice.mjs:79` — notice backstop | No; elapsed-age comparison | Once; centrally clamped, synthetic overrides retained |
+| `ama/orphan-watchdog.mjs:24` — ownerless bound | No; elapsed-age comparison | Once; centrally clamped |
+| `ama/closure-wait.mjs:24` — closure wait bound | No; receipt/elapsed-age comparison | Once; retained launch bounds are consumed without scaling |
+| `follow-up-remediation.mjs:283` — default CI settle window | No; persisted expiry timestamp | Once; centrally clamped |
+| `follow-up-remediation.mjs:288` — configured CI settle window | No; persisted expiry timestamp | Once; centrally clamped |
+| `agy-reviewer-identities.mjs:653` — identity lease wait | No; deadline comparison, fixed lease-poll sleeps | Once; centrally clamped |
+| `claude-reviewer-token-proxy.mjs:248` — upstream idle timeout | Yes; HTTP request `setTimeout` | Once; centrally clamped |
+| `ama-hammer-background-dispatch.mjs:285` — launch bound fallback | No; elapsed-age/status comparison | Once; supplied effective dispatch budget replaces this default |
+| `argus-backlog-retirement.mjs:141` — claim lease TTL | No; persisted claim expiry | Once; centrally clamped |
+| `adapters/reviewer-runtime/agent-runtime/index.mjs:395` — default review wall budget | Yes; runtime SDK request timeout | Once; supplied effective request budget replaces this default |
+| `finalization/executor.mjs:95` — finalization lease TTL | No; persisted lease expiry | Once; centrally clamped |
+| `argus-security-drain.mjs:71` — per-model ceiling | Yes; summed into child subprocess timeout | Once from nominal config ceiling; fallback sum plus slack now clamped |
+| `argus-security-drain.mjs:72` — child timeout floor | Yes; child subprocess timeout | Once; maximum of floor and scaled model sum now clamped |
+| `watcher-poll-guard.mjs:110` — poll deadline | Yes; watchdog `setTimeout` | Removed second scaling; effective inputs composed once, capped at 24 hours |
+
+The sibling `maxSeconds: Infinity` sites were also checked: streamed reviewer
+idle/ceiling resolvers (`reviewer-timeout-model.mjs`) convert to milliseconds for
+timers and now remain safe; running-pass thresholds (`reviewer-pass-reaper.mjs`)
+and merge-lease request deadlines (`ama/merge-lease.mjs`) use elapsed-time or
+persisted expiry comparisons and do not re-scale a returned timeout. No edits to
+merge authority, lease ownership or dispatch semantics are needed.
+
+The poll watchdog keeps its 30-minute default floor and a fixed 24-hour ceiling,
+including configured numeric/function deadlines. The ceiling permits a complete
+idle-host single-repo batch at the default 50 × 15-minute input budget, while
+bounding a hung org scan regardless of discovered repo count or host load.
+`resolveDeadlineMs` rejects non-positive or non-finite configured deadlines,
+including function results, before scheduling the watchdog or poll work. This
+is an absolute hang limit; extreme backlogs do not grant an unlimited poll pass.

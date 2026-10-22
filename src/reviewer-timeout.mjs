@@ -1,4 +1,4 @@
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, timerDelayMs } from './load-aware-timeout.mjs';
 // Legacy reviewer timeout, still used for non-streaming paths. Streamed Claude
 // and Codex reviews use the idle watchdog and scaled ceiling in
 // reviewer-timeout-model.mjs.
@@ -39,7 +39,7 @@ function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = proc
 }
 
 function resolveGeminiReviewerProcessTimeoutMs(env = process.env) {
-  return Math.max(resolveAgyReviewerSubprocessTimeoutMs(env), resolveAgyChunkTimeoutCapMs(env)) + REVIEWER_PROCESS_SLACK_MS;
+  return timerDelayMs(Math.max(resolveAgyReviewerSubprocessTimeoutMs(env), resolveAgyChunkTimeoutCapMs(env)) + REVIEWER_PROCESS_SLACK_MS);
 }
 
 function _resolvePositiveInt(value, fallback) {
@@ -105,10 +105,12 @@ function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
 function resolveAgyReviewerSubprocessTimeoutMs(env = process.env, options = {}) {
   const reviewerTimeoutMs = options.reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env, options);
   const printTimeoutMs = options.printTimeoutMs ?? resolveAgyPrintTimeoutMs(env, options);
-  return Math.max(
+  // These inputs are already scaled. Slack can exceed the platform limit even
+  // when each input fits, so clamp the composition without scaling it again.
+  return timerDelayMs(Math.max(
     _resolvePositiveInt(reviewerTimeoutMs, DEFAULT_REVIEWER_TIMEOUT_MS),
     _resolvePositiveInt(printTimeoutMs, DEFAULT_AGY_PRINT_TIMEOUT_MS) + AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
-  );
+  ));
 }
 
 export {

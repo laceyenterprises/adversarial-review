@@ -1,4 +1,3 @@
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withSqliteBusyRetry } from './sqlite-busy-retry.mjs';
 
 // Bounded watchdog around pollOnce.
@@ -65,6 +64,12 @@ const DEFAULT_POLL_DEADLINE_MS = 60 * 60 * 1000;
 // generous in operator logs as it actually was.
 const DEFAULT_POLL_DEADLINE_FLOOR_MS = 30 * 60 * 1000;
 
+// A poll is hung after a day even if workload arithmetic grants more time.
+// This allows a full idle-host, 50-review single-repo pass (~12.6 hours),
+// while bounding recovery across org discovery and extreme host contention.
+// It is also comfortably below Node's signed 32-bit timer limit.
+const MAX_POLL_DEADLINE_MS = 24 * 60 * 60 * 1000;
+
 // Conservative ceiling for "how many PRs could a single repo poll
 // realistically process this pass." The watcher's `pollOnce` calls
 // `octokit.rest.pulls.list({ per_page: 50, ... })`, so 50 is the hard
@@ -107,7 +112,9 @@ function buildSafePollOnce({
 
   return function safePollOnce(source = 'scheduled pollOnce', pollOptions = undefined) {
     let timeoutHandle;
-    const effectiveDeadlineMs = loadAwareTimeoutMs(resolveDeadlineMs(deadlineMs, source), { maxMs: Infinity });
+    // The caller supplies an effective deadline composed from scaled inputs.
+    // Clamp numeric and function deadlines alike, without scaling them again.
+    const effectiveDeadlineMs = Math.min(MAX_POLL_DEADLINE_MS, resolveDeadlineMs(deadlineMs, source));
 
     const watchdog = new Promise((resolve) => {
       timeoutHandle = setTimeout(() => {
@@ -164,7 +171,7 @@ function buildSafePollOnce({
 }
 
 // Workload-aware default: an org-wide scan with N reviewable PRs in
-// one pass needs at least `N * reviewer timeout + API slack`. A fixed
+// one pass budgets `N * reviewer timeout + API slack`, up to 24 hours. A fixed
 // 10m default trips on legitimate work the moment two or three slow
 // reviews land in the same poll. This helper is the canonical formula
 // the watcher uses; it's exported for reuse and for tests.
@@ -184,7 +191,10 @@ function buildSafePollOnce({
 // `failed-orphan` on restart, which is a false-failure path under
 // normal load. Callers may override `maxPrsPerRepo` with the actual
 // candidate count when they have it; the default here is the
-// conservative ceiling.
+// conservative candidate count. The reviewer timeout is ALREADY load-scaled;
+// compose it once and never scale the resulting deadline again. The fixed
+// MAX_POLL_DEADLINE_MS ceiling wins over both workload and floor overrides:
+// this is a hang detector, not permission to stall org discovery indefinitely.
 function computeWorkloadAwarePollDeadlineMs({
   activeRepoCount,
   maxPrsPerRepo = DEFAULT_MAX_PRS_PER_REPO,
@@ -195,7 +205,7 @@ function computeWorkloadAwarePollDeadlineMs({
   const repos = Math.max(1, Number(activeRepoCount) || 1);
   const prs = Math.max(1, Number(maxPrsPerRepo) || 1);
   const dynamic = repos * prs * reviewerTimeoutMs + apiSlackMs;
-  return Math.max(floorMs, dynamic);
+  return Math.min(MAX_POLL_DEADLINE_MS, Math.max(floorMs, dynamic));
 }
 
 export {
@@ -203,5 +213,6 @@ export {
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
+  MAX_POLL_DEADLINE_MS,
   DEFAULT_MAX_PRS_PER_REPO,
 };

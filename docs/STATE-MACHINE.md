@@ -895,9 +895,11 @@ retry waits, and reacquires before merge. At that boundary, the entire current b
 must be contained in the exact CI-validated head; even disjoint base advancement
 triggers LEASEFAIR-02: one in-run rebase and fresh exact-head CI wait, retaining
 the reacquired lease so cooperating mergers cannot overtake again. Daemon
-reservations still precede reacquisition. The retry has one once-scaled CI bound;
-conflict, red CI and expiry report their actual reasons and release. Successful
-retry rebuilds head-bound audit and predicate authority before merge.
+reservations still precede reacquisition. Both waits and the intervening rebase
+consume one absolute deadline, initialized before the first wait from the
+once-scaled nominal CI bound. Conflict, red CI and expiry report their actual
+reasons and release. Successful retry rebuilds head-bound audit and predicate
+authority before merge.
 Fresh head/CI predicates still run under the lease before merging. Queue
 position accompanies contention logs and overdue wait receipts; contention
 does not become a safety hold. Existing lifecycle transitions are unchanged. The clean smoke also verifies

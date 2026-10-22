@@ -3759,9 +3759,10 @@ The entire current base must be contained in the exact validated head, even
 for disjoint changes. LEASEFAIR-02 handles an absent base in this same run:
 rebase/publish through GitHub's existing update-branch path, fetch and detach
 the exact resulting SHA, and wait once for that head's required CI while
-retaining the lease. Both CI windows use the nominal wait scaled once; polling,
-backoffs and gate reads consume the remaining deadline. This single serialized
-retry prevents cooperating mergers from overtaking the closer again. The
+retaining the lease. Both CI windows share one absolute deadline initialized
+before the first wait from the nominal wait scaled once. The intervening rebase,
+polling, backoffs and gate reads consume the remaining deadline. This single
+serialized retry prevents cooperating mergers from overtaking the closer again. The
 existing holder-fenced lease renewal runs at the retry wait boundaries so audit
 expiry allows the full window; renewal never extends the CI deadline. The
 single retry is independent of the initial rebase-attempt cap.

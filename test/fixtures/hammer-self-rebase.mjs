@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs
 import { join } from 'node:path';
 import { classifyCheckRollup } from '../../src/checks-summary.mjs';
 import { evaluateMergeEligibility } from '../../src/ama/merge-eligibility.mjs';
+import { hammerRangeMatches } from '../../src/ama/hammer-head-validation.mjs';
 
 const dir = process.env.FIXTURE_DIR;
 const path = join(dir, 'state.json');
@@ -30,7 +31,8 @@ if (args[0] === 'gate') {
   }
   const retryReads = state.retried ? (state.retryReads = (state.retryReads || 0) + 1) : 0;
   const pending = (process.env.SCENARIO === 'pending' && state.checkReads === 1) ||
-    (retryScenario && state.retried && (retryReads === 1 || process.env.SCENARIO === 'ci-pending'));
+    (process.env.SCENARIO === 'ci-shared-deadline' && state.checkReads === 1) ||
+    (retryScenario && state.retried && (retryReads === 1 || ['ci-pending', 'ci-shared-deadline'].includes(process.env.SCENARIO)));
   const red = state.retried && process.env.SCENARIO === 'ci-red';
   if (state.retried && process.env.SCENARIO === 'ci-head-moved') state.head = state.foreign;
   const checks = [{ name: 'fixture-test', status: pending ? 'IN_PROGRESS' : 'COMPLETED',
@@ -47,10 +49,16 @@ if (args[0] === 'gate') {
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);
   assert.ok(claim.auditComment.body.includes(state.nextRebased));
+  const range = JSON.parse(readFileSync(args[args.indexOf('--ham-range') + 1]));
+  assert.equal(hammerRangeMatches(range, state.original, state.nextRebased), true,
+    'retry predicate must receive fresh exact-head range evidence');
+  assert.ok(range.commits.includes(state.nextRebased));
   log('predicate', state.nextRebased);
   console.log(JSON.stringify({ eligible: process.env.SCENARIO !== 'ci-predicate-refused',
     trace: { headMatch: { current: state.nextRebased }, branchProtection: { required: false } } }));
 } else if (args[0] === 'range') {
+  assert.deepEqual(args.slice(2), ['fixture/repo', state.original, state.head, '--pr', 'https://github.com/fixture/repo/pull/42']);
+  log('range', state.head);
   console.log(JSON.stringify({ verified: true, reviewedHead: state.original, currentHead: state.head,
     baseSha: state.original, commits: [state.head] }));
 } else if (args[0] === 'gh') {
@@ -68,6 +76,10 @@ if (args[0] === 'gate') {
     git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/topic', target, state.head);
     state.head = target;
     if (state.checkReads) state.retried = true;
+    if (state.retried && process.env.SCENARIO === 'ci-shared-deadline') {
+      const clock = join(dir, 'clock');
+      writeFileSync(clock, String(Number(readFileSync(clock, 'utf8')) + 60));
+    }
     state.behind = false;
     save();
   } else if (args[0] === 'pr' && args[1] === 'view') {
@@ -86,7 +98,7 @@ if (args[0] === 'gate') {
   } else if (args[0] === 'api' && args.includes('graphql')) {
     console.log(JSON.stringify({ login: 'hammer-worker', databaseId: 77 }));
   } else if (args[0] === 'api' && args.some(arg => arg.endsWith('required_status_checks'))) {
-    console.log('{"strict":true}');
+    console.log(JSON.stringify({ strict: process.env.SCENARIO !== 'ci-disjoint' }));
   } else if (args[0] === 'api' && args.some(arg => arg.includes('/commits/'))) {
     console.log(JSON.stringify({ sha: state.head, parents: [{ sha: state.nextBase }] }));
   } else if (args[0] === 'api' && args.includes('--paginate')) {

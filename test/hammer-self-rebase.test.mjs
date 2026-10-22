@@ -59,6 +59,7 @@ function fixture(t, scenario) {
 value=$(cat "$FIXTURE_DIR/clock")
 increment="$1"
 if [ "$SCENARIO" = ci-pending ]; then increment=300; fi
+if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
 echo $((value + increment)) > "$FIXTURE_DIR/clock"
 `);
   executable('node-fixture', `#!/bin/bash
@@ -80,7 +81,7 @@ case "$1" in
   */ama-check.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" predicate "$@" ;;
   */primary-change-context.mjs) echo '{}' ;;
   */load-aware-timeout.mjs) if [ "$2" = 900 ]; then echo scale >> "$FIXTURE_DIR/wait-scales"; fi; echo "$2" ;;
-  */hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" range ;;
+  */hammer-head-context.mjs) exec "$REAL_NODE" "$FIXTURE_HELPER" range "$@" ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs|*/dismiss-withdrawn-reviews.mjs|*/stacked-base-check.mjs) echo '{}' ;;
   *) exec "$REAL_NODE" "$@" ;;
 esac
@@ -170,9 +171,13 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
   });
 }
 
-for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-strict-behind']) {
+for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-strict-behind', 'ci-shared-deadline']) {
   test(`LEASEFAIR-02: ${scenario}`, t => {
     const f = fixture(t, scenario);
+    if (scenario === 'ci-disjoint') {
+      assert.equal(f.git(['--git-dir', join(f.dir, 'remote.git'), 'diff', '--name-only', `${f.rebased}^`, f.nextBase]), 'unrelated.txt');
+      assert.equal(f.git(['--git-dir', join(f.dir, 'remote.git'), 'diff', '--name-only', `${f.rebased}^`, f.rebased]), 'surface.txt');
+    }
     const result = f.run();
     const diagnostics = result.stdout + result.stderr;
     const succeeds = ['ci-touching', 'ci-disjoint', 'ci-strict-behind'].includes(scenario);
@@ -181,6 +186,10 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'acquire\nrelease\nacquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
+    if (scenario === 'ci-shared-deadline') {
+      assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')) - 1700000000, 900,
+        'first CI wait, rebase and retry must consume one absolute deadline');
+    }
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     const checks = events.filter(e => e.kind === 'checks').map(e => e.value);
     assert.ok(checks.some(c => c.head === f.rebased && c.held === false), 'first wait is lease-free');
@@ -197,6 +206,7 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
       assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'PENDING'));
       assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'SUCCESS'));
       assert.ok(events.some(e => e.kind === 'predicate' && e.value === f.nextRebased));
+      assert.ok(events.some(e => e.kind === 'range' && e.value === f.nextRebased), 'retry publication proves the new range');
       assert.match(diagnostics, /outcome=merged/);
     } else {
       assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :

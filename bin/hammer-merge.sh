@@ -556,16 +556,16 @@ HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative
 
 HAM_CI_BASE_RETRY=0
 HAM_CI_WAIT_ACTIVE=0
-# Scale the nominal CI bound once per merge phase; both waits use this duration.
+# Scale once and share one absolute deadline across both waits and the rebase.
 HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs "$HAM_REMOTE_CI_WAIT_SECONDS" 2>/dev/null || true)
 case "$HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS" in
   ''|*[!0-9]*|0) HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS="$HAM_REMOTE_CI_WAIT_SECONDS" ;;
 esac
+HAM_REMOTE_CI_STARTED_AT=$(date +%s)
+HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS ))
 while :; do
 HAM_REMOTE_CI_STATUS=waiting
 HAM_CI_WAIT_ACTIVE=1
-HAM_REMOTE_CI_STARTED_AT=$(date +%s)
-HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_EFFECTIVE_WAIT_SECONDS ))
 HAM_REMOTE_CI_GATE_READ_FAILURES=0
 # The first wait is lease-free. The single retry retains its acquired lease
 # through CI so another cooperating merger cannot overtake it.

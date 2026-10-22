@@ -555,8 +555,9 @@ reacquire and refresh the exact-head gate. After that release, any current-base
 commit absent from the validated head requires rebase and fresh CI, including
 disjoint changes. LEASEFAIR-02 rebases in the same run, holds the reacquired
 lease through one bounded CI wait on the new head, then rebuilds its audit and
-predicate before merge. The nominal CI bound is scaled once; sleeps and gate
-reads consume that deadline. Conflict, red CI and expiry release with their
+predicate before merge. Both CI waits share one absolute deadline, set before
+the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
+reads consume the remaining budget. Conflict, red CI and expiry release with their
 actual reasons. Deferred daemon reservations retain priority before the retry
 acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are

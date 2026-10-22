@@ -108,7 +108,7 @@ NODE
   echo "exit:$phase_status" >> "$TEST_ROOT/audits"
 done
 `;
-  const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 20_000, cwd: fixture?.repo });
+  const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 20_000, cwd: fixture?.repo || dir });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   return { dir, audit: readFileSync(join(dir, 'audits'), 'utf8'),

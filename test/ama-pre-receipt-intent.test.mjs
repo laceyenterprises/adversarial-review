@@ -595,11 +595,59 @@ test('default PR resolver reads bounded REST metadata rather than stored dispatc
     execFileImpl: async (command, args, options) => {
       assert.equal(command, 'gh');
       assert.deepEqual(args, ['api', 'repos/fixture/repo/pulls/8', '--jq', '{state, merged}']);
-      assert.ok(options.timeout > 0 && options.timeout <= 1000);
+      assert.ok(options.timeout > 0 && options.timeout <= 3000);
       return { stdout: JSON.stringify({ state: 'closed', merged: true }) };
     }, deliverAlertImpl: () => assert.fail('terminal PR must not page') });
   assert.equal(result.status, 'pr-terminal');
 });
+
+test('default PR resolver retries transient GitHub failures within its bounded budget', async t => {
+  const f = fixture(t, {}, false);
+  let attempts = 0;
+  const result = await f.reconcile({ readPullRequestStateImpl: undefined,
+    execFileImpl: async (_command, _args, options) => {
+      assert.ok(options.timeout > 0 && options.timeout <= 3000);
+      if (++attempts === 1) throw Object.assign(new Error('temporary outage'), { stderr: 'HTTP 503' });
+      return { stdout: JSON.stringify({ state: 'closed', merged: true }) };
+    } });
+  assert.equal(attempts, 2);
+  assert.equal(result.status, 'pr-terminal');
+});
+
+test('default PR resolver stops after one transient retry', async t => {
+  const f = fixture(t, {}, false);
+  let attempts = 0;
+  const result = await f.reconcile({ readPullRequestStateImpl: undefined,
+    execFileImpl: async () => {
+      attempts++;
+      throw Object.assign(new Error('temporary outage'), { stderr: 'HTTP 503' });
+    } });
+  assert.equal(attempts, 2);
+  assert.equal(result.reason, 'pr-state-unreadable');
+  assert.deepEqual(f.read(), f.record);
+});
+
+for (const dryRun of [false, true]) {
+  test(`local receipt recovery survives unreadable PR state (dryRun=${dryRun})`, async t => {
+    const f = fixture(t);
+    f.insert(receipt);
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({ dryRun,
+      readPullRequestStateImpl: async () => { throw Error('GitHub unavailable'); },
+      deliverAlertImpl: () => assert.fail('receipt recovery must not page') });
+    assert.equal(result.status, 'receipt-recovered');
+    if (dryRun) {
+      assert.deepEqual(f.read(), f.record);
+      assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    } else {
+      assert.equal(f.read().state, 'dispatched');
+      assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+      assert.equal(readAmaCloserLease(f.rootDir, identity).lrqId, receipt.launch_request_id);
+      assert.equal(readHammerRetryCapLedger(f.rootDir, identity).lifetimeAttemptCount, 1);
+    }
+  });
+}
 
 for (const readPullRequestStateImpl of [async () => { throw Error('unavailable'); }, async () => ({})]) {
   test('unreadable PR lifecycle evidence holds ownership without paging or mutation', async t => {
@@ -635,6 +683,18 @@ test('terminal PR dispatch gate retires lingering intents at every head', async 
   assert.equal(result.reason, 'pr-not-mergeable');
   assert.equal(f.read().state, 'completed');
   assert.equal(readAmaCloserDispatchRecord(f.rootDir, older).state, 'completed');
+});
+
+test('terminal PR discovered by reconciliation stops dispatch before downstream admission', async t => {
+  const f = fixture(t, {}, false);
+  const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    dispatchContext: { rootDir: f.rootDir, ...identity },
+    readPullRequestStateImpl: async () => ({ state: 'CLOSED', merged: true }),
+    execFileImpl: () => assert.fail('terminal PR must not reach downstream admission'),
+    deliverAlertImpl: () => assert.fail('terminal PR must not page') });
+  assert.equal(result.reason, 'pr-not-mergeable');
+  assert.equal(result.dispatched, false);
+  assert.equal(f.read().state, 'completed');
 });
 
 for (const boundary of ['receipt', 'alert']) {

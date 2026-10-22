@@ -1119,7 +1119,10 @@ intents from global launch admission and capacity; keyless legacy records retain
 stale/orphan active-record escapes, and terminal PR metadata bypasses holds.
 Native per-PR snapshots and bounded live directory/CLI PR reads retire confirmed
 closed/merged intents as `completed` (`pr-terminal`) without changing leases or
-retry budgets. Unreadable PR state holds without paging.
+retry budgets. Terminal state discovered during reconciliation stops downstream
+dispatch admission. Unreadable PR state permits canonical exact-key local receipt
+recovery; otherwise it holds without mutation or paging. Live PR reads allow one
+transient retry within a 5-second total budget (3 seconds per call).
 Inspection raises one durable page per attempt naming PR, head and reason.
 A unique HQ idempotency key and a fenced
 prepared/submitting boundary let native reconciliation recover an exact receipt
@@ -1571,9 +1574,9 @@ stateDiagram-v2
     state "dispatch-configuration-refused" as s8
     state "no-dispatch" as s9
     state "completed" as s10
-    s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository; preserve retry charge once
+    s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
     s0 --> s9: hammer-dispatch.30 fenced prepared attempt with dead matching owner and absent key, or legacy empty successful ticket/time ledger query, proves no submission; defer lease and refund intent retry once
-    s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state holds without paging
+    s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
     s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission

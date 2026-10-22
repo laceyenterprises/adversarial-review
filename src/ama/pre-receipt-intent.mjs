@@ -57,7 +57,7 @@ async function readPullRequestState({ repo, prNumber }, options) {
   const { stdout } = await execGhWithRetry({
     args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged}'],
     execFileImpl: options.execFileImpl, env: options.env || process.env,
-    signal: options.signal, retries: 0, timeoutMs: 1000, totalTimeoutMs: 1000,
+    signal: options.signal, retries: 1, timeoutMs: 3000, totalTimeoutMs: 5000,
   });
   return JSON.parse(stdout);
 }
@@ -99,9 +99,6 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         preReceiptReconciliation: { status: 'pr-terminal', observedAt: now } };
       if (!options.dryRun) writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
       return { status: 'pr-terminal', changed: true, record: next };
-    }
-    if (!(pr?.isOpen === true || String(pr?.prState || pr?.state || '').toUpperCase() === 'OPEN')) {
-      return { status: 'held', reason: 'pr-state-unreadable' };
     }
     const localDead = lease?.status === 'pending' && !lease.lrqId
       && (!lease.holderHost || lease.holderHost === hostname())
@@ -165,6 +162,12 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           headSha: record.targetRemediationSha || record.headSha,
           dispatchKey: record.dispatchIdempotencyKey, preserveSuppression: true, now });
       } catch { budgetUnreadable = true; }
+    }
+    // Canonical receipt recovery is local evidence, independent of GitHub
+    // availability. Unreadable PR state still cannot authorize absence or paging.
+    if ((!recoverableReceipt || budgetUnreadable)
+      && !(pr?.isOpen === true || String(pr?.prState || pr?.state || '').toUpperCase() === 'OPEN')) {
+      return { status: 'held', reason: 'pr-state-unreadable' };
     }
     let next;
     let status;

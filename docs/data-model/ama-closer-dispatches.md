@@ -22,7 +22,10 @@ closed/merged PRs retire fenced intents at any head as `completed`, reason
 `pr-terminal`, with `preReceiptReconciliation.status: pr-terminal` and
 `observedAt`. This ends intent holds and inspection paging without asserting
 no submission, canceling a worker, changing leases or refunding retry budgets.
-Unreadable PR state holds without mutation or paging. After any yielding read
+Unreadable PR state permits canonical exact-key receipt recovery, but otherwise
+holds without mutation or paging. Live PR reads allow one transient retry with
+a 3-second per-call timeout and a 5-second total budget. A terminal PR discovered
+during reconciliation immediately stops downstream dispatch admission. After any yielding read
 or alert enqueue, an unreadable or changed lease defers the write safely.
 
 New attempts persist a unique `dispatchIdempotencyKey` passed unchanged to

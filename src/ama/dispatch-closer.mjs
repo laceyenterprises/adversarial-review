@@ -4552,6 +4552,9 @@ export async function maybeDispatchAmaCloser(args) {
           deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
           readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
         });
+        if (!terminalPr && recovery.status === 'pr-terminal') return noAmaDispatch({
+          dispatched: false, reason: 'pr-not-mergeable',
+        });
         if (!terminalPr && ['unknown', 'held'].includes(recovery.status)) return noAmaDispatch({
           dispatched: false, skipMergeAgent: true, inFlight: true,
           reason: 'existing-dispatch-unknown', recovery: recovery.reason

@@ -905,6 +905,9 @@ records from stored bodies and jobs. See the
 [finding data model](docs/data-model/review-findings.md) for schemas, cursors,
 attribution limits and replay instructions. Finding statuses are historical
 read projections; existing lifecycle transitions and smoke promises are unchanged.
+Reads batch linked evidence in three queries per populated page; attribution
+uses one multi-path diff per commit. Disputes wait for a posted comment and
+nonempty evidence head, and CLI failures retain their diagnostic on stderr.
 
 REMEDBRANCH-01: follow-up creation holds unresolved PR head branches in pending
 and retries without a worker or round charge; three failed lookups stop for

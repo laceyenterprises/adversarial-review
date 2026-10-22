@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
@@ -40,6 +41,12 @@ function fixture(t, { capture = true, headSha = 'a'.repeat(40) } = {}) {
 }
 
 async function api() { return import('../src/review-finding-records.mjs'); }
+
+function rawDiff(patch, file = 'input.mjs') {
+  return `:100644 100644 aaaaaaa bbbbbbb M\0${file}\0\0diff --git a/${file} b/${file}\n${patch}`;
+}
+
+
 
 test('OSG-03: capture persists both severities and stable ids across a re-parse', async t => {
   const { db, pass } = fixture(t);
@@ -258,7 +265,7 @@ test('same-file changes outside the finding range do not count as addressing it'
   const result = attributeFindingCommits({ findings: [finding], workspaceDir: '/synthetic', startHead: start, publishedHead: commit,
     exec: (_command, args) => args.includes('rev-list') ? commit
       : args.includes('rev-parse') ? start
-        : args.includes('diff') ? '@@ -7 +7 @@\n-old\n+new\n' : '' });
+        : args.includes('diff') ? rawDiff('@@ -7 +7 @@\n-old\n+new\n') : '' });
   assert.equal(result.get('fixture').commitSha, null);
   assert.equal(result.get('fixture').reason, 'no-overlapping-commit');
 });
@@ -272,7 +279,7 @@ test('pure insertion boundaries include the last cited line and shift earlier in
     exec: (_command, args) => args.includes('rev-list') ? `${fixed}\n${prefix}`
       : args.includes('rev-parse') ? (args.includes(`${prefix}^1`) ? start : prefix)
         : args.includes('diff') ? (args.includes(prefix) && args.includes(fixed)
-          ? '@@ -11 +11 @@\n-old\n+new\n' : '@@ -10,0 +11 @@\n+guard\n') : '' });
+          ? rawDiff('@@ -11 +11 @@\n-old\n+new\n') : rawDiff('@@ -10,0 +11 @@\n+guard\n')) : '' });
   for (const lines of ['10', '10-10', '8-10', '10-12']) {
     assert.equal(result.get(lines).commitSha, prefix, lines);
   }
@@ -290,7 +297,7 @@ test('attribution shares reviewer line formats and rejects invalid coordinates',
   const results = attributeFindingCommits({ findings, workspaceDir: '/synthetic', startHead: start, publishedHead: commit,
     exec: (_command, args) => args.includes('rev-list') ? commit
       : args.includes('rev-parse') ? start
-        : args.includes('diff') ? '@@ -2 +2 @@\n-old\n+new\n' : '' });
+        : args.includes('diff') ? rawDiff('@@ -2 +2 @@\n-old\n+new\n') : '' });
   inputs.forEach((_input, i) => assert.equal(results.get(String(i)).commitSha, i < 5 ? commit : null));
 });
 
@@ -317,4 +324,75 @@ test('ambiguous replies and pushback never supply addressing commits', async t =
   assert.equal(linked[0].status, 'addressed');
   assert.equal(linked[1].status, 'unaddressed');
   assert.ok(linked[1].remediations.some(r => r.reason === 'pushback'));
+});
+
+
+test('rescue: findings CLI retains the actionable argument error', () => {
+  const command = fileURLToPath(new URL('../bin/review-findings.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [command, 'unknown-command'], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /expected show, backfill or link-job/);
+});
+
+test('rescue: finding read executes three queries for a populated page', async t => {
+  const { db } = fixture(t);
+  const { readReviewFindings } = await api();
+  let queries = 0;
+  const counted = { prepare(sql) {
+    const statement = db.prepare(sql);
+    return { all(...args) { queries++; return statement.all(...args); } };
+  } };
+  const rows = readReviewFindings(counted);
+  assert.equal(rows.length, 2);
+  assert.equal(queries, 3);
+  assert.ok(rows.every(row => row.remediations.length === 0 && row.disputes.length === 0));
+});
+
+test('rescue: posted dispute waits for its evidence head in triggers and backfill', async t => {
+  const { db } = fixture(t);
+  const { blockingFindingIdentity } = await import('../src/ama/hammer-adjudication.mjs');
+  const { parseReviewFindings } = await import('../src/kernel/review-findings.mjs');
+  const identity = blockingFindingIdentity(parseReviewFindings(body).blocking.findings[0]);
+  const { syncFindingDisputes, readReviewFindings } = await api();
+  db.prepare(`INSERT INTO ham_finding_disputes(repo, pr_number, identity,
+    finding_reviewed_head, comment_id, resolution) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run('sample/service', 7, identity, 'a'.repeat(40), 'head-late-comment', 'withdrawn-by-hammer');
+  syncFindingDisputes(db);
+  assert.deepEqual(readReviewFindings(db)[0].disputes, []);
+  db.prepare('UPDATE ham_finding_disputes SET head_sha=? WHERE identity=?')
+    .run('b'.repeat(40), identity);
+  syncFindingDisputes(db);
+  syncFindingDisputes(db);
+  const [finding] = readReviewFindings(db);
+  assert.equal(finding.status, 'withdrawn');
+  assert.deepEqual(finding.disputes.map(d => [d.head_sha, d.comment_id]),
+    [['b'.repeat(40), 'head-late-comment']]);
+});
+
+test('rescue: attribution batches candidate paths in one diff per commit', t => {
+  const root = mkdtempSync(join(tmpdir(), 'finding-batch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', env }).trim();
+  git('init', '-q'); git('config', 'user.name', 'Fixture');
+  git('config', 'user.email', 'fixture@example.invalid');
+  const files = ['ordinary.mjs', 'tab\tand-\u00e9.mjs', 'line\nbreak.mjs'];
+  for (const file of files) writeFileSync(join(root, file), 'one\ntwo\n');
+  git('add', '--', ...files); git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Initial');
+  const start = git('rev-parse', 'HEAD');
+  for (const file of files) writeFileSync(join(root, file), 'fixed\ntwo\n');
+  git('add', '--', ...files); git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Fix all paths');
+  const fixed = git('rev-parse', 'HEAD');
+  let diffs = 0;
+  const result = attributeFindingCommits({
+    findings: files.map(file => ({ finding_id: file, file, lines: '1' })),
+    workspaceDir: root, startHead: start, publishedHead: fixed, budgetMs: 15000,
+    exec(command, args, options) {
+      if (args.includes('diff')) diffs++;
+      return execFileSync(command, args, { ...options, env });
+    },
+  });
+  for (const file of files) assert.equal(result.get(file).commitSha, fixed, file);
+  assert.equal(diffs, 1);
 });

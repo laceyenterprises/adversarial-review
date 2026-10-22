@@ -64,7 +64,8 @@ export function syncFindingDisputes(db, { passId = null } = {}) {
     FROM review_findings f JOIN reviewer_passes p ON p.pass_id=f.pass_id
     JOIN ham_finding_disputes d ON d.repo=p.repo AND d.pr_number=p.pr_number
       AND d.identity=f.hammer_identity AND d.finding_reviewed_head=f.head_sha
-    WHERE f.blocking=1 AND d.comment_id IS NOT NULL AND (? IS NULL OR f.pass_id=?)
+    WHERE f.blocking=1 AND d.comment_id IS NOT NULL AND d.head_sha IS NOT NULL
+      AND d.head_sha <> '' AND (? IS NULL OR f.pass_id=?)
     ON CONFLICT(finding_id, head_sha, comment_id) DO UPDATE SET
       resolution=excluded.resolution, evidence_sha256=excluded.evidence_sha256,
       requests=excluded.requests, refusals=excluded.refusals`).run(passId, passId).changes;
@@ -135,16 +136,35 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
 // reported to the corpus caller; it must not turn missing data into zero findings.
 export function readReviewFindings(db, { repo = null, prNumber = null, afterPassId = 0, afterOrdinal = 0, limit = 500 } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be 1..5000');
-  const remediationQuery = db.prepare(`SELECT m.*, r.job_id, r.round_number, r.reply_path,
-    r.start_head_sha, r.published_head_sha FROM review_finding_remediations m
-    JOIN review_finding_replies r ON r.reply_id=m.reply_id WHERE finding_id=? ORDER BY r.round_number, r.reply_id`);
-  const disputeQuery = db.prepare('SELECT * FROM review_finding_disputes WHERE finding_id=? ORDER BY head_sha, comment_id');
-  return db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at FROM review_findings f
+  const rows = db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at FROM review_findings f
     JOIN reviewer_passes p ON p.pass_id=f.pass_id WHERE f.current_body=1 AND (f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))
       AND (? IS NULL OR p.repo=?) AND (? IS NULL OR p.pr_number=?)
-    ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(afterPassId, afterPassId, afterOrdinal, repo, repo, prNumber, prNumber, limit).map(row => {
-    const remediations = remediationQuery.all(row.finding_id);
-    const disputes = disputeQuery.all(row.finding_id);
+    ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(afterPassId, afterPassId, afterOrdinal, repo, repo, prNumber, prNumber, limit);
+  if (!rows.length) return [];
+  // JSON1 is already required by the schema. One bound array avoids both N+1
+  // reads and SQLite's parameter-count limit for a 5,000-finding page.
+  const ids = JSON.stringify(rows.map(row => row.finding_id));
+  const groupByFinding = linkedRows => {
+    const groups = new Map();
+    for (const row of linkedRows) {
+      if (!groups.has(row.finding_id)) groups.set(row.finding_id, []);
+      groups.get(row.finding_id).push(row);
+    }
+    return groups;
+  };
+  const remediationRows = db.prepare(`SELECT m.*, r.job_id, r.round_number, r.reply_path,
+    r.start_head_sha, r.published_head_sha FROM review_finding_remediations m
+    JOIN review_finding_replies r ON r.reply_id=m.reply_id
+    WHERE m.finding_id IN (SELECT value FROM json_each(?))
+    ORDER BY m.finding_id, r.round_number, r.reply_id`).all(ids);
+  const disputeRows = db.prepare(`SELECT * FROM review_finding_disputes
+    WHERE finding_id IN (SELECT value FROM json_each(?))
+    ORDER BY finding_id, head_sha, comment_id`).all(ids);
+  const remediationsByFinding = groupByFinding(remediationRows);
+  const disputesByFinding = groupByFinding(disputeRows);
+  return rows.map(row => {
+    const remediations = remediationsByFinding.get(row.finding_id) || [];
+    const disputes = disputesByFinding.get(row.finding_id) || [];
     const status = disputes.some(d => d.resolution === 'withdrawn-by-hammer' && d.comment_id)
       ? 'withdrawn' : row.verdict === 'dismissed' ? 'dismissed'
         : remediations.some(m => m.commit_sha) ? 'addressed' : 'unaddressed';

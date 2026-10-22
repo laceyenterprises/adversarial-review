@@ -44,5 +44,5 @@ export function main(argv = process.argv.slice(2)) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { process.stdout.write(`${JSON.stringify(main())}\n`); }
-  catch { process.stderr.write('review-findings failed: check command options, database schema and local history\n'); process.exitCode = 1; }
+  catch (error) { process.stderr.write(`review-findings failed: ${error?.stack || error}\n`); process.exitCode = 1; }
 }

@@ -13,6 +13,23 @@ function lineRanges(value, file) {
   return ranges.map(({ start, end }) => [start, end]);
 }
 
+// Raw NUL-delimited paths and patch sections share Git's ordering. Pair them
+// rather than decoding quoted patch headers (tabs, newlines and Unicode paths).
+function diffsByPath(output) {
+  if (!output) return new Map();
+  const boundary = output.indexOf('\0\0');
+  if (boundary < 0) throw new Error('invalid-diff-records');
+  const records = output.slice(0, boundary).split('\0');
+  const patches = output.slice(boundary + 2).split(/(?=^diff --git )/m).filter(Boolean);
+  if (records.length % 2 || patches.length !== records.length / 2) throw new Error('invalid-diff-records');
+  const diffs = new Map();
+  for (let i = 0; i < records.length; i += 2) {
+    if (!records[i].startsWith(':')) throw new Error('invalid-diff-records');
+    diffs.set(records[i + 1], patches[i / 2]);
+  }
+  return diffs;
+}
+
 // Map the reviewed coordinates through each intervening diff. A preceding
 // insertion shifts the range; it does not count as fixing that finding.
 export function attributeFindingCommits({ findings, workspaceDir, startHead, publishedHead,
@@ -47,13 +64,14 @@ export function attributeFindingCommits({ findings, workspaceDir, startHead, pub
       // Refuse a base that is an ancestor through a side branch only.
       const actualParent = String(git(['rev-parse', `${commit}^1`])).trim();
       if (actualParent !== parent) throw new Error('nonlinear-history');
-      const diffs = new Map();
+      const files = [...new Set(pending.filter(({ f, file, ranges }) => file && ranges.length
+        && !result.get(f.finding_id).commitSha).map(({ file }) => file))];
+      const diffs = files.length ? diffsByPath(String(git(['--literal-pathspecs', 'diff', '--raw', '-z', '--patch',
+        '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', parent, commit, '--', ...files]))) : new Map();
       for (const item of pending) {
         const { f, file, ranges } = item;
         if (!file || !ranges.length || result.get(f.finding_id).commitSha) continue;
-        if (!diffs.has(file)) diffs.set(file, String(git(['--literal-pathspecs', 'diff', '--no-ext-diff',
-          '--no-textconv', '--no-color', '--no-renames', '--unified=0', parent, commit, '--', file])));
-        const hunks = [...diffs.get(file).matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)]
+        const hunks = [...(diffs.get(file) || '').matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)]
           .map(m => ({ old: Number(m[1]), removed: Number(m[2] ?? 1), added: Number(m[4] ?? 1) }));
         // A zero-removal hunk is anchored after its old line. Include the
         // last cited line, including when the citation contains only one line.

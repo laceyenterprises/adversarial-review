@@ -49,8 +49,9 @@ Commit attribution uses only local history between the round's start and
 published heads. The base must lie on the published head's first-parent chain.
 Line fields use the shared `src/kernel/finding-lines.mjs` parser, also consumed
 by the existing primary-change authorization shim without policy changes.
-For each commit, zero-context diffs are compared with the finding's old line
-range. Pure insertions anchored after any cited line, including the last line
+Each commit uses one diff across all pending candidate paths, with NUL-delimited
+raw path records paired to patch sections; quoted or unusual filenames remain
+unambiguous. Zero-context hunks are compared with the finding's old line range. Pure insertions anchored after any cited line, including the last line
 of a range or a single-line citation, count as overlap; insertions anchored
 before the first cited line only shift the range, as do earlier deletions. A file touch
 outside that range supplies no attribution. Missing locations, missing history,
@@ -73,8 +74,10 @@ attestation, dispatch, closure predicates or lifecycle transitions.
 head, comment ID, resolution, evidence digest and request/refusal counters.
 SQLite insert/update triggers link disputes only to blocking findings of the
 same repository, PR, finding identity and reviewed head. Finding backfill links
-already-stored disputes too. Both paths require a non-null posted comment ID;
-pending disputes are not projected before their comment is recorded.
+already-stored disputes too. Both paths require a non-null posted comment ID and a nonempty evidence head;
+pending disputes are not projected before both are recorded. Late population
+of a previously null head creates one concrete-head link rather than an
+empty-head link followed by a duplicate.
 Replacing the hammer's latest row for a newer
 review does not erase older finding evidence. A missing reviewed head cannot
 link a dispute. These records describe historical evidence; they grant no merge
@@ -86,14 +89,17 @@ authority and do not carry a withdrawal forward to an arbitrary evaluated head.
 SQLite connection. Filters are `repo`, `prNumber`, `afterPassId`, `afterOrdinal`
 and `limit` (1–5000, default 500). The cursor is the last row's pass and ordinal,
 so pagination can stop within a pass. Results include linked reply references,
-commit evidence and disputes. The computed historical status is `withdrawn`
+commit evidence and disputes. A populated page uses three queries: the finding
+selection and two batched linked-record reads using a bound JSON array. An
+empty page uses only the selection query; read-only connections remain supported. The computed historical status is `withdrawn`
 when recorded hammer withdrawal evidence exists, `dismissed` when the pass was
 dismissed, `addressed` when a matched reply has an overlapping commit, otherwise
 `unaddressed`. No new persisted lifecycle status is introduced. Missing or legacy
 schema raises an error rather than reporting a misleading empty corpus.
 
 The JSON CLI requires an explicit existing database; there is no production
-default. `show` is read-only. These commands operate entirely on local inputs:
+default. `show` is read-only. CLI failures retain the actionable error and
+stack on stderr while leaving stdout empty. These commands operate entirely on local inputs:
 
 ```bash
 node bin/review-findings.mjs show --db /path/to/reviews.db --repo sample/service --limit 500

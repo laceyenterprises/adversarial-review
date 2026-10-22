@@ -63,6 +63,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS review_findings_dispute_insert
 AFTER INSERT ON ham_finding_disputes
 WHEN NEW.comment_id IS NOT NULL AND NEW.finding_reviewed_head IS NOT NULL
+  AND NEW.head_sha IS NOT NULL AND NEW.head_sha <> ''
 BEGIN
   INSERT OR REPLACE INTO review_finding_disputes
     (finding_id, identity, head_sha, comment_id, resolution, evidence_sha256, requests, refusals)
@@ -76,6 +77,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS review_findings_dispute_update
 AFTER UPDATE ON ham_finding_disputes
 WHEN NEW.comment_id IS NOT NULL AND NEW.finding_reviewed_head IS NOT NULL
+  AND NEW.head_sha IS NOT NULL AND NEW.head_sha <> ''
 BEGIN
   INSERT OR REPLACE INTO review_finding_disputes
     (finding_id, identity, head_sha, comment_id, resolution, evidence_sha256, requests, refusals)

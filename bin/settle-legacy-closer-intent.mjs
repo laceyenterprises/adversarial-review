@@ -36,12 +36,15 @@ export async function main(args = process.argv.slice(2), options = {}) {
   const dryRun = !values.apply;
   if (!dryRun) {
     if (!values.reason?.trim()) throw new Error('--apply requires --reason');
+    if (typeof process.getuid !== 'function') {
+      throw new Error('Apply requires POSIX UID verification; process.getuid is unavailable');
+    }
     const owner = statSync(amaCloserDispatchDir(rootDir)).uid;
-    if (typeof process.getuid !== 'function' || owner !== process.getuid()) {
+    if (owner !== process.getuid()) {
       throw new Error(`Apply requires dispatch directory owner uid ${owner}`);
     }
   }
-  const identity = { repo: values.repo, prNumber: Number(values.pr), headSha: values.head };
+  const identity = { repo: values.repo, prNumber: Number(values.pr), headSha: values.head.toLowerCase() };
   const now = options.now || new Date().toISOString();
   const auditBase = { ts: now, verb: 'settle-legacy-closer-intent', repo: identity.repo,
     pr: identity.prNumber, revisionRef: identity.headSha, actor: userInfo().username,

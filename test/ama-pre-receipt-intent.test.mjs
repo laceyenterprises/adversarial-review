@@ -412,6 +412,47 @@ test('operator legacy dry-run preserves intent, lease, budget and audit; apply a
   assert.deepEqual(rows[0].evidence, f.read().preReceiptReconciliation.query);
 });
 
+for (const head of ['A'.repeat(40), 'Aa'.repeat(20)]) test(`operator normalizes ${head.slice(0, 2)} head input for dry-run and apply`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const args = operatorArgs(f);
+  args[args.indexOf('--head') + 1] = head;
+  const options = { ...f.options, print() {} };
+  const preview = await settleLegacyIntent(args, options);
+  assert.equal(preview.conclusive, true);
+  assert.equal(preview.headSha, identity.headSha);
+  assert.equal(f.read().state, 'dispatching');
+  const applied = await settleLegacyIntent([...args, '--apply', '--reason', 'fixture recovery'], options);
+  assert.equal(applied.conclusive, true);
+  assert.equal(applied.headSha, identity.headSha);
+  assert.equal(f.read().state, 'no-dispatch');
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+  const rows = readFileSync(applied.auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(rows.map(row => row.revisionRef), [identity.headSha, identity.headSha]);
+});
+
+for (const mode of ['unavailable', 'foreign-owner']) test(`operator apply refuses ${mode} UID verification without mutations`, async t => {
+  const f = fixture(t, { dispatchIdempotencyKey: null });
+  const before = readFileSync(amaCloserDispatchFilePath(f.rootDir, identity), 'utf8');
+  const lease = readAmaCloserLease(f.rootDir, identity);
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const uid = process.getuid();
+  Object.defineProperty(process, 'getuid', { configurable: true,
+    value: mode === 'unavailable' ? undefined : () => uid + 1 });
+  try {
+    await assert.rejects(settleLegacyIntent(operatorArgs(f, ['--apply', '--reason', 'fixture recovery']), {
+      ...f.options, print() {},
+    }), mode === 'unavailable' ? /POSIX UID verification.*unavailable/ : /directory owner uid/);
+    assert.equal((await settleLegacyIntent(operatorArgs(f), { ...f.options, print() {} })).conclusive, true);
+    assert.equal(readFileSync(amaCloserDispatchFilePath(f.rootDir, identity), 'utf8'), before);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+    assert.deepEqual(readdirSync(join(f.rootDir, 'data')).sort(), ['ama-closer-leases', 'follow-up-jobs']);
+  } finally {
+    if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
+    else delete process.getuid;
+  }
+});
+
 for (const mode of ['row', 'unreadable', 'keyed']) test(`operator refuses ${mode} evidence and audits apply refusal`, async t => {
   const f = fixture(t, { dispatchIdempotencyKey: mode === 'keyed' ? key : null });
   if (mode === 'row') f.insert(receipt);

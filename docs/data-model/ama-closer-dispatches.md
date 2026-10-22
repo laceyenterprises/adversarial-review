@@ -82,9 +82,13 @@ node bin/settle-legacy-closer-intent.mjs \
 
 Dry-run is the default and prints JSON evidence without changing the intent,
 lease, retry ledger or audit store (a companion lock file may be created).
-`--apply` requires `--reason` and the directory owner's UID. It uses the same
-fenced check, writes and fsyncs a `settlement-authorized` row before mutation,
-then appends `settled-no-dispatch` or `refused:<reason>` under
+`--head` accepts uppercase or mixed-case hex and normalizes it to lowercase for
+record lookup, identity checks and audit rows. `--apply` requires `--reason` and
+the directory owner's UID, verified through `process.getuid` on a POSIX host.
+If UID verification is unavailable, apply fails closed before reconciliation
+or audit writes; there is no ownership bypass for testing. Dry-run skips this
+UID check. Apply uses the same fenced check, writes and fsyncs a
+`settlement-authorized` row before mutation, then appends `settled-no-dispatch` or `refused:<reason>` under
 `data/operator-mutations/YYYY-MM.jsonl`. Rows include actor, PR, dispatch head,
 operator reason, invocation ID and query evidence. Audit-write failure before
 mutation refuses settlement. An authorization row without a completion row

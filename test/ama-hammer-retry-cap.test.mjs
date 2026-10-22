@@ -3160,9 +3160,12 @@ test('lease-held refusal leaves no orphaned dispatch reservation or HQ admission
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
   acquireAmaCloserLease({ rootDir, ...identity, now: '2026-07-06T11:59:00Z' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_held', now: '2026-07-06T11:59:15Z' });
   updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred', now: '2026-07-06T11:59:30Z' });
   const priorLease = readAmaCloserLease(rootDir, identity);
-  const deps = hammerDispatchDeps();
+  const deps = hammerDispatchDeps({
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+  });
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'lease-held');

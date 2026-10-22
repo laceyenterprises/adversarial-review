@@ -116,10 +116,15 @@ if (args[0] === 'pushed') {
       console.log('synthetic-pr'); process.exit(0);
     }
     if (args.includes('number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName') &&
-      ((process.env.SCENARIO === 'snapshot-failed' && state.head === state.rebased) ||
-        (process.env.SCENARIO === 'ci-snapshot-failed' && state.retried))) {
-      console.error('HTTP 502: synthetic post-rebase snapshot failure');
-      process.exit(1);
+      ((process.env.SCENARIO.startsWith('snapshot-') && state.head === state.rebased) ||
+        (process.env.SCENARIO.startsWith('ci-snapshot-') && state.retried))) {
+      state.snapshotReads = (state.snapshotReads || 0) + 1;
+      save();
+      if (!process.env.SCENARIO.endsWith('transient') || state.snapshotReads === 1) {
+        console.error(process.env.SCENARIO.endsWith('permanent')
+          ? 'HTTP 403: Forbidden' : 'HTTP 502: synthetic post-rebase snapshot failure');
+        process.exit(1);
+      }
     }
     if (process.env.SCENARIO === 'foreign-after-rebase' && state.behind === false) {
       state.head = state.foreign; save();

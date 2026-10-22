@@ -927,6 +927,10 @@ transition and per-head orphan reservation as soon as ownership is certainly
 absent. The reasons persist in watchdog evidence. The clean sandbox smoke
 checks that closure ownership honors that head-bound decision even at the review
 ceiling, and carries an attested clean verdict into ordinary merge eligibility.
+Immediate review requests start the ownerless idle clocks; a failed or refused
+request reaches bounded review recovery and one exhaustion page. Known API
+publications survive scratch-sync failures without a fallback push, and transient
+post-rebase snapshot reads retry within the update-branch cap.
 No lifecycle states are added. Focused offline acceptance is in
 `test/hammer-pushed-attestation.test.mjs`, `test/remorphan-01.test.mjs` and the
 rendered publish/rebase and watcher claim-loop fixtures.

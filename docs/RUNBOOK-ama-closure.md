@@ -2812,7 +2812,10 @@ and validate that whole range. After exit, HAMATTEST-02's authenticated pushed
 or validated App edges carry that verdict forward; commit identity alone does
 not. An explicit shared `rereview-exact-head` decision instead requests review
 once per head when ownership is certainly absent, including when a closer-looking
-tip or earlier ceiling would otherwise suppress it. Ownership probes, safety
+tip or earlier ceiling would otherwise suppress it. This immediate request also
+starts the PR and head idle clocks. If no owner takes over before the idle bound,
+the existing two recovery attempts retain the exact-head review route and page
+on exhaustion, including after a queue refusal or a failed review. Ownership probes, safety
 holds, dispatch leases and retry limits remain in force; ownership never certifies
 a merge.
 
@@ -3792,7 +3795,9 @@ failure stops publication and predicate evaluation. It never transfers an
 eligible verdict or old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
 reports `github-gate-red`; pending-only expiry reports `required-checks-pending`
 with the existing resume receipt, and other expiry reports `github-gate-timeout`.
-All release the lease. A failed post-rebase PR snapshot reports `pr-refresh-failed`
+All release the lease. A post-rebase PR snapshot retries transient failures with
+the update-branch retry cap and exponential backoff, retaining the last valid
+snapshot. Exhaustion or a permanent failure reports `pr-refresh-failed`
 and releases the lease before returning, including during the in-run CI retry.
 PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
@@ -3909,7 +3914,10 @@ edges (HAMATTEST-02). The versioned publisher records the pushed pair immediatel
 after git/API publication, including server rebases, before CI or lease waits.
 Server rebases use the expected-head-bound mutation result SHA; a later foreign
 branch tip is never recorded as a hammer-produced head.
-It marks CI as not validated and uses only the entitled hammer App token. Keep
+It marks CI as not validated and overrides both `GH_TOKEN` and `GITHUB_TOKEN`
+with the entitled hammer App token. If API publication succeeded but scratch
+synchronization failed, attest that published SHA and stop with
+`published-head-sync-failed`; never force-push unsynchronized local state over it. Keep
 that exact pair in a no-merge closing audit after CI, credential or other stops;
 never claim `HAM-Validated-Head` until exact-head CI passes. Publication
 provenance comments are distinct from the successful in-lease validation audit.

@@ -32,7 +32,10 @@ existing `system-orphan-head-review:<head>` marker, which the watcher honors
 through closer-tip and old review-budget suppression, while exact-head deduplication
 and live-owner checks remain in force. `heads.evidence` records
 `{ action: "review", reason: "rereview-exact-head", reasons: [...] }`; the watcher
-also logs the reasons. A new head has its own reservation. Authenticated pushed
+also logs the reasons. The immediate request starts both `ownership.idleSince` and `heads.idleSince`,
+even if queueing fails or the current-head review is already failed. At the idle
+bound, an unowned head retains the review route for the existing two recovery
+attempts and one exhaustion page. A new head has its own reservation. Authenticated pushed
 and validated App edges share the stale-head predicate; neither historical
 hammer identity nor a closed review budget overrides an explicit review decision.
 Drafts, terminal PRs, operator holds, live owners and uncertain ownership retain

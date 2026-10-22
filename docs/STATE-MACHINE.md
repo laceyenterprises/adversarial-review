@@ -972,7 +972,10 @@ their holds. Recognized closer-head evidence is bound to the current head and
 carried into automated and ownerless recovery for ordinary hammer selection.
 An explicit shared `rereview-exact-head` decision takes precedence over that
 historical ownership, with its per-head request marker honored through reviewer
-budget and closer-tip suppression. These routes
+budget and closer-tip suppression. The immediate request starts both idle clocks;
+an ownerless head that reaches the idle bound enters the existing two-attempt
+recovery and exhaustion page path while retaining the exact-head review route.
+These routes
 confer dispatch ownership only; every merge predicate and retry cap still applies.
 The old handoff CLI now terminates its dispatch lease for a hammer retry without
 requesting review. Existing `handed-to-review` records remain readable during

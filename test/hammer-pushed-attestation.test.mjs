@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { publishPushedHammerAttestation } from '../src/ama/hammer-pushed-attestation.mjs';
 import { exactHammerValidation, fetchHammerHeadRange, hammerAttestationChain } from '../src/ama/hammer-head-validation.mjs';
 import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
@@ -7,6 +11,42 @@ import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 
 const baseHead = 'a'.repeat(40), pushedHead = 'b'.repeat(40), nextHead = 'c'.repeat(40);
+
+for (const credential of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'missing']) {
+  test(`pushed attestation CLI authenticates every API call with ${credential}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'pushed-attestation-cli-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'commonjs' }));
+    const calls = join(dir, 'calls.jsonl');
+    writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+if (process.env.GH_TOKEN !== 'synthetic-hammer-token') throw new Error('wrong API identity');
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+if (args[1] === 'graphql') console.log(JSON.stringify({ data: { viewer: { login: 'hammer-worker' } } }));
+else if (args.includes('-f')) console.log(JSON.stringify({ id: 7 }));
+else console.log('[]');
+`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`,
+      HAMMER_LACEY_GH_TOKEN: '', MERGE_AGENT_GH_TOKEN: '',
+      GITHUB_TOKEN: 'synthetic-runner-token', GH_TOKEN: 'synthetic-builder-token' };
+    if (credential !== 'missing') env[credential] = 'synthetic-hammer-token';
+    const result = spawnSync(process.execPath,
+      [resolve(import.meta.dirname, '../bin/hammer-pushed-attestation.mjs'), 'fixture/repo', '42', baseHead, pushedHead],
+      { env, encoding: 'utf8', timeout: 30000 });
+    if (credential === 'missing') {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /no entitled hammer token/);
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), { published: true, commentId: 7 });
+      const requests = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(requests.length, 3, 'viewer, existing comments and publication all use the entitled token');
+      assert.ok(requests.at(-1).some(arg => arg.includes(`HAM-Pushed-Head: ${pushedHead}`)));
+    }
+  });
+}
+
 function fixture(author = 'hammer-worker') {
   const comments = [], writes = [];
   const api = async (path, input) => {

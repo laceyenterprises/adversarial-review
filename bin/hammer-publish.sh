@@ -328,7 +328,8 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
   HAM_PUSHED_HEAD=""
 
   # A verified API commit can already be live when scratch fetch/reset fails.
-  # Attest that exact result before the git fallback can itself fail.
+  # Attest that exact result, then stop: local HEAD is not synchronized and
+  # must never overwrite the known remote commit through the git fallback.
   HAM_API_KNOWN_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.pushedHead // empty')
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
     if ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs \
@@ -341,6 +342,12 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
       if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease; fi
       return 1
     fi
+    HAM_PHASE_OUTCOME=published-head-sync-failed
+    HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
+    export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. API publication and provenance succeeded, but scratch synchronization failed; preserve the remote head for the next hammer pass."
+    if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
+    return 1
   fi
 
   if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then

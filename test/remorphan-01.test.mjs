@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,9 @@ import Database from 'better-sqlite3';
 import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdict, requestReviewRereview } from '../src/review-state.mjs';
+
+// Simulated timestamps exercise the idle policy independently of fleet host load.
+mock.method(os, 'loadavg', () => [0, 0, 0]);
 
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
@@ -595,7 +599,7 @@ test('HAMATTEST-02: watcher executes an unproven-head decision once, before its 
   const first = await tick(0, overrides);
   assert.equal(first.amaClosureResult.reviewRequest.triggered, true);
   await tick(1, overrides);
-  await tick(60, overrides);
+  await tick(10, overrides);
   assert.equal(calls.reviews.length, 1);
   assert.equal(calls.launches.length, 0, 'historical hammer evidence cannot override the shared decision');
   const request = calls.reviews[0];
@@ -609,8 +613,32 @@ test('HAMATTEST-02: watcher executes an unproven-head decision once, before its 
   assert.deepEqual(JSON.parse(state.evidence), { action: 'review', reason: 'rereview-exact-head',
     reasons: ['hammer-app-attestation-missing'] });
   assert.equal(state.attempts, 0);
+  assert.equal(state.idleSince, '2026-10-11T16:00:00.000Z');
   assert.match(calls.logs.join('\n'), /requested exact-head re-review.*hammer-app-attestation-missing/);
 });
+
+for (const failure of ['failed-review', 'queue-refused']) {
+  test(`HAMATTEST-02: exact-head ${failure} accumulates idle time and exhausts recovery`, async t => {
+    const { args, tick, calls } = setup(t);
+    const overrides = { reviewStateRow: { review_status: failure === 'failed-review' ? 'failed' : 'posted',
+      reviewer_head_sha: 'current' },
+    result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head' },
+      ownerProofFacts: { headSha: 'current', liveHeadCloserAuthored: true, reviewCycleExhausted: true } },
+    requestRereviewImpl: async options => { calls.reviews.push(options); return { triggered: false, reason: 'queue-refused' }; } };
+    await tick(0, overrides);
+    const pending = await tick(10, overrides);
+    assert.equal(pending.amaClosureResult.ownerlessIdleMs, 600000);
+    assert.equal(calls.pages.length, 0);
+    await tick(15, overrides);
+    await tick(16, overrides);
+    const exhausted = await tick(17, overrides);
+    await tick(18, overrides);
+    assert.equal(exhausted.outcome, 'recovery-exhausted');
+    assert.equal(recoveryState(args.rootDir).attempts, 2);
+    assert.equal(calls.pages.length, 1);
+    assert.equal(calls.launches.length, 0, 'unproven heads retain the review route');
+  });
+}
 
 for (const ownership of [{ owned: true }, { owned: false, uncertain: true }]) {
   test(`HAMATTEST-02: shared re-review decision respects ownership ${JSON.stringify(ownership)}`, async t => {

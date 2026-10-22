@@ -245,6 +245,7 @@ esac
     { route: 're-review', branch: 'worker', fallbackHead: 'b'.repeat(40),
       previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
   ]) {
+    rmSync(join(dir, 'push-args'), { force: true });
     const env = { HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
       PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'),
       ATTESTATION_ARGS_FILE: join(dir, 'attestation-args'), PATH: `${dir}:${process.env.PATH}` };
@@ -258,11 +259,15 @@ echo SHOULD_NOT_CONTINUE
     assert.equal(failure.status, 1, failure.stderr);
     assert.match(failure.stdout, /LEASE_RELEASED\nHELD=0/);
     assert.doesNotMatch(failure.stdout, /SHOULD_NOT_CONTINUE/);
-    if (result.pushedHead) assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
-      `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${result.previousHead} ${result.pushedHead}`);
-    assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
-      ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
-      : 'push --force-with-lease');
+    if (result.pushedHead) {
+      assert.equal(readFileSync(env.ATTESTATION_ARGS_FILE, 'utf8').trim(),
+        `${root}/bin/hammer-pushed-attestation.mjs fixture/repo 1 ${result.previousHead} ${result.pushedHead}`);
+      assert.equal(existsSync(env.PUSH_ARGS_FILE), false, 'unsynchronized local HEAD must never be pushed');
+    } else {
+      assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
+        ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
+        : 'push --force-with-lease');
+    }
   }
 });
 test('merge refuses an ineligible predicate before reading the green gate', (t) => {

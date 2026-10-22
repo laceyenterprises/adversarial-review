@@ -145,7 +145,7 @@ exit "$status"
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
 
-for (const scenario of ['snapshot-failed', 'ci-snapshot-failed']) {
+for (const scenario of ['snapshot-failed', 'ci-snapshot-failed', 'snapshot-permanent']) {
   test(`post-rebase snapshot failure releases the lease before returning: ${scenario}`, t => {
     const f = fixture(t, scenario);
     const result = f.run();
@@ -154,12 +154,25 @@ for (const scenario of ['snapshot-failed', 'ci-snapshot-failed']) {
     assert.equal(result.status, 1, diagnostics);
     assert.match(diagnostics, new RegExp(`${scenario.startsWith('ci-') ? 'merge' : 'verify'}=1 outcome=pr-refresh-failed .*held=0`));
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).snapshotReads,
+      scenario.endsWith('permanent') ? 1 : 3);
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.ok(events.some(e => e.kind === 'pushed-edge' && e.value.pushedHead ===
       (scenario.startsWith('ci-') ? f.nextRebased : f.rebased)), 'provenance survives failed snapshot');
     assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
     assert.equal(f.git(['rev-parse', 'HEAD']), scenario.startsWith('ci-') ? f.rebased : f.original,
       'no scratch sync or further validation after snapshot failure');
+  });
+}
+
+for (const scenario of ['snapshot-transient', 'ci-snapshot-transient']) {
+  test(`post-rebase snapshot retries a transient error and merges: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /outcome=merged/);
+    assert.equal(JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8')).snapshotReads, 2);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }
 

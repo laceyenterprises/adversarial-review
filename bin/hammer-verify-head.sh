@@ -604,11 +604,27 @@ ham_rebase_head() {
       return 1
     fi
   fi
-  if ! ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"; then
-    HAM_PHASE_OUTCOME=pr-refresh-failed
-    ham_release_merge_lease || return 1
-    return 1
-  fi
+  local ham_snapshot_attempt=1
+  while true; do
+    if ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      > "<<RUN_DIR>>/pr-after.snapshot.json" 2> "<<RUN_DIR>>/update-branch.stderr"; then
+      mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+        ham_release_merge_lease || return 1
+        return 1
+      }
+      break
+    fi
+    if [ "$ham_snapshot_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ] \
+      || ! ham_update_branch_transient "<<RUN_DIR>>/update-branch.stderr"; then
+      cat "<<RUN_DIR>>/update-branch.stderr" >&2
+      rm -f "<<RUN_DIR>>/pr-after.snapshot.json"
+      HAM_PHASE_OUTCOME=pr-refresh-failed
+      ham_release_merge_lease || return 1
+      return 1
+    fi
+    sleep $((5 * (1 << (ham_snapshot_attempt - 1))))
+    ham_snapshot_attempt=$((ham_snapshot_attempt + 1))
+  done
   if [ "$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")" != "$POST_REMEDIATION_SHA" ]; then
     HAM_PHASE_OUTCOME=head-changed
     ham_release_merge_lease || return 1

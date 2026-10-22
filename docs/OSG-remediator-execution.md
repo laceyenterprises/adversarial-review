@@ -18,11 +18,16 @@ role. The service checks its account through `selectWorkerTokenAccount`, using
 the proposed model. Unknown, held, changed or undeclared account proposals fall
 back to the caller's current route. A different nonterminal remediator family
 also retains the existing next-round reviewer exclusion. A same-role execution
-change preserves the default route's diversity decision. Shadow logs only.
+change preserves the default route's diversity decision. Base worker classes,
+remediator roles and corporate aliases are compared through the existing builder
+family normalizer. Shadow logs only.
 
 The resulting model and reasoning effort travel through managed dispatch for
-both supported model families. ITP still revalidates readiness and acquires the
-execution lease at admission. A proposal is not an account pin or lease. Actual
+both supported model families. Effort uses the owner's top-level override when
+non-null, otherwise the catalog's `arm.effort`. Missing, empty, non-string and
+`default` effort values omit `--reasoning-level`; explicit effort is forwarded.
+ITP still revalidates readiness and acquires the execution lease at admission.
+A proposal is not an account pin or lease. Actual
 account bindings remain authoritative; the corpus records admission-time account
 changes separately with unknown realized propensity. No account twins or
 parallel account policy are introduced.
@@ -33,10 +38,14 @@ existing no-re-review rule. The physical execution class remains one of the
 existing privileged hammer roles.
 
 Every active-mode attempt atomically records a UUID-named JSON observation under
-`data/osg-remediator/`. It contains a version, PR subject, role kind, timestamp,
-default class, stable reason, assignment when available and selected arm/account
+`<adversarial review state dir>/osg-remediator/` (default `data/osg-remediator/`,
+overridden by `ADVERSARIAL_REVIEW_STATE_DIR`). It contains a version, PR subject,
+role kind, timestamp, default class, stable reason, assignment when available and selected arm/account
 proposal when applied. Failure to record an arm keeps the default. Follow-up
 workers and successful closer records also retain `osgRemediator` metadata.
+The closer's AMA audit resolves OSG before recording `harnessResolution`, which
+includes the selected physical class, model resolution, account proposal and
+OSG observation. Existing harness holds remain authoritative and skip OSG.
 No exception/provider text or credentials enter these records.
 
 The explicit corpus refresh joins assignments to existing remediation runs,

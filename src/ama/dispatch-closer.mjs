@@ -7065,13 +7065,24 @@ async function maybeDispatchAmaCloserAttempt({
   }
   const harnessHoldReason = harnessFallback?.reason === 'all-fallbacks-grounded'
     ? 'all-fallbacks-grounded' : `harness-hold:${harnessFallback?.reason || 'unknown'}`;
+  if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
+    dispatchWorkerClass = harnessFallback.workerClass;
+  }
+  const osgRemediatorRoute = !harnessFallback?.hold && isHammerWorkerClass(workerClass)
+    ? await resolveOsgRemediatorRouteImpl({ current: { workerClass: dispatchWorkerClass },
+      kind: 'hammer', rootDir, repo, prNumber, env, log: logger })
+    : { workerClass: dispatchWorkerClass };
+  dispatchWorkerClass = osgRemediatorRoute.workerClass;
   const harnessResolution = {
     ...(harnessFallback?.pooled ? { accountProposal: {
       identity: harnessFallback.identity, tokenAccountId: harnessFallback.tokenAccountId || null,
       brokerProvider: harnessFallback.brokerProvider || null, reason: harnessFallback.reason,
       evidenceGeneration: harnessFallback.evidenceGeneration || null,
     } } : {}),
-    workerClass: harnessFallback?.workerClass || workerClass,
+    workerClass: dispatchWorkerClass,
+    ...(osgRemediatorRoute.modelResolution ? { modelResolution: osgRemediatorRoute.modelResolution,
+      accountProposal: osgRemediatorRoute.osg?.accountProposal } : {}),
+    ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),
     ...(harnessFallback?.diagnostics?.length ? { diagnostics: harnessFallback.diagnostics } : {}),
@@ -7122,7 +7133,6 @@ async function maybeDispatchAmaCloserAttempt({
       reason: harnessHoldReason, holdReason: harnessFallback.reason || 'unknown', harnessResolution });
   }
   if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
-    dispatchWorkerClass = harnessFallback.workerClass;
     logAmaCloserDispatchEvent(logger, 'ama_closer.harness_fallback', {
       repo,
       prNumber,
@@ -7144,12 +7154,6 @@ async function maybeDispatchAmaCloserAttempt({
       env: process.env,
     });
   }
-
-  const osgRemediatorRoute = isHammerWorkerClass(workerClass)
-    ? await resolveOsgRemediatorRouteImpl({ current: { workerClass: dispatchWorkerClass },
-      kind: 'hammer', rootDir, repo, prNumber, env, log: logger })
-    : { workerClass: dispatchWorkerClass };
-  dispatchWorkerClass = osgRemediatorRoute.workerClass;
 
   // AOM-04: the orchestration switch is a deliberate no-op for merge-class
   // dispatch. Native and agentos both stay on `hq dispatch` because no bare
@@ -7585,9 +7589,12 @@ async function maybeDispatchAmaCloserAttempt({
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
-  if (osgRemediatorRoute.modelResolution) {
-    args.push('--model', osgRemediatorRoute.modelResolution.resolvedModel,
-      '--reasoning-level', osgRemediatorRoute.modelResolution.resolvedReasoningLevel);
+  if (osgRemediatorRoute.modelResolution?.resolvedModel) {
+    args.push('--model', osgRemediatorRoute.modelResolution.resolvedModel);
+  }
+  const reasoningLevel = osgRemediatorRoute.modelResolution?.resolvedReasoningLevel;
+  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
+    args.push('--reasoning-level', reasoningLevel);
   }
   if (workerId) {
     args.push('--worker-id', workerId);

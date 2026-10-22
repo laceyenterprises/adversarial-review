@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "osg-remediator",
+      "title": "OSG Remediator Route Observations",
+      "path": "docs/data-model/osg-remediator.md",
+      "store": "<adversarial review state dir>/osg-remediator/<uuid>.json",
+      "schemaSurface": "src/osg-remediator.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/follow-up-remediation.mjs"],
+      "owner": "remediator execution routing"
+    },
+    {
       "id": "review-findings",
       "title": "Review Finding Records",
       "path": "docs/data-model/review-findings.md",
@@ -200,6 +209,7 @@
     },
     {
       "id": "ama-audit",
+      "osgResolutionFields": ["harnessResolution.modelResolution", "harnessResolution.osgRemediator", "attempts[].harnessResolution.modelResolution", "attempts[].harnessResolution.osgRemediator"],
       "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",
@@ -207,6 +217,7 @@
       "accountProposalField": "harnessResolution.accountProposal and attempts[].harnessResolution.accountProposal; diagnostic only, dispatcher binding is authoritative",
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
         "src/follow-up-branch.mjs",
         "src/remediation-unpublished.mjs",
         "src/worker-token-pool.mjs",

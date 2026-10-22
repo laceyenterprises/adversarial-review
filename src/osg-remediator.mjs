@@ -7,9 +7,9 @@ import { mkdirSync } from 'node:fs';
 import { loadRoleConfig } from './role-config.mjs';
 import { selectWorkerTokenAccount } from './worker-token-pool.mjs';
 import { isHammerWorkerClass } from './ama/hammer-worker-class.mjs';
-import { canonicalWorkerClass } from './worker-class-aliases.mjs';
-import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.mjs';
+import { isCrossModelReviewWaived, normalizeBuilderClass } from './adapters/subject/github-pr/routing.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 
 export function remediatorProposalOwner(value, { env = process.env } = {}) {
   return new Promise((resolve, reject) => {
@@ -32,8 +32,8 @@ export function remediatorProposalOwner(value, { env = process.env } = {}) {
   });
 }
 
-function recordRoute(rootDir, value) {
-  const directory = join(rootDir, 'data', 'osg-remediator');
+function recordRoute(rootDir, env, value) {
+  const directory = join(resolveAdversarialReviewStateDir(rootDir, env), 'osg-remediator');
   mkdirSync(directory, { recursive: true });
   writeFileAtomic(join(directory, `${randomUUID()}.json`), JSON.stringify(value));
 }
@@ -41,7 +41,7 @@ function recordRoute(rootDir, value) {
 export async function resolveOsgRemediatorRoute({ current, kind, repo, prNumber,
   rootDir, reviewerModels = [], env = process.env, mode,
   ownerImpl = remediatorProposalOwner, selectAccountImpl = selectWorkerTokenAccount,
-  recordImpl = value => recordRoute(rootDir, value), log = console } = {}) {
+  recordImpl = value => recordRoute(rootDir, env, value), log = console } = {}) {
   let reason = 'error-remediator-route';
   let assignment;
   try {
@@ -57,7 +57,7 @@ export async function resolveOsgRemediatorRoute({ current, kind, repo, prNumber,
       const workerClass = proposal.worker_class;
       const validRole = kind === 'hammer' ? isHammerWorkerClass(workerClass)
         : ['remediator-codex', 'remediator-claude'].includes(workerClass);
-      if (!validRole || (kind === 'remediator' && workerClass !== canonicalWorkerClass(current.workerClass)
+      if (!validRole || (kind === 'remediator' && normalizeBuilderClass(workerClass) !== normalizeBuilderClass(current.workerClass)
         && reviewerModels.some(model => isCrossModelReviewWaived(workerClass, model)))) {
         reason = 'arm-role-unavailable';
       } else {
@@ -67,7 +67,7 @@ export async function resolveOsgRemediatorRoute({ current, kind, repo, prNumber,
           reason = 'arm-account-unavailable';
         } else {
           selected = { workerClass, modelResolution: { resolvedModel: proposal.arm.model,
-            resolvedReasoningLevel: proposal.effort, source: 'osg-remediator' }, arm: proposal.arm,
+            resolvedReasoningLevel: proposal.effort ?? proposal.arm.effort ?? null, source: 'osg-remediator' }, arm: proposal.arm,
           account, accountProposal: { identity: account.identity, tokenAccountId: account.tokenAccountId,
             evidenceGeneration: account.evidenceGeneration } };
         }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,6 +31,56 @@ test('assigned arm keeps hammer authority and carries model, effort and account'
   assert.equal(selected.osg.arm.account, arm.account);
   assert.equal(selected.osg.assignment.propensity, 0.5);
   assert.equal(selected.osg.reason, 'assigned');
+});
+
+test('effort uses the catalog arm when the owner omits or nulls its override', async () => {
+  for (const [effort, catalogEffort, expected] of [
+    [undefined, 'low', 'low'], [null, 'high', 'high'], ['medium', 'low', 'medium'],
+    [undefined, 'default', 'default'], [undefined, undefined, null],
+  ]) {
+    const selected = await route({ ownerImpl: async () => ({ assignment,
+      arm: { ...arm, effort: catalogEffort }, worker_class: 'hammer', effort, reason: 'assigned' }) });
+    assert.equal(selected.modelResolution.resolvedReasoningLevel, expected);
+  }
+});
+
+test('same-family remediator arms preserve diversity across base, pooled and corporate aliases', async () => {
+  for (const [workerClass, reviewer, currentClasses] of [
+    ['remediator-codex', 'codex', ['codex', 'codex-corp', 'remediator-codex', 'remediator-codex-corp']],
+    ['remediator-claude', 'claude', ['claude-code', 'claude-code-corp', 'remediator-claude', 'remediator-claude-corp']],
+  ]) {
+    for (const currentClass of currentClasses) {
+      const selected = await route({ kind: 'remediator', current: { workerClass: currentClass },
+        reviewerModels: [reviewer],
+        ownerImpl: async () => ({ assignment, arm, worker_class: workerClass, reason: 'assigned' }),
+        selectAccountImpl: async () => ({ pooled: true, status: 'selected', identity: workerClass,
+          tokenAccountId: arm.account }),
+      });
+      assert.equal(selected.workerClass, workerClass, currentClass);
+      assert.equal(selected.osg.reason, 'assigned', currentClass);
+      assert.equal(selected.modelResolution.resolvedReasoningLevel, arm.effort);
+    }
+  }
+});
+
+test('cross-family remediator arms still exclude the next reviewer family', async () => {
+  for (const [currentClass, workerClass, reviewer, otherReviewer] of [
+    ['claude-code', 'remediator-codex', 'codex', 'claude'],
+    ['codex', 'remediator-claude', 'claude', 'codex'],
+  ]) {
+    for (const conflict of [true, false]) {
+      const selected = await route({ kind: 'remediator', current: { workerClass: currentClass },
+        reviewerModels: [conflict ? reviewer : otherReviewer],
+        ownerImpl: async () => ({ assignment, arm, worker_class: workerClass, reason: 'assigned' }),
+        selectAccountImpl: async () => {
+          assert.equal(conflict, false, 'refused arm must not select an account');
+          return { pooled: true, status: 'selected', identity: workerClass, tokenAccountId: arm.account };
+        },
+      });
+      assert.equal(selected.osg.reason, conflict ? 'arm-role-unavailable' : 'assigned');
+      assert.equal(selected.workerClass, conflict ? currentClass : workerClass);
+    }
+  }
 });
 
 test('unavailable or changed account falls back without holding dispatch', async () => {
@@ -85,4 +135,20 @@ test('evidence persists the assignment and fallback with no provider text', asyn
     assert.equal(value.reason, 'quota-trial-share');
     assert.equal(value.repo, 'example/fixture');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('evidence respects the configured state directory without writing repository data', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'osg-remediator-root-'));
+  const stateDir = mkdtempSync(join(tmpdir(), 'osg-remediator-state-'));
+  try {
+    await route({ rootDir, env: { ADVERSARIAL_REVIEW_STATE_DIR: stateDir }, recordImpl: undefined });
+    const files = readdirSync(join(stateDir, 'osg-remediator'));
+    assert.equal(files.length, 1);
+    const value = JSON.parse(readFileSync(join(stateDir, 'osg-remediator', files[0])));
+    assert.equal(value.reason, 'assigned');
+    assert.equal(existsSync(join(rootDir, 'data')), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });

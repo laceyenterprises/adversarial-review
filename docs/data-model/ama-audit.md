@@ -64,6 +64,17 @@ revalidates admission and owns the actual durable account binding. Pool holds
 use the existing `deferred` audit outcome and `harness-hold:<reason>`; the legacy
 quota snapshot is not an alternative source of pooled admission evidence.
 
+OSG-14 resolves the optional remediator arm before the closer writes its audit.
+`harnessResolution.workerClass` is the selected physical execution class.
+When an arm applies, optional `harnessResolution.modelResolution` contains
+`resolvedModel`, `resolvedReasoningLevel` (string or null) and
+`source: 'osg-remediator'`; `accountProposal` then describes that arm's proposed account.
+Optional `harnessResolution.osgRemediator` retains the
+[route observation](osg-remediator.md), including fallback reasons when no arm
+applies. These fields also appear in `attempts[].harnessResolution`. Existing
+harness holds skip OSG and retain the deferred audit; no lifecycle states or
+merge authority change.
+
 ```mermaid
 erDiagram
   AMA_AUDIT ||--|{ AMA_ATTEMPT : records

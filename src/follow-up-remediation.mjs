@@ -600,7 +600,11 @@ async function dispatchRemediationViaHq({
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
     ticketRef, workerClass, repo, prNumber, branch, promptPath, parentSession, project, hqRoot, allowConflictedBase,
   });
-  if (modelResolution) legacyHqArgs.push('--model', modelResolution.resolvedModel, '--reasoning-level', modelResolution.resolvedReasoningLevel);
+  if (modelResolution?.resolvedModel) legacyHqArgs.push('--model', modelResolution.resolvedModel);
+  const reasoningLevel = modelResolution?.resolvedReasoningLevel;
+  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
+    legacyHqArgs.push('--reasoning-level', reasoningLevel);
+  }
   const ticket = useAppContract
     ? await (async () => {
         const connect = await loadAppSdkConnect();

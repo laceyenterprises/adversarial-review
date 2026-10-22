@@ -174,7 +174,7 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
   });
 }
 
-for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-strict-behind', 'ci-shared-deadline']) {
+for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-range-unavailable', 'ci-strict-behind', 'ci-shared-deadline']) {
   test(`LEASEFAIR-02: ${scenario}`, t => {
     const f = fixture(t, scenario);
     if (scenario === 'ci-disjoint') {
@@ -212,7 +212,13 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
       assert.ok(events.some(e => e.kind === 'range' && e.value === f.nextRebased), 'retry publication proves the new range');
       assert.match(diagnostics, /outcome=merged/);
     } else {
-      assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
+      if (scenario === 'ci-range-unavailable') {
+        assert.ok(events.some(e => e.kind === 'range' && e.value === f.nextRebased), diagnostics);
+        assert.equal(events.some(e => e.kind === 'predicate'), false, 'no predicate may consume stale range evidence');
+        assert.doesNotMatch(readFileSync(join(f.dir, 'comments'), 'utf8'), new RegExp(f.nextRebased),
+          'failed range proof must stop retry audit publication');
+        assert.match(diagnostics, /synthetic retry range proof unavailable/);
+      } else assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
         scenario === 'ci-red' ? 'outcome=github-gate-red' : scenario === 'ci-head-moved' ? 'outcome=live-head-moved-before-merge' :
           scenario === 'ci-predicate-refused' ? 'outcome=retry-predicate-not-eligible' : 'outcome=required-checks-pending'));
     }

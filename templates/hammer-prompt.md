@@ -464,19 +464,16 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    (agent-os#4090). The predicate accepts only a matched
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
-5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
-   your commit. **Rebase the PR onto a recent base (`main`) and CONFIRM THE
-   REBASE HOLDS.** Required checks must pass on the exact head containing the
-   current base. The procedure releases the base merge lease during its first CI wait,
-   then reacquires before merge and checks the fetched current base again. If
-   that base advanced, including disjoint file changes, the procedure rebases in
-   this run and holds the reacquired lease through one bounded, load-aware CI
-   wait on the new exact head. Deferred daemon merges retain priority before
-   reacquisition. A conflict, red CI or expired bound reports its actual reason;
-   clean base advancement alone does not end the run. The retry rebuilds the
-   audit and predicate before merging; never reuse old-head validation.
-   A lagging GitHub `BEHIND` snapshot may avoid a redundant rebase only when the
-   exact validated head already contains the entire fetched current base.
+5. Refresh the post-remediation PR head. **Rebase onto a recent base (`main`) and CONFIRM THE
+   REBASE HOLDS.** Checks must pass on the exact head containing the current base.
+   The procedure releases the lease for the first CI wait, then reacquires and fetches the base.
+   Any absent base commit, including disjoint changes, triggers one in-run rebase
+   and exact-head CI wait under the held lease. Both waits and rebase share one
+   load-scaled deadline. Daemon merges retain priority before reacquisition.
+   Conflict, red CI and expiry report actual reasons; base advancement alone
+   does not end the run. Retry rebuilds audit and predicate; never reuse old-head
+   validation. A lagging `BEHIND` snapshot skips rebase only when the validated
+   head contains the entire fetched base.
    Before entering the final rebase→remote-CI→merge window, acquire the
    merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking

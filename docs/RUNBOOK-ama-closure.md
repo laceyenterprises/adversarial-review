@@ -3769,8 +3769,12 @@ single retry is independent of the initial rebase-attempt cap.
 
 After retry CI succeeds, the closer republishes its head-bound remediation
 audit and rebuilds the full predicate from fresh head, reviews, timeline, commit,
-range and primary-change evidence. It never transfers an eligible verdict or
-old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
+range and primary-change evidence. The shared `hammer-publish` phase first
+re-proves and rewrites `range.json` for the retry head and renders the published
+audit body. Only then does the closer reconstruct `retry-terminal-remediation.json`
+with that body and pass the refreshed range to `ama-check.mjs`. A range proof
+failure stops publication and predicate evaluation. It never transfers an
+eligible verdict or old-head CI to the rebased head. Conflict reports `rebase-conflict`; red CI
 reports `github-gate-red`; pending-only expiry reports `required-checks-pending`
 with the existing resume receipt, and other expiry reports `github-gate-timeout`.
 All release the lease. Real read, publication, head-race and authority failures

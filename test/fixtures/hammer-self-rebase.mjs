@@ -48,7 +48,9 @@ if (args[0] === 'gate') {
 } else if (args[0] === 'predicate') {
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);
-  assert.ok(claim.auditComment.body.includes(state.nextRebased));
+  assert.equal(claim.auditComment.body, state.publishedBody,
+    'retry predicate must use the audit body produced by retry publication');
+  assert.ok(state.publishedBody.includes(state.nextRebased));
   const range = JSON.parse(readFileSync(args[args.indexOf('--ham-range') + 1]));
   assert.equal(hammerRangeMatches(range, state.original, state.nextRebased), true,
     'retry predicate must receive fresh exact-head range evidence');
@@ -59,6 +61,10 @@ if (args[0] === 'gate') {
 } else if (args[0] === 'range') {
   assert.deepEqual(args.slice(2), ['fixture/repo', state.original, state.head, '--pr', 'https://github.com/fixture/repo/pull/42']);
   log('range', state.head);
+  if (state.retried && process.env.SCENARIO === 'ci-range-unavailable') {
+    console.error('synthetic retry range proof unavailable');
+    process.exit(65);
+  }
   console.log(JSON.stringify({ verified: true, reviewedHead: state.original, currentHead: state.head,
     baseSha: state.original, commits: [state.head] }));
 } else if (args[0] === 'gh') {
@@ -109,6 +115,8 @@ if (args[0] === 'gate') {
     const body = args[args.indexOf('--body') + 1];
     assert.ok(body.includes(`HAM-Validated-Head: ${state.head}`));
     appendFileSync(join(dir, 'comments'), body + '\n');
+    state.publishedBody = body;
+    save();
   } else if (args[0] === 'pr' && args[1] === 'merge') {
     assert.equal(args[args.indexOf('--match-head-commit') + 1], state.retried ? state.nextRebased : state.rebased);
     if (retryScenario) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');

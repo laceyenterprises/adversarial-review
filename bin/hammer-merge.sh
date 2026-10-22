@@ -515,9 +515,9 @@ if (!renewMergeLease({ ...identity, ...lease }).renewed) process.exit(1);
 NODE
 }
 
-# Rebuild head-bound remediation authority after the retry's CI succeeds. The
-# original finding/doc claims survive; commit, range, audit and live evidence do
-# not. Never relabel an old eligible verdict as authority for a different head.
+# After retry CI, publication refreshes range.json and HAM_AUDIT_COMMENT_BODY.
+# Rebuild the claim afterward; never reuse old-head range, CI or verdict
+# authority. Original finding/doc claims survive.
 ham_validate_ci_retry() {
   HAM_VERDICT_READY_FILE=""
   ham_renew_ci_retry_lease || { HAM_PHASE_OUTCOME=merge-lease-lost; return 1; }

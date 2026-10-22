@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { transferReviewerFallbackSession } from '../src/reviewer-fallback-session.mjs';
 import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
 import { postGitHubReviewWithCapture } from '../src/reviewer.mjs';
 import { buildReviewedAttestationPayload } from '../src/reviewed-attestation.mjs';
@@ -17,7 +20,7 @@ const body = '## Summary\nSynthetic review.\n\n## Blocking issues\n- None.\n\n##
 async function run(t, extra = {}) {
   const root = mkdtempSync(join(tmpdir(), 'osg-reviewer-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const contexts = [], posts = [], attestations = [], selections = [], releases = [];
+  const contexts = [], posts = [], attestations = [], selections = [], releases = [], sessions = [];
   const args = {
     rootDir: root, repo: 'sample/project', prNumber: 7, reviewerModel: 'codex', builderTag: 'claude-code',
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', reviewerSessionUuid: 'fixture-session', reviewerHeadSha: 'a'.repeat(40),
@@ -30,6 +33,7 @@ async function run(t, extra = {}) {
     fetchPullRequestHeadAndStateImpl: async () => ({ state: 'open', headRefOid: 'a'.repeat(40) }),
     reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'cli-direct' }), async spawnReviewer(req) {
       contexts.push(req.subjectContext);
+      sessions.push(req.sessionUuid);
       return { ok: true, reviewBody: body, reviewBodyDelivery: 'caller-post' };
     } },
     postGitHubReviewWithCaptureImpl: async value => {
@@ -47,7 +51,7 @@ async function run(t, extra = {}) {
   };
   const result = await spawnReviewer(args);
   assert.equal(result.ok, true);
-  return { contexts, posts, attestations, selections, releases };
+  return { contexts, posts, attestations, selections, releases, sessions, result };
 }
 
 test('assigned reviewer produces the same verdict, family subject, account attribution and attestation as default', async t => {
@@ -101,4 +105,68 @@ test('CLI runtime serializes the arm into the reviewer process arguments', async
   await adapter.spawnReviewer({ model: 'codex', subjectContext: { repo: 'sample/project', prNumber: 7,
     reviewerModel: 'codex', reviewerArm: arm }, timeoutMs: 100, sessionUuid: 'fixture-cli' });
   assert.deepEqual(processArgs.reviewerArm, arm);
+});
+
+for (const state of ['changed', 'held', 'error', 'unsupported-runtime']) {
+  test(`cross-family arm fallback retains the claimed session after ${state}`, async t => {
+    const db = new Database(':memory:');
+    ensureReviewStateSchema(db);
+    t.after(() => db.close());
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, review_status,
+      reviewer_session_uuid, reviewer_head_sha, reviewed_at) VALUES ('sample/project', 7, 'claude',
+      'reviewing', 'fixture-session', ?, '2026-10-22T00:00:00Z')`).run('a'.repeat(40));
+    const fallbackCalls = [], requests = [];
+    const fallback = await run(t, {
+      reviewerModel: 'claude', builderTag: 'gemini', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      reviewerArm: { ...arm, harness: 'claude', worker_class: 'claude-reviewer' },
+      reviewerArmDefaultRoute: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', codexBrokerProvider: 'codex-corp' },
+      onGeminiQuotaFallback: () => assert.fail('arm fallback must not invoke Gemini quota handling'),
+      onReviewerArmFallback: value => {
+        fallbackCalls.push(value);
+        transferReviewerFallbackSession(db, { ...value, repo: 'sample/project', prNumber: 7,
+          previousSessionUuid: 'fixture-session' });
+      },
+      selectReviewerTokenAccountImpl: async value => {
+        requests.push(value);
+        if (!value.model) return null; // Legacy, non-enrolled default account.
+        if (state === 'error') throw Error('synthetic account outage');
+        return state === 'held' ? { hold: true } : { ...receipt, tokenAccountId: 'other-account' };
+      },
+      ...(state === 'unsupported-runtime' ? {
+        reviewerRuntimeAdapterOverride: { describe: () => ({ id: 'fixture-stub' }), async spawnReviewer(req) {
+          assert.equal(req.model, 'codex');
+          assert.equal(req.sessionUuid, 'fixture-session');
+          return { ok: true, reviewBody: body, reviewBodyDelivery: 'caller-post' };
+        } },
+      } : {}),
+    });
+    assert.equal(fallbackCalls.length, 1);
+    const row = db.prepare('SELECT * FROM reviewed_prs').get();
+    assert.equal(row.reviewer_session_uuid, 'fixture-session');
+    assert.equal(row.reviewer, 'codex');
+    assert.equal(row.codex_broker_provider, 'codex-corp');
+    assert.equal(row.review_status, 'reviewing');
+    assert.equal(fallback.result.effectiveReviewerModel, row.reviewer);
+    assert.equal(requests.at(-1).requestId, row.reviewer_session_uuid);
+    if (state !== 'unsupported-runtime') {
+      assert.deepEqual(fallback.sessions, [row.reviewer_session_uuid]);
+      assert.equal(fallback.contexts[0].reviewerArm, undefined);
+    }
+    assert.throws(() => transferReviewerFallbackSession(db, { repo: 'sample/project', prNumber: 7,
+      previousSessionUuid: 'stale-session', reviewerSessionUuid: 'replacement', reviewerModel: 'claude' }), /lost session claim/);
+    assert.equal(db.prepare('SELECT reviewer_session_uuid FROM reviewed_prs').get().reviewer_session_uuid, 'fixture-session');
+  });
+}
+
+test('arm fallback forwards a generated session UUID when the caller omits one', async t => {
+  let transferredSession;
+  const fallback = await run(t, {
+    reviewerSessionUuid: undefined, reviewerModel: 'claude', builderTag: 'gemini',
+    reviewerArm: { ...arm, harness: 'claude', worker_class: 'claude-reviewer' },
+    reviewerArmDefaultRoute: { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' },
+    selectReviewerTokenAccountImpl: async value => value.model ? { hold: true } : null,
+    onReviewerArmFallback: value => { transferredSession = value.reviewerSessionUuid; },
+  });
+  assert.ok(transferredSession);
+  assert.deepEqual(fallback.sessions, [transferredSession]);
 });

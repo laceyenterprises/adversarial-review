@@ -672,7 +672,7 @@ async function spawnReviewerOnce(args) {
   const runtimeId = (args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter)?.describe?.()?.id;
   const defaultArgs = () => {
     const route = args.reviewerArmDefaultRoute;
-    return { ...args, reviewerArm: null, reviewerArmDefaultRoute: null,
+    return { ...args, reviewerSessionUuid: sessionUuid, reviewerArm: null, reviewerArmDefaultRoute: null,
       ...(route ? { reviewerModel: route.reviewerModel, botTokenEnv: route.botTokenEnv,
         codexBrokerProvider: route.codexBrokerProvider || 'codex', claudeAccountSelection: null } : {}) };
   };

@@ -45,7 +45,7 @@ export function reviewerArmOwner(value, { env = process.env, timeoutMs = 1500 } 
 }
 
 export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber,
-  reviewerMode = 'off', primaryReviewerQuotaCapped = false,
+  reviewerMode = 'off', primaryReviewerQuotaCapped = false, routeTable,
   config, owner = reviewerArmOwner, log = console } = {}) {
   try {
     if (domainId !== 'code-pr' || !baseRoute || baseRoute.configBroken) return baseRoute;
@@ -53,10 +53,10 @@ export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber
     if (!['apply', 'shadow'].includes(config?.mode)) return baseRoute;
     const { resolveReviewerExecution } = await import('./reviewer-harness.mjs');
     const currentRoute = applyEffectiveReviewerRoute({ baseRoute, builderClass: baseRoute.builderClass,
-      mode: reviewerMode, primaryReviewerQuotaCapped, routeTable: baseRoute.routeTable });
+      mode: reviewerMode, primaryReviewerQuotaCapped, routeTable: routeTable ?? baseRoute.routeTable });
     const allowedFamilies = Object.keys(REVIEWER_ROUTE_BY_MODEL)
       .filter(family => !reviewerRefusesBuilder(baseRoute.builderClass, family));
-    const result = await owner({ repo: repoPath?.split('/').at(-1), prNumber, mode: config.mode,
+    const result = await owner({ repo: repoPath, prNumber, mode: config.mode,
       reviewerModel: currentRoute.reviewerModel, allowedFamilies,
       execution: resolveReviewerExecution(currentRoute.reviewerModel, { log }) });
     // Stable tokens only: the owner must never echo provider/DB diagnostics.

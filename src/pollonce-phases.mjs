@@ -32,6 +32,7 @@ import { summarizeChecksConclusion } from './checks-summary.mjs';
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
 import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
+import { transferReviewerFallbackSession } from './reviewer-fallback-session.mjs';
 import { readReviewerGeminiPoolAvailability, readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
@@ -1870,6 +1871,7 @@ export async function processReviewSubject(entry, ctx) {
       }
       baseRoute = await applyReviewerArm({ baseRoute, domainId, repoPath, prNumber,
         reviewerMode: geminiReviewerMode,
+        routeTable: domainAdapterSet.routeTable,
         primaryReviewerQuotaCapped: geminiReviewerMode === 'fallback'
           && primaryReviewerQuotaCappedForRow(existing, { expectedReviewerModel: baseRoute.reviewerModel }),
       });
@@ -3984,7 +3986,14 @@ export async function processReviewSubject(entry, ctx) {
                 return handoffPromise;
               };
               const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
-              if (spawnReviewerArgs.reviewerArm) spawnReviewerArgs.onReviewerArmFallback = spawnReviewerArgs.onGeminiQuotaFallback;
+              if (spawnReviewerArgs.reviewerArm) spawnReviewerArgs.onReviewerArmFallback = (fallback) => {
+                // Arm admission fails before runtime start: retain the same
+                // session and do not touch Gemini quota/probe reservations.
+                transferReviewerFallbackSession(db, {
+                  ...fallback, repo: repoPath, prNumber, previousSessionUuid: reviewerSessionUuid,
+                });
+                reviewerSessionUuid = fallback.reviewerSessionUuid;
+              };
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
                 const rowSettlementStartedAt = Date.now();

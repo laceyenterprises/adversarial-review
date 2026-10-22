@@ -72,3 +72,26 @@ test('an assigned arm overrides Gemini default selection but retains its integri
     baseRoute: { ...selected, builderClass: 'codex' }, mode: 'always-on' });
   assert.notEqual(refused.reviewerModel, 'codex');
 });
+
+test('owner receives fully qualified repository identity for same-named forks', async () => {
+  const repos = [];
+  for (const repoPath of ['upstream/project', 'fork/project']) {
+    await applyReviewerArm({ baseRoute: current, domainId: 'code-pr', repoPath, prNumber: 7,
+      config: { mode: 'shadow' }, log: quiet,
+      owner: async value => { repos.push(value.repo); return { reason: 'shadow' }; } });
+  }
+  assert.deepEqual(repos, ['upstream/project', 'fork/project']);
+});
+
+test('incumbent integrity resolution honors the supplied domain route table', async () => {
+  const domainRoute = { reviewerModel: 'claude', botTokenEnv: 'GH_DOMAIN_REVIEWER_TOKEN' };
+  let incumbent;
+  const route = await applyReviewerArm({
+    baseRoute: { ...current, builderClass: 'gemini', reviewerModel: 'gemini' },
+    domainId: 'code-pr', routeTable: { gemini: domainRoute }, config: { mode: 'apply' }, log: quiet,
+    owner: async value => { incumbent = value.reviewerModel; return { arm, reason: 'assigned' }; },
+  });
+  assert.equal(incumbent, 'claude');
+  assert.equal(route.reviewerArmDefaultRoute.reviewerModel, 'claude');
+  assert.equal(route.reviewerArmDefaultRoute.botTokenEnv, domainRoute.botTokenEnv);
+});

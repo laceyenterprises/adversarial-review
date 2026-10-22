@@ -1939,7 +1939,8 @@ cross-family and Gemini integrity guards still run; title routing, posting,
 verdicts, signed reviewed attestations and merge authority retain their owners.
 
 The bounded, secret-free stdio request invokes `cwp_dispatch.osg_reviewer` from
-the installed Agent OS Python environment. That owner reads the canonical arm
+the installed Agent OS Python environment, retaining the full `owner/repo` identity
+and resolving the incumbent against the domain route table. That owner reads the canonical arm
 contract, policy and budget, exact publication provenance and classified stratum,
 and persists one immutable assignment per ticket before returning an arm. An
 unavailable owner or missing classification returns the default. The whole owner
@@ -1953,7 +1954,9 @@ are unavailable proposals. An incumbent whose account cannot be measured, includ
 holder-based Gemini, keeps current routing. ITP still authorizes the model, chooses the account
 and acquires its execution lease at spawn. A changed/held account discards the
 experiment pins and uses the ordinary default; a family change transfers the
-existing review claim through the normal fallback callback. No trial pins cross
+existing review claim through a model-neutral compare-and-swap callback. The
+claim, runtime and settlement retain one session UUID; this pre-spawn fallback
+does not invoke Gemini quota handling or release Gemini credential probes. No trial pins cross
 a subsequent family fallback. CLI arguments carry model/effort to the existing
 `reasoningPin`, including Claude broker model preparation and silent retries.
 

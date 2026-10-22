@@ -3368,6 +3368,9 @@ async function consumeNextFollowUpJob({
         reviewerModels: nextRoundReviewerModels(claimed.job, { env: jobEnv }), env: jobEnv, log });
       workerClass = remediatorRouting.workerClass;
     }
+    if (remediatorRouting.pooled || !['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
+      delete jobEnv.CODEX_BROKER_PROVIDER;
+    }
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,
       jobPath: claimed.jobPath,

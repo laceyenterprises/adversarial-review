@@ -115,6 +115,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
     AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '1',
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
+    CODEX_BROKER_PROVIDER: 'codex-corp',
     CODEX_AUTH_PATH: join(rootDir, 'absent-auth.json') };
   const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
   const apply = values => { for (const [key, value] of Object.entries(values)) {
@@ -122,7 +123,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
   } };
   apply(overrides);
   t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: family === 'codex' ? 'claude-code' : 'codex',
+  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: experiment || family === 'codex' ? 'claude-code' : 'codex',
     reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
     reviewPostedAt: '2026-10-19T00:00:00Z' });
   const dispatches = [];
@@ -131,6 +132,8 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
   const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
     guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
     ...(experiment ? { resolveOsgRemediatorRouteImpl: options => {
+      assert.equal(options.current.pooled, false);
+      assert.equal(options.env.CODEX_BROKER_PROVIDER, 'codex-corp');
       const arm = { role: 'remediator', harness: family, worker_class: identity,
         model: wire.request.requested_models[0], effort: 'low', account: wire.selection.account_id };
       return resolveOsgRemediatorRoute({ ...options, mode: 'apply',
@@ -140,15 +143,19 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
         selectAccountImpl: async () => ({ pooled: true, status: 'selected', identity,
           hold: false, tokenAccountId: arm.account }), recordImpl: () => {} });
     } } : {}),
-    resolveRemediationWorkerClassImpl: args => resolveRemediationWorkerClassWithFallback({ ...args,
+    resolveRemediationWorkerClassImpl: args => experiment
+      ? { workerClass: 'remediator-codex-corp', pooled: false, hold: false }
+      : resolveRemediationWorkerClassWithFallback({ ...args,
       selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
         model: wire.request.requested_models[0], ownerImpl: async () => wire }),
       execFileImpl: async () => ({ stdout: '{}' }) }),
-    execFileImpl: async (command, args) => {
+    execFileImpl: async (command, args, options) => {
       if (command === 'gh' && args[0] === 'api' && args[1].endsWith('/pulls/42')) return { stdout: JSON.stringify({
         base: { ref: 'main' }, head: { ref: 'fixture-branch', repo: { full_name: 'sample/project' } } }) };
       if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'running', workspaceDir }) };
       if (args[0] === 'dispatch') {
+        assert.equal(Object.hasOwn(options.env, 'CODEX_BROKER_PROVIDER'), false,
+          'pooled dispatch must discard inherited or pre-OSG legacy provider settings');
         dispatches.push(args);
         return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-lrq' }) };
       }
@@ -157,6 +164,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
     postCommentImpl: async () => {}, deliverAlertImpl: async () => {},
     log: { info() {}, warn() {}, log() {}, error() {} } });
   assert.equal(result.consumed, true, JSON.stringify(result));
+  assert.equal(process.env.CODEX_BROKER_PROVIDER, 'codex-corp', 'claim environment is isolated');
   assert.equal(result.job.remediationWorker.workerClass, identity);
   assert.equal(result.job.remediationWorker.accountProposal.tokenAccountId, wire.selection.account_id);
   assert.equal(dispatches.length, 1);

@@ -18,6 +18,7 @@ export function remediatorProposalOwner(value, { env = process.env } = {}) {
     let stdout = '';
     // Optional evidence has a fixed bound, no retries and no load scaling.
     const timeout = setTimeout(() => child.kill('SIGKILL'), 1500);
+    timeout.unref?.();
     child.stdout.on('data', data => { stdout += data; if (stdout.length > 131072) child.kill('SIGKILL'); });
     child.on('error', () => { clearTimeout(timeout); reject(new Error('osg-owner-unavailable')); });
     child.stdin.on('error', () => {});

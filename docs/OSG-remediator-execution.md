@@ -8,7 +8,8 @@ All OSG configuration defaults remain off.
 Off returns the exact caller-owned default object without owner/account calls or
 evidence writes. Active mode calls the registered ledger owner's
 `cwp_dispatch.osg_remediator` module over JSON stdio, with a fixed 1.5-second
-transport deadline, bounded output and no retries. The owner checks unique PR to
+transport deadline, bounded output and no retries. The deadline timer is unreferenced
+so it cannot keep the host event loop alive on its own. The owner checks unique PR to
 ticket attribution, experiment role, assignment mode, catalog approval, recorded
 availability, class/role model and effort support, and account budget windows.
 It reads existing snapshots; it does not refresh providers or fetch credentials.
@@ -26,6 +27,9 @@ The resulting model and reasoning effort travel through managed dispatch for
 both supported model families. Effort uses the owner's top-level override when
 non-null, otherwise the catalog's `arm.effort`. Missing, empty, non-string and
 `default` effort values omit `--reasoning-level`; explicit effort is forwarded.
+After final routing, follow-up dispatch clears the legacy `CODEX_BROKER_PROVIDER`
+environment override for pooled accounts and non-Codex workers. Unpooled Codex
+routes retain their selected legacy provider.
 ITP still revalidates readiness and acquires the execution lease at admission.
 A proposal is not an account pin or lease. Actual
 account bindings remain authoritative; the corpus records admission-time account

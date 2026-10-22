@@ -105,6 +105,32 @@ test('off returns the exact original object without config/owner/account/evidenc
     selectAccountImpl: forbidden, recordImpl: forbidden }), current);
 });
 
+test('omitted mode loads the default off config without owner/account/evidence I/O', async () => {
+  const current = Object.freeze({ workerClass: 'hammer', reason: 'preferred-ready' });
+  const calls = [];
+  const unexpected = name => () => { calls.push(name); throw Error(`unexpected ${name}`); };
+  const result = await seam.resolveOsgRemediatorRoute({ current, kind: 'hammer',
+    repo: 'example/fixture', prNumber: 7, env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+    ownerImpl: unexpected('owner'), selectAccountImpl: unexpected('account'),
+    recordImpl: unexpected('record'), log: { warn: unexpected('warn') } });
+  assert.equal(result, current);
+  assert.deepEqual(calls, []);
+});
+
+test('owner transport deadline does not hold the event loop open', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'osg-owner-unavailable-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const setTimeoutImpl = globalThis.setTimeout;
+  let deadline;
+  t.mock.method(globalThis, 'setTimeout', (...args) => {
+    deadline = setTimeoutImpl(...args);
+    return deadline;
+  });
+  const pending = seam.remediatorProposalOwner({}, { env: { HQ_PYTHON3: join(rootDir, 'missing-python') } });
+  assert.equal(deadline.hasRef(), false);
+  await assert.rejects(pending, /osg-owner-unavailable/);
+});
+
 test('owner failure, budget fallback and audit failure keep a usable default', async () => {
   const current = { workerClass: 'hammer' };
   for (const ownerImpl of [async () => { throw Error('private diagnostic'); },

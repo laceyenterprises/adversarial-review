@@ -1686,3 +1686,12 @@ transitions remain unchanged. Merge-lease and waiter deadlines store their
 effective load-aware 900-second base at acquisition and are read without
 rescaling. The [wait inventory](load-aware-wait-inventory.md) lists consumers
 and fixed cleanup/polling exceptions.
+
+LEASEFAIR-03 keeps lease contention within the existing deferred/dispatch flow.
+A progress-aware closer waits while service advances, up to the load-aware
+ceiling, and records the holders it observed. Green exact-head wait expiry gets
+two in-run acquisition retries with fresh admission snapshots. Final green
+exhaustion is a retryable deferred audit, never a terminal no-merge; the next
+pass refunds failure charges and resumes without contention backoff. The daemon
+keeps priority. All holder transitions, including LEASEFAIR-02's CI retry hold,
+are retained in the bounded per-base JSONL history.

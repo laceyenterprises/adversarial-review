@@ -37,7 +37,7 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `prNumber` | positive integer | Pull request number. |
 | `jobKey` | string or null | Stable reviewed-head key for the current per-series counter. A changed known job key resets `attemptCount`, `dispatchHeads`, ordinary retry refunds, and the three per-series deferral fields below. Lifetime refund usage survives. |
 | `attemptCount` | non-negative integer | Confirmed hammer dispatches in the current reviewed-head series, less ordinary retry, contention, durable non-execution and independently observed operator-label deferral refunds. Dispatches increment only after launch succeeds. |
-| `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series, less bounded contention refunds (at most twelve for the entire PR) and proven hold-only non-execution refunds. Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
+| `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series, less ordinary contention refunds (at most twelve for the entire PR), green lease-wait refunds and proven hold-only non-execution refunds. Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
 | `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
@@ -95,7 +95,7 @@ explicit evidence and launch identity; a hold-only reason alone never qualifies.
   PR-wide `lifetimeDeferralRefundCount` is below twelve, and increment that
   durable usage counter. Fresh reviews cannot replenish lifetime refunds, so
   excluding proven hold-only non-execution refunds, the total launch ceiling is
-  bounded by the normal lifetime ceiling plus twelve.
+  bounded by the normal lifetime ceiling plus twelve, excluding proven green lease-wait exhaustion.
   Both refund paths refuse a launch already refunded by the other path.
 - HAMREFUND-01 refunds the series and matching target counters only for a
   terminal launch with durable harness evidence: `worker_killed` with `SIGTERM`
@@ -158,3 +158,14 @@ HAMREFUND-01 reconciliation; lifetime charges remain intact. Ordinary exited-wit
 preventing another credit even when a dispatch marker is absent. The dispatch
 record retains `labelGateRefundedLaunchRequestId` to prevent duplicate per-head
 admission credit.
+
+LEASEFAIR-03: a `deferred` / `merge-lease-timeout` audit with
+`leaseWaitExhausted: true` means a fresh exact-head green snapshot followed a
+progress-aware lease wait. This is contention, so `deferHammerRetryDispatch`
+refunds series, target and lifetime failure charges once per launch, sets
+`leaseWaitExhausted: true` and `deferralNextAt` to now, and retains up to 64
+`leaseWaitLaunches`. The next pass does not apply contention backoff or expiry.
+These refunds do not consume the ordinary lifetime deferral refund allowance.
+Green lease identities are separate from `deferralLaunches`, so they do not
+consume the ordinary queue count or start its six-hour deadline. Other deferrals
+retain their existing bounded budget; a later real failure is charged normally. Daemon recovery still applies its live eligibility predicates.

@@ -5362,6 +5362,7 @@ async function maybeDispatchAmaCloserAttempt({
   if (deferredPark && existingRecord?.launchRequestId) {
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
+      leaseWaitExhausted: parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true,
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
     });
   }

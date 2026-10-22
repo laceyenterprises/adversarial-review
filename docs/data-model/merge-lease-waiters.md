@@ -38,3 +38,21 @@ deadline does not authorize a merge or turn contention into a safety hold.
 This is a compatible optional-field extension, with no migration or config key.
 Fair service requires daemon and closer acquisitions to use the updated lease
 library; already running closer procedures finish under their existing fences.
+
+LEASEFAIR-03 adds the CLI's `--wait-by-progress` mode for closers. `--wait`
+becomes the nominal no-progress interval (900 seconds in the procedure), with a
+six-hour nominal total ceiling. The existing load-aware helper sizes each bound
+once and clamps to the platform timer limit. The waiter receives that already
+sized ceiling without scaling again, preserving arrival order throughout the
+wait. A decreasing service position or a newly observed grant/release/steal/
+expiry resets the stall timer; arrivals and holder renewals do not. The overall
+ceiling remains fixed even under continuous daemon priority service. Ordinary
+`--wait` and the compatibility `--wait-for-holder-deadline` retain their prior
+wall-clock semantics without the new flag. Dead-holder reclamation is unchanged.
+
+Timeouts name `lease-queue-no-progress` or `lease-wait-ceiling` and report the
+[holders observed](merge-lease-history.md). Green exact-head closers refresh the
+live head/check snapshot and record a deferred audit before each of up to two
+in-run acquisition retries. They re-enter admission on every retry. Final green
+exhaustion records `leaseWaitExhausted: true`, which requests the next closer
+pass without charging failure counters. This does not waive any live merge gate.

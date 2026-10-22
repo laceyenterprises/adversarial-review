@@ -4426,3 +4426,26 @@ After deployment, verify a slow live closer retains its owner and produces the
 live wording at the effective bound; an unknown launch still produces exhaustion.
 Use synthetic offline fixtures to verify multipliers and env overrides; no
 configuration flip or migration is required.
+
+## LEASEFAIR-03: progress-aware closer lease waits
+
+Closers pass `--wait-by-progress` to `bin/merge-lease.mjs acquire`. The existing
+900-second nominal wait is a no-progress interval; forward queue movement or
+lease service restarts it, subject to a six-hour nominal ceiling. Both bounds
+are load-scaled once and timer-clamped. Daemon priority and dead-holder rules
+are unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
+its grant, renewal and release are included in the per-base history.
+
+Inspect `data/merge-leases/<repo-slug>__<base>.history.jsonl` for the newest 4096
+lease events, including PR, head, PID, role, timestamps and reason. Wait expiry
+reports “lease wait exhausted behind PR …” with the observed holders. The run
+keeps `merge-lease-wait-0.json` through `merge-lease-wait-2.json` beside the
+procedure output. The deferred audit carries the same holders and wait reason.
+
+After expiry the closer reads a fresh live head/check snapshot through the
+shared closer check classifier. An open, exact, green head permits two in-run
+retries, each re-entering admission. Continued green exhaustion remains deferred
+with `leaseWaitExhausted: true`; the next pass retries without failure-counter
+charges or deferral backoff. A moved head, terminal PR or non-green snapshot
+cannot receive this green-exhaustion exemption. Final acquisition still requires
+all existing base, review, required-check, audit and merge predicates.

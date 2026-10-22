@@ -3336,15 +3336,17 @@ for (const status of ['reaped', 'cancelled']) {
   });
 }
 
-for (const parkReason of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown']) {
+for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'green-lease-wait']) {
+  const leaseWaitExhausted = parkKind === 'green-lease-wait';
+  const parkReason = leaseWaitExhausted ? 'merge-lease-timeout' : parkKind;
   for (const pendingCi of [false, true]) {
-    test(`certified lease park waits for UNKNOWN then resumes daemon merge: ${parkReason}, pending CI=${pendingCi}`, async (t) => {
+    test(`certified lease park waits for UNKNOWN then resumes daemon merge: ${parkKind}, pending CI=${pendingCi}`, async (t) => {
       const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-closer-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const first = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
       assert.equal(first.dispatched, true);
       writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD,
-        attempt: { outcome: 'deferred', reason: parkReason }, now: '2026-07-06T12:01:00Z' });
+        attempt: { outcome: 'deferred', reason: parkReason, leaseWaitExhausted }, now: '2026-07-06T12:01:00Z' });
       let merges = 0;
       const run = (dispatchedAt, currentHead = ADVANCED_HEAD, mergeableState = 'MERGEABLE') => maybeDispatchAmaCloser({
         ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true,
@@ -3369,7 +3371,9 @@ for (const parkReason of ['merge-lease-timeout', 'required-checks-pending', 'pr-
         }),
       });
       const backoff = await run('2026-07-06T12:02:00Z', ADVANCED_HEAD, 'UNKNOWN');
-      assert.equal(backoff.reason, 'hammer-merge-ready-backoff');
+      assert.equal(backoff.reason, leaseWaitExhausted
+        ? (pendingCi ? 'hammer-merge-ready-checks-pending' : 'hammer-merge-ready-mergeability-unknown')
+        : 'hammer-merge-ready-backoff');
       assert.equal(backoff.recoveryWait, true);
       assert.notEqual(backoff.needsOperator, true);
       const waiting = await run('2026-07-06T12:05:00Z', ADVANCED_HEAD, 'UNKNOWN');

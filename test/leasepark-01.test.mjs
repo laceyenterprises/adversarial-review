@@ -87,3 +87,31 @@ test('legacy missing lifetime refund usage fails closed without losing the serie
   assert.equal(nextSeries.deferralNextAt, null);
   assert.equal(nextSeries.lifetimeDeferralRefundCount, 12);
 });
+
+test('LEASEFAIR-03 exhausted green lease waits retry immediately without failure charges', async t => {
+  const { evaluateHammerDeferralQueue } = await import('../src/ama/hammer-retry-cap.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'leasefair-refund-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const identity = { repo: 'fixture/repo', prNumber: 7 };
+  const args = { jobKey: 'review', headSha: 'target', now: '2026-01-01T00:00:00Z' };
+  for (let i = 0; i < 15; i++) {
+    recordHammerRetryDispatch(root, identity, args);
+    const deferral = { ...args, launchRequestId: `lease-${i}`, leaseWaitExhausted: true };
+    deferHammerRetryDispatch(root, identity, deferral);
+    const ledger = deferHammerRetryDispatch(root, identity, deferral);
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.targetAttemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 0);
+    assert.equal(ledger.deferralLaunches.length, 0);
+    assert.equal(ledger.leaseWaitLaunches.length, i + 1);
+    assert.deepEqual(evaluateHammerDeferralQueue(ledger, args.now), { expired: false, backoff: false });
+  }
+  const { refundHammerRetryDispatch } = await import('../src/ama/hammer-retry-cap.mjs');
+  assert.equal(refundHammerRetryDispatch(root, identity, { ...args, launchRequestId: 'lease-14' }).reason, 'already-refunded');
+  recordHammerRetryDispatch(root, identity, args);
+  assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 1);
+  const ordinary = deferHammerRetryDispatch(root, identity, { ...args, launchRequestId: 'ordinary-park' });
+  assert.equal(ordinary.deferralLaunches.length, 1);
+  assert.equal(ordinary.lifetimeDeferralRefundCount, 1);
+  assert.deepEqual(evaluateHammerDeferralQueue(ordinary, args.now), { expired: false, backoff: true });
+});

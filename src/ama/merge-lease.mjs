@@ -467,6 +467,39 @@ export function mergeLeaseWaitersFilePath(rootDir, identity = {}) {
   return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.waiters.json`);
 }
 
+// History is serialized by the same per-base mutation lock as the holder.
+// Atomic replacement appends logically while retaining only a bounded tail;
+// readers never see a partial JSONL line after a process crash.
+export const MERGE_LEASE_HISTORY_LIMIT = 4096;
+export function mergeLeaseHistoryFilePath(rootDir, identity = {}) {
+  return mergeLeaseFilePath(rootDir, identity).replace(/\.json$/, '.history.jsonl');
+}
+
+export function readMergeLeaseHistory(rootDir, identity = {}) {
+  try {
+    return readFileSync(mergeLeaseHistoryFilePath(rootDir, identity), 'utf8')
+      .split('\n').filter(Boolean).map(line => JSON.parse(line));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  }
+}
+
+function appendLeaseHistory(rootDir, lease, event, at, reason) {
+  const identity = { repo: lease.repo, base: lease.base };
+  const records = readMergeLeaseHistory(rootDir, identity);
+  records.push({ schemaVersion: 1, eventId: randomUUID(), event, at, reason,
+    repo: lease.repo, base: lease.base, leaseId: lease.leaseId,
+    holderPr: lease.holderPr, holderHead: lease.holderHead,
+    holderPid: lease.holderPid, holderHost: lease.holderHost,
+    holderRole: lease.holderRole || 'closer',
+    acquiredAt: lease.grantedAt || lease.acquiredAt,
+    releasedAt: event === 'grant' || event === 'renew' ? null : at });
+  writeFileAtomic(mergeLeaseHistoryFilePath(rootDir, identity),
+    records.slice(-MERGE_LEASE_HISTORY_LIMIT).map(record => JSON.stringify(record)).join('\n') + '\n',
+    { mode: LEASE_FILE_MODE });
+}
+
 export async function assessMergeLeaseNeedsRevalidation({
   repoPath,
   base,
@@ -765,6 +798,7 @@ export function upsertMergeLeaseWaiter({
   updatedAt,
   attempt = 1,
   priority,
+  effectiveDeadlineSeconds,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   return withWaiterMutationLock({ rootDir, repo, base }, () => {
@@ -785,7 +819,7 @@ export function upsertMergeLeaseWaiter({
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
       deadlineSeconds: priority === 'daemon' ? DAEMON_MERGE_RESERVATION_SECONDS
-        : loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
+        : effectiveDeadlineSeconds ?? loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
     };
     const waiters = existing
       ? doc.waiters.map((w) => w.waiterId === waiterId ? nextWaiter : w)
@@ -869,6 +903,7 @@ export function acquireMergeLease({
   waiterId,
   registerWaiter = false,
   waiterPriority,
+  waiterDeadlineSeconds,
   attempt = 1,
   pidAliveFn = pidIsLive,
   _afterHolderWrite,
@@ -894,6 +929,7 @@ export function acquireMergeLease({
       holderHost,
       deadlineSeconds,
       priority: waiterPriority,
+      effectiveDeadlineSeconds: waiterDeadlineSeconds,
     });
     waiter = registered.waiter;
   }
@@ -947,6 +983,7 @@ export function acquireMergeLease({
       leaseId: suppliedLeaseId || leaseId(),
       holderPr: normalizeHolderPr(holderPr),
       holderHead: String(holderHead || ''),
+      holderRole: waiterPriority === 'daemon' ? 'daemon' : 'closer',
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
       ...(holderProcessGroup != null ? { holderProcessGroup: Number(holderProcessGroup) } : {}),
@@ -970,6 +1007,12 @@ export function acquireMergeLease({
       throw err;
     }
 
+    try {
+      appendLeaseHistory(rootDir, lease, 'grant', acquiredAt, reclaim?.reclaimed ? `reclaimed:${reclaim.reason}` : 'queue-grant');
+    } catch (err) {
+      rmSync(leasePath, { force: true });
+      throw err;
+    }
     if (waiter?.waiterId) {
       try {
         writeJsonFile(mergeLeaseWaitersFilePath(rootDir, { repo, base }),
@@ -977,6 +1020,7 @@ export function acquireMergeLease({
       } catch (err) {
         // Do not leave an unreported holder if persisting waiter removal fails.
         // The mutation lock still fences this newly created holder.
+        appendLeaseHistory(rootDir, lease, 'release', acquiredAt, 'waiter-removal-failed');
         rmSync(leasePath, { force: true });
         throw err;
       }
@@ -995,6 +1039,9 @@ export function releaseMergeLease({
   holderPr,
   holderHead,
   acquiredAt,
+  now,
+  historyEvent = 'release',
+  reason = 'holder-release',
   _afterFenceRead,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
@@ -1017,6 +1064,7 @@ export function releaseMergeLease({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
+    appendLeaseHistory(rootDir, currentLease, historyEvent, now || isoNow(), reason);
     rmSync(leasePath, { force: true });
     return { released: true, leasePath, lease: currentLease };
   });
@@ -1073,6 +1121,7 @@ export function releaseMergeLeaseForRetryableAbort({
       if (!isMutationLockBusyError(err)) throw err;
       return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
     }
+    appendLeaseHistory(rootDir, currentLease, 'release', now || isoNow(), retryableAbortReason);
     rmSync(leasePath, { force: true });
     return {
       released: true,
@@ -1126,7 +1175,9 @@ export function renewMergeLease({
       acquiredAt: renewedAt,
       updatedAt: renewedAt,
       previousAcquiredAt: currentLease.acquiredAt,
+      grantedAt: currentLease.grantedAt || currentLease.acquiredAt,
     };
+    appendLeaseHistory(rootDir, renewed, 'renew', renewedAt, 'holder-renewal');
     writeJsonFile(leasePath, renewed);
     return { renewed: true, leasePath, lease: renewed, previousLease: currentLease };
   });
@@ -1166,6 +1217,9 @@ export function reclaimIfStale({
     holderPr: lease.holderPr,
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
+    now,
+    historyEvent: deadSameHostPid ? 'steal' : 'expiry',
+    reason: deadSameHostPid ? 'dead-holder-pid' : 'past-deadline',
   });
   if (!released.released) {
     return { reclaimed: false, reason: released.reason || 'identity-changed', inspection, release: released };
@@ -1269,6 +1323,8 @@ export async function reconcileMergeLeases({
     holderPr: lease.holderPr,
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
+    now,
+    reason: `holder-pr-${state.toLowerCase()}`,
   });
   let attemptPrune = null;
   if (released.released) {

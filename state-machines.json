@@ -287,7 +287,7 @@
         {"id": "hammer-dispatch.08","from": "dispatching","to": "completed","trigger": "launch result: completed","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.10","from": "dispatched","to": "dispatch-failed","trigger": "failed outcome reconciled","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.11","from": "launch-terminal","to": "dispatching","trigger": "bounded same-head no-merge retry or changed context; merged success stays sticky","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.11","from": "launch-terminal","to": "dispatching","trigger": "bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; merged success stays sticky","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.12","from": "dispatch-deferred-transient","to": "dispatching","trigger": "bounded retry, next-poll branch confirmation or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.13","from": "dispatch-blocked-branch-holder","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.14","from": "dispatch-failed","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},

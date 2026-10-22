@@ -327,7 +327,11 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    `HAM_REQUIRED_CHECKS_WAITED_SECONDS`. Missing CI becomes terminal only after
    the existing head/check waits; on head visibility timeout say checks could not
    start (0s). A different live head keeps the race handling;
-   the comment must contain the line `HAM closing status — no merge.` for the closer's terminal audit. Never post
+   For a green lease-wait exhaustion, quote the helper's “lease wait exhausted
+   behind …” holders, state that acquisition retries next pass, and report a
+   retryable deferral. Preserve the deferred audit; do not replace it with
+   failed-without-merge or a terminal no-merge comment.
+   For other terminal stops, the comment must contain `HAM closing status — no merge.`. Never post
    it after merge or claim success merely for remediation or rebase completion.
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.

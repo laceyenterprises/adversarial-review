@@ -1118,3 +1118,89 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
 });
+
+test('LEASEFAIR-03 position 3 survives two daemon holds beyond the old wall clock', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const start = Date.parse('2026-06-20T18:00:00Z');
+  for (const pr of [201, 202]) upsertMergeLeaseWaiter({ rootDir, repo: REPO, base: BASE,
+    pr, head: `daemon-${pr}`, holderPid: 7000 + pr, holderHost: HOST,
+    waiterId: `daemon-${pr}`, priority: 'daemon', arrivedAt: new Date(start).toISOString() });
+  let holder = null, finished = 0;
+  const positions = [];
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+    acquireMergeLease: args => {
+      const result = acquireMergeLease(args);
+      positions.push(result.queuePosition);
+      return result;
+    },
+    onSleep: ({ nowMs }) => {
+      if (holder && nowMs - Date.parse(holder.lease.acquiredAt) >= 1000) {
+        releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
+        holder = null;
+        finished++;
+      }
+      if (!holder && finished < 2) {
+        const pr = 201 + finished;
+        holder = acquireFixture(rootDir, { holderPr: pr, holderHead: `daemon-${pr}`,
+          holderPid: 7000 + pr, now: new Date(nowMs).toISOString(), registerWaiter: true,
+          waiterId: `daemon-${pr}`, waiterPriority: 'daemon' });
+        assert.equal(holder.acquired, true);
+      }
+    },
+  });
+  assert.equal(result.code, 0, result.io.stderrText);
+  assert.equal(positions[0], 3);
+  assert.equal(finished, 2);
+  assert.ok(jsonOutput(result.io).waited_s > 1);
+  const { readMergeLeaseHistory } = await import('../src/ama/merge-lease.mjs');
+  const history = readMergeLeaseHistory(rootDir, { repo: REPO, base: BASE });
+  assert.deepEqual(history.map(row => [row.event, row.holderRole, row.holderPr]), [
+    ['grant', 'daemon', 201], ['release', 'daemon', 201],
+    ['grant', 'daemon', 202], ['release', 'daemon', 202], ['grant', 'closer', 203],
+  ]);
+});
+
+test('LEASEFAIR-03 no progress names the holder and refunds the gate attempt', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireFixture(rootDir, { holderHead: 'blocking-head', waiterPriority: 'daemon' });
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75);
+  assert.equal(out.reason, 'lease-queue-no-progress');
+  assert.equal(out.no_progress_s, 1);
+  assert.match(out.closingStatus, /lease wait exhausted behind PR 100 \(daemon, blocking-head, pid 7100\)/);
+  assert.equal(out.holders[0].holderPr, 100);
+  assert.equal(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE })[0].attempts, 0);
+  assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
+});
+
+test('LEASEFAIR-03 progress ceiling is sized once and cannot be postponed by daemon service', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const start = Date.parse('2026-06-20T18:00:00Z');
+  let holder = acquireFixture(rootDir);
+  const scaled = [];
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => { scaled.push(n); return n === 1 ? 2 : 4; },
+    onSleep: ({ nowMs }) => {
+      releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
+      holder = acquireFixture(rootDir, { holderPr: 300 + (nowMs - start),
+        registerWaiter: true, waiterPriority: 'daemon', now: new Date(nowMs).toISOString() });
+      assert.equal(holder.acquired, true);
+    },
+  });
+  const out = jsonOutput(result.io);
+  assert.equal(result.code, 75);
+  assert.equal(out.reason, 'lease-wait-ceiling');
+  assert.equal(out.waited_s, 4);
+  assert.deepEqual(scaled, [1, 21600]);
+  assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
+});

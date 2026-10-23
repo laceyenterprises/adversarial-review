@@ -9,6 +9,7 @@ import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-r
 import { decideClosureOwner } from './ama/closure-owner.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
@@ -922,6 +923,17 @@ async function maybeDispatchAmaClosureForInner({
         reason: result.boundedWait.reason, boundedMs: result.boundedWait.boundedMs,
         retryAfterMs: result.boundedWait.retryAfterMs }
       : closureOwnerSink.value };
+  // NXA-02 observational shadow of this pass's final legacy owner; no effect.
+  if (result?.closureOwner && closureOwnerSink.shadowInput) {
+    const { input, autonomousMergeExecutionEnabled } = closureOwnerSink.shadowInput;
+    const candidate = options.candidate || {};
+    void shadowNextActionLater({ source: 'closure-orchestration', legacy: result.closureOwner,
+      passSnapshot: options.passSnapshot || null, repo: options.repoPath, prNumber: options.prNumber,
+      rootDir: options.rootDir || ROOT, evidence: () => closureOwnerShadowEvidence(input, {
+        subjectKey: `${options.repoPath}#${options.prNumber}`, autonomousMergeExecutionEnabled,
+        rootDir: options.rootDir || ROOT, observedAt: new Date(options.now ? options.now() : Date.now()).toISOString(),
+        checksRollup: candidate.statusCheckRollup, candidate, labels: options.labelNames }) });
+  }
   if (result && ownerProofFactsSink.value) result = { ...result, ownerProofFacts: ownerProofFactsSink.value };
   try {
     recordOperatorNoticeCloserOutcome(options.rootDir || ROOT, {
@@ -1720,6 +1732,7 @@ async function dispatchAmaClosureFor({
     reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
   let closureOwner = decideClosureOwner(closureOwnerInput);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
+  if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled };
   const wouldUseDaemonPath = isDaemonMergeReviewAllowed(reviewState, { strictMode });
   const disabledEligibility = evaluateMergeEligibility({
     verdict: settledVerdict,
@@ -2155,6 +2168,8 @@ async function dispatchAmaClosureFor({
 
   closureOwner = decideClosureOwner({ ...closureOwnerInput, attested: hamTerminalRemediationValidated });
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
+  if (closureOwnerSink) closureOwnerSink.shadowInput = { input: { ...closureOwnerInput, attested: hamTerminalRemediationValidated },
+    autonomousMergeExecutionEnabled };
 
   // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is
   // no blocking wait for CI anywhere in this tick, by design. When required
@@ -2926,6 +2941,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   signal = null,
   operationTimeoutMs = loadAwareTimeoutMs(DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS),
   operationTracker = null,
+  passSnapshot = null,
 }) {
   throwIfAborted(signal);
   // BUG-1 dispatch-time terminal guard. `candidate` is the live PR read for
@@ -2972,6 +2988,8 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       signal,
       operationTimeoutMs,
       operationTracker,
+      // NXA-01 pass snapshot, observational only (NXA-02 shadow).
+      ...(passSnapshot ? { passSnapshot } : {}),
     });
   } catch (err) {
     throwIfAborted(signal);

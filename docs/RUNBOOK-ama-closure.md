@@ -328,6 +328,48 @@ measurements; verify the existing posted-review step logs after deployment to
 establish whether normal production PRs meet the ten-second target. No config
 change or new check is required.
 
+## Shared next action shadow (NXA-02)
+
+`nextAction(snapshot)` (`src/pr-next-action.mjs`) is the single successor
+policy for "who acts next on this open PR". It is pure and total. It reads one
+NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
+round?, evidenceRefs, decisionKey}`. It is **shadow only**: `decideClosureOwner`
+and every consumer keep their legacy decisions and effects, and no caller is
+switched. The decision grants no merge authority. The exact-head, provenance,
+HCP, required-check, protection, identity and lease checks described in this
+runbook still decide every mutation.
+
+The shadow (`src/pr-next-action-shadow.mjs`, reached through the import-free
+consumer seam `src/pr-next-action-consumer.mjs`) runs at closure orchestration
+(final legacy owner), the posted-review handler, the no-progress lane, the
+closer handoff, the rescue classifier, the hammer-owner route page and the
+watcher handoff wake. All consumers in one pass share one decision. Every
+action/actor/reason disagreement is appended to
+`data/next-action-shadow/disagreements.jsonl` under the watcher root (one
+rotation at 16 MiB) with its generation, source, deadline and evidence
+references. The shadow prints nothing, never throws and never delays a legacy
+effect.
+
+Overdue decisions are recorded once per decision. They are delivered through
+the existing closure-wait alert path (debounce, refund on transport failure,
+retry next pass) only when the rollout owner sets
+`AMA_NEXT_ACTION_OVERDUE_ALERTS=1` in the watcher environment. Unset, nothing
+is paged. Deadline expiry and alert availability never refuse work.
+
+To classify live disagreements (read-only, bounded to the log tail):
+
+```bash
+node bin/next-action-disagreements.mjs --root "$WATCHER_ROOT" --dispositions /private/path/dispositions.json
+node bin/next-action-disagreements.mjs --root "$WATCHER_ROOT" --aggregate
+```
+
+Rows, the legacy reason→row inventory, known evidence limits and the rollout
+acceptance procedure are in
+[`NEXT-ACTION-REASON-INVENTORY.md`](NEXT-ACTION-REASON-INVENTORY.md). Switching
+a caller needs at least 20 distinct classified live cases, including candidate
+mistakes and expected corrections. That acceptance is human rollout acceptance,
+not a gate, and it is not authorized by NXA-02.
+
 ## Stacked-base reads (STACKEDBASE-01)
 
 The stacked-base guard skips GitHub when the caller supplies a base from live

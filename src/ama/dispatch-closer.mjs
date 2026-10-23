@@ -11,6 +11,7 @@ import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { decideClosureOwner } from './closure-owner.mjs';
+import { closureOwnerShadowEvidence, shadowNextActionLater } from '../pr-next-action-consumer.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -5004,6 +5005,15 @@ async function maybeDispatchAmaCloserAttempt({
   const reviewHandoffOwner = reviewHandoffLease?.status === 'handed-to-review'
     ? decideClosureOwner({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
       strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }) : null;
+  // NXA-02 observational shadow only; the legacy owner below keeps authority.
+  if (reviewHandoffOwner) void shadowNextActionLater({ source: 'dispatch-closer-handoff', legacy: reviewHandoffOwner,
+    repo: dispatchContext.repo, prNumber, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+    evidence: () => closureOwnerShadowEvidence({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
+      strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }, {
+      subjectKey: `${dispatchContext.repo}#${prNumber}`, observedAt: new Date().toISOString(),
+      checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+      candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
+        isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels }) });
   const reviewHandoffFindings = reviewHandoffOwner?.owner === 'hammer';
   if (reviewHandoffOwner?.owner === 'review') {
     const wait = await observeClosureWait({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,

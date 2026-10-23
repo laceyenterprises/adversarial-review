@@ -14,6 +14,7 @@
 // route-ending outcomes: the hammer's final no-merge decision, or an exhausted
 // hammer retry cap.
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { createNextActionPassKey, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
@@ -143,6 +144,9 @@ export async function routeToHammerOwner({
       [routeSpec.dispatchFlag]: true,
     };
     if (!reviewedHeadSha) throw new Error(`${route} authoritative reviewed head unavailable`);
+    // NXA-02: one observational pass key shared with closure orchestration.
+    const passSnapshot = createNextActionPassKey({ subjectKey: `${repoPath}#${prNumber}`, head: routeHead,
+      observedAt: new Date().toISOString() });
     const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
       rootDir,
       reviewStateRow: { ...existing, reviewer_head_sha: reviewedHeadSha },
@@ -153,6 +157,7 @@ export async function routeToHammerOwner({
       prNumber,
       currentRevisionRef,
       logger,
+      passSnapshot,
     });
     const { outcome, amaClosureResult } = coexistenceDecision || {};
     if (outcome === 'pr-terminal') {
@@ -169,6 +174,10 @@ export async function routeToHammerOwner({
       const page = await pageHammerOwnerOutcome({
         rootDir, route, repoPath, prNumber, headSha, outcome: finalOutcome, amaClosureResult, deliverAlertImpl, logger,
       });
+      void shadowNextActionLater({ source: 'hammer-owner-route', passSnapshot, repo: repoPath, prNumber, rootDir,
+        legacy: { action: 'operator-hold', actor: 'operator',
+          reason: finalOutcome === 'hammer-no-merge' ? 'hammer-final-no-merge' : 'retry-exhausted',
+          legacyOwner: route, legacyReason: amaClosureResult?.reason || finalOutcome } });
       logger?.warn?.(
         `[watcher] ${route} hammer route ended for ${repoPath}#${prNumber}: ${finalOutcome} ` +
           `(${amaClosureResult?.reason}); operator ${page.paged ? 'paged' : 'page failed'}`

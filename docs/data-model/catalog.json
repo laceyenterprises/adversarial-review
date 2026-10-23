@@ -678,6 +678,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "launchOwnership": "LRQSTATUS-01: parked receipts and resumed launches retain PR ownership across terminal deferred leases, including rekeyed heads. The recovery probe persists known resolved statuses and the secondary probe persists newly parked statuses under matching receipt identity; unknown status or unreadable retry evidence cannot erase the ownership observation. Positive resumed execution restores fleet capacity accounting, including matching rekeyed deferred leases. Confirmed terminal launch/retry evidence restores existing settlement/retry policy.",
       "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "preReceiptReconciliation"],
       "preReceiptSemantics": "LAC-2081 / LEGACYINTENT-01: native fenced keyed receipt recovery or proof of no submission; legacy no-key attempts settle legacy-no-launch-proven only on a successful empty inclusive ticket/time ledger query recorded in preReceiptReconciliation.query; unresolved ownership holds only its PR/head, never fleet launch admission or capacity; keyless active listings retain stale/orphan escapes; authoritative closed/merged PR state retires intents as completed/pr-terminal without lease or budget changes; unreadable PR state holds without paging; inspection pages once per attempt; audited single-PR command defaults to dry-run",
       "preReceiptAlertFields": ["preReceiptReconciliation.alertedAt"],
@@ -759,6 +760,7 @@
     {
       "id": "ama-closer-leases",
       "preReceiptReaper": "LAC-2081: unresolved dispatching intents preserve leases and retry budget; native proof owns settlement; lease mutations share reclaim flock and compare expected owner",
+      "parkedOwnership": "LRQSTATUS-01: a matching terminal deferred lease continues to fence redispatch and inline daemon merge through resumed execution, including rekeyed heads; only confirmed terminal launch/retry evidence releases ownership",
       "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky. TERMLEASE-01 reclaims terminal superseded/failed-without-merge/deferred on the same pass with proven ended/absent launch; live or unproven launches hold. Superseded dispatches release matching rekeyed leases and retain the dispatch outcome.",
       "title": "AMA Closer Leases",
       "path": "docs/data-model/ama-closer-leases.md",

@@ -107,8 +107,10 @@ test('default ledger reader merges worker PID and process status into fleet capa
     }
   } finally { db.close(); }
   const checkedPids = [];
+  // Verify adapter evidence independently of host sampling latency. Separate
+  // fixtures below exercise scan deadlines and unreadable evidence.
   const active = await findActiveAmaCloserLaunches(root, {
-    now: NOW, ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+    now: NOW, ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, scanBudgetMs: Infinity,
     processKillImpl: (pid, signal) => {
       checkedPids.push(pid);
       assert.equal(signal, 0);
@@ -140,6 +142,7 @@ test('default ledger reader merges worker PID and process status into fleet capa
     const checkedPids = [];
     const active = await findActiveAmaCloserLaunches(${JSON.stringify(root)}, {
       now: ${JSON.stringify(NOW)}, ledgerDbPath: ${JSON.stringify(ledgerDbPath)},
+      scanBudgetMs: Infinity,
       env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
       processKillImpl: (pid, signal) => {
         checkedPids.push(pid);

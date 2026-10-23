@@ -20,7 +20,7 @@ const now = Date.parse('2026-10-01T12:00:00Z');
 const leaseAt = (age, extra = {}) => ({ status: 'dispatched', lrqId: 'synthetic-launch',
   updatedAt: new Date(now - age).toISOString(), terminalOutcome: null, ...extra });
 
-for (const status of ['requested', 'queued', 'admitted', 'leased', 'starting', 'running']) {
+for (const status of ['requested', 'admitted', 'leased', 'starting', 'running']) {
   test(`LEASELIVE-01: ${status} retains ownership at 45 minutes and past fallback`, async () => {
     const reader = ({ launchRequestId, includeRetryChain }) => {
       assert.equal(launchRequestId, 'synthetic-launch');

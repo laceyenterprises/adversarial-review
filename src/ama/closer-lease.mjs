@@ -39,7 +39,7 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import fsExt from 'fs-ext';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from '../worker-execution-limits.mjs';
 import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
-import { launchRequestInFlight } from './launch-request-status.mjs';
+import { launchRequestInFlight, launchRequestParked } from './launch-request-status.mjs';
 import { closeSync, openSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -134,6 +134,7 @@ export function isReclaimableDispatchedAmaCloserLease(lease, {
     try { probe = readLaunchRequestStatusImpl({ ...readOptions, launchRequestId: lease.lrqId, includeRetryChain: true }); }
     catch { probe = null; }
   }
+  if (lease.lrqId && launchRequestParked(probe)) return false;
   const inFlight = lease.lrqId ? launchRequestInFlight(probe) : null;
   if (inFlight === true) return false;
   const reclaimAgeMs = inFlight === false ? AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS
@@ -177,6 +178,7 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
 export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord } = {}) {
   if (lease?.status !== TERMINAL
     || !['superseded', 'failed-without-merge', 'deferred'].includes(lease.terminalOutcome)) return false;
+  if (launchRequestParked(launchStatusProbe)) return false;
   const inFlight = launchRequestInFlight(launchStatusProbe);
   if (inFlight === true || launchStatusProbe?.retryChainUnreadable) return false;
   if (inFlight === false || launchStatusProbe?.reason === 'missing-launch-request-row') return true;

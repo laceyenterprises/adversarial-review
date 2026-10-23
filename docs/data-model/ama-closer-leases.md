@@ -85,3 +85,24 @@ so lookup does not filter by the current or original lease head. Without an
 audit or merge evidence, other terminal launches settle as `superseded` when
 the lease was rekeyed to an advanced head, otherwise `failed-without-merge`;
 operator-triage statuses settle as `deferred`.
+
+
+LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+(`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
+Boolean wire `terminal` and `succeeded` values take precedence when present;
+status-only ledger rows use the producer definitions. `blocked_needs_decision`
+and vocabulary-defined `blocked_`/`waiting_` states are parked: they consume no
+closer capacity and settle an active lease as terminal `deferred`, but their
+unchanged dispatch identity still owns the PR. They cannot be reclaimed,
+redispatched by ordinary or orphan recovery, or lose their scratch directory
+while parked. Parked observations are re-read rather than cached as final.
+Positive resumed execution occupies fleet capacity again, including through a
+matching rekeyed deferred lease. A resolved decision retains the same PR owner and fences
+both closer redispatch and inline daemon merge, even though the lease remains
+terminal `deferred`. The fence follows matching rekeyed leases and persists
+until confirmed terminal launch/retry evidence restores the existing
+retry/settlement policy. Unknown evidence preserves the ownership observation.
+The legacy stored spellings map through producer values: `completed` →
+`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
+`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+status-only evidence remains unknown. No new durable states or fields are added.

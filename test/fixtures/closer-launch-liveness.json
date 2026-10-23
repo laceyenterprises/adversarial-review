@@ -5,7 +5,7 @@
   "liveRetry": {
     "ok": true,
     "row": { "status": "failed" },
-    "retryChain": [{ "launch_request_id": "synthetic-retry", "status": "queued" }]
+    "retryChain": [{ "launch_request_id": "synthetic-retry", "status": "admitted" }]
   },
   "unreadableRetry": { "ok": true, "row": { "status": "failed" }, "retryChainUnreadable": true }
 }

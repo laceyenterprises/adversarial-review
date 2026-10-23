@@ -1626,6 +1626,15 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'superseded',
 ]);
 
+// Persist a status for confirmed terminal evidence without discarding wire
+// booleans. Process success still requires independent PR/merge evidence.
+function terminalCloserLaunchStatus(value) {
+  const meaning = launchRequestMeaning(value);
+  const status = normalizeWorkerRunStatus(typeof value === 'string' ? value : value?.status);
+  if (status === 'succeeded' && !meaning.succeeded) return 'failed';
+  return status || (meaning.succeeded ? 'succeeded' : 'failed');
+}
+
 function amaCloserStatusFromTerminalLaunchRequestStatus(value) {
   const meaning = launchRequestMeaning(value);
   const launchRequestStatus = meaning.status;
@@ -1757,7 +1766,7 @@ function* reconcileAmaCloserLeaseSteps({
         leaseIdentity: { repo, prNumber, headSha: held.headSha }, terminalOutcome: 'deferred',
         launchRequestId, now, logger, repo, prNumber });
     }
-    const status = normalizeWorkerRunStatus(probe.row?.status);
+    const status = terminalCloserLaunchStatus(probe.row);
     if (!isTerminalLaunchRequestStatus(probe.row)
       || !AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
     const identity = { repo, prNumber, headSha: held.headSha };
@@ -5523,12 +5532,13 @@ async function maybeDispatchAmaCloserAttempt({
     throwIfAborted(signal);
     // A terminal lease may already have been written by the worker. Persist
     // ledger terminality before retry/refund/PR evidence can return early.
-    if (probe?.ok && isTerminalLaunchRequestStatus(probe.row)) {
+    const terminalStatus = probe?.ok && isTerminalLaunchRequestStatus(probe.row)
+      ? terminalCloserLaunchStatus(probe.row) : null;
+    if (terminalStatus) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        normalizeWorkerRunStatus(probe.row.status), (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
+        terminalStatus, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
-    const terminal = probe?.ok && isTerminalLaunchRequestStatus(probe.row)
-      && ['failed', 'succeeded'].includes(probe.row?.status);
+    const terminal = ['failed', 'succeeded'].includes(terminalStatus);
     const reason = terminal ? unexecutedHammerReason(probe.row) : null;
     if (reason && !auditTerminalOutcome) {
       const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl, repo, prNumber, signal });
@@ -5844,7 +5854,7 @@ async function maybeDispatchAmaCloserAttempt({
       inFlight: !launchRequestMeaning(statusProbe).parked,
       preservePredecessorArtifacts: true, launchRequestId: existingRecord.launchRequestId,
     });
-    if (status === 'succeeded' && launchRequestMeaning(statusProbe).succeeded === false) status = 'failed';
+    if (isTerminalLaunchRequestStatus(statusProbe)) status = terminalCloserLaunchStatus(statusProbe);
     // FINALCLOSE-01: worker status can remain `starting` after a reboot while
     // the launch ledger is terminal. Process success alone is not merge proof;
     // keep raw `succeeded` in the terminal-hold classifier below so live PR,
@@ -5853,7 +5863,7 @@ async function maybeDispatchAmaCloserAttempt({
       && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
       const row = prefetchedLaunchRequestProbe.row;
-      const terminalStatus = row.status === 'succeeded' && !launchRequestMeaning(row).succeeded ? 'failed' : row.status;
+      const terminalStatus = terminalCloserLaunchStatus(row);
       status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
         ? 'unknown' : terminalStatus;
     }
@@ -5862,7 +5872,7 @@ async function maybeDispatchAmaCloserAttempt({
       && prefetchedLaunchRequestProbe?.ok
       && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
-    if (isTerminalLaunchRequestStatus(status)) {
+    if (isTerminalLaunchRequestStatus(statusProbe) || isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }

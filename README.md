@@ -921,6 +921,11 @@ Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
 `statusVocabulary`. Explicit terminal/succeeded false values win independently;
 missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.
 The SDK artifact is installed through the npm lockfile before service startup.
+Wire-only terminal evidence is recorded even without a status string: closer
+records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
+success record. Merge cancellation may confirm terminality without a status
+string; remediation success requires both terminal and succeeded evidence.
+These observations do not prove that a PR merged.
 Decision-blocked and waiting launches release active closer leases and capacity,
 while their dispatch receipts retain PR ownership through decision resolution
 and resumed execution. Resumed workers fence both redispatch and inline daemon

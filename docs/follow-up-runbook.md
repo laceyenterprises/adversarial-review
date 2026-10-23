@@ -213,6 +213,12 @@ the first 200 output characters. These warnings share one budget per process:
 at most one warning per minute, across dispatch IDs and probe types. A backward
 clock adjustment renews the budget so diagnostics do not stay suppressed.
 
+Wire-only terminal evidence is recorded even without a status string: closer
+records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
+success record. Merge cancellation may confirm terminality without a status
+string; remediation success requires both terminal and succeeded evidence.
+These observations do not prove that a PR merged.
+
 ## Infrastructure refunds (REMREFUND-01)
 
 An exited remediation worker can retry its charged round once when an

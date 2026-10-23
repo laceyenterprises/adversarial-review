@@ -63,6 +63,8 @@ if (scenario === 'clean') {
   const { launchRequestInFlight, launchRequestOwned, launchRequestMeaning } = await import('../../src/ama/launch-request-status.mjs');
   assert.equal(launchRequestMeaning({ status: 'succeeded', terminal: false, succeeded: false }).terminal, false);
   assert.equal(launchRequestMeaning({ status: 'succeeded', succeeded: false }).succeeded, false);
+  assert.equal(launchRequestMeaning({ status: null, terminal: true, succeeded: false }).terminal, true);
+  assert.equal(launchRequestMeaning({ status: null, terminal: true, succeeded: false }).succeeded, false);
   assert.equal(launchRequestMeaning('completed').status, null);
   assert.equal(launchRequestMeaning('blocked_needs_decision').succeeded, false);
   const { launchHoldsCloserCapacity } = await import('../../src/ama/closure-capacity.mjs');

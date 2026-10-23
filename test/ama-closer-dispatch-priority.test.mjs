@@ -2705,3 +2705,63 @@ for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
     assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'synthetic-owner');
   });
 }
+
+for (const source of ['dispatch probe', 'preflight ledger']) {
+  for (const succeeded of [false, true]) {
+    test(`SDK terminal evidence records ${source} success=${succeeded} without a status`, async t => {
+      const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-terminal-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const args = findingsRemediationArgs(rootDir, { dispatchContext: {
+        reviewCycleCapReached: true, livePrProbeImpl: async () => ({ state: 'UNKNOWN' }),
+      } });
+      const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+      const now = args.dispatchContext.dispatchedAt;
+      // No lease: exercise dispatch reconciliation rather than early lease repair.
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+        workerClass: 'hammer', launchRequestId: 'synthetic-owner', retryCount: 2,
+        reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+      const payload = { status: null, terminal: true, succeeded };
+      const deps = testDeps();
+      const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+        readLaunchRequestStatusImpl: () => source === 'preflight ledger'
+          ? { ok: true, row: payload } : { ok: false },
+        execFileImpl: async (_command, argv) => {
+          assert.deepEqual(argv.slice(0, 2), ['dispatch', 'status'], 'unknown PR evidence prevents redispatch');
+          return { stdout: JSON.stringify(source === 'dispatch probe' ? payload : { status: 'future' }) };
+        },
+      });
+      const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+      assert.equal(record.state, 'launch-terminal', JSON.stringify({ result, record }));
+      assert.equal(record.terminalLaunchStatus, succeeded ? 'succeeded' : 'failed');
+      if (source === 'preflight ledger' || !succeeded) {
+        assert.equal(record.lastObservedStatus, succeeded ? 'unverified-terminal-success' : 'failed');
+      }
+    });
+  }
+}
+
+for (const withLease of [false, true]) {
+  test(`SDK terminal evidence rejects explicit false success during preflight recording withLease=${withLease}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-success-false-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    if (withLease) {
+      acquireAmaCloserLease({ rootDir, ...identity, now });
+      updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-owner' });
+    }
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-owner', retryCount: 1,
+      reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+    await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+      readLaunchRequestStatusImpl: () => ({ ok: true,
+        row: { status: 'succeeded', terminal: true, succeeded: false } }),
+      execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'future' }) }),
+    });
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+    assert.equal(record.state, 'launch-terminal');
+    assert.equal(record.terminalLaunchStatus, 'failed');
+    assert.equal(record.lastObservedStatus, 'failed');
+  });
+}

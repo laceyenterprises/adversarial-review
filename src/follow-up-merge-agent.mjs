@@ -1959,8 +1959,8 @@ async function cancelMergeAgentDispatchOnMerge({
           throwOnError: true,
         });
         const probedStatus = String(probed?.status || '').trim().toLowerCase();
-        if (probedStatus) {
-          result.probedDispatchStatus = probedStatus;
+        if (probed) {
+          result.probedDispatchStatus = probedStatus || (readDispatchStatus(probed).terminal ? 'terminal' : 'unknown');
           if ((probedStatus === 'not-found' && probed?.terminal !== false) || readDispatchStatus(probed).terminal) {
             result.probeConfirmedTerminal = true;
           }

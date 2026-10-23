@@ -2900,10 +2900,11 @@ async function reconcileFollowUpJob({
     rootDir, jobPath, job, worker, workspaceDir: paths?.workspaceDir, requeuedAt: completedAt, execFileImpl,
   });
   if (resumeRequeued) return resumeRequeued;
+  const dispatchMeaning = readDispatchStatus(liveness?.dispatchStatus);
   return settleMissingRemediationArtifact({
     rootDir, job, jobPath, worker, workerState, completedAt, finalMessage,
     liveness, logText: workerLogText, resumeImpossible, maxRetries: resolveMaxTransientRemediationRetries(),
-    hqDispatchSucceeded: readDispatchStatus(liveness?.dispatchStatus).succeeded,
+    hqDispatchSucceeded: dispatchMeaning.terminal && dispatchMeaning.succeeded,
     now, log, postCommentImpl,
     buildCommentDelivery: buildReconcileCommentDelivery,
     postOutcomeComment: postReconcileOutcomeCommentSafe,

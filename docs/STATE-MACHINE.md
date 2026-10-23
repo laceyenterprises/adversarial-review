@@ -777,6 +777,11 @@ diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reape
 and `rejected` remain unknown rather than authorizing success or retries.
 Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
+Wire-only terminal evidence is recorded even without a status string: closer
+records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
+success record. Merge cancellation may confirm terminality without a status
+string; remediation success requires both terminal and succeeded evidence.
+These observations do not prove that a PR merged.
 
 TERMLEASE-01 adds terminal non-merge lease removal before fresh acquisition:
 `superseded`, `failed-without-merge` and `deferred` stop owning the current head

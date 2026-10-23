@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createHqDispatchStatusOutputParser } from '../src/hq-dispatch-status-output.mjs';
 import { parseHqDispatchStatus } from '../src/producer-contracts/dispatch-receipt.mjs';
 import {
+  cancelMergeAgentDispatchOnMerge,
   dispatchMergeAgentForPR,
   listMergeAgentDispatches,
   isMergeAgentDispatchActiveForHead,
@@ -19,6 +20,8 @@ import { assessWorkerLivenessDetailed } from '../src/remediation-worker-liveness
 import { dispatchStatusExamples } from './helpers/dispatch-status-cases.mjs';
 import { readDispatchStatus, LAUNCH_REQUEST_STATUSES } from '@agent-os/app-sdk';
 import { normalizeWorkerTerminalEvent, workerTerminalEventToDispatchStatus } from '../src/remediation-hq-dispatch.mjs';
+import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned } from '../src/follow-up-jobs.mjs';
 import { resolveHqWorkerWorkspace } from '../src/remediation-hq-dispatch.mjs';
 
 const LRQ = 'lrq_11111111-1111-4111-8111-111111111111';
@@ -293,5 +296,81 @@ for (const status of [null, '', 42, 'future', 'succeeded']) {
     const f = fixture(t, { wire: { status, terminal: false, succeeded: false } });
     assert.equal((await active(f)).active, true);
     assert.ok(f.calls()[0].includes('--json'));
+  });
+}
+
+for (const terminal of [true, false]) {
+  for (const succeeded of [true, false]) {
+    test(`wire-only cancel probe terminal=${terminal} succeeded=${succeeded} controls label cleanup`, async t => {
+      const f = fixture(t);
+      recordMergeAgentDispatch(f.rootDir, HEAD, { launchRequestId: LRQ,
+        dispatchedAt: '2026-10-01T00:00:00Z', hqOwnerUser: 'fixture-owner' });
+      let labelRemovals = 0;
+      const result = await cancelMergeAgentDispatchOnMerge({
+        rootDir: f.rootDir, repo: HEAD.repo, prNumber: HEAD.prNumber, hqPath: f.hqBin,
+        now: new Date(NOW).toISOString(), env: f.env, cancelRetryDelaysMs: [],
+        ghExecFileImpl: async () => { labelRemovals++; return { stdout: '' }; },
+        hqExecFileImpl: async (_command, args) => {
+          if (args[1] === 'cancel') throw new Error('unreadable cancel failure');
+          assert.deepEqual(args, ['dispatch', 'status', LRQ, '--json', '--as-owner', 'fixture-owner']);
+          return { stdout: JSON.stringify({ status: null, terminal, succeeded }) };
+        },
+      });
+      assert.equal(result.probeConfirmedTerminal, terminal);
+      assert.equal(result.cleanupComplete, terminal);
+      assert.equal(result.retryable, !terminal);
+      assert.equal(result.labelRemoved, terminal);
+      assert.equal(labelRemovals, terminal ? 1 : 0);
+      if (terminal) assert.equal(result.probedDispatchStatus, 'terminal');
+    });
+  }
+}
+
+for (const payload of [
+  { status: 'succeeded', terminal: false },
+  { status: 'succeeded', terminal: true, succeeded: false },
+  { status: 'succeeded', terminal: true, succeeded: true },
+]) {
+  test(`remediation reconcile requires terminal success before missing-artifact settlement: ${JSON.stringify(payload)}`, async t => {
+    const f = fixture(t);
+    const priorHqRoot = process.env.HQ_ROOT;
+    process.env.HQ_ROOT = f.hqRoot;
+    t.after(() => {
+      if (priorHqRoot === undefined) delete process.env.HQ_ROOT;
+      else process.env.HQ_ROOT = priorHqRoot;
+    });
+    const headSha = 'a'.repeat(40);
+    createFollowUpJob({ rootDir: f.rootDir, repo: HEAD.repo, prNumber: HEAD.prNumber,
+      branch: 'fixture/remediation', revisionRef: headSha, reviewerModel: 'claude', critical: true,
+      reviewBody: '## Summary\nFix the finding.', reviewPostedAt: '2026-10-01T00:00:00Z' });
+    const claimed = claimNextFollowUpJob({ rootDir: f.rootDir, claimedAt: '2026-10-01T00:01:00Z' });
+    const workspaceDir = join(f.hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+    mkdirSync(workspaceDir, { recursive: true });
+    const spawned = markFollowUpJobSpawned({ rootDir: f.rootDir, jobPath: claimed.jobPath,
+      spawnedAt: '2026-10-01T00:02:00Z', worker: {
+        model: 'codex', workerClass: 'codex', dispatchMode: 'hq', dispatchId: LRQ,
+        launchRequestId: LRQ, hqRoot: f.hqRoot, workspaceDir,
+        outputPath: join(workspaceDir, 'last-message.md'),
+        logPath: join(workspaceDir, 'worker.log'),
+        replyPath: join(f.hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      } });
+    const result = await reconcileFollowUpJob({
+      rootDir: f.rootDir, jobPath: spawned.jobPath, job: spawned.job,
+      now: () => new Date(NOW).toISOString(),
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha }),
+      execFileImpl: async (_command, args) => {
+        assert.deepEqual(args.slice(0, 2), ['dispatch', 'status']);
+        return { stdout: JSON.stringify({ ...payload, workspaceDir }) };
+      },
+      postCommentImpl: async () => ({ posted: false, error: 'offline fixture' }), log: f.logger,
+    });
+    if (payload.terminal === false) {
+      assert.equal(result.action, 'active');
+      assert.equal(result.job.status, 'in_progress');
+      assert.equal(result.job.remediationWorker.state, 'spawned');
+    } else {
+      assert.equal(result.action, 'failed');
+      assert.equal(result.job.failure.code, payload.succeeded ? 'artifact-missing-completion' : 'hq-dispatch-failed');
+    }
   });
 }

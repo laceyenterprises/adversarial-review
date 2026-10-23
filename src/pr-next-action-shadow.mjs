@@ -1,6 +1,6 @@
 // ── NXA-02 observational shadow of the shared next action ────────────────────
 //
-// Each current consumer keeps its legacy decision and effects. After deciding,
+// Consumers other than the NXA-03 wake keep legacy decisions and effects. After deciding,
 // it hands this module (through src/pr-next-action-consumer.mjs, which copies
 // the evidence synchronously and loads this module lazily) that decision plus
 // evidence it already holds. The
@@ -9,7 +9,7 @@
 // evidence references) to a bounded local JSONL log for the rollout owner
 // (bin/next-action-disagreements.mjs classifies it read-only).
 //
-// Shadow never changes effects: the call copies its evidence synchronously,
+// Shadow delivery never changes effects: the call copies its evidence synchronously,
 // returns at once, never throws, and its promise never rejects. Sink, alert and
 // evidence failures are swallowed. It prints nothing: CLI stdout stays the
 // caller's, and the JSONL log is the only record. Under the offline test runner it is inert
@@ -35,6 +35,8 @@ const NOTE_LIMIT = 512;
 // pass. Closure orchestration registers its enriched derivation; later
 // consumers of the same pass (posted-review, hammer-owner route) reuse it.
 const decisionsByPass = new WeakMap();
+// Bare reads must not prevent closure orchestration from registering evidence.
+const baselineDecisionsByPass = new WeakMap();
 const reportedOverdue = new Set();
 // Consumers without a pass (the no-progress lane) leave a legacy note that the
 // next pass decision for the same subject/head compares and drains.
@@ -100,19 +102,26 @@ function primaryChangeObservation(input, progress) {
   return { ...(progress || {}), primaryChange: { ok: result?.ok === true, reason: result?.reason ?? null } };
 }
 
-function resolveShared({ snapshot, passSnapshot, evidence }) {
-  if (snapshot) return Promise.resolve({ snapshot, decision: nextAction(snapshot) });
+// Resolve execution intent independently of shadow sinks/alerts. Adopted wake
+// routing and observational callers share the exact pair for this generation;
+// Bare reads are provisional until closure evidence registers the shared pair;
+// subsequent changed facts require a new pass, never mutation of that pair.
+export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null } = {}) {
+  if (passSnapshot && decisionsByPass.has(passSnapshot)) return decisionsByPass.get(passSnapshot);
+  if (snapshot) return Promise.resolve(Object.freeze({ snapshot, decision: nextAction(snapshot) }));
   if (evidence) {
     // Copy synchronously: legacy objects may change after the caller resumes.
     const { readLaunches, primaryChangeInput, ...fields } = evidence;
     // Closure consumers enrich round information without necessarily observing
     // a job. Keep complete pass evidence (including its owner) unless the
     // consumer explicitly replaces that field or the whole observation.
-    const remediation = fields.observations?.remediation;
-    const inheritedRemediation = passSnapshot?.observations?.remediation;
-    if (remediation && !Object.hasOwn(remediation, 'state') && inheritedRemediation?.state === 'complete') {
-      fields.observations = { ...fields.observations,
-        remediation: { ...inheritedRemediation.value, ...remediation } };
+    for (const name of ['remediation', 'policy', 'progress', 'checks']) {
+      const current = fields.observations?.[name];
+      const inherited = passSnapshot?.observations?.[name];
+      if (current && !Object.hasOwn(current, 'state') && inherited?.state === 'complete') {
+        fields.observations = { ...fields.observations,
+          [name]: { ...inherited.value, ...current } };
+      }
     }
     const progress = primaryChangeObservation(primaryChangeInput, fields.observations?.progress);
     const derived = deriveNextActionSnapshot({ base: passSnapshot, ...fields,
@@ -122,18 +131,24 @@ function resolveShared({ snapshot, passSnapshot, evidence }) {
       if (readLaunches) {
         const launches = await bounded(Promise.resolve().then(readLaunches), NEXT_ACTION_SHADOW_LAUNCH_READ_MS)
           .catch(() => ({ state: 'error', value: null, provenance: { sourceRef: 'launch-requests' } }));
-        final = deriveNextActionSnapshot({ base: derived, observations: { launches } });
+        const reference = derived.observations?.launches;
+        // Failed descendant reads cannot erase an independently read receipt,
+        // including after terminal lease removal. Keep unknown provenance.
+        const resolved = launches.state !== 'complete' && reference?.value?.closer
+          ? { ...reference, provenance: { ...reference.provenance, ledgerReadState: launches.state },
+            value: { closer: { ...reference.value.closer, retryChainUnreadable: true } } } : launches;
+        final = deriveNextActionSnapshot({ base: derived, observations: { launches: resolved } });
       }
-      return { snapshot: final, decision: nextAction(final) };
+      return Object.freeze({ snapshot: final, decision: nextAction(final) });
     })();
     if (passSnapshot) decisionsByPass.set(passSnapshot, shared);
     return shared;
   }
   if (!passSnapshot) return null;
-  let shared = decisionsByPass.get(passSnapshot);
+  let shared = baselineDecisionsByPass.get(passSnapshot);
   if (!shared) {
-    shared = Promise.resolve({ snapshot: passSnapshot, decision: nextAction(passSnapshot) });
-    decisionsByPass.set(passSnapshot, shared);
+    shared = Promise.resolve(Object.freeze({ snapshot: passSnapshot, decision: nextAction(passSnapshot) }));
+    baselineDecisionsByPass.set(passSnapshot, shared);
   }
   return shared;
 }
@@ -188,7 +203,7 @@ export function noteNextActionLegacy({ source, subjectKey, head, legacy, env = p
  * inside the shadow's guard); null records only overdue observation. Returns a
  * promise for tests; callers must not await it for control flow.
  */
-export function shadowNextAction({ source, legacy = null, snapshot = null, passSnapshot = null, evidence = null,
+export function shadowNextAction({ source, legacy = null, snapshot = null, passSnapshot = null, evidence = null, shared = null,
   repo = null, prNumber = null, rootDir = null, now = Date.now, env = process.env,
   sink = null, observeOverdueImpl = observeClosureWait, overduePageImpl = deliverOverdue } = {}) {
   let sharedPromise;
@@ -196,7 +211,7 @@ export function shadowNextAction({ source, legacy = null, snapshot = null, passS
   try {
     if (inertUnderTest(sink, env)) return Promise.resolve(null);
     adapted = adaptLegacy(legacy);
-    sharedPromise = resolveShared({ snapshot, passSnapshot,
+    sharedPromise = shared ? Promise.resolve(shared) : resolveSharedNextAction({ snapshot, passSnapshot,
       evidence: typeof evidence === 'function' ? evidence() : evidence });
     if (!sharedPromise) return Promise.resolve(null);
   } catch {

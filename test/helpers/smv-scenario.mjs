@@ -24,6 +24,8 @@ const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloser
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
 const { reconcilePreReceiptIntent } = await import('../../src/ama/pre-receipt-intent.mjs');
 const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
+const { deriveNextActionSnapshot, nextAction } = await import('../../src/pr-next-action.mjs');
+const { shadowNextAction } = await import('../../src/pr-next-action-shadow.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
@@ -522,16 +524,33 @@ if (scenario === 'clean') {
   // A finished same-head hammer releases retry ownership and fleet capacity.
   const retrySubject = { ...identity(), prNumber: prNumber + 10 };
   const { requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
-  let wakes = 0;
-  const wake = () => requestEligibleHammerWake({ ...retrySubject,
-    eligibility: { eligible: true, reasons: [] },
-    requestWatcherWakeImpl: () => { wakes++; return { requested: true }; }, log: quiet });
+  let wakes = 0, wakeShared;
+  const wake = () => {
+    const lease = readAmaCloserLease(rootDir, retrySubject);
+    const record = readAmaCloserDispatchRecord(rootDir, retrySubject);
+    const snapshot = deriveNextActionSnapshot({ subjectKey: 'subject-handoff', head: retrySubject.headSha,
+      observedAt: new Date().toISOString(), observations: {
+        pr: { headSha: retrySubject.headSha, state: 'OPEN', mergeable: 'MERGEABLE' },
+        checks: { conclusion: 'SUCCESS' },
+        reviews: { headSha: retrySubject.headSha, verdict: 'approved', blockingFindingState: 'known',
+          blockingFindingCount: 0, nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+        remediation: { roundsLeft: false }, leases: { closer: lease },
+        launches: { closer: record ? { headSha: retrySubject.headSha, launchRequestId: record.launchRequestId,
+          row: { status: record.terminalLaunchStatus || 'running' }, retryChain: [],
+          outcome: record.terminalOutcome === 'failed-without-merge' ? 'no-merge' : null, retryable: true } : null },
+        policy: { autonomousMergeExecutionEnabled: true },
+      } });
+    wakeShared = { snapshot, decision: nextAction(snapshot) };
+    return requestEligibleHammerWake({ ...retrySubject, shared: wakeShared,
+      requestWatcherWakeImpl: () => { wakes++; return { requested: true }; }, log: quiet });
+  };
   assert.equal(wake().outcome, 'requested');
   acquireAmaCloserLease(retrySubject);
   updateAmaCloserLease({ ...retrySubject, status: 'dispatched', lrqId: 'synthetic-ended' });
   updateAmaCloserDispatchRecord(rootDir, retrySubject, () => ({ ...retrySubject,
     state: 'dispatched', launchRequestId: 'synthetic-ended', lastObservedStatus: 'starting' }));
-  assert.equal(wake().outcome, 'duplicate');
+  assert.equal(wake().outcome, 'skipped');
+  assert.equal(wakeShared.decision.reason, 'live-owner');
   assert.equal(await reconcileAmaCloserLeaseAsync({ ...retrySubject,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     readMergedSignalImpl: () => ({ ok: false }),
@@ -553,6 +572,8 @@ if (scenario === 'clean') {
   assert.equal(active.some(row => row.launchRequestId === 'synthetic-ended'), false);
   assert.equal(wake().outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
   assert.equal(wakes, 2);
+  const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
+  assert.equal(shadow.decision, wakeShared.decision);
   const unreadableSubject = { ...retrySubject, prNumber: prNumber + 11 };
   updateAmaCloserDispatchRecord(rootDir, unreadableSubject, () => ({ ...unreadableSubject,
     state: 'dispatched', launchRequestId: 'synthetic-unreadable', lastObservedStatus: 'starting',

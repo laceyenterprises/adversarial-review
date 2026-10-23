@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
-import { noteNextActionLegacy, setNextActionShadowSinkForTesting, shadowNextAction,
+import { noteNextActionLegacy, resolveSharedNextAction, setNextActionShadowSinkForTesting, shadowNextAction,
   NEXT_ACTION_OVERDUE_ALERTS_ENV } from '../src/pr-next-action-shadow.mjs';
 import { closureOwnerShadowEvidence, launchSource, settleNextActionShadowsForTesting,
   shadowNextActionLater } from '../src/pr-next-action-consumer.mjs';
@@ -124,11 +124,53 @@ test('one decision per pass: later consumers reuse the enriched decision and dra
   assert.equal(second.notes.length, 0, 'notes are compared once');
 });
 
+for (const awaitBaseline of [false, true]) test(`bare pass read cannot suppress closure enrichment (awaited=${awaitBaseline})`, async () => {
+  const pass = base();
+  const baseline = resolveSharedNextAction({ passSnapshot: pass });
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass }), baseline);
+  if (awaitBaseline) await baseline;
+  let reads = 0;
+  let finishRead;
+  const launchRead = new Promise(resolve => { finishRead = resolve; });
+  const enriched = resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    readLaunches: () => { reads++; return launchRead; },
+  } });
+  assert.notEqual(enriched, baseline);
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass }), enriched, 'in-flight enrichment is shared');
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    readLaunches: () => { throw new Error('must not reread an enriched pass'); },
+  } }), enriched);
+  finishRead({ state: 'complete', value: { closer: { row: { status: 'running' }, headSha: HEAD } } });
+  const shared = await enriched;
+  assert.equal(reads, 1);
+  assert.equal((await baseline).decision.reason, 'stale-verdict');
+  assert.deepEqual([shared.decision.actor, shared.decision.reason], ['hammer', 'live-owner']);
+  const shadow = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, sink: () => {} });
+  assert.equal(shadow.decision, shared.decision);
+  assert.equal(pass.observations.launches.value.closer, null, 'baseline evidence remains immutable');
+});
+
+for (const [name, evidence, primaryChange, reason] of [
+  ['valid', { headSha: HEAD, hasHammerCommits: false }, { ok: true, reason: null }, 'stale-verdict'],
+  ['unreadable', { headSha: OLD }, { ok: false, reason: 'primary-change-read-failed' }, 'primary-change-unreadable'],
+]) test(`shared resolution preserves ${name} primary-change observation through launch enrichment`, async () => {
+  const pass = base({ observations: { progress: { diffEmpty: false } } });
+  const shared = await resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    observations: { progress: {} },
+    primaryChangeInput: { evidence, head: HEAD },
+    readLaunches: async () => ({ state: 'complete', value: { closer: null } }),
+  } });
+  assert.deepEqual(shared.snapshot.observations.progress.value, { diffEmpty: false, primaryChange });
+  assert.equal(shared.decision.reason, reason);
+  assert.deepEqual(pass.observations.progress.value, { diffEmpty: false });
+  assert.ok(Object.isFrozen(shared.snapshot.observations.progress.value.primaryChange));
+});
+
 test('round enrichment preserves the original pass remediation owner with failed CI', async () => {
   const pass = base({ observations: { remediation: {
     job: { status: 'in_progress', headSha: HEAD }, completedRounds: 1, maxRounds: 3,
   } } });
-  const run = followUpJob => shadowNextAction({ source: 'closure-orchestration', passSnapshot: pass, env,
+  const run = (followUpJob, passSnapshot = pass) => shadowNextAction({ source: 'closure-orchestration', passSnapshot, env,
     evidence: closureOwnerShadowEvidence({ currentHead: HEAD, lease: null, checks: 'FAILURE', roundsLeft: true,
       followUpJob }, { autonomousMergeExecutionEnabled: true }), sink: () => {}, now: () => Date.parse(ANCHOR) });
   const retained = await run(undefined);
@@ -137,7 +179,9 @@ test('round enrichment preserves the original pass remediation owner with failed
   assert.equal(retained.decision.round, 2, 'inherited round counts are preserved too');
   const shared = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, sink: () => {} });
   assert.equal(shared.decision, retained.decision);
-  const replaced = await run({ status: 'completed', headSha: HEAD });
+  const samePass = await run({ status: 'completed', headSha: HEAD });
+  assert.equal(samePass.decision, retained.decision, 'new facts cannot overwrite a resolved generation');
+  const replaced = await run({ status: 'completed', headSha: HEAD }, base());
   assert.deepEqual([replaced.decision.reason, replaced.decision.queue.intent], ['ci-red', 'dispatch'],
     'explicit new job evidence replaces the inherited owner');
   assert.equal(pass.observations.remediation.value.job.status, 'in_progress');
@@ -314,6 +358,7 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
     const rootDir = mkdtempSync(join(tmpdir(), 'nxa-closure-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const effects = [];
+    let wakeShared;
     const pass = deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head, observedAt: ANCHOR });
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber, currentRevisionRef: head, logger: quiet,
       passSnapshot: pass, now: () => Date.parse(ANCHOR),
@@ -342,13 +387,16 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
       probeClosureOwnershipImpl: async () => ({ owned: false, uncertain: false }),
       observeClosureWaitImpl: async () => ({}),
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible' }),
-      requestEligibleHammerWakeImpl: payload => { effects.push(['wake', payload.headSha ?? null]); return { outcome: 'skipped' }; },
+      requestEligibleHammerWakeImpl: payload => {
+        wakeShared = payload.shared;
+        effects.push(['wake', payload.headSha ?? null]); return { outcome: 'skipped' };
+      },
       maybeDispatchAmaCloserImpl: async payload => {
         effects.push(['closer', payload.dispatchContext?.dispatchReason ?? null]);
         return { dispatched: false, skipMergeAgent: true, reason: 'synthetic-probe' };
       },
     });
-    return { result, effects, pass };
+    return { result, effects, pass, wakeShared };
   };
   const plain = await runOnce();
   setNextActionShadowSinkForTesting(() => { throw new Error('synthetic sink failure'); });
@@ -365,6 +413,7 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
   assert.ok(plain.result.closureOwner, JSON.stringify(plain.result));
   // The orchestration registered its enriched decision for this pass.
   const shared = await shadowNextAction({ source: 'posted-review', passSnapshot: recorded.pass, env, now: () => Date.parse(ANCHOR) });
+  assert.equal(shared.decision, recorded.wakeShared.decision, 'wake and shadow share the decision object');
   assert.equal(shared.decision.passId, null);
   assert.equal(shared.decision.head, HEAD);
   assert.notEqual(shared.decision.reason, 'pr-unknown', 'the enriched decision, not the bare pass, reached posted-review');

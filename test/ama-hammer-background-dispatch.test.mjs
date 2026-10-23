@@ -22,7 +22,7 @@ import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } fr
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
-import { CLOSER_AUTHORED_STALE_WAKE_REASON, closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
+import { closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
 
 function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
@@ -1195,7 +1195,9 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
     const result = await maybeDispatchAmaClosureFor(args);
     assert.equal(wakes.length, 1);
     assert.equal(wakes[0].headSha, 'H1');
-    assert.equal(wakes[0].eligibility.eligible, scenario === 'green');
+    assert.equal(['hammer', 'daemon-merge'].includes(wakes[0].shared.decision.action)
+      && wakes[0].shared.decision.actor !== 'closure-recovery',
+    ['green', 'pending-conflict'].includes(scenario));
     assert.equal(payloads.length, scenario === 'pending' ? 0 : 1);
     if (scenario === 'pending') {
       assert.equal(result.reason, 'closer-head-ci-not-green');
@@ -1278,7 +1280,7 @@ test('STALECLOSER-03 closer head: mergeability UNKNOWN then CLEAN produces a wak
   assert.equal(watcherWakes.length, 1, 'mergeability resolving on the closer head wakes the watcher');
   assert.equal(watcherWakes[0].headSha, 'H1');
   assert.equal(readHammerWakeAudit(hammerWakeAuditPath(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber,
-    headSha: 'H1', eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON }))?.outcome, 'requested');
+    headSha: 'H1', eligibilityReason: 'shared-next-action', wakeAttemptKey: 'initial' }))?.outcome, 'requested');
   assert.equal(payloads.length, 1, 'the closer is dispatched for the eligible closer head');
   assert.equal(payloads[0].dispatchContext.closerAuthoredStale.eligible, true);
   assert.equal(payloads[0].dispatchContext.closerAuthoredStale.currentHead, 'H1');

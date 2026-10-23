@@ -8,7 +8,8 @@ import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
 import { isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
 import { readAmaCloserLease, AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './ama/closer-lease.mjs';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { readdir, stat, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -23,6 +24,7 @@ import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { ciBlockedHammerReasonsCovered } from './ama/review-cycle-cap-route.mjs';
 
+// Retained legacy adapter for source rollback; adopted routing uses nextAction.
 export function hammerWakeEligibility(eligibility, { dispatchReason, ciBlockedHammerOwner,
   reviewCeilingReached, reviewState, headSha, checksConclusion } = {}) {
   const stale = Boolean(reviewState?.headSha && headSha && reviewState.headSha !== headSha);
@@ -52,6 +54,8 @@ const HAMMER_WAKE_AUDIT_SCHEMA_VERSION = 1;
 const HAMMER_WAKE_ELIGIBILITY_REASON = 'clean-current-head-ci-green-policy-eligible';
 const HAMMER_WAKE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const HAMMER_WAKE_RETENTION_MAX_FILES = 5000;
+const HAMMER_WAKE_SWEEP_INTERVAL_MS = 60 * 1000;
+const hammerWakeSweeps = new Map();
 const HAMMER_WAKE_RETRY_ATTEMPTS = 3;
 const HAMMER_WAKE_STALE_RESERVATION_MS = 10 * 60 * 1000;
 
@@ -59,8 +63,9 @@ function hammerWakeAuditDir(rootDir) {
   return join(rootDir, 'data', 'hammer-wakes');
 }
 
-function hammerWakeDedupeKey({ repo, prNumber, headSha, eligibilityReason }) {
-  return `${String(repo || '').trim()}#${Number(prNumber)}@${String(headSha || '').trim()}:${String(eligibilityReason || '').trim()}`;
+function hammerWakeDedupeKey({ repo, prNumber, headSha, eligibilityReason, wakeAttemptKey }) {
+  const key = `${String(repo || '').trim()}#${Number(prNumber)}@${String(headSha || '').trim()}:${String(eligibilityReason || '').trim()}`;
+  return wakeAttemptKey ? `${key}:attempt:${wakeAttemptKey}` : key;
 }
 
 function hammerWakeAuditPath(rootDir, identity) {
@@ -81,7 +86,7 @@ function staleHammerWakeReservation(record, auditPath, nowMs = Date.now(), maxAg
   return Number.isFinite(observedMs) && nowMs - observedMs > maxAgeMs;
 }
 
-function sweepHammerWakeAudits(
+async function sweepHammerWakeAudits(
   rootDir,
   {
     nowMs = Date.now(),
@@ -92,14 +97,15 @@ function sweepHammerWakeAudits(
   const dir = hammerWakeAuditDir(rootDir);
   let entries;
   try {
-    entries = readdirSync(dir)
-      .filter((name) => name.endsWith('.json'))
-      .map((name) => {
-        const path = join(dir, name);
-        const stat = statSync(path);
-        return { path, mtimeMs: stat.mtimeMs };
-      })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    entries = [];
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith('.json')) continue;
+      const path = join(dir, name);
+      try {
+        entries.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+      } catch { /* A concurrent reservation takeover or sweep can remove a file. */ }
+    }
+    entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
   } catch {
     return { removed: 0, retained: null };
   }
@@ -111,7 +117,7 @@ function sweepHammerWakeAudits(
     const overLimit = Number.isFinite(maxFiles) && maxFiles >= 0 && retained.length >= maxFiles;
     if (expired || overLimit) {
       try {
-        rmSync(entry.path, { force: true });
+        await rm(entry.path, { force: true });
         removed += 1;
       } catch {
         retained.push(entry);
@@ -123,10 +129,26 @@ function sweepHammerWakeAudits(
   return { removed, retained: retained.length };
 }
 
+function scheduleHammerWakeAuditSweep(rootDir) {
+  const dir = hammerWakeAuditDir(rootDir);
+  if (hammerWakeSweeps.has(dir)) return hammerWakeSweeps.get(dir);
+  // Coalesce bursts and keep filesystem traversal off the synchronous wake path.
+  // Retention is best effort and must never reject into dispatch or keep it alive.
+  const sweep = sweepHammerWakeAudits(rootDir)
+    .catch(() => ({ removed: 0, retained: null }))
+    .finally(() => {
+      setTimeout(() => hammerWakeSweeps.delete(dir), HAMMER_WAKE_SWEEP_INTERVAL_MS).unref();
+    });
+  hammerWakeSweeps.set(dir, sweep);
+  return sweep;
+}
+
 /**
  * Reserve and fire the event-driven close-lane wake. This deliberately wakes
  * the watcher: that watcher owns the existing AMA daemon/Hammer decision and
- * closer lease, so the hook cannot become a parallel merge authority.
+ * closer lease, so the hook cannot become a parallel merge authority. Shared
+ * callers provide an immutable snapshot/decision pair; eligibility is retained
+ * only for the legacy source rollback adapter.
  */
 function requestEligibleHammerWake({
   rootDir = ROOT,
@@ -142,12 +164,13 @@ function requestEligibleHammerWake({
   requestWatcherWakeImpl = requestWatcherWake,
   log = console,
   retryAttempt = 0,
+  shared = null,
 } = {}) {
   // Suppression hands this exact worker push to the hammer. It is eligible
   // for a wake, while merge authority still requires HAM terminal validation.
   // Keep every other policy miss, including CI, and never inherit an unrelated
   // unreviewed push. The same terminal job record owns re-review suppression.
-  if (eligibility?.reasons?.includes('stale-head')) {
+  if (!shared && eligibility?.reasons?.includes('stale-head')) {
     const finalRound = findCommentOnlyFinalRoundPushJob(rootDir, {
       repo, prNumber, reviewedHead: reviewedHeadSha, workerPushedHeadSha: headSha,
     }, log);
@@ -156,11 +179,36 @@ function requestEligibleHammerWake({
       eligibility = { ...eligibility, eligible: reasons.length === 0, reasons };
     }
   }
+  // The legacy adapter above is retained for source rollback. Adopted callers
+  // supply the already-resolved pair; transport must not read a second policy
+  // snapshot or infer launch absence from a wake or a terminal worker audit.
+  const decision = shared?.decision;
+  const retryEvidence = decision?.reason === 'retry-no-merge'
+    ? shared.snapshot?.observations?.launches?.value?.closer : null;
+  const retryLaunch = retryEvidence?.launchRequestId || null;
+  // Fleet descendants reuse the ancestor receipt. Their completed IDs must
+  // advance wake identity too; status/timestamp changes alone must not.
+  const retryIds = [...new Set((Array.isArray(retryEvidence?.retryChain) ? retryEvidence.retryChain : [])
+    .map(row => row?.launch_request_id || row?.launchRequestId || row?.id).filter(id => typeof id === 'string' && id))].sort();
+  const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
+    .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
+  if (shared) {
+    const ownsWake = (decision?.action === 'hammer' && decision.actor === 'hammer'
+      && decision.queue?.intent === 'dispatch')
+      || (decision?.action === 'daemon-merge' && decision.actor === 'daemon' && decision.queue?.intent === 'daemon');
+    eligibility = { eligible: Boolean(ownsWake && !decision.queue.deferredBy
+      && decision.head === headSha && shared.snapshot?.head === headSha),
+      reasons: [decision?.reason].filter(Boolean) };
+    if (eligibility.eligible) eligibility.reasons = [];
+    eligibilityReason = 'shared-next-action';
+  }
   const identity = {
     repo: String(repo || '').trim(),
     prNumber: Number(prNumber),
     headSha: String(headSha || '').trim(),
     eligibilityReason: String(eligibilityReason || '').trim(),
+    ...(shared ? { wakeAttemptKey: retryIdentity || (decision?.reason === 'retry-no-merge' && decision.attempt != null
+      ? `retry-${decision.attempt}` : 'initial') } : {}),
   };
   const eligibilityReasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
   let outcome = 'skipped';
@@ -174,7 +222,7 @@ function requestEligibleHammerWake({
   } else if (eligibility?.eligible === true) {
     try {
       mkdirSync(hammerWakeAuditDir(rootDir), { recursive: true });
-      sweepHammerWakeAudits(rootDir);
+      scheduleHammerWakeAuditSweep(rootDir);
     } catch (err) {
       outcome = 'failed';
       reason = 'wake-audit-dir-unavailable';
@@ -183,8 +231,8 @@ function requestEligibleHammerWake({
     }
     if (outcome !== 'failed') {
       auditPath = hammerWakeAuditPath(rootDir, identity);
-      let retryOfLaunchRequestId = null;
-      try {
+      let retryOfLaunchRequestId = retryLaunch || null;
+      if (!shared) try {
         const lease = readAmaCloserLease(rootDir, identity);
         if (lease?.status === 'terminal' && AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(lease.terminalOutcome)) {
           const record = readAmaCloserDispatchRecord(rootDir, { ...identity,
@@ -204,6 +252,10 @@ function requestEligibleHammerWake({
         outcome: 'reserved',
         ...(retryOfLaunchRequestId ? { retryOfLaunchRequestId } : {}),
         route: 'watcher-ama-merge-authority',
+        ...(shared ? { nextAction: { action: decision.action, actor: decision.actor, reason: decision.reason,
+          deadline: decision.deadline, head: decision.head, decisionKey: decision.decisionKey,
+          evidenceRefs: decision.evidenceRefs, queue: decision.queue,
+          passId: decision.passId, generation: decision.generation } } : {}),
       };
       let reservationCreated = false;
       try {
@@ -219,7 +271,7 @@ function requestEligibleHammerWake({
         });
         if (wake?.requested !== true) throw new Error('watcher wake did not confirm request');
         outcome = 'requested';
-        reason = identity.eligibilityReason;
+        reason = decision?.reason || identity.eligibilityReason;
         const requestedRecord = {
           ...reserved,
           outcome,
@@ -243,8 +295,9 @@ function requestEligibleHammerWake({
             at: observedAt,
             source: 'event-driven-hammer-wake',
             idempotencyKey: `hammer-wake:${hammerWakeDedupeKey(identity)}${retryOfLaunchRequestId ? `:retry:${retryOfLaunchRequestId}` : ''}`,
-            reason: identity.eligibilityReason,
-            payload: { outcome, route: reserved.route, requestId: wake?.payload?.request_id || null },
+            reason: decision?.reason || identity.eligibilityReason,
+            payload: { outcome, route: reserved.route, requestId: wake?.payload?.request_id || null,
+              ...(shared ? { nextAction: reserved.nextAction } : {}) },
           });
           latencyEvent = { recorded: true, eventType: 'hammer_wake', wakeOutcome: outcome };
         } catch (err) {
@@ -299,6 +352,7 @@ function requestEligibleHammerWake({
                   reviewStateDb,
                   ...identity,
                   reviewedHeadSha,
+                  shared,
                   eligibility,
                   observedAt,
                   nowMs,
@@ -313,6 +367,7 @@ function requestEligibleHammerWake({
                     reviewStateDb,
                     ...identity,
                     reviewedHeadSha,
+                    shared,
                     eligibility,
                     observedAt,
                     nowMs,
@@ -356,6 +411,7 @@ function requestEligibleHammerWake({
     outcome,
     reason,
     eligibilityReasons,
+    ...(shared ? { nextAction: decision } : {}),
     route: 'watcher-ama-merge-authority',
     // Diagnostic only: the caller relies on a later watcher tick, not this flag.
     retryable,
@@ -513,5 +569,6 @@ export {
   readHammerWakeAudit,
   requestEligibleHammerWake,
   requestHammerWakeForSettledReviewStop,
+  scheduleHammerWakeAuditSweep,
   sweepHammerWakeAudits,
 };

@@ -27,6 +27,11 @@ and releases its pending lease. Preserve the predecessor LRQ and artifacts on
 their original head for the next probe; charge the existing bounded failure
 budget and suppress fallback while that evidence is unresolved.
 
+Unverified dispatch receipts log `ama_closer.launch_receipt_unverified`; explicit
+identity conflicts log `ama_closer.launch_identity_mismatch`. A foreign lease skips
+the receipt lookup and records query reason `lookup-skipped-foreign-lease` with
+no query attempts.
+
 Receipt lookups use the ledger's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded

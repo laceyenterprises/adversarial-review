@@ -650,7 +650,7 @@ function describePostgresSpawnFailure(result) {
 
 function queryPostgresRows(...args) { return runLedgerStepsSync(queryPostgresRowsSteps(...args)); }
 
-function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
+function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false, timeoutMs = null } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -707,7 +707,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
+        timeout: timeoutMs ?? loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
         input: script,
@@ -717,7 +717,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
+        timeout: timeoutMs ?? loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
       } };
@@ -953,7 +953,7 @@ export function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
 }
 
 function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget, ledgerDbPath,
-  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
+  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
   if (!normalizeText(idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
     rootDir, hqRoot, requiredTables: ['launch_requests'] });
@@ -978,7 +978,7 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
     `${postgresLaunchColumns}
      SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests request
        WHERE idempotency_key = :'intent_key' LIMIT 2) receipt`,
-    { spawnSyncImpl, readOnly: true, psqlVars: [['intent_key', idempotencyKey]] });
+    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['intent_key', idempotencyKey]] });
 }
 
 // Legacy intents lack an admission key. Query the whole ticket, without a repo
@@ -989,7 +989,7 @@ export function readLaunchRequestsForTicketSinceAsync(args = {}) {
 
 function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
   ledgerTarget, ledgerDbPath, env = process.env, rootDir = process.cwd(), hqRoot,
-  spawnSyncImpl = spawnSync } = {}) {
+  spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
   if (!normalizeText(ticketRef) || typeof requestedAtOrAfter !== 'string'
     || !Number.isFinite(Date.parse(requestedAtOrAfter))) {
     return { ok: false, reason: 'invalid-ticket-attempt-query' };
@@ -1010,7 +1010,7 @@ function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
     `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
        WHERE ticket_ref = :'ticket_ref'
          AND (requested_at >= :'since'::timestamptz OR requested_at IS NULL) LIMIT 1) receipt`,
-    { spawnSyncImpl, readOnly: true, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
+    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
 }
 
 function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,

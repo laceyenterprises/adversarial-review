@@ -128,6 +128,7 @@ for (const mode of ['live', 'foreign-host', 'dispatched-other', 'unreadable', 'm
       writeFileSync(amaCloserLeaseFilePath(f.rootDir, identity), JSON.stringify({
         ...readAmaCloserLease(f.rootDir, identity), holderHost: `${hostname()}-other`,
       }));
+      extra.readIntentReceiptImpl = () => assert.fail('foreign lease must skip receipt lookup');
     }
     if (mode === 'dispatched-other') updateAmaCloserLease({ rootDir: f.rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_other' });
     if (mode === 'unreadable') extra.readIntentReceiptImpl = () => { throw Error('unavailable'); };
@@ -137,6 +138,10 @@ for (const mode of ['live', 'foreign-host', 'dispatched-other', 'unreadable', 'm
     if (mode === 'foreign-repo') f.insert({ ...receipt, target_repo: 'different' });
     const lease = readAmaCloserLease(f.rootDir, identity);
     assert.equal((await f.reconcile(extra)).status, 'unknown');
+    if (mode === 'foreign-host') {
+      assert.equal(f.read().preReceiptReconciliation.query.reason, 'lookup-skipped-foreign-lease');
+      assert.deepEqual(f.read().preReceiptReconciliation.query.attempts, []);
+    }
     assert.equal(f.read().retryCount, 2);
     assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
     assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
@@ -202,11 +207,12 @@ test('dry-run changes no intent, lease or budget bytes', async t => {
 });
 
 test('Postgres receipt lookup uses read-only parameterized bounded SQL', async () => {
-  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote",
+  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote", timeoutMs: 240_000,
     ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
     spawnSyncImpl(command, args, options) {
       assert.equal(command, 'psql');
       assert.ok(args.includes("intent_key=key'quote"));
+      assert.equal(options.timeout, 240_000);
       assert.match(options.input, /BEGIN READ ONLY/);
       assert.match(options.input, /idempotency_key = :'intent_key' LIMIT 2/);
       assert.match(options.input, /:launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha/);
@@ -485,11 +491,12 @@ test('audit failure prevents operator settlement', async t => {
 });
 
 test('legacy Postgres query is read-only, bounded and parameterized across the whole ticket', async () => {
-  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started,
+  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started, timeoutMs: 240_000,
     ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
     spawnSyncImpl(command, args, options) {
       assert.equal(command, 'psql');
       assert.ok(args.includes("ticket_ref=AMA-PR-8'fixture"));
+      assert.equal(options.timeout, 240_000);
       assert.ok(args.includes('since=2026-10-22T10:18:18.000Z'));
       assert.match(options.input, /BEGIN READ ONLY/);
       assert.match(options.input, /ticket_ref = :'ticket_ref'/);

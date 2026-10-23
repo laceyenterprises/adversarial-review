@@ -2654,3 +2654,26 @@ test('CLOSERINTENT-01: new submitting intent cannot inherit the previous attempt
   assert.equal(submitted, true, JSON.stringify(result));
   assert.equal(result.dispatched, true, JSON.stringify(result));
 });
+
+for (const failedCall of [false, true]) test(`CLOSERINTENT-01: missing ticket evidence logs an unverified receipt (failed call=${failedCall})`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-unverified-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const messages = [];
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    logger: { warn: text => messages.push(text) },
+    execFileImpl: async () => {
+      const output = { stdout: JSON.stringify({ launchRequestId: 'lrq_unverified' }) };
+      if (failedCall) throw Object.assign(new Error('synthetic dispatch error'), output);
+      return output;
+    },
+  });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-receipt-unverified');
+  assert.ok(messages.some(line => line.includes('ama_closer.launch_receipt_unverified')));
+  assert.ok(messages.every(line => !line.includes('ama_closer.launch_identity_mismatch')));
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD })));
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.launchRequestId, null);
+  assert.equal(readAmaCloserLease(rootDir, record).status, 'pending');
+});

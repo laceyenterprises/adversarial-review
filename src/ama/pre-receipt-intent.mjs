@@ -168,7 +168,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
       : options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync;
     const args = { ...options, rootDir, hqRoot: options.hqRoot || record.hqRoot, ...query };
     const probe = !foreignLease ? await lookupReceipt(read, args, options) : null;
-    let evidence = queryEvidence(query, probe);
+    let evidence = queryEvidence(query, foreignLease ? { reason: 'lookup-skipped-foreign-lease' } : probe);
     // Operator recovery also supports keyed historical records: prove absence
     // across the entire closer ticket, never only the misattributed launch ID.
     let operatorAbsence = false;

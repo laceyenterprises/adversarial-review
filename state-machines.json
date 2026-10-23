@@ -322,7 +322,7 @@
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
     "src/ama-closure-orchestration.mjs": "0d136cfde606709609c191f21acab127a386ead5713853fc1cf1e346fb3089f4",
     "src/ama/closer-lease.mjs": "4cd0c998514fc5bd7401266b66ae2ecf33c02a87b6b62d8ef33d3c9a5779f1e8",
-    "src/ama/closure-owner.mjs": "d8c4adf77536fe249f40c364c2f81e37c888475deb928e65a1d5db95956086f9",
+    "src/ama/closure-owner.mjs": "9ad8f4e80bdbafb78e2ac675356d9e76742cdf9011f871b60f4e4528655e0736",
     "src/ama/dispatch-closer.mjs": "21ed12ec5cd9ded436b82ef5941276fec236dd709eed9795ad799a2e95a8544b",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",

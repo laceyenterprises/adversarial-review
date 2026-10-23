@@ -51,7 +51,7 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   if (lease?.lrqId && (launchRequestParked(launchStatusProbe)
     || (lease.status === 'terminal' && lease.terminalOutcome === 'deferred'
       && launchRequestOwned(launchStatusProbe) === true))) {
-    return action('wait', `dispatch-status-${withLiveLaunchRetry(launchStatusProbe).row.status.replaceAll('_', '-')}`,
+    return action('wait', `dispatch-status-${String(withLiveLaunchRetry(launchStatusProbe)?.row?.status || 'unknown').replaceAll('_', '-')}`,
       { retryAfterMs: CLOSURE_OWNER_WAIT_MS });
   }
   // Reclaimability is shared with dispatch; only acquisition mutates the lease.

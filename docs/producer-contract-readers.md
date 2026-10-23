@@ -179,6 +179,10 @@ unchanged dispatch identity still owns the PR. They cannot be reclaimed,
 redispatched by ordinary or orphan recovery, or lose their scratch directory
 while parked. Parked observations are re-read rather than cached as final.
 A later resolved producer status restores the existing retry/settlement policy.
+Producer terminality alone is not child-exit or ownership-release authority:
+`blocked_needs_decision` is itself terminal in the producer vocabulary, including
+when the wire explicitly reports `terminal: true`. A live wire-only observation
+without a status string retains ownership and uses an `unknown` wait reason.
 The legacy stored spellings map through producer values: `completed` →
 `succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
 `rejected` → `failed`. These aliases supply no new retry authority. Unknown

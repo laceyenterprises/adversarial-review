@@ -61,6 +61,28 @@ test('parked retry descendants retain ownership without capacity', () => {
   assert.equal(launchRequestOwned(probe), true);
 });
 
+test('producer-terminal decision evidence retains ownership until its status resolves', () => {
+  for (const status of ['blocked_needs_decision', 'canceled', 'failed', 'superseded']) {
+    const row = { status, terminal: true, succeeded: false };
+    assert.equal(launchRequestMeaning(row).terminal, true);
+    assert.equal(launchRequestInFlight({ ok: true, row }), false);
+    assert.equal(launchRequestOwned({ ok: true, row }), status === 'blocked_needs_decision');
+  }
+});
+
+test('wire-only live ownership returns a wait reason without a status string', () => {
+  for (const status of [undefined, null, '', 42]) {
+    const row = { status, terminal: false };
+    const owner = decideClosureOwner({
+      lease: { lrqId: 'wire-only', status: 'terminal', terminalOutcome: 'deferred' },
+      launchStatusProbe: { ok: true, row }, currentHead: 'head',
+      reviewState: { verdict: 'approved', headSha: 'head' },
+    });
+    assert.equal(owner.owner, 'wait');
+    assert.equal(owner.reason, `dispatch-status-${status || 'unknown'}`);
+  }
+});
+
 for (const status of ['blocked_needs_decision', 'waiting_input', 'waiting_approval']) {
   test(`fresh terminal ledger evidence overrides stored parked ${status}`, () => {
     const record = { state: 'dispatched', launchRequestId: 'parked', lastObservedStatus: status,

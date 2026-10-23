@@ -920,6 +920,8 @@ Positive resumed execution also restores fleet capacity accounting, including
 when the deferred lease was rekeyed to the worker's new head.
 Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
+Producer-terminal decision states retain ownership; wire-only live probes with
+no status string return an `unknown` wait reason without interrupting arbitration.
 The offline `test/launch-request-status.test.mjs` table covers every vocabulary
 status, wire precedence, retry descendants, and parked/resumed ownership without a
 second dispatch. The clean sandbox smoke also verifies repeated resumed-owner

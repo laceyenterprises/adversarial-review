@@ -880,9 +880,9 @@ export {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main(process.argv.slice(2)).then((code) => {
-    process.exit(code);
+    process.exitCode = code;
   }).catch((err) => {
     process.stderr.write(`error: ${err.message}\n`);
-    process.exit(EXIT_RUNTIME);
+    process.exitCode = EXIT_RUNTIME;
   });
 }

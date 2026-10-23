@@ -520,5 +520,5 @@ function main(argv, {
 export { UsageError, USAGE, main, parseArgs, readReasonFromSource };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exit(main(process.argv.slice(2)));
+  process.exitCode = main(process.argv.slice(2));
 }

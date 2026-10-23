@@ -640,4 +640,4 @@ async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-process.exit(await main());
+process.exitCode = await main();

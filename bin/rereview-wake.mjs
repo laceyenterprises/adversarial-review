@@ -209,7 +209,7 @@ function main(argv = process.argv.slice(2), deps = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exit(main());
+  process.exitCode = main();
 }
 
 export { main, renderStatus };

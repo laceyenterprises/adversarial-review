@@ -210,4 +210,4 @@ function main(argv = process.argv.slice(2)) {
   }
 }
 
-process.exit(main());
+process.exitCode = main();

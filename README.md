@@ -1,5 +1,18 @@
 # Adversarial Review
 
+LAC-2094: finite CLI result entrypoints allow pending stdout/stderr writes to
+finish before exiting. Merge-lease `status`/`list` preserve the complete JSON
+document and retained attempts on pipes, including slow consumers. See the
+[output contract](docs/RUNBOOK-ama-closure.md#cli-output-completion-lac-2094)
+and [offline proof and sibling sweep](docs/validation/cli-output-lifecycle.md).
+This changes no persistent schema/model, lifecycle states/transitions or
+declared smoke promises. Live recovery acceptance remains separate from source
+publication. Run the focused regressions with:
+
+```bash
+node test/run-tests.mjs cli-output-lifecycle.test.mjs
+```
+
 ```
            /\                                                 /\
  _         )( ______________________   ______________________ )(         _

@@ -11,7 +11,7 @@ const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 
 async function network(command, args, input) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return meteredExecFileSync(execFileSync, command, args, { input, ...(command === 'gh' ? { hammerToken: true } : {}), timeout: 15000,
+      return meteredExecFileSync(execFileSync, command, args, { input, hammerToken: true, timeout: 15000,
         maxBuffer: 64 * 1024 * 1024, env: process.env });
     } catch (error) {
       const transient = isTransientGhError(error) || (command === 'git'

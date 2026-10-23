@@ -2,7 +2,8 @@
 # GitHub credentials refresh inside metered-gh immediately before each call.
 export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
-ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
+ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
+ham_git() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
 ham_entitled_gh() { ham_gh "$@"; }
@@ -351,12 +352,12 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
     HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
     HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
     if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
-      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+      ham_git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }
     else
-      git push --force-with-lease || {
+      ham_git push --force-with-lease || {
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }

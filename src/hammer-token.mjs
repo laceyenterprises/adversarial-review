@@ -5,7 +5,7 @@ const ENTITLED_VARS = ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'];
 function credentialRejected(error) {
   const detail = [error?.message, error?.stderr, error?.stdout].join('\n');
   return error?.status === 401 || error?.response?.status === 401
-    || /\bbad credentials\b|\bHTTP(?:\/\S+)?\s+401\b|\b401\s+Unauthorized\b/i.test(detail);
+    || /\bbad credentials\b|\bHTTP(?:\/\S+)?\s+401\b|\b401\s+Unauthorized\b|\bauthentication (?:failed|required)\b|could not read (?:Username|Password)|\brequires authentication\b|\btoken (?:has )?expired\b|\bunauthorized\b[^\n]*\b401\b/i.test(detail);
 }
 
 // Launch commands are trusted environment inputs, never PR content. Refresh on
@@ -17,18 +17,24 @@ function tokenContext(options) {
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
   const command = (variable && credentialEnv[`${variable}_REFRESH_COMMAND`])
     || credentialEnv.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND;
-  const managed = Boolean(hammerToken || credentialEnv.HAM_ROOT_DIR)
-    && (ENTITLED_VARS.some(key => credentialEnv[key]) || Boolean(command));
+  const entitled = ENTITLED_VARS.some(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`]);
+  const managed = Boolean(hammerToken || (credentialEnv.HAM_ROOT_DIR && entitled))
+    && (entitled || Boolean(command));
   return { credentialEnv, childOptions, variable, command, managed };
 }
 
-// Use the selected entitlement for admission-cache and throttle identity too.
-// Keep the full launch environment private to the refresh command.
-export function hammerTokenOptions(options = {}) {
-  const { credentialEnv, variable, managed } = tokenContext(options);
-  if (!managed) return options;
-  return { ...options, credentialEnv, env: { ...(options.env || process.env),
-    GH_TOKEN: credentialEnv[variable], GITHUB_TOKEN: credentialEnv[variable] } };
+// Scope Git's credential helper to this child, preserving other inline config.
+// No token appears in argv or persistent git config, and host helpers cannot
+// select an ambient worker identity ahead of the entitled gh credential.
+export function hammerGitOptions(options) {
+  const env = { ...(options.env || process.env) };
+  const count = Number(env.GIT_CONFIG_COUNT || 0);
+  env.GIT_CONFIG_COUNT = String(count + 2);
+  env[`GIT_CONFIG_KEY_${count}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${count}`] = '';
+  env[`GIT_CONFIG_KEY_${count + 1}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${count + 1}`] = '!gh auth git-credential';
+  return { ...options, env, stdio: 'pipe' };
 }
 
 export function hammerTokenSession(options = {}) {
@@ -100,7 +106,7 @@ export async function withHammerToken(execute, options) {
   const session = hammerTokenSession(options);
   while (true) {
     const active = session.prepare();
-    try { return session.redact(await execute(active)); }
+    try { return session.redact(await execute(active, session)); }
     catch (error) { session.retry(error); }
   }
 }
@@ -110,7 +116,7 @@ export function withHammerTokenSync(execute, options) {
   while (true) {
     const active = session.prepare();
     let result;
-    try { result = execute(active); }
+    try { result = execute(active, session); }
     catch (error) { session.retry(error); continue; }
     if (session.managed && result && typeof result === 'object' && Number(result.status) > 0 && credentialRejected(result)) {
       session.retry(result);

@@ -13,7 +13,7 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
     else if (action === 'limited') await recordRateLimitedCall(item.resource || item, item.credential);
     else await recordResponseRateLimit(item);
   }
-} else if (action === 'exec') {
+} else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   let terminationSignal;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
@@ -29,7 +29,8 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
     for (const [signal, cancel] of cancellations) process.on(signal, cancel);
   });
   try {
-    const result = await meteredExecFile(execute, 'gh', args, {
+    const result = await meteredExecFile(execute, action === 'exec-git' ? 'git' : 'gh', args, {
+      ...(action !== 'exec' ? { hammerToken: true } : {}),
       timeout: 30_000, killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     });
     process.stdout.write(result.stdout || '');
@@ -41,6 +42,6 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
     process.exitCode = signalNumber ? 128 + signalNumber : Number.isInteger(err.code) ? err.code : Number.isInteger(err.status) ? err.status : 1;
   }
 } else {
-  process.stderr.write('usage: metered-gh.mjs exec <gh arguments>\n');
+  process.stderr.write('usage: metered-gh.mjs exec|exec-hammer <gh arguments> | exec-git <git arguments>\n');
   process.exitCode = 64;
 }

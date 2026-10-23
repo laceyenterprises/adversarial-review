@@ -83,7 +83,7 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec "$@"; }
+ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"

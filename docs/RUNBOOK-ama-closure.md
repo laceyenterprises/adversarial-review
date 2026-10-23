@@ -4634,19 +4634,29 @@ request marker and per-head evidence, and confirm pushed edges never satisfy
 
 All closer GitHub calls use `bin/metered-gh.mjs` or Node's shared metered
 execution seam. `src/hammer-token.mjs` selects `HAMMER_LACEY_GH_TOKEN`, with
-`MERGE_AGENT_GH_TOKEN` as the legacy fallback. Immediately before each GitHub
-invocation, including after a CI wait or throttle wait, it runs that variable's
-`<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch environment's
-`HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
+`MERGE_AGENT_GH_TOKEN` as the legacy fallback. It resolves the credential before
+admission-cache lookup and rate-limit accounting, including when dispatch only
+supplies a refresh command. Each invocation, including after a CI wait, runs
+that variable's `<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch
+environment's `HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
 10-second timeout and must print only the new token on stdout. Its diagnostics
-are discarded. Without a refresh command, the current token is used unchanged.
+are discarded. After an actual throttle wait it refreshes again immediately
+before execution and attributes the response to that credential. Without a
+refresh command, the current token is used unchanged.
 
 Audit publication, gate-cap closing status and pushed-attestation preflights also
 accept a refresh command alone: `HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND`,
 `MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND` or the generic launch fallback. They do
 not require a pre-minted token. `bin/hammer-context.mjs` explicitly enables
 hammer token management for history reads as well as the initial PR snapshot,
-including when it runs before inputs export `HAM_ROOT_DIR`.
+including when it runs before inputs export `HAM_ROOT_DIR`. Other Node helpers
+using `execGhWithRetry` reach the same refresh/retry seam through
+`meteredExecFile`; they do not independently wrap it. Automatic closer detection
+requires `HAM_ROOT_DIR` plus a hammer/legacy token or its refresh command; a
+generic launch refresh command alone requires explicit `hammerToken: true`.
+Closer shell `ham_gh` wrappers use `exec-hammer` to set this marker explicitly.
+Service/reviewer calls with only `HAM_ROOT_DIR` and generic launch refresh retain
+their own credentials.
 
 A 401 or `Bad credentials` response forces one more refresh and one retry of the
 same call. A second rejection reports that refresh succeeded but the retry was
@@ -4655,3 +4665,13 @@ outcome. Closer failures never invoke the watcher's broker refresh path. Token
 values are redacted from returned output and errors. Use `ham_gh` and `ham_pr`
 from the closer inputs; do not copy a launch token into a long-lived shell
 variable or print it while diagnosing a wait. No configuration change is needed.
+
+Git publication uses the same credential session: `hammer-publish.sh` invokes
+`bin/metered-gh.mjs exec-git` through `ham_git`, and `hammer-api-publish.mjs`
+explicitly enables hammer credentials for its Git fetches. Each child receives
+fresh `GH_TOKEN` and `GITHUB_TOKEN` plus an inline `!gh auth git-credential`
+helper, after resetting inherited credential helpers and preserving other
+inline Git configuration. Authentication rejection refreshes and retries once
+with the original Git arguments, including the exact-head push lease. Tokens
+never enter persistent shell assignments, argv or Git configuration. Ordinary
+non-hammer Git execution remains outside this opt-in credential path.

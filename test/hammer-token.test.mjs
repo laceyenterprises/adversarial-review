@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { hammerTokenSession } from '../src/hammer-token.mjs';
+import { githubCredential, githubBudgetKey, markGitHubRateLimited, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 const expired = 'synthetic-expired-token';
 const fresh = 'synthetic-fresh-token';
@@ -194,15 +195,15 @@ test('refresh command has a fixed timeout and discards its diagnostics', t => {
     error => /refresh failed \(timeout or signal\)/.test(error.message) && !error.message.includes('synthetic-secret'));
 });
 
-for (const failure of [false, true]) {
-  test(`metered CLI never emits token values on ${failure ? 'failure' : 'success'}`, t => {
+for (const action of ['exec', 'exec-hammer', 'exec-git']) for (const failure of [false, true]) {
+  test(`metered CLI ${action} never emits token values on ${failure ? 'failure' : 'success'}`, t => {
     const f = fixture(t);
-    writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+    writeFileSync(join(f.dir, action === 'exec-git' ? 'git' : 'gh'), `#!${process.execPath}
 process.stdout.write(process.env.GH_TOKEN);
 process.stderr.write(process.env.GITHUB_TOKEN + ${JSON.stringify(failure ? ' HTTP 401 Bad credentials' : '')});
 process.exit(${failure ? 1 : 0});
 `, { mode: 0o755 });
-    const result = spawnSync(process.execPath, [resolve('bin/metered-gh.mjs'), 'exec', 'api', 'fixture'], {
+    const result = spawnSync(process.execPath, [resolve('bin/metered-gh.mjs'), action, 'api', 'fixture'], {
       env: f.env, encoding: 'utf8', timeout: 10000,
     });
     assert.equal(result.error, undefined);
@@ -283,4 +284,199 @@ test('service and reviewer calls keep explicit credentials outside closer contex
     },
   });
   assert.equal(result.stdout, 'ok');
+});
+
+for (const mode of ['async', 'sync', 'spawn']) {
+  for (const variable of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'HQ_ENTITLEMENT_GH_TOKEN']) {
+    test(`${mode}: ${variable} refresh-only credential owns admission and telemetry`, async t => {
+      const f = fixture(t);
+      const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+      delete f.env.HAMMER_LACEY_GH_TOKEN;
+      delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+      f.env[`${variable}_REFRESH_COMMAND`] = command;
+      // Generic launch commands require the explicit closer marker.
+      const options = { env: f.env, hammerToken: true };
+      let calls = 0;
+      const execute = (_command, _args, active) => {
+        calls++;
+        assert.equal(active.env.GH_TOKEN, fresh);
+        assert.equal(active.credentialEnv, undefined);
+        return { status: 0, stdout: 'ok', stderr: '* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n' };
+      };
+      const previous = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+      process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = f.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+      t.after(() => {
+        if (previous === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+        else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previous;
+      });
+      await withGitHubBudgetScope({}, async () => {
+        markGitHubRateLimited('core', 'default');
+        const result = mode === 'async'
+          ? await meteredExecFile(async (...args) => execute(...args), 'gh', ['api', 'fixture'], options)
+          : meteredExecFileSync(mode === 'spawn' ? execute : (...args) => {
+            const result = execute(...args);
+            // Exercise the synchronous exception path and its telemetry too.
+            throw Object.assign(new Error('HTTP 403 Forbidden'), result, { status: 1 });
+          }, 'gh', ['api', 'fixture'], options);
+        assert.equal(result.stdout, 'ok');
+      }).catch(error => {
+        if (mode !== 'sync') throw error;
+        assert.equal(error.status, 1);
+        assert.match(error.message, /HTTP 403 Forbidden/);
+      });
+      assert.equal(calls, 1);
+      assert.equal(f.count(), 1);
+      const buckets = JSON.parse(readFileSync(f.env.GHO_RATE_LIMIT_SHARED_STATE_PATH, 'utf8')).buckets;
+      assert.deepEqual(Object.keys(buckets), [githubBudgetKey('core', githubCredential({ token: fresh }))]);
+    });
+  }
+}
+
+test('refresh-only admission-cache reads are keyed by the resolved credential', async t => {
+  const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  const { withAdmissionReadCache } = await import('../src/watcher-admission-read-cache.mjs');
+  const other = 'synthetic-second-entitlement';
+  let calls = 0;
+  const execute = async (_command, _args, options) => {
+    calls++;
+    return { stdout: options.env.GH_TOKEN === fresh ? 'first' : 'second' };
+  };
+  await withAdmissionReadCache(async () => {
+    for (const expected of ['first', 'second']) {
+      const result = await meteredExecFile(execute, 'gh', ['pr', 'view', '42', '--json', 'headRefOid,statusCheckRollup'], { env: f.env });
+      assert.equal(result.stdout, expected);
+      f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = `printf %s ${quote(other)}`;
+    }
+  });
+  assert.equal(calls, 2);
+});
+
+test('HAM_ROOT_DIR plus a generic launch refresh does not replace service credentials', async t => {
+  const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  f.env.GH_TOKEN = 'synthetic-service-token';
+  f.env.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND = 'exit 99';
+  const result = await execGhWithRetry({ env: f.env, args: ['api', 'fixture'],
+    execFileImpl: async (_command, _args, options) => {
+      assert.equal(options.env.GH_TOKEN, f.env.GH_TOKEN);
+      return { stdout: 'ok' };
+    },
+  });
+  assert.equal(result.stdout, 'ok');
+});
+
+for (const detail of ['HTTP 401', 'Requires authentication', 'Authentication failed', 'token has expired']) {
+  test(`explicit refresh-only CLI context handles ${detail} without watcher remint`, async t => {
+    const f = fixture(t);
+    delete f.env.HAM_ROOT_DIR;
+    delete f.env.HAMMER_LACEY_GH_TOKEN;
+    let calls = 0;
+    await assert.rejects(execGhWithRetry({ env: f.env, hammerToken: true, args: ['api', 'fixture'],
+      execFileImpl: async (_command, _args, options) => {
+        calls++;
+        assert.equal(options.env.GH_TOKEN, fresh);
+        throw new Error(detail);
+      },
+      refreshGhAuthImpl: () => assert.fail('closer must never use the watcher broker'),
+    }), /refresh succeeded, but GitHub rejected/);
+    assert.equal(calls, 2);
+    assert.equal(f.count(), 2);
+  });
+}
+
+for (const mode of ['async', 'sync']) {
+  test(`${mode}: Git network calls refresh and retry through the entitled credential helper`, async t => {
+    const f = fixture(t);
+    delete f.env.HAMMER_LACEY_GH_TOKEN;
+    f.env.GH_TOKEN = 'synthetic-ambient-worker';
+    f.env.GIT_CONFIG_COUNT = '1';
+    f.env.GIT_CONFIG_KEY_0 = 'color.ui';
+    f.env.GIT_CONFIG_VALUE_0 = 'false';
+    let calls = 0;
+    const execute = (command, args, options) => {
+      calls++;
+      assert.equal(command, 'git');
+      assert.deepEqual(args, ['push', 'origin', 'HEAD:worker', '--force-with-lease=worker:before']);
+      assert.equal(options.env.GH_TOKEN, fresh);
+      assert.equal(options.env.GITHUB_TOKEN, fresh);
+      assert.equal(options.env.GIT_CONFIG_COUNT, '3');
+      assert.equal(options.env.GIT_CONFIG_KEY_0, 'color.ui');
+      assert.equal(options.env.GIT_CONFIG_VALUE_0, 'false');
+      assert.equal(options.env.GIT_CONFIG_KEY_1, 'credential.helper');
+      assert.equal(options.env.GIT_CONFIG_VALUE_1, '');
+      assert.equal(options.env.GIT_CONFIG_KEY_2, 'credential.helper');
+      assert.equal(options.env.GIT_CONFIG_VALUE_2, '!gh auth git-credential');
+      if (calls === 1) throw new Error('fatal: Authentication failed');
+      return 'ok';
+    };
+    const args = ['push', 'origin', 'HEAD:worker', '--force-with-lease=worker:before'];
+    const options = { env: f.env, hammerToken: true };
+    const result = mode === 'async'
+      ? await meteredExecFile(async (...args) => execute(...args), 'git', args, options)
+      : meteredExecFileSync(execute, 'git', args, options);
+    assert.equal(result, 'ok');
+    assert.equal(calls, 2);
+    assert.equal(f.count(), 2);
+    assert.equal(f.env.GH_TOKEN, 'synthetic-ambient-worker');
+  });
+}
+
+test('Git credential fill uses the refreshed child token without host configuration', t => {
+  const f = fixture(t);
+  writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+if (process.argv.slice(2).join(' ') !== 'auth git-credential get') process.exit(99);
+console.log('username=x-access-token\\npassword=' + process.env.GH_TOKEN + '\\n');
+`, { mode: 0o755 });
+  const result = meteredExecFileSync(execFileSync, 'git', ['credential', 'fill'], {
+    env: { ...f.env, PATH: `${f.dir}:${process.env.PATH}`, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    hammerToken: true, encoding: 'utf8', input: 'protocol=https\nhost=github.com\n\n', timeout: 5000,
+  });
+  assert.match(result, /password=\[redacted\]/);
+  assert.doesNotMatch(result, new RegExp(`${expired}|${fresh}`));
+  assert.equal(f.count(), 1);
+});
+
+for (const file of ['bin/hammer-publish.sh', 'bin/hammer-merge.sh', 'bin/hammer-verify-head.sh', 'templates/hammer-prompt.md']) {
+  test(`${file}: shell gh calls explicitly enable refresh-only hammer credentials`, t => {
+    const f = fixture(t);
+    const source = readFileSync(resolve(file), 'utf8');
+    const definition = source.match(/^ham_gh\(\) \{.*$/m)?.[0];
+    assert.ok(definition, file);
+    const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+    delete f.env.HAMMER_LACEY_GH_TOKEN;
+    delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+    f.env.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND = command;
+    f.env.HAM_NODE_BIN = process.execPath;
+    writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+if (process.env.GH_TOKEN !== ${JSON.stringify(fresh)}) process.exit(99);
+process.stdout.write('ok');
+`, { mode: 0o755 });
+    const result = spawnSync('/bin/bash', ['-c', `${definition.replaceAll('<<ROOT_DIR>>', resolve('.'))}\nham_gh api fixture`], {
+      env: f.env, encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'ok');
+    assert.equal(f.count(), 1);
+  });
+}
+
+test('synchronous Git failures capture stderr before redacting credentials', t => {
+  const f = fixture(t);
+  writeFileSync(join(f.dir, 'git'), `#!${process.execPath}
+process.stderr.write(process.env.GH_TOKEN + ' HTTP 401 Bad credentials');
+process.exit(1);
+`, { mode: 0o755 });
+  const script = `import { execFileSync } from 'node:child_process';
+import { meteredExecFileSync } from ${JSON.stringify(new URL('../src/metered-gh.mjs', import.meta.url).href)};
+try { meteredExecFileSync(execFileSync, 'git', ['push'], { hammerToken: true }); }
+catch (error) { process.stderr.write(error.stderr || error.message); process.exitCode = 1; }`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: f.env, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /refresh succeeded, but GitHub rejected/);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
+  assert.equal(f.count(), 2);
 });

@@ -35,7 +35,8 @@ const key = command === 'gh' ? (args[0] === 'pr' || args[1]?.endsWith('/pulls/1'
   : args[0] === 'fetch' ? 'fetch-' + args[2] : args[0];
 const calls = JSON.parse(readFileSync(callsFile, 'utf8'));
 const attempt = calls.filter(call => call.key === key).length + 1;
-calls.push({ key, args, input });
+calls.push({ key, args, input, freshCredential: process.env.GH_TOKEN === 'synthetic-refreshed-hammer',
+  helper: process.env['GIT_CONFIG_VALUE_' + (Number(process.env.GIT_CONFIG_COUNT) - 1)] });
 writeFileSync(callsFile, JSON.stringify(calls));
 const fail = message => { process.stderr.write(message); process.exit(1); };
 if (scenario === 'recover' && ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published'].includes(key) && attempt === 1)
@@ -65,12 +66,23 @@ if (command === 'gh') {
 `, { mode: 0o755 });
   }
   return {
-    run: async () => JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-      env: { ...process.env, PATH: `${root}:${process.env.PATH}` }, timeout: 20000,
+    run: async (env = {}) => JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 20000,
     })).stdout),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };
 }
+
+test('API publisher refreshes the entitled credential for Git fetch as well as GitHub calls', async t => {
+  const f = fixture(t, 'recover');
+  assert.equal((await f.run({ HAMMER_LACEY_GH_TOKEN: 'synthetic-expired-hammer',
+    HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-refreshed-hammer',
+    GH_TOKEN: 'synthetic-ambient-worker' })).route, 'published');
+  for (const call of f.calls().filter(call => ['pr', 'mutation', 'verification'].includes(call.key) || call.key.startsWith('fetch-'))) {
+    assert.equal(call.freshCredential, true, call.key);
+    if (call.key.startsWith('fetch-')) assert.equal(call.helper, '!gh auth git-credential');
+  }
+});
 
 test('API publisher retries every network subprocess and preserves mutation CAS and contents', async t => {
   const f = fixture(t, 'recover');
@@ -298,7 +310,8 @@ fi
     writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: true\n');
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root,
       AGENT_OS_CONFIG_PATH: config, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
-      GH_TOKEN: 'synthetic-token', HAMMER_LACEY_GH_TOKEN: 'synthetic-token',
+      GH_TOKEN: 'synthetic-ambient-worker', HAMMER_LACEY_GH_TOKEN: 'synthetic-expired-hammer',
+      HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-token',
       HAM_RUN_DIR: root, HAM_ROOT_DIR: repoRoot, HAM_HQ_ROOT: root, HAM_NODE_BIN: leaseNode, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: pr,
       HAM_PR_URL: `https://github.com/fixture/repo/pull/${pr}`, HAM_REVIEWED_SHA: reviewed, HAM_BASE_HEAD: reviewed,
       HAM_AUDIT_REMEDIATED_TOTAL: '1', HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
@@ -307,6 +320,13 @@ fi
     writeFileSync(env.HAM_AUDIT_DETAILS_FILE, `**Findings addressed**\n- **Fix feature** (blocking): ${filename} repair\nDoc-currency: stale wording\n`);
     const script = join(root, 'publish.sh');
     writeFileSync(script, renderHammerProcedure('hammer-publish', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
+    // The local remote needs no auth; enforce the actual publication child's
+    // credential and inline helper through Git's ordinary pre-push hook.
+    writeFileSync(join(work, '.git', 'hooks', 'pre-push'), `#!/bin/sh
+[ "$GH_TOKEN" = synthetic-token ] || exit 71
+[ "$GITHUB_TOKEN" = synthetic-token ] || exit 72
+[ "$GIT_CONFIG_VALUE_1" = '!gh auth git-credential' ] || exit 73
+`, { mode: 0o755 });
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
     await run('/bin/bash', ['-c', 'source "$1"', '_', script], { env: { ...env, HAM_COMMIT_PUBLICATION_ONLY: '1' } });
     const published = await git('rev-parse', 'HEAD');

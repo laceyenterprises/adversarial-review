@@ -548,7 +548,7 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
   assert.equal(existsSync(previousScratch), false);
 });
 
-for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'missing-retry-repo', 'null-retry-repo', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head']) {
+for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'missing-retry-repo', 'null-retry-repo', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head', 'advanced-foreign-retry-ticket']) {
   test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
@@ -569,8 +569,8 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
       if (repoSource === 'context-pr-number') retryArgs.dispatchContext.prNumber = 42;
       else retryArgs.prNumber = 42;
     }
-    const targetHead = repoSource === 'advanced-head' ? 'c'.repeat(40) : head;
-    if (repoSource === 'advanced-head') {
+    const targetHead = repoSource.startsWith('advanced-') ? 'c'.repeat(40) : head;
+    if (repoSource.startsWith('advanced-')) {
       retryArgs.prMetadata = { ...args.prMetadata, headSha: targetHead };
       retryArgs.dispatchContext.allowStaleReviewHeadHammerResume = true;
       retryArgs.dispatchContext.targetRemediationSha = targetHead;
@@ -595,7 +595,7 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
           const db = new Database(ledgerTarget.path);
           db.prepare('UPDATE launch_requests SET status = ? WHERE launch_request_id = ?')
             .run('requested', 'synthetic-retry-leaf');
-          if (repoSource === 'foreign-retry-ticket') db.exec("UPDATE launch_requests SET ticket_ref = 'CONFLICT-REBASE-42' WHERE launch_request_id = 'synthetic-retry-leaf'");
+          if (repoSource.endsWith('foreign-retry-ticket')) db.exec("UPDATE launch_requests SET ticket_ref = 'CONFLICT-REBASE-42' WHERE launch_request_id = 'synthetic-retry-leaf'");
           if (repoSource === 'foreign-retry-repo') db.exec("UPDATE launch_requests SET target_repo = 'other/project' WHERE launch_request_id = 'synthetic-retry-leaf'");
           if (repoSource === 'foreign-retry-head') db.prepare("UPDATE launch_requests SET head_sha = ? WHERE launch_request_id = 'synthetic-retry-leaf'").run('c'.repeat(40));
           if (repoSource === 'missing-retry-repo') db.exec('ALTER TABLE launch_requests DROP COLUMN target_repo');
@@ -608,11 +608,19 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
         return { stdout: JSON.stringify({ status: 'failed' }) };
       },
     });
-    if (repoSource.startsWith('foreign-retry')) {
+    if (repoSource.includes('foreign-retry')) {
       assert.equal(result.reason, 'dispatch-retry-identity-mismatch', JSON.stringify(result));
       const current = JSON.parse(readFileSync(path));
-      assert.equal(current.state, 'dispatching');
-      assert.equal(current.launchRequestId, null);
+      assert.equal(current.state, targetHead === head ? 'dispatch-failed' : 'launch-terminal');
+      assert.equal(current.launchRequestId, previous.launchRequestId);
+      const targetIdentity = { repo: 'fixture/repo', prNumber: 42, headSha: targetHead };
+      const target = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, targetIdentity)));
+      assert.equal(target.state, 'dispatch-failed');
+      assert.equal(target.retryCount, previous.retryCount + 1);
+      assert.equal(current.scratchDir, previous.scratchDir);
+      assert.equal(readAmaCloserLease(root, targetIdentity), null);
+      assert.equal(existsSync(attemptedPrompt), false);
+      assert.equal(existsSync(unlaunchedScratch), false);
       assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
       return;
     }
@@ -769,7 +777,9 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   assert.equal(existsSync(JSON.parse(before).scratchDir), true);
 });
 
-test('SCRATCHRACE-01: retry traversal failure keeps an unreceipted intent and predecessor artifacts', async t => {
+for (const advancedHead of [false, true])
+for (const unreadable of ['chain', 'probe'])
+test(`SCRATCHRACE-01: retry traversal ${unreadable} failure releases new intent (advanced head=${advancedHead})`, async t => {
   const root = fixture(t);
   const args = dispatchArgs(root);
   const first = await maybeDispatchAmaCloser({ ...args,
@@ -778,13 +788,25 @@ test('SCRATCHRACE-01: retry traversal failure keeps an unreceipted intent and pr
   const path = amaCloserDispatchFilePath(root, identity);
   const previous = JSON.parse(readFileSync(path));
   let refused = false;
-  const result = await maybeDispatchAmaCloser({ ...args,
+  let attemptedPrompt, unlaunchedScratch;
+  const targetHead = advancedHead ? 'c'.repeat(40) : head;
+  const retryArgs = advancedHead ? { ...args,
+    prMetadata: { ...args.prMetadata, headSha: targetHead },
+    dispatchContext: { ...args.dispatchContext, allowStaleReviewHeadHammerResume: true,
+      targetRemediationSha: targetHead, dispatchRecordHeadSha: head,
+      livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: targetHead,
+        headBranchExists: true, headRefName: 'synthetic-branch' }) },
+  } : args;
+  const result = await maybeDispatchAmaCloser({ ...retryArgs,
     readPullRequestStateImpl: () => ({ state: 'OPEN' }),
-    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' },
-      ...(refused ? { retryChainUnreadable: true } : { retryChain: [] }) }),
+    readLaunchRequestStatusImpl: () => refused && unreadable === 'probe' ? { ok: false } :
+      ({ ok: true, row: { status: 'failed' },
+        ...(refused ? { retryChainUnreadable: true } : { retryChain: [] }) }),
     execFileImpl: async (_cmd, argv) => {
       if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
         refused = true;
+        attemptedPrompt = argv[argv.indexOf('--prompt') + 1];
+        unlaunchedScratch = readFileSync(attemptedPrompt, 'utf8').split('scratch=')[1];
         throw new Error('uq_worker_runs_live_logical_job');
       }
       return { stdout: JSON.stringify({ status: 'failed' }) };
@@ -793,10 +815,23 @@ test('SCRATCHRACE-01: retry traversal failure keeps an unreceipted intent and pr
   assert.equal(result.reason, 'dispatch-retry-chain-unreadable');
   assert.equal(result.skipMergeAgent, true, 'incomplete retry evidence prevents fallback spawning');
   const record = JSON.parse(readFileSync(path));
-  assert.equal(record.state, 'dispatching');
-  assert.equal(record.retryCount, previous.retryCount + 1);
-  assert.equal(record.launchRequestId, null);
-  assert.equal(readAmaCloserLease(root, identity).status, 'pending');
+  const targetIdentity = { ...identity, headSha: targetHead };
+  const target = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, targetIdentity)));
+  assert.equal(target.state, 'dispatch-failed');
+  assert.equal(target.retryCount, previous.retryCount + 1);
+  assert.equal(readAmaCloserLease(root, targetIdentity), null);
+  assert.equal(record.launchRequestId, previous.launchRequestId);
+  assert.equal(record.scratchDir, previous.scratchDir);
+  if (advancedHead) assert.equal(record.state, 'launch-terminal');
+  else assert.equal(record.state, 'dispatch-failed');
+  assert.equal(existsSync(attemptedPrompt), false);
+  assert.equal(existsSync(unlaunchedScratch), false);
+  const next = await maybeDispatchAmaCloser({ ...retryArgs,
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' }, retryChainUnreadable: true }),
+    execFileImpl: async () => assert.fail('unreadable predecessor still suppresses spawning'),
+  });
+  assert.equal(next.reason, 'dispatch-retry-chain-unreadable', JSON.stringify(next));
   assert.equal(existsSync(previous.scratchDir), true);
   assert.equal(existsSync(first.promptPath), true);
 });

@@ -18,6 +18,15 @@ it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
 Exact-key reads project missing identity columns as null on SQLite and Postgres.
 
+An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
+reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
+prior retry count, and remove its unused scratch/prompt. Missing ticket evidence
+still stays fenced for exact-key recovery. After a live logical-job refusal,
+unreadable or mismatched retry evidence ends the new attempt as `dispatch-failed`
+and releases its pending lease. Preserve the predecessor LRQ and artifacts on
+their original head for the next probe; charge the existing bounded failure
+budget and suppress fallback while that evidence is unresolved.
+
 Receipt lookups use the ledger's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded
@@ -192,7 +201,9 @@ An unproven refusal, including one without a predecessor LRQ, follows the charge
 suppress merge-agent fallback by claiming fleet ownership. If the refusal-time
 retry probe is itself unreadable, charge the failure but retain the predecessor
 LRQ and artifacts on its original identity as `dispatch-failed`, reason
-`dispatch-retry-chain-unreadable`; suppress fallback until a readable probe can
+`dispatch-retry-chain-unreadable` (or `dispatch-retry-identity-mismatch` for a
+foreign descendant); release the new pending lease and remove its unused artifacts.
+Suppress fallback until a readable probe can
 resolve ownership. No dispatched lease is fabricated. Retry-query failures retain
 the successfully read base status with `retryChainUnreadable: true`; that status alone cannot authorize lease settlement, scratch cleanup or
 re-dispatch. Malformed unrelated JSON metadata is skipped by both ledger backends.
@@ -314,11 +325,12 @@ assertion that the PR or branch was deleted.
 A later CI-blocked wake refusal does not retire an earlier `dispatching` intent.
 The LAC-2081 reconciliation contract above supersedes dead-owner/age rollback.
 
-- A newly returned launch receipt retains `state: dispatched`, its launch IDs,
-  and its active lease when ticket evidence is unavailable. It is charged
-  conservatively until reconciliation; authoritative foreign-ticket evidence
-  retires the record and refunds that charge once. Missing ticket evidence
-  cannot create a `no-dispatch` record or authorize another spawn.
+- New output without ticket evidence retains an unreceipted `dispatching` intent
+  and pending lease for exact-key recovery. An explicit foreign identity settles
+  only the new attempt as `no-dispatch`, with a superseded lease and prior retry
+  count. Legacy receipted records retain their conservative charge until
+  authoritative foreign-ticket evidence retires them and refunds that charge
+  once. Missing ticket evidence cannot authorize another spawn.
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
   from follow-up consumption until native proof settles the intent; receipted
   records retain their established status/observation window.

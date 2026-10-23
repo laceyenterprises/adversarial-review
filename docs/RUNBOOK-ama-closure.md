@@ -37,6 +37,15 @@ it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
 Exact-key reads project missing identity columns as null on SQLite and Postgres.
 
+An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
+reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
+prior retry count, and remove its unused scratch/prompt. Missing ticket evidence
+still stays fenced for exact-key recovery. After a live logical-job refusal,
+unreadable or mismatched retry evidence ends the new attempt as `dispatch-failed`
+and releases its pending lease. Preserve the predecessor LRQ and artifacts on
+their original head for the next probe; charge the existing bounded failure
+budget and suppress fallback while that evidence is unresolved.
+
 Receipt lookups use the ledger's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded
@@ -4359,19 +4368,19 @@ with both `Worker-Class: hammer` and `Worker-Class: codex` therefore requires
 independent content coverage rather than first-value or last-value selection.
 
 The closer checks available dispatch ticket evidence before recording or charging
-a launch. Only `HAM` or the matching `AMA-PR-<N>` ticket confirms hammer identity; a
+a new launch. The exact matching `AMA-PR-<N>` ticket confirms closer identity; a
 `CONFLICT-PR-<N>-REBASE` launch is a separate owner. Its running or completed
 status cannot become a hammer attempt or `failed-without-merge` outcome.
 Previously misclassified launches with authoritative foreign-ticket evidence
 are retired and their matching series/target/lifetime charge is refunded once.
 Legacy records without `reviewedSha` use their head (or lease identity head) as
 the series key; the refund still requires a matching ledger charge.
-A launch receipt with unreadable ticket evidence retains its active lease
-and launch IDs for reconciliation; absence of evidence cannot release ownership
-or trigger another spawn. It receives a conservative attempt charge, refunded
-once if authoritative foreign-ticket evidence appears. Explicit foreign tickets
-are refused before charging; ledger ticket evidence takes precedence over CLI
-output. JSON and key/value CLI receipts both preserve ticket identity.
+New output with unreadable ticket evidence retains an unreceipted `dispatching`
+intent and pending lease for exact-key reconciliation; it cannot authorize another
+spawn. Explicit foreign identities settle the new attempt as `no-dispatch` with
+a superseded lease and the prior retry count. Legacy receipted records retain
+their conservative charge until authoritative foreign-ticket evidence permits
+a once-only refund. Ledger identity evidence takes precedence over CLI output. JSON and key/value CLI receipts both preserve ticket identity.
 An accepted receipt promotes the existing pending lease to `dispatched`, retaining
 its acquisition time and launch-request ID so later polls cannot launch a duplicate.
 When updating this flow, keep the `hammer-dispatch` source projection in

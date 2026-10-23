@@ -2589,24 +2589,43 @@ test('LEGACYINTENT-01: automatic negative ledger proof releases an old intent fo
   assert.ok(record.dispatchIdempotencyKey);
 });
 
+for (const failedCall of [false, true])
 for (const patch of [
   { ticketRef: 'CONFLICT-REBASE-404' }, { repo: 'other/project' }, { headSha: 'b'.repeat(40) },
-]) test(`CLOSERINTENT-01: dispatch output rejects foreign identity ${JSON.stringify(patch)}`, async t => {
+]) test(`CLOSERINTENT-01: dispatch output rejects foreign identity ${JSON.stringify(patch)} (failed call=${failedCall})`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-identity-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const messages = [];
   const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     logger: { warn: text => messages.push(text) },
-    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-404',
-      repo: 'acme/repo', headSha: HEAD, launchRequestId: 'lrq_other', ...patch }) }),
+    execFileImpl: async () => {
+      const output = { stdout: JSON.stringify({ ticketRef: 'AMA-PR-404',
+        repo: 'acme/repo', headSha: HEAD, launchRequestId: 'lrq_other', ...patch }) };
+      if (failedCall) throw Object.assign(new Error('synthetic dispatch error'), output);
+      return output;
+    },
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'non-hammer-launch-not-adopted');
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD })));
-  assert.equal(record.state, 'dispatching');
+  assert.equal(record.state, 'no-dispatch');
+  assert.equal(record.reason, 'non-hammer-launch-not-adopted');
+  assert.equal(record.retryCount, 0);
+  assert.equal(record.lastError, null);
   assert.equal(record.launchRequestId, null);
+  assert.equal(record.dispatchId, null);
   assert.equal(record.unadoptedLaunchRequestId, 'lrq_other');
+  const lease = readAmaCloserLease(rootDir, record);
+  assert.equal(lease.status, 'terminal');
+  assert.equal(lease.terminalOutcome, 'superseded');
+  assert.equal(lease.lrqId, null);
+  assert.equal(existsSync(record.scratchDir), false);
+  assert.equal(existsSync(record.promptPath), false);
+  const next = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+  });
+  assert.equal(next.dispatched, true, JSON.stringify(next));
   assert.ok(messages.some(line => line.includes('launch_identity_mismatch')));
 });
 

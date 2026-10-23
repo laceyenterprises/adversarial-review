@@ -25,6 +25,15 @@ it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
 Exact-key reads project missing identity columns as null on SQLite and Postgres.
 
+An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
+reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
+prior retry count, and remove its unused scratch/prompt. Missing ticket evidence
+still stays fenced for exact-key recovery. After a live logical-job refusal,
+unreadable or mismatched retry evidence ends the new attempt as `dispatch-failed`
+and releases its pending lease. Preserve the predecessor LRQ and artifacts on
+their original head for the next probe; charge the existing bounded failure
+budget and suppress fallback while that evidence is unresolved.
+
 Receipt lookups use the ledger's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded

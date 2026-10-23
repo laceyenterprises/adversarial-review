@@ -7875,12 +7875,29 @@ async function maybeDispatchAmaCloserAttempt({
     // Dispatch deduplication can return another owner's launch for this PR.
     // Never adopt its LRQ, charge its attempt, cancel it, or record its outcome.
     const reason = 'non-hammer-launch-not-adopted';
-    retainScratchDir = true;
+    retainScratchDir = false;
+    finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
+      now: dispatchContext.dispatchedAt, logger, repo, prNumber });
     updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
-      ...(current || {}), launchRequestId: null, dispatchId: null,
-      lastError: reason, unadoptedLaunchRequestId: payload.launchRequestId,
+      ...(current || {}), state: 'no-dispatch', reason, retryCount: priorRetryCount,
+      launchRequestId: null, dispatchId: null,
+      lastError: null, unadoptedLaunchRequestId: payload.launchRequestId,
     }));
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
+  };
+  const settleRetryProbeRefusal = (reason, err) => {
+    // HQ rejected this submission on the live logical-job constraint. The
+    // unreadable/foreign retry is predecessor evidence, not a new keyed intent.
+    // Keep that evidence on its original head for the next ordinary probe.
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
+      ...(existingDispatchIdentity.headSha === targetDispatchIdentity.headSha ? existingRecord : current),
+      state: 'dispatch-failed', reason, retryCount: priorRetryCount + 1,
+      lastError: formatHqDispatchError(err),
+    }));
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    retainScratchDir = false;
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      preservePredecessorArtifacts: true, reason });
   };
   logCodexWorkerDispatch({ info: message => logAmaCloserDispatchEvent(logger,
     'ama_closer.codex_account', { repo, prNumber, message }) }, dispatchWorkerClass, osgRemediatorRoute.modelResolution ? osgRemediatorRoute : harnessFallback, 'ama-closer');
@@ -7928,21 +7945,17 @@ async function maybeDispatchAmaCloserAttempt({
       const retryChainUnknown = liveClaimRefusal && existingRecord?.launchRequestId
         && (!retryProbe?.ok || retryProbe.retryChainUnreadable);
       if (retryChainUnknown) {
-        retainScratchDir = true;
         logRetryChainUnreadable(logger, retryProbe, { repo, prNumber });
-        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          preservePredecessorArtifacts: true, reason: 'dispatch-retry-chain-unreadable' });
+        return settleRetryProbeRefusal('dispatch-retry-chain-unreadable', err);
       }
       if (retryProbe?.ok && retryProbe.liveRetryLaunchRequestId
         && !closerLaunchMatches(existingRecord, retryProbe.row)) {
-        retainScratchDir = true;
         logAmaCloserDispatchEvent(logger, 'ama_closer.launch_identity_mismatch', {
           repo, prNumber, headSha: existingRecord.headSha,
           launchRequestId: retryProbe.liveRetryLaunchRequestId,
           ticketRef: retryProbe.row?.ticket_ref || null,
         });
-        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          preservePredecessorArtifacts: true, reason: 'dispatch-retry-identity-mismatch' });
+        return settleRetryProbeRefusal('dispatch-retry-identity-mismatch', err);
       }
       if (retryProbe?.ok && !retryProbe.retryChainUnreadable && retryProbe.liveRetryLaunchRequestId
         && closerLaunchMatches(existingRecord, retryProbe.row)) {

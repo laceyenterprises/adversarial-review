@@ -4289,7 +4289,14 @@ branch tip is never recorded as a hammer-produced head.
 It marks CI as not validated and overrides both `GH_TOKEN` and `GITHUB_TOKEN`
 with the entitled hammer App token. If API publication succeeded but scratch
 synchronization failed, attest that published SHA and stop with
-`published-head-sync-failed`; never force-push unsynchronized local state over it. Keep
+`published-head-sync-failed`; never force-push unsynchronized local state over it.
+LAC-2086: stop the current run without another push, remediation pass or source
+review. The no-merge note carries the exact base/pushed pair and
+`HAM-CI-Validated: false`. Publication failure reasons contain only the first
+message/stderr lines (or the first line of a raw string rejection), capped at
+512 characters; report that reason once rather
+than copying repeated finding fragments from phase output. A published source
+commit proves neither merge nor production recovery. Keep
 that exact pair in a no-merge closing audit after CI, credential or other stops;
 never claim `HAM-Validated-Head` until exact-head CI passes. Publication
 provenance comments are distinct from the successful in-lease validation audit.
@@ -4964,7 +4971,20 @@ inline Git configuration. Authentication rejection refreshes and retries once
 with the original Git arguments, including the exact-head push lease. Any other
 failure is rethrown as the same error with secrets redacted, keeping its `code`,
 `signal` and `status`, so a child timeout or missing binary keeps the kind that
-retry routing reads (HAMREDACT-01). Tokens never enter persistent shell assignments, Git argv or Git configuration. Ordinary
+retry routing reads (HAMREDACT-01). LAC-2086 replaces recursive traversal with
+an iterative visited-object walk, including deep nested errors and cyclic output
+arrays, preserving object identity and the code/signal/status used for retries.
+The original failure path was post-publication fetch timeout -> the Node
+`execFileSync` error's self-referential `.error` -> token redaction -> stack
+overflow -> nontransient publication failure. HAMREDACT-01 fixed the self-cycle;
+the full offline publication CLI regression now also pins exhausted retries,
+reset/tree failures, bounded diagnostics, exact-head provenance and no fallback
+push or new review. Both synchronous and asynchronous metered callers share
+this redactor. Sibling audit: metered `finish`/`finishSync` only inspect scalar
+error fields; publication's library and CLI catches share the bounded formatter.
+Local scratch Git calls capture stderr rather than letting `execFileSync` echo
+it again before the structured result. Outbound-body filtering rewrites text,
+not error graphs. Tokens never enter persistent shell assignments, Git argv or Git configuration. Ordinary
 non-hammer Git execution remains outside this opt-in credential path.
 
 ## Merged completion head identity (MERGESIGNAL-01)

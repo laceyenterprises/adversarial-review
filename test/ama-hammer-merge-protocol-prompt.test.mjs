@@ -595,8 +595,8 @@ test('HAMIDENT-02: bounded unlinked identity repair requires own HAM trailers an
 });
 
 test('HAMATTESTRETRY-01 prompt preserves the audit delivery recovery cause', () => {
-  assert.match(HAMMER_PROMPT, /Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures/);
-  assert.match(HAMMER_PROMPT, /do not request source re-review for delivery failure/);
+  assert.match(HAMMER_PROMPT, /Preserve `HAM_NO_MERGE_NOTE` for audit delivery or scratch-sync failures/);
+  assert.match(HAMMER_PROMPT, /do not request source re-review for either failure/);
   assert.match(HAMMER_PROMPT, /Something went wrong while executing your query/);
 });
 

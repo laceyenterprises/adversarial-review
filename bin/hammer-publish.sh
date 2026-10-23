@@ -339,7 +339,9 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
     HAM_PHASE_OUTCOME=published-head-sync-failed
     HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
-    HAM_NO_MERGE_NOTE="HAM closing status — no merge. API publication and provenance succeeded, but scratch synchronization failed; preserve the remote head for the next hammer pass."
+    printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Base-Head: %s\nHAM-Pushed-Head: %s\nHAM-CI-Validated: false' \
+      'HAM closing status — no merge. API publication and provenance succeeded, but scratch synchronization failed; preserve the remote head. Stop this run without another push or source review.' \
+      "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"
     if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
     return 1
   fi

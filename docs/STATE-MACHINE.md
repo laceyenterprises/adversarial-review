@@ -779,6 +779,13 @@ before any validated-head audit or merge; retry reacquires and rechecks unchange
 head/base/file-overlap safety. No durable states or transitions are added.
 See [source evidence and pending deployment acceptance](validation/lac-2093.md).
 
+LAC-2086: successful API publication followed by failed scratch adoption stops
+at the existing `published-head-sync-failed` outcome after recording the exact
+base/pushed-head provenance. The lease is released, CI remains unvalidated,
+and the current run may neither push stale local state nor start another source
+review/remediation loop. Its no-merge diagnostic is bounded; source publication
+alone does not establish merge or production recovery. No durable state changes.
+
 Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;

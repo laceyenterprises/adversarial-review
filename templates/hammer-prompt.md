@@ -329,8 +329,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    Preserve App publication comments and their `HAM-Base-Head` / `HAM-Pushed-Head`
    pair in no-merge audits (CI unvalidated). Retry failed delivery with that pair.
    Only green exact-head CI permits `HAM-Validated-Head`; keep one in-lease audit.
-   Preserve `HAM_NO_MERGE_NOTE` for audit delivery failures;
-   do not request source re-review for delivery failure. Otherwise include the
+   Preserve `HAM_NO_MERGE_NOTE` for audit delivery or scratch-sync failures;
+   do not request source re-review for either failure. Otherwise include the
    note or measured `HAM_HEAD_WAITED_SECONDS` and `HAM_REQUIRED_CHECKS_WAITED_SECONDS`.
    Missing CI becomes terminal only after the existing head/check waits; on head
    timeout say checks could not start (0s). Preserve different-live-head race handling.

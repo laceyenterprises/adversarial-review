@@ -339,7 +339,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         // The owner validates the plan and persists its lease before extending
         // the timer. Budgets are total elapsed time, never relative renewals.
         const nextMs = onMessage(message);
-        if (Number.isFinite(nextMs) && nextMs > wallTimeoutMs && wallTimeoutMs > 0) {
+        if (Number.isFinite(nextMs) && nextMs > 0 && (wallTimeoutMs === 0 || nextMs > wallTimeoutMs)) {
           wallTimeoutMs = timerDelayMs(nextMs);
           armWallTimer();
         }

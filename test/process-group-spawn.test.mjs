@@ -555,3 +555,17 @@ test('GEMTIMEOUT-01: refused lease extension terminates the child', async () => 
     onMessage() { throw new Error('synthetic lost claim'); },
   }), /onMessage callback failed: synthetic lost claim/);
 });
+
+test('GEMTIMEOUT-01: IPC plan arms a wall timer when the initial timeout is zero or omitted', async () => {
+  for (const initial of [{ timeout: 0 }, {}]) {
+    const controller = new AbortController();
+    const watchdog = setTimeout(() => controller.abort(), 5000);
+    try {
+      await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+        'process.send({type:"plan"}); setInterval(() => {}, 100);',
+      ], { ...initial, progressTimeout: 0, killGraceMs: 0, signal: controller.signal,
+        onMessage() { return 500; },
+      }), /timed out after 500ms/);
+    } finally { clearTimeout(watchdog); }
+  }
+});

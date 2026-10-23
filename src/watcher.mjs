@@ -81,6 +81,7 @@ import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
+  normalizeReviewerModel,
   routeSubject,
   validateDefaultReviewerRouteConfig,
 } from './adapters/subject/github-pr/routing.mjs';
@@ -1037,7 +1038,7 @@ const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
       && (!record?.reviewerSessionUuid || row.reviewer_session_uuid === record.reviewerSessionUuid)) {
       return row.reviewer_timeout_ms;
     }
-    return record?.reviewerModel === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs()
+    return normalizeReviewerModel(record?.reviewerModel) === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs()
       : resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000;
   },
   isProcessAlive,

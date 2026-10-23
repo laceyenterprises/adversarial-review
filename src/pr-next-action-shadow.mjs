@@ -35,6 +35,8 @@ const NOTE_LIMIT = 512;
 // pass. Closure orchestration registers its enriched derivation; later
 // consumers of the same pass (posted-review, hammer-owner route) reuse it.
 const decisionsByPass = new WeakMap();
+// Bare reads must not prevent closure orchestration from registering evidence.
+const baselineDecisionsByPass = new WeakMap();
 const reportedOverdue = new Set();
 // Consumers without a pass (the no-progress lane) leave a legacy note that the
 // next pass decision for the same subject/head compares and drains.
@@ -102,7 +104,8 @@ function primaryChangeObservation(input, progress) {
 
 // Resolve execution intent independently of shadow sinks/alerts. Adopted wake
 // routing and observational callers share the exact pair for this generation;
-// changed facts require a new pass snapshot, never mutation of a cached pair.
+// Bare reads are provisional until closure evidence registers the shared pair;
+// subsequent changed facts require a new pass, never mutation of that pair.
 export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null } = {}) {
   if (passSnapshot && decisionsByPass.has(passSnapshot)) return decisionsByPass.get(passSnapshot);
   if (snapshot) return Promise.resolve(Object.freeze({ snapshot, decision: nextAction(snapshot) }));
@@ -142,10 +145,10 @@ export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, 
     return shared;
   }
   if (!passSnapshot) return null;
-  let shared = decisionsByPass.get(passSnapshot);
+  let shared = baselineDecisionsByPass.get(passSnapshot);
   if (!shared) {
     shared = Promise.resolve(Object.freeze({ snapshot: passSnapshot, decision: nextAction(passSnapshot) }));
-    decisionsByPass.set(passSnapshot, shared);
+    baselineDecisionsByPass.set(passSnapshot, shared);
   }
   return shared;
 }

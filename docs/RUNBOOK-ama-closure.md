@@ -343,7 +343,10 @@ The shadow (`src/pr-next-action-shadow.mjs`, reached through the import-free
 consumer seam `src/pr-next-action-consumer.mjs`) runs at closure orchestration
 (final legacy owner), the posted-review handler, the no-progress lane, the
 closer handoff, the rescue classifier, the hammer-owner route page and the
-watcher handoff wake. All consumers in one pass share one decision. Every
+watcher handoff wake. Closure evidence registers one enriched decision per pass;
+an earlier bare snapshot read cannot prevent that enrichment. Later consumers
+reuse the enriched pair, including while its launch evidence read is pending.
+Further evidence changes require a new pass snapshot. Every
 action/actor/reason disagreement is appended to
 `data/next-action-shadow/disagreements.jsonl` under the watcher root (one
 rotation at 16 MiB) with its generation, source, deadline and evidence

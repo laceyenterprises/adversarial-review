@@ -1404,7 +1404,10 @@ process drain is confirmed, independently of delivery rows. An approved
 exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
-<a id="smv-handoff"></a>**smv-handoff:** null same-repository head metadata
+<a id="smv-handoff"></a>**smv-handoff:** NXA-03 verifies shared immutable
+decision wake routing, live-owner suppression and one wake per reconciled
+no-merge attempt at the same head; the next shadow consumer receives the same
+decision. No merge permission is granted. Null same-repository head metadata
 requires Git confirmation; unknown reads release the lease and preserve launch
 budget, then resume after confirmation recovers. Unidentified forks still
 unresolved after six hours stop for operator inspection without charging launch

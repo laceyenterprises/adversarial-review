@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
-import { noteNextActionLegacy, setNextActionShadowSinkForTesting, shadowNextAction,
+import { noteNextActionLegacy, resolveSharedNextAction, setNextActionShadowSinkForTesting, shadowNextAction,
   NEXT_ACTION_OVERDUE_ALERTS_ENV } from '../src/pr-next-action-shadow.mjs';
 import { closureOwnerShadowEvidence, launchSource, settleNextActionShadowsForTesting,
   shadowNextActionLater } from '../src/pr-next-action-consumer.mjs';
@@ -122,6 +122,32 @@ test('one decision per pass: later consumers reuse the enriched decision and dra
   const second = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, now: () => Date.parse(ANCHOR) });
   assert.equal(second.decision, first.decision, 'the same decision object reaches every consumer of the pass');
   assert.equal(second.notes.length, 0, 'notes are compared once');
+});
+
+for (const awaitBaseline of [false, true]) test(`bare pass read cannot suppress closure enrichment (awaited=${awaitBaseline})`, async () => {
+  const pass = base();
+  const baseline = resolveSharedNextAction({ passSnapshot: pass });
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass }), baseline);
+  if (awaitBaseline) await baseline;
+  let reads = 0;
+  let finishRead;
+  const launchRead = new Promise(resolve => { finishRead = resolve; });
+  const enriched = resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    readLaunches: () => { reads++; return launchRead; },
+  } });
+  assert.notEqual(enriched, baseline);
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass }), enriched, 'in-flight enrichment is shared');
+  assert.equal(resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    readLaunches: () => { throw new Error('must not reread an enriched pass'); },
+  } }), enriched);
+  finishRead({ state: 'complete', value: { closer: { row: { status: 'running' }, headSha: HEAD } } });
+  const shared = await enriched;
+  assert.equal(reads, 1);
+  assert.equal((await baseline).decision.reason, 'stale-verdict');
+  assert.deepEqual([shared.decision.actor, shared.decision.reason], ['hammer', 'live-owner']);
+  const shadow = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, sink: () => {} });
+  assert.equal(shadow.decision, shared.decision);
+  assert.equal(pass.observations.launches.value.closer, null, 'baseline evidence remains immutable');
 });
 
 test('round enrichment preserves the original pass remediation owner with failed CI', async () => {

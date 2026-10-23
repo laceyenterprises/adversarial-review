@@ -3953,19 +3953,19 @@ function* readMergedBuildCompletionSignalSteps({
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
   if (result.ok) {
     const producerHeadSha = String(result.row?.head_sha || '').trim().toLowerCase() || null;
-    const reviewedHeadSha = String(headSha || '').trim().toLowerCase() || null;
+    const expectedHeadSha = String(headSha || '').trim().toLowerCase() || null;
     if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(producerHeadSha || '')
-      && producerHeadSha === reviewedHeadSha) return {
+      && producerHeadSha === expectedHeadSha) return {
       ...result,
       producerHeadSha,
-      reviewedHeadSha,
-      headShaMatchesReviewed: producerHeadSha && reviewedHeadSha ? producerHeadSha === reviewedHeadSha : null,
+      reviewedHeadSha: expectedHeadSha,
+      headShaMatchesReviewed: true,
     };
-    const key = `merged-signal-head-mismatch:${repo}#${prNumber}:${reviewedHeadSha}`;
+    const key = `merged-signal-head-mismatch:${repo}#${prNumber}:${expectedHeadSha}`;
     if (dispatchCloserLogGate.note(key, 'ignored').changed) {
       logger?.info?.(JSON.stringify({
         event: 'ama_closer.merged_signal_head_mismatch', repo, prNumber,
-        reviewedHeadSha, producerHeadSha,
+        expectedHeadSha, producerHeadSha,
         completionId: result.row?.completion_id ?? null,
         ticketId: result.row?.ticket_id ?? null,
         launchRequestId: result.row?.launch_request_id ?? null,

@@ -4944,5 +4944,7 @@ Missing or foreign heads follow the absent-signal path, including normal produce
 they cannot establish successful merge.
 Mismatches log `ama_closer.merged_signal_head_mismatch` once per repository,
 pull request and expected head per process, with completion identity fields.
+The `expectedHeadSha` diagnostic field names the active comparison head: the
+reviewed head before advancement and the target remediation head afterwards.
 Authoritative live merged state and terminal audit evidence retain their
 existing behavior.

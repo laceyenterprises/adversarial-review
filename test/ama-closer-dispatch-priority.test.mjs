@@ -2814,7 +2814,8 @@ for (const advanced of [false, true]) {
         assert.equal(result.dispatched, true, JSON.stringify(result));
         assert.notEqual(readAmaCloserLease(rootDir, { repo, prNumber: 404, headSha: target })?.terminalOutcome, 'succeeded');
         assert.equal(mismatches.length, 1, 'unmatched signal logs once per dispatch cycle');
-        assert.equal(mismatches[0].reviewedHeadSha, target);
+        assert.equal(mismatches[0].expectedHeadSha, target);
+        assert.equal(Object.hasOwn(mismatches[0], 'reviewedHeadSha'), false);
         const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, {
           repo, prNumber: 404, headSha: target,
         }), 'utf8'));

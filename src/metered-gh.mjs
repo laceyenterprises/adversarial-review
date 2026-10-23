@@ -1,3 +1,4 @@
+import { hammerTokenOptions, withHammerToken, withHammerTokenSync } from './hammer-token.mjs';
 import { readAdmissionChecks } from './watcher-admission-read-cache.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 // The only gh execution seam. GH_DEBUG captures headers even for high-level
@@ -141,13 +142,14 @@ async function finish(result, { failed = false, resource = 'core', credential = 
 
 function meteredExecFile(execFileImpl = execFileAsync, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
+  options = hammerTokenOptions(options);
   return readAdmissionChecks(execFileImpl, command, args, options, executeGh);
   async function executeGh() {
     const credential = githubCredential({ env: options.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
     for (const res of ghResources(args)) await awaitThrottleIfNeeded(res, credential);
     try {
-      return await finish(await execFileImpl(command, args, debugOptions(options)), { credential, resource });
+      return await finish(await withHammerToken(active => execFileImpl(command, args, active), debugOptions(options)), { credential, resource });
     } catch (err) {
       await finish(err, { failed: true, credential, resource });
       throw err;
@@ -180,7 +182,7 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
 
 function executeFileSync(execFileImpl, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
-  const activeOptions = debugOptions(options);
+  const activeOptions = debugOptions(hammerTokenOptions(options));
   const { env } = activeOptions;
   const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
   let buckets = {};
@@ -201,7 +203,7 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
     // execFileSync normally returns only stdout. Capture stderr as well so all
     // successful responses are accounted for; injected executors keep their seam.
     if (execFileImpl === execFileSync) {
-      const result = spawnSync(command, args, { ...activeOptions, stdio: 'pipe' });
+      const result = withHammerTokenSync(active => spawnSync(command, args, { ...active, stdio: 'pipe' }), activeOptions);
       if (result.error || result.status !== 0) {
         const err = result.error || new Error(`Command failed: gh ${args.slice(0, 2).join(' ')}`);
         Object.assign(err, { stdout: result.stdout, stderr: result.stderr, status: result.status, signal: result.signal });
@@ -209,7 +211,7 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
       }
       return finishSync(result, { env, resource }).stdout;
     }
-    const result = execFileImpl(command, args, activeOptions);
+    const result = withHammerTokenSync(active => execFileImpl(command, args, active), activeOptions);
     if (result && typeof result === 'object' && 'status' in result) finishSync(result, { env, resource });
     return result;
   } catch (err) {

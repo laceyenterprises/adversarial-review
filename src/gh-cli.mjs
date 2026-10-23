@@ -202,6 +202,7 @@ async function execGhWithRetry({
   execFileImpl = execFileAsync,
   args,
   env = process.env,
+  hammerToken = false,
   signal,
   timeoutMs = loadAwareTimeoutMs(GH_LOOKUP_TIMEOUT_MS),
   retries = 2,
@@ -229,6 +230,8 @@ async function execGhWithRetry({
         args,
         {
           env: buildAllowlistedGhEnv(env),
+          credentialEnv: env,
+          hammerToken,
           maxBuffer: GH_LOOKUP_MAX_BUFFER,
           timeout: Math.min(timeoutMs, remainingMs),
           killSignal: 'SIGTERM',
@@ -237,6 +240,7 @@ async function execGhWithRetry({
       );
     } catch (err) {
       lastErr = err;
+      if (err.hammerAuthHandled) throw err;
       if (isGhAuthFailure(err)) {
         if (authRemintAttempted) {
           // Re-minted once and GitHub still says no. This is an auth outage,

@@ -4629,3 +4629,22 @@ drafts and operator holds retain their existing protections. Queue failures
 remain retryable. After deployment, inspect an ownerless synthetic replay's
 request marker and per-head evidence, and confirm pushed edges never satisfy
 `exactHammerValidation`. No configuration, CI status or merge gate is added.
+
+## Closer credential refresh (HAMTOKEN-05)
+
+All closer GitHub calls use `bin/metered-gh.mjs` or Node's shared metered
+execution seam. `src/hammer-token.mjs` selects `HAMMER_LACEY_GH_TOKEN`, with
+`MERGE_AGENT_GH_TOKEN` as the legacy fallback. Immediately before each GitHub
+invocation, including after a CI wait or throttle wait, it runs that variable's
+`<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch environment's
+`HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
+10-second timeout and must print only the new token on stdout. Its diagnostics
+are discarded. Without a refresh command, the current token is used unchanged.
+
+A 401 or `Bad credentials` response forces one more refresh and one retry of the
+same call. A second rejection reports that refresh succeeded but the retry was
+rejected; unavailable, failed, empty or invalid refresh output reports its own
+outcome. Closer failures never invoke the watcher's broker refresh path. Token
+values are redacted from returned output and errors. Use `ham_gh` and `ham_pr`
+from the closer inputs; do not copy a launch token into a long-lived shell
+variable or print it while diagnosing a wait. No configuration change is needed.

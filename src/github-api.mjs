@@ -789,6 +789,7 @@ async function execGhJson(execFileImpl, args) {
         timeout: loadAwareTimeoutMs(GH_EXEC_TIMEOUT_MS),
         killSignal: 'SIGKILL',
         env: buildGhEnv(),
+        credentialEnv: process.env,
       });
       if (headerAware) {
         const response = parseGhApiHttpEnvelope(stdout);
@@ -2110,6 +2111,7 @@ async function fetchPullRequestMergeability(repo, prNumber, {
           timeout: loadAwareTimeoutMs(GH_EXEC_TIMEOUT_MS),
           killSignal: 'SIGKILL',
           env: buildGhEnv(env),
+          credentialEnv: env,
         }));
         break;
       } catch (err) {

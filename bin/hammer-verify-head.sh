@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# GitHub credentials refresh inside metered-gh immediately before each call.
+export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
@@ -288,8 +290,7 @@ NODE
       return 20
     fi
     [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 0 ] || return "$HAM_GATE_CAP_AUDIT_EXIT"
-    HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
-    if [ -z "$HAM_GH_TOKEN" ]; then
+    if [ -z "${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}" ]; then
       echo "HAM hard-blocker: no entitled hammer token for gate-cap closing status" >&2
       return 1
     fi
@@ -305,7 +306,7 @@ HAM closing status — no merge. The gate-attempt cap stopped this head before l
       shift 2
       local ham_attempt=1
       while [ "$ham_attempt" -le 3 ]; do
-        if GH_TOKEN="$HAM_GH_TOKEN" ham_gh "$@" > "$ham_out" 2> "$ham_err"; then
+        if ham_gh "$@" > "$ham_out" 2> "$ham_err"; then
           return 0
         fi
         if [ "$ham_attempt" -ge 3 ] || ! ham_gate_cap_gh_transient "$ham_err"; then

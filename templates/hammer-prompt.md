@@ -83,14 +83,14 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec "$@"; }
+ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 ```
 
-`HAM_ROOT_DIR` names the deployed daemon checkout and its completed-round ledger;
-keep it exported for `hammer-head-context.mjs`. `HAM_HQ_ROOT` is the separate HQ root.
+`HAM_ROOT_DIR` is the deployed daemon checkout and round ledger; keep it exported.
+`HAM_HQ_ROOT` is the HQ root.
 
 Before the merge lease, write the complete audit markdown to a file under `<<RUN_DIR>>` and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
@@ -105,9 +105,10 @@ docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
-Use the bounded required-check wait already provided by `<<RUN_DIR>>/hammer-merge.sh`.
-Its GitHub reads use `<<ROOT_DIR>>/bin/metered-gh.mjs` through `ham_gh`. Never use
-`--watch` or add polling loops. All GitHub calls use these metered helpers.
+Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. All GitHub
+calls use `ham_gh` (`<<ROOT_DIR>>/bin/metered-gh.mjs`) or `ham_pr`.
+Never use `--watch` or add polling loops. The helpers refresh before each call and
+refresh and retry once on a credential rejection. Never read or print raw token variables.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
@@ -239,21 +240,27 @@ head. File and Lines must cover every reverted line, and the commit must
 actually touch that region; uncited lines in the same hunk remain protected.
 
 **Your adjudication of a disputed blocking finding is final** (HAMFINAL-01;
-operator decision 2026-10-10 after agent-os PR 7987 was hand-merged over
-CHANGES_REQUESTED while the hammer sat "pending adjudication": "Hammers
-judgement is final"). If a blocking finding is false on this exact head (for
-example a chunked review calls a JSON file malformed that parses fine),
-preserve the code and write the evidence to a temporary file. The evidence MUST
-be concrete and exact-head: a fenced block quoting the repro command you ran on
-`HEAD` together with its output, or a fenced quote of the head file showing the
-cited defect is absent. Prose alone is refused. Withdraw the finding through:
+operator decision 2026-10-10, agent-os PR 7987). For a false finding, preserve
+the code and write exact-head evidence to a temporary file: a fenced command
+run on `HEAD` with its output, or a fenced head-file quote showing the defect
+is absent. Prose alone is refused. Withdraw through:
 
 ```bash
 # Resolve the canonical daemon owner from the existing database, not the worker login.
 HAM_DISPUTE_OWNER=$(stat -f '%Su' <<ROOT_DIR>>/data/reviews.db) || exit 1
 HAM_DISPUTE_RUN=()
 if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
-  HAM_DISPUTE_RUN=(sudo -A -H -u "$HAM_DISPUTE_OWNER" env "GH_TOKEN=${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}")
+  # Refresh as the worker before crossing the user boundary.
+  HAM_DISPUTE_TOKEN=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_NODE_BIN" --input-type=module -e '
+    const s=(await import(process.argv[1])).hammerTokenSession({hammerToken:true});
+    process.stdout.write(s.prepare().env.GH_TOKEN);
+  ' '<<ROOT_DIR>>/src/hammer-token.mjs') || exit 1
+  HAM_DISPUTE_RUN=(sudo -A -H -u "$HAM_DISPUTE_OWNER" env
+    -u HAMMER_LACEY_GH_TOKEN -u MERGE_AGENT_GH_TOKEN
+    -u HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND -u MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND
+    -u HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND
+    "GH_TOKEN=$HAM_DISPUTE_TOKEN" "GITHUB_TOKEN=$HAM_DISPUTE_TOKEN")
+  unset HAM_DISPUTE_TOKEN
 fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
 if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
@@ -271,12 +278,10 @@ fi
 ```
 
 The helper posts a HAM-authored `Resolution: withdrawn-by-hammer` comment with
-the finding identity, the exact head and the evidence digest (`Evidence-SHA256`),
-records the same in `ham_finding_disputes`, and wakes the watcher. It requests
-NO re-review, so the same-head duplicate guard can never strand the PR. Exit 0
-means the withdrawal is recorded; any other exit means it is not, and the
-finding still stands (remediate it or stop with the exit's reason). A rerun on
-the same head or a proven closer rebase is idempotent.
+finding identity, exact head and `Evidence-SHA256`, records it in
+`ham_finding_disputes`, and wakes the watcher. NO re-review is requested.
+Only exit 0 records withdrawal; otherwise remediate or stop with the exit's
+reason. Same-head and proven closer-rebase reruns are idempotent.
 The predicate verifies the posted comment against the successful admission in
 the canonical `--root-dir` database, including its node ID and full-body digest.
 A comment left by a failed helper call cannot resolve a finding. Withdrawal
@@ -628,7 +633,7 @@ fi
 
 ```
 
-Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1`; `source "<<RUN_DIR>>/hammer-publish.sh"` with the hammer `GH_TOKEN`. Stop on failure; unset the flag on success. Ordinary remediation uses the conflict-repair publication guards.
+Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1` and `source "<<RUN_DIR>>/hammer-publish.sh"`. Stop on failure; unset the flag on success. Ordinary remediation retains the conflict-repair guards.
 
 Refresh and validate the live head:
 
@@ -687,16 +692,14 @@ done
 # Publish; rebased/multi-commit history keeps the lease-protected git route.
 HAM_COMMIT_PUBLICATION_ONLY=1
 export HAM_COMMIT_PUBLICATION_ONLY
-GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
+source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
 After conflict repair, re-run changed-surface tests (2b) and required checks
 on the new head before re-acquiring the lease and merging.
 
-Post the PR audit comment. List every final finding with its blocking class and changed paths, using
-`HAMMER_LACEY_GH_TOKEN` (legacy: `MERGE_AGENT_GH_TOKEN`), never ambient credentials.
+Post the PR audit comment. Use `ham_gh` with refreshed entitled credentials. Include every final finding, blocking class and changed path.
 
 In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-publish.sh"` with the exported dispatch values. Publish the validation audit under lease. If the captured starting base cannot be proven, the procedure sets `HAM_BASE_HEAD=<<REVIEWED_SHA>>` and audits the full reviewed-to-built range. Nonzero status blocks continuation and releases for a later hammer pass; it never requests review.
 

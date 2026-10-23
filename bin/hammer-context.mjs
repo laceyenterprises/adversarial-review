@@ -17,7 +17,7 @@ if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') |
   process.exit(64);
 }
 function get(args) {
-  const result = meteredExecFileSync(spawnSync, 'gh', args, { encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
+  const result = meteredExecFileSync(spawnSync, 'gh', args, { hammerToken: true, encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
@@ -75,7 +75,7 @@ try {
       } catch { /* Unreadable local lease is reported as unavailable below. */ }
     }
   }
-  const historyReader = createHistoryReader();
+  const historyReader = createHistoryReader({ hammerToken: true });
   let primaryChange;
   try {
     const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head, rootDir: localRoot,

@@ -494,27 +494,15 @@ test('terminal-remediation audit is written under the merge lease at the settled
   );
 });
 
-test('hammer prompt reads the entitled hammer token from HAMMER_LACEY_GH_TOKEN (agent-os#4762 rename)', () => {
-  // agent-os#4762 gave the-hammer-lacey entitlement a DISTINCT gh_token_var
-  // (HAMMER_LACEY_GH_TOKEN) to stop the hammer inheriting the merge-agent's
-  // MERGE_AGENT_GH_TOKEN identity. The worker-pool (acpx-codex.sh) exports the
-  // entitled token under that var + ambient GH_TOKEN, and NOT under
-  // MERGE_AGENT_GH_TOKEN. This prompt must resolve the audit-comment identity
-  // token from the dedicated var (legacy fallback only), or the terminal audit
-  // hard-blocks on every close (2026-08-04 merge-pipeline stall on #4874).
-  assert.match(
-    HAMMER_PROMPT,
-    /HAM_GH_TOKEN="\$\{HAMMER_LACEY_GH_TOKEN:-\$\{MERGE_AGENT_GH_TOKEN:-\}\}"/,
-  );
-  // The audit-comment gh calls + presence guard use the resolved HAM_GH_TOKEN,
-  // never a bare MERGE_AGENT_GH_TOKEN (which is absent in the hammer env).
-  assert.doesNotMatch(HAMMER_PROMPT, /GH_TOKEN="\$MERGE_AGENT_GH_TOKEN"/);
-  assert.doesNotMatch(HAMMER_PROMPT, /\[ -z "\$\{MERGE_AGENT_GH_TOKEN:-\}" \]/);
-  assert.match(HAMMER_PROMPT, /if \[ -z "\$\{HAM_GH_TOKEN:-\}" \]; then/);
-  assert.ok(
-    (HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" ham_gh /g) || []).length >= 3,
-    'all three audit-comment gh calls (lookup, PATCH, comment) must use HAM_GH_TOKEN',
-  );
+test('hammer prompt delegates entitled credential refresh to the shared helper', () => {
+  assert.match(HAMMER_PROMPT, /refresh and retry once on a credential rejection/);
+  assert.match(HAMMER_PROMPT, /Never read or print raw token/);
+  for (const phase of ['hammer-publish', 'hammer-verify-head', 'hammer-merge']) {
+    const source = readFileSync(new URL(`../bin/${phase}.sh`, import.meta.url), 'utf8');
+    assert.match(source, /bin\/metered-gh\.mjs exec/);
+    assert.doesNotMatch(source, /HAM_GH_TOKEN=/);
+    assert.doesNotMatch(source, /GH_TOKEN="\$HAM_GH_TOKEN"/);
+  }
 });
 
 test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gitlinks (SUBSYNC-01, agent-os#7092)', () => {

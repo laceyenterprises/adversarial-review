@@ -12,7 +12,9 @@ import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 
 const baseHead = 'a'.repeat(40), pushedHead = 'b'.repeat(40), nextHead = 'c'.repeat(40);
 
-for (const credential of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'missing']) {
+for (const credential of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
+  'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+  'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'missing']) {
   test(`pushed attestation CLI authenticates every API call with ${credential}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'pushed-attestation-cli-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -29,8 +31,12 @@ else console.log('[]');
 `, { mode: 0o755 });
     const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`,
       HAMMER_LACEY_GH_TOKEN: '', MERGE_AGENT_GH_TOKEN: '',
+      HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: '', MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND: '',
+      HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '', HAM_ROOT_DIR: '',
+      GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
       GITHUB_TOKEN: 'synthetic-runner-token', GH_TOKEN: 'synthetic-builder-token' };
-    if (credential !== 'missing') env[credential] = 'synthetic-hammer-token';
+    if (credential !== 'missing') env[credential] = credential.endsWith('_REFRESH_COMMAND')
+      ? "printf '%s' synthetic-hammer-token" : 'synthetic-hammer-token';
     const result = spawnSync(process.execPath,
       [resolve(import.meta.dirname, '../bin/hammer-pushed-attestation.mjs'), 'fixture/repo', '42', baseHead, pushedHead],
       { env, encoding: 'utf8', timeout: 30000 });

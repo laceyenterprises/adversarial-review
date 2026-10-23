@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# GitHub credentials refresh inside metered-gh immediately before each call.
+export HAM_ROOT_DIR='<<ROOT_DIR>>'
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
-ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
+ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-hammer "$@"; }
+ham_git() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec-git "$@"; }
 ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
 
-ham_entitled_gh() { GH_TOKEN="$HAM_GH_TOKEN" ham_gh "$@"; }
+ham_entitled_gh() { ham_gh "$@"; }
 
 ham_publish_phase() {
 HAM_PHASE_OUTCOME=hammer-publish-error
@@ -90,8 +93,7 @@ HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.X
   ham_publish_abort 1; return 1
 }
 
-HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
-if [ -z "$HAM_GH_TOKEN" ]; then
+if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
   echo "HAM hard-blocker: no entitled hammer token present for audit comment identity" >&2
   ham_publish_abort 1; return 1
 fi
@@ -247,19 +249,11 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediati
   "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
 HAM_AUDIT_COMMENT_BODY=$(printf '%s' "$HAM_AUDIT_COMMENT_BODY" |
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_AUDIT_COMMENT_BODY='<local>'
-# The worker-pool exports the hammer's entitled token as HAMMER_LACEY_GH_TOKEN
-# (entitlement the-hammer-lacey). agent-os#4762 split it from the merge-agent's
-# MERGE_AGENT_GH_TOKEN so the hammer stops inheriting the merge-agent[bot]
-# identity (that collision failed hammer spawn with auth-identity-mismatch).
-# Prefer the dedicated var; fall back to MERGE_AGENT_GH_TOKEN only for
-# pre-rename / rolled-back hosts. The downstream identity check still verifies
-# the resolved login is the-hammer-lacey[bot], so a stale fallback fails loudly
-# rather than silently posting as the wrong bot.
-HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
+# The shared metered helper selects and refreshes the entitled audit identity.
 ham_existing_terminal_audit_comment_id() {
   # Slurp pagination into one JSON value; gh's --slurp cannot be combined
   # with --jq. The selector reads the complete array of comment pages.
-  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" ham_gh api \
+  HAM_AUDIT_COMMENTS_JSON=$(ham_gh api \
     --paginate --slurp \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || {
       printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" >&2
@@ -272,7 +266,7 @@ ham_existing_terminal_audit_comment_id() {
       "$HAM_AUDIT_BASE_HEAD" "$POST_REMEDIATION_SHA" "$HAM_AUDIT_COMMENT_MARKER"
 
 }
-if [ -z "${HAM_GH_TOKEN:-}" ]; then
+if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
   echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
   ham_publish_abort 1; return 1
 fi
@@ -358,12 +352,12 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
     HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
     HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
     if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
-      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+      ham_git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }
     else
-      git push --force-with-lease || {
+      ham_git push --force-with-lease || {
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }

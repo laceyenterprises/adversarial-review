@@ -10,7 +10,7 @@ if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' &&
 }
 const prNumber = process.env.HAM_PR_NUMBER || (baseArg === '--pr' ? prUrl.match(/\/pull\/(\d+)(?:[/?#]|$)/)?.[1] : undefined);
 // Keep PR-base discovery inside the same bounded, classified retry path as ancestry reads.
-const baseRef = process.env.HAM_BASE_HEAD ? (baseArg === '--pr' ? 'main' : baseArg) : baseArg === '--pr' ? (await execGhWithRetry({
+const baseRef = process.env.HAM_BASE_HEAD ? (baseArg === '--pr' ? 'main' : baseArg) : baseArg === '--pr' ? (await execGhWithRetry({ hammerToken: true,
   args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '.base.ref'], timeoutMs: 15000,
 })).stdout.trim() : baseArg;
 if (!baseRef) throw new Error('hammer PR base is missing');
@@ -20,7 +20,7 @@ if (process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead && !
 // Discover the actual live PR base only for the new content proof. Existing
 // reviewed-start/App-chain fast paths retain their zero-extra-read contract.
 const loadRebaseBase = async () => {
-  const pr = JSON.parse((await execGhWithRetry({ args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: 15000 })).stdout);
+  const pr = JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: 15000 })).stdout);
   return pr?.head?.sha === currentHead && /^[a-f0-9]{40}$/.test(pr?.base?.sha || '') ? { sha: pr.base.sha } : null;
 };
 const loadRebaseCoverage = async ({ base, head }) => {
@@ -62,7 +62,7 @@ const loadRebaseCoverage = async ({ base, head }) => {
 const loadComments = async () => {
   const comments = [];
   for (let page = 1; process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead; page++) {
-    const batch = JSON.parse((await execGhWithRetry({ args: ['api',
+    const batch = JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api',
       `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`], timeoutMs: 15000 })).stdout);
     comments.push(...batch);
     if (batch.length < 100) break;
@@ -83,13 +83,13 @@ const loadTimelinePage = async cursor => {
   const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`,
     '-f', `name=${name}`, '-F', `number=${prNumber}`];
   if (typeof cursor === 'string' && cursor) args.push('-f', `cursor=${cursor}`);
-  const response = JSON.parse((await execGhWithRetry({ args, timeoutMs: 15000 })).stdout);
+  const response = JSON.parse((await execGhWithRetry({ hammerToken: true, args, timeoutMs: 15000 })).stdout);
   if (response.errors) return null;
   return response.data?.repository?.pullRequest?.timelineItems;
 };
 // Use GitHub's Link cursor rather than inventing page numbers for activity.
 const loadActivityPage = async path => {
-  const { stdout } = await execGhWithRetry({ args: ['api', '--include', path], timeoutMs: 15000 });
+  const { stdout } = await execGhWithRetry({ hammerToken: true, args: ['api', '--include', path], timeoutMs: 15000 });
   const boundary = stdout.search(/\r?\n\r?\n/);
   if (boundary < 0) return null;
   const headers = stdout.slice(0, boundary);
@@ -102,7 +102,7 @@ const loadActivityPage = async path => {
 };
 const range = await fetchHammerHeadRange({ loadRebaseBase, loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
-  get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
+  get: async path => JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {
   process.stderr.write('hammer starting base or responsibility range could not be proven\n');
   process.exit(65);

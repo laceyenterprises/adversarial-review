@@ -229,6 +229,7 @@ test('API fallback push rejection releases the lease under set -e for both push 
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
+  */metered-gh.mjs) exec "$REAL_NODE" "$@" ;;
   */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
   *) printf '%s\\n' "$PUBLISH_RESULT" ;;
 esac
@@ -246,7 +247,7 @@ esac
       previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
   ]) {
     rmSync(join(dir, 'push-args'), { force: true });
-    const env = { HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
+    const env = { REAL_NODE: process.execPath, HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer', HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
       PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'),
       ATTESTATION_ARGS_FILE: join(dir, 'attestation-args'), PATH: `${dir}:${process.env.PATH}` };
     const failure = run('/bin/bash', ['-c', `set -e

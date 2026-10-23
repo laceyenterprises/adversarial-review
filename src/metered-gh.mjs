@@ -1,3 +1,4 @@
+import { hammerGitOptions, withHammerToken, withHammerTokenSync } from './hammer-token.mjs';
 import { readAdmissionChecks } from './watcher-admission-read-cache.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 // The only gh execution seam. GH_DEBUG captures headers even for high-level
@@ -140,14 +141,27 @@ async function finish(result, { failed = false, resource = 'core', credential = 
 }
 
 function meteredExecFile(execFileImpl = execFileAsync, command, args, options = {}) {
-  if (command !== 'gh') return execFileImpl(command, args, options);
-  return readAdmissionChecks(execFileImpl, command, args, options, executeGh);
-  async function executeGh() {
-    const credential = githubCredential({ env: options.env || process.env });
+  if (command !== 'gh') {
+    if (command === 'git' && options.hammerToken) {
+      return withHammerToken(active => execFileImpl(command, args, hammerGitOptions(active)), options);
+    }
+    return execFileImpl(command, args, options);
+  }
+  // Resolve refresh-only entitlements before cache keys or budget identities.
+  // Retry the whole metered attempt so a renewed credential owns its telemetry.
+  return withHammerToken((active, session) => readAdmissionChecks(execFileImpl, command, args, active,
+    () => executeGh(active, session)), debugOptions(options));
+  async function executeGh(active, session) {
+    let credential = githubCredential({ env: active.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
-    for (const res of ghResources(args)) await awaitThrottleIfNeeded(res, credential);
+    let waited = false;
+    for (const res of ghResources(args)) waited = await awaitThrottleIfNeeded(res, credential) || waited;
+    if (waited && session.managed) {
+      active = session.prepare();
+      credential = githubCredential({ env: active.env });
+    }
     try {
-      return await finish(await execFileImpl(command, args, debugOptions(options)), { credential, resource });
+      return await finish(await execFileImpl(command, args, active), { credential, resource });
     } catch (err) {
       await finish(err, { failed: true, credential, resource });
       throw err;
@@ -179,14 +193,23 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
 }
 
 function executeFileSync(execFileImpl, command, args, options = {}) {
-  if (command !== 'gh') return execFileImpl(command, args, options);
-  const activeOptions = debugOptions(options);
-  const { env } = activeOptions;
+  if (command !== 'gh') {
+    if (command === 'git' && options.hammerToken) {
+      return withHammerTokenSync(active => execFileImpl(command, args, hammerGitOptions(active)), options);
+    }
+    return execFileImpl(command, args, options);
+  }
+  return withHammerTokenSync((active, session) => executeGhSync(execFileImpl, command, args, active, session), debugOptions(options));
+}
+
+function executeGhSync(execFileImpl, command, args, activeOptions, session) {
+  let { env } = activeOptions;
   const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
   let buckets = {};
   try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(env), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
   const scope = currentGitHubBudgetScope();
-  const credential = githubCredential({ env });
+  let credential = githubCredential({ env });
+  let waited = false;
   for (const res of ghResources(args)) {
     const bucket = buckets[githubBudgetKey(res, credential)];
     const limited = scopedGitHubRateLimit(res, credential);
@@ -195,7 +218,13 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
       if (scope?.urgent && bucket.remaining > 0) continue;
       if (scope) { scope.deferred = true; throw new GitHubBudgetDeferredError(bucket); }
       bridgeCall('wait', [{ resource: res, credential }], env);
+      waited = true;
     }
+  }
+  if (waited && session.managed) {
+    activeOptions = session.prepare();
+    env = activeOptions.env;
+    credential = githubCredential({ env });
   }
   try {
     // execFileSync normally returns only stdout. Capture stderr as well so all

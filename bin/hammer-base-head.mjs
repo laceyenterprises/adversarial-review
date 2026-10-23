@@ -10,7 +10,7 @@ if (!ref) {
   process.stderr.write('usage: hammer-base-head PR_URL\n');
   process.exit(64);
 }
-const { stdout } = await execGhWithRetry({
+const { stdout } = await execGhWithRetry({ hammerToken: true,
   args: ['api', `repos/${ref[1]}/pulls/${ref[2]}`, '--jq', '.head.sha'],
   timeoutMs: 15_000,
 });

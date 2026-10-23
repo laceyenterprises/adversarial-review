@@ -2154,6 +2154,7 @@ async function main() {
     }
     // REVIEWVALID-01: a template echo is never posted; chunk replies were checked one by one.
     if (!dispatch.chunked) assertReviewerReply(rawReviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
+    assertReviewerReply(reviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });

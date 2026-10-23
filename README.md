@@ -268,7 +268,10 @@ A reply that echoes the output template is not a review either
 checks the raw reply of every direct reviewer model and every oversized-diff
 chunk. Hosted `agent-os-hq` artifacts first shed their model preamble and an
 optional whole-reply Markdown fence. Validation still precedes lossy section
-trimming, so normalization cannot hide duplicate sections or trailing text.
+trimming, so normalization cannot hide duplicate sections or trailing text. The
+final posting body is validated too. Validation, sanitization and finding parsing
+share fence handling: headings and finding cards inside examples are not review
+sections or actionable findings, and examples remain intact in the posted body.
 It rejects a reply if:
 
 - at least two fields of a finding card are whole-value template placeholders

@@ -3677,6 +3677,8 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
       // REVIEWVALID-01: one template-echo chunk must not reach the merged review.
       assertReviewerReply(result.rawReviewText ?? result.reviewText, {
         onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
+      assertReviewerReply(result.reviewText, {
+        onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
       chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
       execution ||= result.execution || null;
       chunkReviews.push({

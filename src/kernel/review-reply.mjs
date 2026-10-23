@@ -1,3 +1,4 @@
+import { maskReviewFences } from './review-markdown.mjs';
 // REVIEWVALID-01: the posting contract for a reviewer reply.
 //
 // A posted review is a claim about the code. A reply that is the
@@ -119,20 +120,8 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   const reasons = [];
 
   const headings = [];
-  const unfencedLines = Array(lines.length).fill('');
-  let openFence = null;
-  lines.forEach((line, index) => {
-    const fence = line.match(FENCE_RE);
-    if (openFence) {
-      if (fence && fence[1][0] === openFence[0] && fence[1].length >= openFence.length
-        && !line.slice(fence[0].length).trim()) openFence = null;
-      return;
-    }
-    if (fence) {
-      openFence = fence[1];
-      return;
-    }
-    unfencedLines[index] = line;
+  const unfencedLines = maskReviewFences(text).split('\n');
+  unfencedLines.forEach((line, index) => {
     const match = line.match(REQUIRED_HEADING_RE);
     if (match) headings.push({ name: REQUIRED_HEADINGS.find((name) => name.toLowerCase() === match[1].toLowerCase()), index });
   });

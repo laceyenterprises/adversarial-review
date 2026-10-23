@@ -1,3 +1,5 @@
+import { maskReviewFences } from './review-markdown.mjs';
+
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
 //   - one finding card per issue, currently headed by a top-level
@@ -60,23 +62,17 @@ function isNoneFindingsSentinelOnly(linesOrSection) {
 }
 
 function extractReviewSection(body, headingPattern) {
-  const lines = String(body ?? '').replace(/\r\n/g, '\n').split('\n');
-  let fence = null;
+  const text = String(body ?? '').replace(/\r\n/g, '\n');
+  const lines = text.split('\n');
+  const visible = maskReviewFences(text).split('\n');
   let section = null;
-  for (const line of lines) {
-    const marker = line.trimStart().match(/^(`{3,}|~{3,})/);
-    if (marker) {
-      if (!fence) fence = marker[1];
-      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
-      if (section) section.push(line);
-      continue;
-    }
-    if (!fence && /^##[ \t]+/.test(line)) {
+  for (const [index, line] of visible.entries()) {
+    if (/^##[ \t]+/.test(line)) {
       if (section) break;
       if (headingPattern.test(line)) section = [];
       continue;
     }
-    if (section) section.push(line);
+    if (section) section.push(lines[index]);
   }
   return section === null ? null : section.join('\n');
 }
@@ -93,7 +89,8 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
   // before the count step so an empty section is not miscounted as a
   // finding, but fail closed when extra prose is flush-left or looks
   // like finding-card content.
-  const lines = section.split(/\n/);
+  const originalLines = section.split(/\n/);
+  const lines = maskReviewFences(section).split('\n');
   if (isNoneFindingsSentinelOnly(lines)) return [];
 
   const matchBoldLabel = (raw) => {
@@ -132,12 +129,12 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
     const parts = label.value ? [label.value] : [];
     let end = startIndex;
     for (let index = startIndex + 1; index < lines.length; index += 1) {
-      const raw = lines[index];
+      const raw = originalLines[index];
       if (!raw.trim()) {
         parts.push('');
         continue;
       }
-      if (indentWidth(raw) <= labelIndent || matchBoldLabel(raw) || isFindingBoundary(raw)) break;
+      if (indentWidth(raw) <= labelIndent || matchBoldLabel(lines[index]) || isFindingBoundary(lines[index])) break;
       parts.push(raw.trim());
       end = index;
     }

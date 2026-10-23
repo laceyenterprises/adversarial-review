@@ -16,7 +16,7 @@ import {
 } from '../src/kernel/review-reply.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { dispatchReviewerModel, reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
-import { sanitizeCodexReviewPayload } from '../src/kernel/verdict.mjs';
+import { extractReviewVerdict, sanitizeCodexReviewPayload } from '../src/kernel/verdict.mjs';
 import { reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -143,7 +143,7 @@ test('REVIEWVALID-01: a duplicated Verdict, or a section after it, is rejected',
   assert.deepEqual(validateReviewerReply('').reasons, ['empty reply']);
 });
 
-test('REVIEWVALID-01: required headings inside fenced examples are not sections', () => {
+test('REVIEWVALID-01: required headings survive dispatch and posting inside fenced examples', async () => {
   for (const [opening, nested, closing] of [
     ['```markdown', '## Summary\n## Verdict', '```'],
     ['~~~markdown', '## Summary\n## Verdict', '~~~'],
@@ -154,6 +154,20 @@ test('REVIEWVALID-01: required headings inside fenced examples are not sections'
     const reply = VALID_REPLY.replace('## Suggested fixes\n',
       `## Suggested fixes\n${opening}\n${nested}\n${closing}\n`);
     assert.deepEqual(validateReviewerReply(reply), { ok: true, reasons: [] }, opening);
+    for (const model of ['claude', 'gemini', 'codex']) {
+      const dispatch = await dispatchReviewerModel(model, '+synthetic diff', '', {
+        reviewWithClaudeImpl: async () => ({ reviewText: reply }),
+        reviewWithGeminiImpl: async () => ({ reviewText: reply }),
+        reviewWithCodexImpl: async () => ({ reviewText: reply }),
+      });
+      const posted = dispatch.needsSanitize
+        ? sanitizeCodexReviewPayload(dispatch.rawReviewText) : dispatch.reviewText;
+      assert.doesNotThrow(() => assertReviewerReply(dispatch.rawReviewText));
+      assert.doesNotThrow(() => assertReviewerReply(posted));
+      assert.ok(posted.includes(`${opening}\n${nested}\n${closing}`), model);
+      assert.equal(extractReviewVerdict(posted), 'Request changes', model);
+      assert.equal(parseReviewFindings(posted).blocking.count, 1, model);
+    }
     assert.ok(validateReviewerReply(`${reply}\n## Summary\nReal duplicate.`)
       .reasons.includes('repeated required sections Summary'));
   }
@@ -368,12 +382,29 @@ test('REVIEWVALID-01: component titles and virtual files retain all addressable 
 });
 
 test('REVIEWVALID-01: markup in fenced code and prose labels is not a template echo', () => {
-  for (const [opening, closing] of [['```svg', '```'], ['~~~~jsx', '~~~~~']]) {
+  for (const [opening, closing] of [['```svg', '```'], ['~~~~jsx', '~~~~~'],
+    ['````markdown', '`````'], ['~~~markdown', '~~~']]) {
     for (const section of ['Blocking issues', 'Non-blocking issues', 'Suggested fixes']) {
-      const example = [opening, ...ECHO_CARD, '<path>', '<text>', closing,
-        '- Element: `<path>`', '- **Element:** <Text>', '- Node: <text>'].join('\n');
+      const example = [opening, ...ECHO_CARD, '<path>', '<text>', closing].join('\n');
       const reply = VALID_REPLY.replace(`## ${section}\n`, `## ${section}\n${example}\n`);
       assert.deepEqual(validateReviewerReply(reply), { ok: true, reasons: [] }, section);
+      assert.equal(validateReviewerReply(reply.replace('## Suggested fixes\n',
+        '## Suggested fixes\n- Element: `<path>`\n- **Element:** <Text>\n- Node: <text>\n')).ok, true);
+      for (const body of [reply, reply.replace(`## ${section}\n${example}\n`, `## ${section}\n`)
+        .replace('## Verdict', `${example}\n## Verdict`)]) {
+        const parsed = parseReviewFindings(body);
+        assert.equal(parsed.blocking.state, 'known', section);
+        assert.equal(parsed.blocking.count, 1, section);
+        assert.deepEqual(parsed.blocking.findings.map((finding) => finding.title), ['Retry loop never terminates']);
+        assert.deepEqual(classifyBlockingFindings(body), { count: 1, state: 'known' });
+        assert.equal(classifyNonBlockingFindings(body).count, 0);
+        const rescue = classifyMergeAgentRescue({
+          reviewBody: body, labels: [], mergeable: 'MERGEABLE', statusCheckRollup: [],
+          headSha: 'a'.repeat(40), reviewHeadSha: 'a'.repeat(40),
+        });
+        assert.equal(rescue.decision, 'remediation-eligible');
+        assert.equal(rescue.parsedFindings.length, 1);
+      }
     }
   }
 });
@@ -383,4 +414,23 @@ test('REVIEWVALID-01: an empty Verdict reports a missing verdict line', () => {
     assert.deepEqual(validateReviewerReply(VALID_REPLY.replace(/Request changes$/, whitespace)).reasons,
       ['missing verdict line']);
   }
+});
+
+
+test('REVIEWVALID-01: a valid raw chunk cannot authorize an invalid posting body', async () => {
+  const rejected = [];
+  await assert.rejects(reviewAgyOversizedInChunks('+synthetic diff\n'.repeat(9000), '', {
+    env: { AGENT_OS_REVIEWER_TIMEOUT_MS: '1000' },
+    reviewerModel: 'codex',
+    maxBytes: 60000,
+    dispatchReviewerModelImpl: async () => ({
+      rawReviewText: VALID_REPLY,
+      reviewText: VALID_REPLY.replace(/\n## Verdict\nRequest changes$/, ''),
+      needsSanitize: false,
+    }),
+    onRejectedCodexOutput: (evidence) => rejected.push(evidence),
+  }), ReviewerReplyRejectedError);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0].rejectionReason, /no Verdict section/);
+  assert.equal(rejected[0].chunkIndex, 1);
 });

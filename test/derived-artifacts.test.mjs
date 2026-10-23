@@ -211,7 +211,15 @@ test('build cancellation kills background descendants before returning', async t
     await assert.rejects(runArtifactBuild({ file: '/bin/sh', args: ['-c', 'sleep 60 & echo $! > descendant.pid; wait'],
       cwd: root, env: { PATH: '/usr/bin:/bin' } }, controller.signal), /failed or exceeded/);
     const pid = Number(readFileSync(pidFile, 'utf8').trim());
-    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    // kill(pid, 0) also succeeds for dead, unreaped descendants on Linux.
+    // The sandbox can terminate them, but only their new parent can reap them.
+    const descendant = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], {
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(descendant.error);
+    assert.ok(descendant.status === 1
+      || (descendant.status === 0 && /^Z/.test(descendant.stdout.trim())),
+    `descendant must be absent or a terminated zombie: ${descendant.stdout} ${descendant.stderr}`);
   } finally { clearTimeout(timer); }
 });
 

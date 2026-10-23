@@ -21,13 +21,10 @@ wrap commands with Perl:
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
 ```
 
-Match timeouts to operations. **For test suites, use the load-aware helper** with
-the idle-host duration (up to 6x for load; errors fall back to that duration):
+Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-second no-output deadline never scales.
 
 ```bash
-/usr/bin/perl -e '$t = shift || 360; alarm $t; exec @ARGV' \
-  "$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs 360)" \
-  python3 -m pytest tests/test_endpoints.py
+"${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --pytest -- tests/test_endpoints.py || exit $?
 ```
 
 Never search recursively without bounds over `/tmp`, `/private/tmp`, `$HOME`,
@@ -44,12 +41,16 @@ interrupted shared worker-base ref updates can orphan locks and poison retries.
 
 At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once before exploratory reads. Its bounded JSON covers PR/head/findings, checks, diff stat, conflicts, primary change and remediation/lease state. Fetch the full review if `review.findingsTruncated` is true. The live merge predicate remains mandatory.
 
-**Never run a full test suite locally.** PR-head CI is the full-suite merge gate.
-Run only targeted tests for changed files, including after rebase/replay. Run long
-tests/builds through `<<ROOT_DIR>>/bin/run-bounded.sh --timeout <seconds> -- <command>`
-in one foreground blocking tool call; it preserves status and caps the tail at
-4 KiB. Use one bounded harness wait for external waits. Never background a command and poll with `sleep`, `tail`, or `cat`, or narrate "still waiting".
-Codex and Claude must not create background test sessions and repeatedly read logs.
+**Never run a full test suite locally.**
+Run targeted tests after edits/rebase in one foreground call.
+Under the merge lease use `hammer-validate.mjs` above; outside it,
+`<<ROOT_DIR>>/bin/run-bounded.sh` also caps output at 4 KiB.
+Never nest buffering runners. Any timeout, cancellation or nonzero
+result must exit via the lease-release trap before validation audit or merge.
+Diagnose outside the lease; reacquire and repeat head/base/file-overlap checks.
+Keep required tests/checks. Use one bounded harness wait for external waits.
+Never background a command and poll with `sleep`, `tail`, or `cat`.
+Codex and Claude: no background test sessions or "still waiting" narration.
 
 ## Snapshot
 

@@ -769,6 +769,16 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+LAC-2093 bounds local validation under the shared lease with
+`bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
+independent of the load-scaled 360-second nominal absolute ceiling. Real pytest
+phase events expose collection/setup/call/teardown progress. TERM/INT/HUP
+cancellation initiates group TERM and five-second KILL escalation even after
+leader exit. Incomplete validation exits through the existing lease-release trap
+before any validated-head audit or merge; retry reacquires and rechecks unchanged
+head/base/file-overlap safety. No durable states or transitions are added.
+See [source evidence and pending deployment acceptance](validation/lac-2093.md).
+
 Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;

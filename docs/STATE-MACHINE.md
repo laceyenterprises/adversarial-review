@@ -978,6 +978,15 @@ once with a timer-safe ceiling. Ineligibility, head movement and merge completio
 remove it immediately; an absent daemon expires. A holder release (including a
 retryable abort) wakes the first surviving daemon PR at its reserved head through
 the existing capped watcher wake path. No holder is preempted.
+LAC-2087 puts the posted-review candidate exits inside this cleanup lifecycle:
+operator skip and terminal/head-change exits remove abandoned daemon ownership
+even when no next acquire runs. Only eligible daemon contention retains it;
+a concrete in-flight closure promise also retains ownership across a soft caller
+deadline until its inner scope settles. Watcher PID liveness supplies no acquire
+ownership. Other FIFO waiters and the
+holder fence are unchanged. The clean smoke covers empty-lane progress after a
+hold with a live watcher PID; dedicated fixtures also cover head changes and
+cleanup while a holder remains. No states or merge-authority edges are added.
 The closer releases before its first remote-CI wait, including UNKNOWN/read
 retry waits, and reacquires before merge. At that boundary, the entire current base
 must be contained in the exact CI-validated head; even disjoint base advancement

@@ -610,6 +610,14 @@ wakes the first daemon PR at its reserved head through the existing per-head cap
 The clean offline smoke verifies service at 299 seconds and an exact-head release
 wake; no deployment configuration or migration is needed.
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
+LAC-2087 extends cleanup to posted-review candidate exits, including operator
+skip before any closure attempt. The clean smoke proves abandoned daemon waiter
+removal with a live watcher PID, preservation of other FIFO requests and next
+closer acquisition. `daemon-waiter-lifecycle` fixtures also exercise head changes,
+terminal candidates, an unchanged active holder fence and concrete active
+closure ownership across a soft caller deadline. No lifecycle states
+or merge gates change. Runtime recovery requires separate read-only observations
+after normal deployment; see the [lease runbook](docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
 When the hammer closes a PR (the common MSM path),
 `templates/hammer-prompt.md` directs one linear flow. The verify-head,

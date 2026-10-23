@@ -34,6 +34,7 @@ import { finalReviewHammerLatencySummary, resolveMergeAgentCoexistenceForWatcher
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
+import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import {
   clearPendingAmaHammerDispatch,
   clearPendingAmaHammerDispatchForTerminalPr,
@@ -562,6 +563,13 @@ async function handlePostedReviewRowWithinReadCache({
         },
       };
     }
+    // Own reservation cleanup outside closure dispatch: operator holds and
+    // terminal/head changes can prevent the next daemon acquire entirely.
+    let closureInFlight = false;
+    return await withDaemonMergeReservation({ rootDir, repo: repoPath, pr: prNumber,
+      base: candidate?.baseBranch, head: candidate?.headSha || currentRevisionRef,
+      isAttemptActive: () => closureInFlight,
+    }, async () => {
     // End advisory reuse before any closure, lease or dispatch freshness read.
     closePostedReviewReadCache();
     const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence', {
@@ -679,8 +687,9 @@ async function handlePostedReviewRowWithinReadCache({
     let coexistenceDecision;
     try {
       coexistenceDecision = await timePostedReviewStep(
-        'resolveMergeAgentCoexistence', stepKey, logger, ({ signal }) =>
-          resolveMergeAgentCoexistenceForWatcherImpl({
+        'resolveMergeAgentCoexistence', stepKey, logger, async ({ signal }) => {
+          closureInFlight = true;
+          try { return await resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
             reviewStateRow: existing,
             reviewStateDb,
@@ -699,7 +708,8 @@ async function handlePostedReviewRowWithinReadCache({
             signal,
             operationTimeoutMs: coexistenceOperationTimeoutMs,
             operationTracker: coexistenceOperationTracker,
-          }),
+          }); } finally { closureInFlight = false; }
+        },
         undefined,
         {
           deadlineMs: coexistenceDeadlineMs,
@@ -958,6 +968,7 @@ async function handlePostedReviewRowWithinReadCache({
       gateDecision,
       amaClosureResult: coexistenceDecision?.amaClosureResult || null,
     };
+    });
   } catch (err) {
     // The augmented error from `dispatchMergeAgentForPR` already
     // inlines stderr+stdout into `err.message`, so just dumping

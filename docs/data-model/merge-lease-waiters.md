@@ -35,6 +35,15 @@ Acquisition removes the matching waiter. Watcher eligibility exits, head moves,
 terminal outcomes and merge completion remove the PR's obsolete reservation
 immediately; only eligible lease contention retains it. An absent daemon's
 reservation still expires after the stored deadline.
+LAC-2087 extends that cleanup boundary to the posted-review candidate handler:
+an operator skip, terminal candidate, or moved head can exit before closure ever
+attempts another acquire. Only the nested daemon `lease-contended` result keeps
+the current reservation. A concrete closure promise that outlives the caller’s
+soft deadline retains its reservation until its inner attempt settles. The
+long-lived watcher PID proves service liveness,
+not an active acquire. Cleanup uses the existing per-base mutation lock and
+removes only this PR's obsolete daemon requests; ordinary waiters, other PRs'
+requests and holder fences remain intact.
 Cleanup requires a resolved head; an absent head leaves existing reservations
 intact while the caller's attempt handles the unresolved candidate.
 

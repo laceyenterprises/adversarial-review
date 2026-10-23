@@ -4137,6 +4137,24 @@ for the first surviving daemon waiter's PR and exact head. The existing per-head
 wake cap applies; a failed wake write falls back to the next poll. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 
+LAC-2087: the posted-review candidate handler owns reservation cleanup even when
+an operator skip or terminal candidate prevents closure dispatch. It drops the
+old head before evaluating closure and keeps the current reservation only for
+eligible daemon lease contention or while its concrete closure promise still
+runs after a soft caller deadline (the inner attempt owns eventual cleanup).
+A live watcher PID does not prove an acquire
+is still active. Other PRs' daemon reservations, ordinary FIFO waiters and the
+holder fence are preserved. Offline `daemon-waiter-lifecycle` fixtures reproduce
+acquire → hold/head change → no next acquire, with both empty and held lanes;
+the clean smoke also exercises next-closer progress and surviving daemon priority.
+
+Source tests and PR publication do not establish runtime recovery. After normal
+deployment, observe a naturally scheduled hold/head-change pass and record that
+its exact obsolete waiter disappears, surviving waiters retain order, and the
+next eligible closer acquires under the shared fence. This is separate read-only
+evidence; no queue edits, rescue-PR changes, manual merge bypass or restart are
+part of this fix.
+
 Progress polling reparses the bounded history only when its file identity or
 metadata changes, including equal-size atomic replacements at the retention
 limit. Timeout evidence also retains holders without lease IDs using their PR,

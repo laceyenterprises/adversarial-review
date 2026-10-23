@@ -948,3 +948,19 @@ test('deep error/output graphs are redacted iteratively with identity and cycles
   assert.equal(output[1], root);
   assert.equal(output[2], output);
 });
+
+test('wide mixed output redacts leaves and nested aliases while preserving scalars', () => {
+  const session = hammerTokenSession({ env: { HAMMER_LACEY_GH_TOKEN: expired }, hammerToken: true });
+  const nested = { message: expired };
+  const output = Array.from({ length: 10_000 }, () => [expired, Buffer.from(expired), null, 0, false, nested]).flat();
+  const error = { output };
+  assert.equal(session.redact(error), error);
+  assert.equal(error.output, output);
+  for (let i = 0; i < output.length; i += 6) {
+    assert.equal(output[i], '[redacted]');
+    assert.equal(String(output[i + 1]), '[redacted]');
+    assert.deepEqual(output.slice(i + 2, i + 5), [null, 0, false]);
+    assert.equal(output[i + 5], nested);
+  }
+  assert.equal(nested.message, '[redacted]');
+});

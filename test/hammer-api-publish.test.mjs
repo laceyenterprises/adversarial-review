@@ -78,3 +78,18 @@ test('publication diagnostics bound multiline child output without traversing er
   assert.ok(long.length <= 512);
   assert.match(long, /\[truncated\]$/);
 });
+
+test('raw string rejections retain bounded first-line publication diagnostics', async () => {
+  for (const [rejection, expected] of [
+    ['transport offline\nrepeated finding', 'transport offline'],
+    ['transport offline\r\nrepeated finding', 'transport offline'],
+    ['', 'publication failed'],
+    ['x'.repeat(10_000), 'x'.repeat(496) + ' ... [truncated]'],
+  ]) {
+    const result = await publishHammerTree({ ...options, api: () => Promise.reject(rejection) });
+    assert.equal(result.reason, expected);
+    assert.equal(result.route, 're-review');
+    assert.equal(result.fallbackHead, options.expectedHead);
+    assert.ok(result.reason.length <= 512);
+  }
+});

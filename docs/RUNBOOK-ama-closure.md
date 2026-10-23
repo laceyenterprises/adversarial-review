@@ -4293,7 +4293,8 @@ synchronization failed, attest that published SHA and stop with
 LAC-2086: stop the current run without another push, remediation pass or source
 review. The no-merge note carries the exact base/pushed pair and
 `HAM-CI-Validated: false`. Publication failure reasons contain only the first
-message/stderr lines, capped at 512 characters; report that reason once rather
+message/stderr lines (or the first line of a raw string rejection), capped at
+512 characters; report that reason once rather
 than copying repeated finding fragments from phase output. A published source
 commit proves neither merge nor production recovery. Keep
 that exact pair in a no-merge closing audit after CI, credential or other stops;

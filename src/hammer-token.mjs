@@ -171,7 +171,8 @@ export function hammerTokenSession(options = {}) {
       for (const key of keys) {
         if (current[key] === undefined) continue;
         current[key] = redactLeaf(current[key]);
-        pending.push(current[key]);
+        const next = current[key];
+        if (next && typeof next === 'object' && !Buffer.isBuffer(next)) pending.push(next);
       }
     }
     return redactLeaf(value);

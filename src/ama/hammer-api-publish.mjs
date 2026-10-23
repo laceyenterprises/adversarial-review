@@ -4,7 +4,8 @@ import { filterGitHubBody } from '../github-outbound-body.mjs';
 // Never walk .error/.cause/.output or serialize the child error graph.
 export function hammerPublicationFailureReason(error) {
   const line = value => String(value || '').split(/\r?\n/, 1)[0];
-  const parts = [...new Set([line(error?.code), line(error?.message), line(error?.stderr)].filter(Boolean))];
+  const parts = [...new Set([typeof error === 'string' ? line(error) : '',
+    line(error?.code), line(error?.message), line(error?.stderr)].filter(Boolean))];
   const reason = parts.join(': ') || 'publication failed';
   return reason.length > 512 ? `${reason.slice(0, 496)} ... [truncated]` : reason;
 }

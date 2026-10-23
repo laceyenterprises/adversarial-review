@@ -1626,7 +1626,20 @@ const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'superseded',
 ]);
 
-function amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus) {
+// Persist a status for confirmed terminal evidence without discarding wire
+// booleans. Process success still requires independent PR/merge evidence.
+function terminalCloserLaunchStatus(value) {
+  const meaning = launchRequestMeaning(value);
+  const status = normalizeWorkerRunStatus(typeof value === 'string' ? value : value?.status);
+  if (status === 'succeeded' && !meaning.succeeded) return 'failed';
+  if (meaning.terminal && !AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) {
+    return meaning.succeeded ? 'succeeded' : 'failed';
+  }
+  return status || (meaning.succeeded ? 'succeeded' : 'failed');
+}
+
+function amaCloserStatusFromTerminalLaunchRequestStatus(value) {
+  const launchRequestStatus = terminalCloserLaunchStatus(value);
   if (launchRequestStatus === 'succeeded') return 'unverified-terminal-success';
   if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(launchRequestStatus)) {
     return launchRequestStatus;
@@ -1755,8 +1768,9 @@ function* reconcileAmaCloserLeaseSteps({
         leaseIdentity: { repo, prNumber, headSha: held.headSha }, terminalOutcome: 'deferred',
         launchRequestId, now, logger, repo, prNumber });
     }
-    const status = normalizeWorkerRunStatus(probe.row?.status);
-    if (!AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
+    const status = terminalCloserLaunchStatus(probe.row);
+    if (!isTerminalLaunchRequestStatus(probe.row)
+      || !AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
     const identity = { repo, prNumber, headSha: held.headSha };
     const dispatchIdentity = { ...identity, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
     const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
@@ -3764,8 +3778,8 @@ function parseAmaCloserDispatchStatusOutput(stdout) {
   const status = typeof parsed?.status === 'string'
     ? parsed.status.trim().toLowerCase()
     : null;
-  if (!status) return null;
-  return { status, ...(parsed.diagnostic ? { diagnostic: parsed.diagnostic } : {}) };
+  if (!status && typeof parsed?.terminal !== 'boolean' && typeof parsed?.succeeded !== 'boolean') return null;
+  return { ...parsed, status };
 }
 
 async function probeAmaCloserDispatchStatus({
@@ -5520,11 +5534,13 @@ async function maybeDispatchAmaCloserAttempt({
     throwIfAborted(signal);
     // A terminal lease may already have been written by the worker. Persist
     // ledger terminality before retry/refund/PR evidence can return early.
-    if (probe?.ok && isTerminalLaunchRequestStatus(probe.row?.status)) {
+    const terminalStatus = probe?.ok && isTerminalLaunchRequestStatus(probe.row)
+      ? terminalCloserLaunchStatus(probe.row) : null;
+    if (terminalStatus) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        normalizeWorkerRunStatus(probe.row.status), (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
+        terminalStatus, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
-    const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
+    const terminal = ['failed', 'succeeded'].includes(terminalStatus);
     const reason = terminal ? unexecutedHammerReason(probe.row) : null;
     if (reason && !auditTerminalOutcome) {
       const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl, repo, prNumber, signal });
@@ -5833,21 +5849,32 @@ async function maybeDispatchAmaCloserAttempt({
     });
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
+    // A wire false must survive the transport and every status-only policy below.
+    if (statusProbe?.terminal === false) return noAmaDispatch({
+      dispatched: false, skipMergeAgent: true,
+      reason: dispatchStatusReason(status || 'unknown'),
+      inFlight: !launchRequestMeaning(statusProbe).parked,
+      preservePredecessorArtifacts: true, launchRequestId: existingRecord.launchRequestId,
+    });
+    if (isTerminalLaunchRequestStatus(statusProbe)) status = terminalCloserLaunchStatus(statusProbe);
     // FINALCLOSE-01: worker status can remain `starting` after a reboot while
     // the launch ledger is terminal. Process success alone is not merge proof;
     // keep raw `succeeded` in the terminal-hold classifier below so live PR,
     // auto-merge and no-merge audit evidence decide ownership before retry/refund.
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
-      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
-      const terminalStatus = prefetchedLaunchRequestProbe.row.status;
+      && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(terminalCloserLaunchStatus(prefetchedLaunchRequestProbe.row))) {
+      const row = prefetchedLaunchRequestProbe.row;
+      const terminalStatus = terminalCloserLaunchStatus(row);
       status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
         ? 'unknown' : terminalStatus;
     }
     existingDispatchStatus = status;
     const finalRoundLaunchEnded = dispatchContext?.dispatchReason === 'exhausted-final-hammer'
       && prefetchedLaunchRequestProbe?.ok
-      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
-    if (isTerminalLaunchRequestStatus(status)) {
+      && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(terminalCloserLaunchStatus(prefetchedLaunchRequestProbe.row));
+    if (isTerminalLaunchRequestStatus(statusProbe) || isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
@@ -6052,7 +6079,7 @@ async function maybeDispatchAmaCloserAttempt({
             : noMergeAuditForCurrentHead === null ? 'audit-comments-unreadable' : 'live-pr-state-unknown';
           updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
-            lastObservedStatus: status,
+            lastObservedStatus: amaCloserStatusFromTerminalLaunchRequestStatus(status),
             lastObservedAt: dispatchContext.dispatchedAt,
             lastError: `${HAMMER_OUTCOME_UNCONFIRMED}:${unconfirmedReason}`,
           }));
@@ -6676,9 +6703,10 @@ async function maybeDispatchAmaCloserAttempt({
         hqRoot,
         rootDir,
       });
-      const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
-      if (launchRequestProbe?.ok && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
-        status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
+      const launchRequestStatus = terminalCloserLaunchStatus(launchRequestProbe?.row);
+      if (launchRequestProbe?.ok && isTerminalLaunchRequestStatus(launchRequestProbe.row)
+        && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
+        status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestProbe.row);
         existingDispatchStatus = status;
         const capFinalDecision = await reconcileCapFinalDecision(status);
         if (capFinalDecision) return capFinalDecision;

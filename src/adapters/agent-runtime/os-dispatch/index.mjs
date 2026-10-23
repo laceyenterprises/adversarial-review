@@ -1,3 +1,4 @@
+import { readDispatchStatus } from '../../../producer-contracts/launch-status.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 // The `os-dispatch` AgentRuntime (v2 app architecture §6.1) — the PRIMARY
 // runtime. Reviews and remediations route through the Agent OS app contract
@@ -61,14 +62,7 @@ const APP_CONTRACT_REQUEST_ID_DIGEST_LENGTH = 16;
 const DEFAULT_POLL_BASE_MS = 5_000;
 const DEFAULT_POLL_JITTER_MS = 1_000;
 
-// dispatch_status terminal-state mapping → AgentRunStatus. Non-terminal states
-// (queued/accepted/dispatching/running/heartbeating/…) keep the poll loop
-// alive; anything not listed here is treated as non-terminal so a novel
-// in-progress state never resolves the run prematurely.
-const SUCCESS_STATUSES = new Set(['succeeded', 'success', 'completed', 'complete', 'done']);
-const FAILED_STATUSES = new Set(['failed', 'failure', 'error', 'errored', 'rejected']);
-const CANCELLED_STATUSES = new Set(['canceled', 'cancelled', 'superseded', 'aborted']);
-const TIMEOUT_STATUSES = new Set(['timeout', 'timed_out', 'timedout', 'expired', 'deadline_exceeded']);
+// Launch evidence comes from the SDK. AgentRunStatus categories remain app policy.
 const EXECUTION_ACTIVE_STATUSES = new Set(['running', 'heartbeating']);
 const EXECUTION_START_FIELDS = [
   'running_at',
@@ -136,12 +130,16 @@ function normalizeStatus(status) {
   return String(status || '').trim().toLowerCase();
 }
 
-function mapTerminalStatus(status) {
-  if (SUCCESS_STATUSES.has(status)) return 'completed';
-  if (TIMEOUT_STATUSES.has(status)) return 'timeout';
-  if (CANCELLED_STATUSES.has(status)) return 'cancelled';
-  if (FAILED_STATUSES.has(status)) return 'failed';
-  return null;
+function mapTerminalStatus(value) {
+  const payload = typeof value === 'string' ? { status: value } : value;
+  // The app-contract endpoint retains producer evidence under live_status.
+  // Top-level wire fields take precedence as that projection evolves.
+  const evidence = readDispatchStatus({ ...liveStatusOf(payload), ...payload });
+  if (!evidence.terminal) return null;
+  if (evidence.succeeded) return 'completed';
+  if (evidence.status === 'canceled' || evidence.status === 'superseded') return 'cancelled';
+  if (failureClassOf(payload, null) === 'timeout') return 'timeout';
+  return 'failed';
 }
 
 function validateRequest(request) {
@@ -755,7 +753,7 @@ function createOsDispatchAgentRuntime({
         }
         return dispatchFailureResult(err);
       }
-      const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));
+      const mapped = mapTerminalStatus(statusPayload);
       if (mapped) {
         return buildTerminalResult(mapped, statusPayload, role, artifactContext, {
           env,

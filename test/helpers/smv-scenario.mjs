@@ -60,7 +60,25 @@ const scenario = process.argv[2];
 let evidence = {};
 if (scenario === 'clean') {
   // LRQSTATUS-01: scheduling terminality does not release a parked PR owner.
-  const { launchRequestInFlight, launchRequestOwned } = await import('../../src/ama/launch-request-status.mjs');
+  const { launchRequestInFlight, launchRequestOwned, launchRequestMeaning } = await import('../../src/ama/launch-request-status.mjs');
+  assert.equal(launchRequestMeaning({ status: 'succeeded', terminal: false, succeeded: false }).terminal, false);
+  assert.equal(launchRequestMeaning({ status: 'succeeded', succeeded: false }).succeeded, false);
+  assert.equal(launchRequestMeaning({ status: null, terminal: true, succeeded: false }).terminal, true);
+  assert.equal(launchRequestMeaning({ status: null, terminal: true, succeeded: false }).succeeded, false);
+  const { normalizeWorkerTerminalEvent, workerTerminalEventToDispatchStatus, parseHqDispatchStatus } = await import('../../src/remediation-hq-dispatch.mjs');
+  for (const payload of [{ terminal: true, succeeded: true }, { terminal: true, succeeded: false },
+    { status: 'succeeded', terminal: true, succeeded: false }]) {
+    const event = normalizeWorkerTerminalEvent('health.worker.terminal.synthetic', payload);
+    assert.equal(event.terminal, true);
+    assert.equal(event.succeeded, payload.succeeded);
+    const projected = workerTerminalEventToDispatchStatus(event);
+    assert.equal(projected.succeeded, payload.succeeded);
+    const probed = parseHqDispatchStatus(JSON.stringify(payload));
+    assert.equal(launchRequestMeaning(probed).terminal, true);
+    assert.equal(launchRequestMeaning(probed).succeeded, payload.succeeded);
+  }
+  assert.equal(launchRequestMeaning('completed').status, null);
+  assert.equal(launchRequestMeaning('blocked_needs_decision').succeeded, false);
   const { launchHoldsCloserCapacity } = await import('../../src/ama/closure-capacity.mjs');
   for (const status of ['blocked_needs_decision', 'waiting_approval', 'waiting_input']) {
     const probe = { ok: true, row: { status } };

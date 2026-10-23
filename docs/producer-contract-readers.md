@@ -45,21 +45,35 @@ servable degraded provider, with its existing legacy `providers` boolean fallbac
 Aggregate HTTP status and the provider name `google` never stand in for the
 broker's registered provider `gemini`.
 
-The launch vocabulary artifact is extracted from the producer's dependency-free
-module. Terminality is distinct from success. Existing consumer policy subsets
-and legacy spellings remain explicit at their callers; the closer does not gain
-retry authority for blocked decisions. Worker-run, dispatch-record and
-reviewer-run statuses remain separate contracts. Unknown launch/receipt statuses
-carry the producer and offending field/value without a new rejection.
+Launch evidence comes from the committed SDK 0.3.0 release artifact in
+`vendor/`, pinned by npm's lockfile integrity. `src/producer-contracts/launch-status.mjs`
+re-exports SDK readers and vocabulary sets; it contains no status interpretation.
+The release bundles the public `statusVocabulary` export and runs offline without
+an OS checkout, ledger, credentials or network. Install the locked dependencies
+before starting the service. The older extracted JSON remains capture/refresh
+history only and is no longer read by production code.
 
-Dispatch status probes preserve the dispatch/worker vocabulary and producer
-diagnostics without interpreting them as launch-row statuses. Caller-owned
-terminal policy sets fail loudly at module load if generated producer vocabulary
-no longer recognizes a required terminal status. Each required policy entry is
-asserted before producer terminality filters the set, so a vocabulary refresh
-cannot silently remove retry, remediation or reviewer terminal handling; legacy capacity aliases remain
-explicit caller policy. Quota deferral logs deduplicate on routing state, reason
-and sorted diagnostic field paths, retaining changing values only in the emitted message.
+Reviewer polling, the app-contract AgentRuntime, remediation liveness and terminal
+events, dispatch receipts, merge-agent probes and closer lease/retry readers use `readDispatchStatus`.
+Each explicit `terminal` and `succeeded` boolean takes precedence independently,
+including false; missing or invalid booleans use vocabulary fallback. Invalid
+booleans and unknown statuses carry SDK diagnostics. `blocked_needs_decision`
+is terminal and unsuccessful; waiting approval/input remain nonterminal.
+Parked ownership and capacity follow the existing closer policy below.
+
+Launch aliases such as `completed`, `complete`, `done`, `cancelled`, `reaped` and
+`rejected` are unknown. Worker-run, reviewer-run and app dispatch-record states
+remain separate contracts. Retry/rearm policy remains an explicit subset and
+fails loudly if the SDK vocabulary no longer recognizes one of its terminal
+members. Producer terminality supplies no additional retry or merge authority.
+Transport probes retain both booleans rather than projecting a status alone.
+The app-contract reader accepts the documented nested `live_status` evidence;
+top-level boolean fields take precedence. Its AgentRunStatus mapping occurs only
+after SDK terminality: success is `completed`, cancellation/supersession is
+`cancelled`, and other unsuccessful terminal launches are `failed` (or `timeout`
+when the failure class says so). Client deadline expiry remains a separate timeout.
+Quota deferral logs deduplicate on routing state, reason and sorted diagnostic
+field paths, retaining changing values only in the emitted message.
 
 Dispatch receipt identity aliases retain each caller's existing precedence and
 permissive compatibility behavior; whitespace-only aliases are skipped so a
@@ -78,8 +92,9 @@ The service does not gain a second D1 completion classifier or PR-create route.
 [`provenance.json`](../test/fixtures/producer-contracts/provenance.json) pins the
 Agent OS revision, source path and SHA-256 for every copied artifact. Definitions
 under `test/fixtures/producer-contracts/definitions` are inert verbatim excerpts
-of producer types/readers, not executable policy. The generated runtime launch
-vocabulary comes from the same source module, rather than a handwritten set.
+of producer types/readers, not executable policy. The historical extracted launch
+vocabulary records that capture revision; runtime interpretation uses the pinned
+SDK release and its public export.
 All copied owner captures are byte-identical; this repository adds no redactions.
 
 Relative links inside copied owner records resolve against their `source` path
@@ -169,7 +184,7 @@ fallback. A reason key must never promote short-window evidence to weekly
 capacity. Existing lifecycle states and offline smoke promises are unchanged.
 
 
-LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;
 status-only ledger rows use the producer definitions. `blocked_needs_decision`
@@ -183,7 +198,22 @@ Producer terminality alone is not child-exit or ownership-release authority:
 `blocked_needs_decision` is itself terminal in the producer vocabulary, including
 when the wire explicitly reports `terminal: true`. A live wire-only observation
 without a status string retains ownership and uses an `unknown` wait reason.
-The legacy stored spellings map through producer values: `completed` →
-`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
-`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
+public `statusVocabulary`. Each explicit boolean wins independently, including
+false; absent or invalid booleans use the vocabulary and malformed values carry
+diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reaped`
+and `rejected` remain unknown rather than authorizing success or retries.
+Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
+
+SDK dispatch regressions use the release's public `dispatch-status` serializer
+examples, covering every canonical state without copying producer source.
+Labelled negative/compatibility mutations cover explicit false, missing booleans,
+unknown/malformed values and removed aliases. Run the complete
+`test/producer-contract-readers.test.mjs`, `test/hq-dispatch-status-json.test.mjs`
+and `test/launch-request-status.test.mjs` files through `test/run-tests.mjs`, plus
+the reviewer-runtime, remediation, merge-agent and closer/retry/lease consumers.
+These checks do not dispatch work or prove deployed runtime activation.
+
+See the [SDK migration validation record](validation/sdk-launch-status.md) for
+scoped commands, artifact isolation and native-backend evidence limits.

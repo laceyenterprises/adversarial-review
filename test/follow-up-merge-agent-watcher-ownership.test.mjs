@@ -102,10 +102,12 @@ function adapterAwareGhExecFile({ calls = [], failAdapterLabel = false } = {}) {
   };
 }
 
-test('watcher owns outcome: re-dispatches a died-without-handoff failed worker and passes --as-owner', async () => {
+for (const requested of [false, true])
+for (const payload of [{ status: 'failed' }, { terminal: true, succeeded: false }, { terminal: true, succeeded: true }]) {
+  test(`merge retry requested=${requested} preserves ownership and budget: ${JSON.stringify(payload)}`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = makeHqRoot('airlock');
-  seedRecord(rootDir, { watcherReDispatchCount: 0 });
+  seedRecord(rootDir, { watcherReDispatchCount: requested ? 2 : 0 });
   const statusCalls = [];
   const dispatchCalls = [];
 
@@ -113,13 +115,17 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
     rootDir,
-    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    ...makeJob({
+      labels: [{ name: 'merge-agent-dispatched' }, ...(requested ? [{ name: 'merge-agent-requested' }] : [])],
+      mergeAgentRequest: requested ? { actor: 'VirtualPaul', createdAt: '2026-05-24T03:55:00.000Z',
+        labelEventId: 'evt-retry', labelEventNodeId: 'LE_retry', headSha: 'head-sha-1' } : null,
+    }),
     env: baseEnv(hqRoot),
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
         statusCalls.push(args);
-        return { stdout: JSON.stringify({ status: 'failed' }) };
+        return { stdout: JSON.stringify(payload) };
       }
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -134,9 +140,11 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
     'status probe must pass --as-owner <hq owner> so the cross-account status is visible'
   );
   const records = listMergeAgentDispatches(rootDir);
-  assert.equal(records[0].watcherReDispatchCount, 1, 're-dispatch increments the bounded budget');
+  assert.equal(records[0].watcherReDispatchCount, requested ? 2 : 1, 'only autonomous retry increments the bounded budget');
+  if (requested) assert.equal(result.trigger, 'merge-agent-requested');
   assert.equal(records[0].hqOwnerUser, 'airlock', 'dispatch records must preserve the resolved HQ owner for later cleanup probes');
 });
+}
 
 test('phantom completion: re-dispatches a terminal succeeded worker when PR is still open with marker', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -339,7 +347,9 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
   );
 });
 
-test('phantom handoff after grace: escalates an orphaned terminal-failed dispatch to merge-agent-stuck (does NOT re-dispatch)', async () => {
+for (const payload of [{ status: 'failed' }, { terminal: true, succeeded: false },
+  { status: 'succeeded', terminal: true, succeeded: false }]) {
+  test(`phantom handoff after grace escalates without re-dispatch: ${JSON.stringify(payload)}`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = makeHqRoot('airlock');
   seedRecord(rootDir, { watcherReDispatchCount: 0 });
@@ -357,7 +367,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
-        return { stdout: JSON.stringify({ status: 'failed' }) };
+        return { stdout: JSON.stringify(payload) };
       }
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -382,7 +392,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     execFileImpl: async (cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
         assert.ok(args.includes('--json'), 'status probes must request JSON');
-        return { stdout: JSON.stringify({ status: 'failed' }) };
+        return { stdout: JSON.stringify(payload) };
       }
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
@@ -410,7 +420,10 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     ghCalls.some((a) => a[0] === 'pr' && a[1] === 'comment'),
     'a durable operator comment must explain the phantom-handoff escalation',
   );
+  assert.equal(listMergeAgentDispatches(rootDir)[0].phantomHandoffCommentDelivery.context.dispatchStatus, 'failed',
+    'the persisted escalation must retain explicit false success evidence');
 });
+}
 
 test('phantom handoff comment failure is recorded and retried on a later tick', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

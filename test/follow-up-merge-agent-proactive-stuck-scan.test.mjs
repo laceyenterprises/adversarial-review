@@ -554,7 +554,8 @@ test('reconcileProactivePhantomHandoffs starts grace for a terminal current-head
   assert.equal(recorded.phantomHandoffCommentDelivery, null);
 });
 
-test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the label-add window failed earlier', async () => {
+for (const payload of [{ status: 'failed' }, { status: 'succeeded', terminal: true, succeeded: false }]) {
+  test(`reconcileProactivePhantomHandoffs finishes pending delivery with ${JSON.stringify(payload)}`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   recordMergeAgentDispatch(rootDir, {
@@ -609,7 +610,7 @@ test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the l
     hqPath: '/bin/hq-unused',
     execFileImpl: async (_command, args) => {
       assert.ok(args.includes('--json'));
-      return { stdout: JSON.stringify({ status: 'failed' }) };
+      return { stdout: JSON.stringify(payload) };
     },
     ghExecFileImpl: async (cmd, args) => {
       if (args[0] === 'api') return { stdout: '' };
@@ -635,7 +636,9 @@ test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the l
   const recorded = JSON.parse(readFileSync(dispatchPath, 'utf8'));
   assert.equal(recorded.phantomHandoffCommentDelivery.posted, true);
   assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 1);
+  assert.equal(recorded.phantomHandoffCommentDelivery.context.dispatchStatus, 'failed');
 });
+}
 
 // MAR-C: merge-agent-recovery-in-flight label suppresses phantom-handoff
 // grace start. The merge-agent applies this label when it dispatches a

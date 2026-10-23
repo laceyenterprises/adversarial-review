@@ -11,7 +11,7 @@ import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserDispatchFilePath, upd
 test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-reconcile-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const statuses = ['succeeded', 'failed', 'canceled', 'reaped', 'completed', 'rejected'];
+  const statuses = ['succeeded', 'failed', 'canceled', 'reaped_stuck_requested', 'superseded', 'operator_triage_required'];
   const paths = statuses.map((status, i) => {
     const identity = { repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc' };
     updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched', launchRequestId: status, custom: 'preserved' }));

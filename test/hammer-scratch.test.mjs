@@ -168,7 +168,7 @@ test('HAMTMP-01: prompt composition preserves an omitted scratch directory for d
     'PR 42 scratch=/fixture/private-scratch');
 });
 
-for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
+for (const status of ['succeeded', 'failed', 'canceled', 'reaped_stuck_requested']) {
   test(`HAMTMP-01: dispatch renders one private directory and ${status} run cleanup removes it`, async t => {
     const root = fixture(t);
     const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root),

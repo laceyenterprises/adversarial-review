@@ -917,7 +917,27 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
-LRQSTATUS-01 uses the producer's launch-status vocabulary and wire booleans.
+Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
+`statusVocabulary`. Explicit terminal/succeeded false values win independently;
+missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.
+The SDK artifact is installed through the npm lockfile before service startup.
+Wire-only terminal evidence is recorded even without a status string: closer
+records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
+success record. Merge cancellation may confirm terminality without a status
+string; remediation success requires both terminal and succeeded evidence.
+These observations do not prove that a PR merged.
+Wire-only terminal ledger rows also override stale `starting`/`running` worker
+observations and enter final-cap reconciliation. Successful launches persist
+`lastObservedStatus: unverified-terminal-success` until independent closure
+evidence is available; launch success alone never proves a merge. Merge-agent
+retry predicates resolve missing statuses to `succeeded`/`failed` only after
+terminality is confirmed, retaining the existing retry budget and label gates.
+Normalized terminal events retain both SDK booleans; status probes accept
+wire-only evidence and preserve explicit false values. Terminal wire evidence paired with an active or
+unknown status string is persisted as `succeeded` or `failed`, rather than an
+active closer status. Merge-agent phantom-handoff reconciliation and pending
+comment retries project `status: succeeded` with explicit `succeeded: false`
+as `failed` before crossing the status-string boundary.
 Decision-blocked and waiting launches release active closer leases and capacity,
 while their dispatch receipts retain PR ownership through decision resolution
 and resumed execution. Resumed workers fence both redispatch and inline daemon
@@ -928,7 +948,11 @@ Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
 Producer-terminal decision states retain ownership; wire-only live probes with
 no status string return an `unknown` wait reason without interrupting arbitration.
-The offline `test/launch-request-status.test.mjs` table covers every vocabulary
+The offline `test/hq-dispatch-status-json.test.mjs` uses public SDK serializer
+examples across reviewer, remediation and merge-agent boundaries, including
+negative false/alias/malformed mutations. `test/agent-runtime-os-dispatch.test.mjs`
+covers the app-contract projection, including nested live status and explicit
+false precedence. The `test/launch-request-status.test.mjs` table covers every vocabulary
 status, wire precedence, retry descendants, and parked/resumed ownership without a
 second dispatch. The clean sandbox smoke also verifies repeated resumed-owner
 fences and terminal release. No live action or configuration change is required after deploy.

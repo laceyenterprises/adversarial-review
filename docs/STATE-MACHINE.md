@@ -751,7 +751,7 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
-LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;
 status-only ledger rows use the producer definitions. `blocked_needs_decision`
@@ -770,10 +770,30 @@ known resolved statuses; the secondary probe persists newly parked statuses
 under the matching receipt identity.
 Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
-The legacy stored spellings map through producer values: `completed` →
-`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
-`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
+public `statusVocabulary`. Each explicit boolean wins independently, including
+false; absent or invalid booleans use the vocabulary and malformed values carry
+diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reaped`
+and `rejected` remain unknown rather than authorizing success or retries.
+Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
+Wire-only terminal evidence is recorded even without a status string: closer
+records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
+success record. Merge cancellation may confirm terminality without a status
+string; remediation success requires both terminal and succeeded evidence.
+These observations do not prove that a PR merged.
+Wire-only terminal ledger rows also override stale `starting`/`running` worker
+observations and enter final-cap reconciliation. Successful launches persist
+`lastObservedStatus: unverified-terminal-success` until independent closure
+evidence is available; launch success alone never proves a merge. Merge-agent
+retry predicates resolve missing statuses to `succeeded`/`failed` only after
+terminality is confirmed, retaining the existing retry budget and label gates.
+Normalized terminal events retain both SDK booleans; status probes accept
+wire-only evidence and preserve explicit false values. Terminal wire evidence paired with an active or
+unknown status string is persisted as `succeeded` or `failed`, rather than an
+active closer status. Merge-agent phantom-handoff reconciliation and pending
+comment retries project `status: succeeded` with explicit `succeeded: false`
+as `failed` before crossing the status-string boundary.
 
 TERMLEASE-01 adds terminal non-merge lease removal before fresh acquisition:
 `superseded`, `failed-without-merge` and `deferred` stop owning the current head

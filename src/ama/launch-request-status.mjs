@@ -1,4 +1,4 @@
-import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../producer-contracts/launch-status.mjs';
+import { readDispatchStatus, assertTerminalLaunchPolicy } from '../producer-contracts/launch-status.mjs';
 // Retry/re-arm policy subset, deliberately separate from scheduling terminality.
 // Retry/re-arm authority keeps its existing policy subset; the owner also
 // reports blocked decisions terminal. Capacity and retry remain separate policies.
@@ -6,20 +6,13 @@ export const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set(
   ['succeeded', 'failed', 'operator_triage_required', 'canceled', 'superseded', 'reaped_stuck_requested']
     .filter(status => {
       assertTerminalLaunchPolicy([status]);
-      return readLaunchRequestStatus(status).terminal;
+      return readDispatchStatus({ status }).terminal;
     }),
 );
-// Stored pre-contract records remain readable through producer-defined meanings.
-const LEGACY_STATUS_ALIASES = { completed: 'succeeded', cancelled: 'canceled',
-  reaped: 'reaped_stuck_requested', rejected: 'failed' };
-
 export function launchRequestMeaning(value) {
-  const row = typeof value === 'string' ? { status: value } : value || {};
-  const status = String(row.status || '').trim().toLowerCase();
-  const meaning = readLaunchRequestStatus(LEGACY_STATUS_ALIASES[status] || status);
+  const row = typeof value === 'string' ? { status: value } : value;
+  const meaning = readDispatchStatus(row);
   return { ...meaning,
-    terminal: typeof row.terminal === 'boolean' ? row.terminal : meaning.terminal,
-    succeeded: typeof row.succeeded === 'boolean' ? row.succeeded : meaning.succeeded,
     // Parking is scheduling/ownership policy over the published vocabulary.
     parked: meaning.status !== null && /^(blocked_|waiting_)/.test(meaning.status),
   };

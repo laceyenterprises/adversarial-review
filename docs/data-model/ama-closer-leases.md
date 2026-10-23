@@ -87,7 +87,7 @@ the lease was rekeyed to an advanced head, otherwise `failed-without-merge`;
 operator-triage statuses settle as `deferred`.
 
 
-LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;
 status-only ledger rows use the producer definitions. `blocked_needs_decision`
@@ -102,7 +102,10 @@ both closer redispatch and inline daemon merge, even though the lease remains
 terminal `deferred`. The fence follows matching rekeyed leases and persists
 until confirmed terminal launch/retry evidence restores the existing
 retry/settlement policy. Unknown evidence preserves the ownership observation.
-The legacy stored spellings map through producer values: `completed` →
-`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
-`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
+public `statusVocabulary`. Each explicit boolean wins independently, including
+false; absent or invalid booleans use the vocabulary and malformed values carry
+diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reaped`
+and `rejected` remain unknown rather than authorizing success or retries.
+Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.

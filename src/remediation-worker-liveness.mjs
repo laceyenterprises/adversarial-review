@@ -1,9 +1,9 @@
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
+import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import {
-  HQ_TERMINAL_STATUSES,
   parseHqDispatchStatus,
   resolveHqBin,
   workerTerminalEventMatches,
@@ -106,7 +106,8 @@ async function assessWorkerLivenessDetailed(job, {
   const worker = job?.remediationWorker || {};
   if (
     workerTerminalEventMatches(worker, workerTerminalEvent)
-    && workerTerminalEvent?.status === 'succeeded' && workerTerminalReplyPath && existsSync(workerTerminalReplyPath)
+    && readDispatchStatus(workerTerminalEvent).terminal && readDispatchStatus(workerTerminalEvent).succeeded
+    && workerTerminalReplyPath && existsSync(workerTerminalReplyPath)
   ) {
     const nowAt = parseIsoTime(now());
     const spawnedAt = parseIsoTime(worker.spawnedAt);
@@ -145,7 +146,7 @@ async function assessWorkerLivenessDetailed(job, {
       maxBuffer: 5 * 1024 * 1024,
     });
     const statusPayload = parseHqDispatchStatusOutput(stdout, args, parseHqDispatchStatus, logger);
-    if (HQ_TERMINAL_STATUSES.has(statusPayload.status)) {
+    if (readDispatchStatus(statusPayload).terminal) {
       return {
         state: 'exited',
         reason: `hq-dispatch-${statusPayload.status}`,

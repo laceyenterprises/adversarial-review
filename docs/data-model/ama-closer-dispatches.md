@@ -5,6 +5,16 @@
 **Source of truth:** `src/ama/dispatch-closer.mjs`
 **Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`, `bin/settle-legacy-closer-intent.mjs`
 
+## Terminal launch observations
+
+Both preflight ledger reads and dispatch-status probes preserve wire terminality.
+A confirmed terminal payload without a status string records `state: launch-terminal`
+and `terminalLaunchStatus: succeeded` or `failed` from its success evidence.
+Explicit `succeeded: false` overrides a `succeeded` status before persistence,
+including early lease reconciliation. Successful launch observation uses the
+existing `unverified-terminal-success` classifier; PR merge proof and retry
+eligibility remain separate. No fields or durable status values are added.
+
 ## Interrupted dispatch intents (LAC-2081)
 
 CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output
@@ -528,7 +538,7 @@ to the latest 100 keys). Offline fixtures pin arguments, cwd and schema handling
 this repository does not execute the external producer during tests.
 
 
-LRQSTATUS-01: launch status meanings come from the pinned producer vocabulary
+Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;
 status-only ledger rows use the producer definitions. `blocked_needs_decision`
@@ -545,7 +555,23 @@ restores the existing retry/settlement policy. Unknown status or unreadable retr
 evidence preserves the last ownership observation. The recovery probe persists
 known resolved statuses; the secondary probe persists newly parked statuses
 under the matching receipt identity.
-The legacy stored spellings map through producer values: `completed` →
-`succeeded`, `cancelled` → `canceled`, `reaped` → `reaped_stuck_requested`,
-`rejected` → `failed`. These aliases supply no new retry authority. Unknown
+The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
+public `statusVocabulary`. Each explicit boolean wins independently, including
+false; absent or invalid booleans use the vocabulary and malformed values carry
+diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reaped`
+and `rejected` remain unknown rather than authorizing success or retries.
+Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
+
+Wire-only terminal ledger rows also override stale `starting`/`running` worker
+observations and enter final-cap reconciliation. Successful launches persist
+`lastObservedStatus: unverified-terminal-success` until independent closure
+evidence is available; launch success alone never proves a merge. Merge-agent
+retry predicates resolve missing statuses to `succeeded`/`failed` only after
+terminality is confirmed, retaining the existing retry budget and label gates.
+Normalized terminal events retain both SDK booleans; status probes accept
+wire-only evidence and preserve explicit false values. Terminal wire evidence paired with an active or
+unknown status string is persisted as `succeeded` or `failed`, rather than an
+active closer status. Merge-agent phantom-handoff reconciliation and pending
+comment retries project `status: succeeded` with explicit `succeeded: false`
+as `failed` before crossing the status-string boundary.

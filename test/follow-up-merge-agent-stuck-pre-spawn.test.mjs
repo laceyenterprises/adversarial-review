@@ -249,7 +249,8 @@ test('describeStaleDispatch — live-state probe overrides refusal history', () 
       refusal('2026-05-18T02:03:00Z'),
     ]);
     for (const liveStatus of [
-      'succeeded', 'failed', 'cancelled', 'canceled', 'superseded',
+      'succeeded', 'failed', 'canceled', 'superseded',
+      'blocked_needs_decision', 'waiting_approval', 'waiting_input',
       'running', 'starting', 'blocked', 'stalled',
       'SUCCEEDED',  // case-insensitive
     ]) {

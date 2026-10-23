@@ -1,8 +1,8 @@
-import { readLaunchRequestStatus } from './launch-status.mjs';
+import { readDispatchStatus } from './launch-status.mjs';
 
 const producer = 'cwp_dispatch.dispatch';
 
-/** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readLaunchRequestStatus>}} */
+/** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readDispatchStatus> & {diagnostic: string|null}}} */
 export function readDispatchReceipt(value, { identityFields = ['launchRequestId', 'dispatchId', 'lrq'], allowNonObject = false } = {}) {
   if (typeof value === 'string' && !allowNonObject) {
     if (!value.trim()) throw new Error(`${producer}: $stdout empty`);
@@ -12,15 +12,17 @@ export function readDispatchReceipt(value, { identityFields = ['launchRequestId'
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     const diagnostic = `${producer}: $stdout invalid type; expected object`;
     if (!allowNonObject) throw new Error(diagnostic);
-    return { payload: value, rawIdentity: null, launchRequestId: null, identityDiagnostic: diagnostic, status: readLaunchRequestStatus(null) };
+    const evidence = readDispatchStatus(null);
+    return { payload: value, rawIdentity: null, launchRequestId: null, identityDiagnostic: diagnostic,
+      status: { ...evidence, diagnostic: evidence.diagnostics[0] || null } };
   }
   const selected = identityFields.find(key => typeof value[key] === 'string' ? value[key].trim() : value[key]);
   const rawIdentity = value[selected || identityFields.at(-1)];
   const launchRequestId = typeof rawIdentity === 'string' && rawIdentity.trim() ? rawIdentity : null;
   const identityDiagnostic = launchRequestId ? null : `${producer}: ${(selected ? [selected] : identityFields)
     .map(key => `$.${key} ${Object.hasOwn(value, key) ? 'invalid; expected non-empty string' : 'missing'}`).join('; ')}`;
-  const status = readLaunchRequestStatus(value.status);
-  if (status.diagnostic) status.diagnostic = `${producer}: $.status ${Object.hasOwn(value, 'status') ? `unrecognized value ${JSON.stringify(value.status)}` : 'missing'}`;
+  const evidence = readDispatchStatus(value);
+  const status = { ...evidence, diagnostic: evidence.diagnostics[0] || null };
   return { payload: value, rawIdentity, launchRequestId, identityDiagnostic, status };
 }
 
@@ -59,8 +61,14 @@ export function parseHqJsonObject(text, label) {
 
 export function parseHqDispatchStatus(stdout, { normalize = true } = {}) {
   const payload = parseHqJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload?.status || '').trim().toLowerCase();
-  if (!status) throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
+  let status = String(payload?.status || '').trim().toLowerCase();
+  if (!status) {
+    if (typeof payload?.terminal !== 'boolean' && typeof payload?.succeeded !== 'boolean') {
+      throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
+    }
+    const evidence = readDispatchStatus(payload);
+    status = evidence.terminal ? (evidence.succeeded ? 'succeeded' : 'failed') : 'unknown';
+  }
   if (!normalize) return { ...payload };
   return { ...payload, status, health: String(payload?.health || '').trim().toLowerCase() || null };
 }

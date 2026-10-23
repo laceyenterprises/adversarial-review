@@ -182,6 +182,9 @@ The persisted accounting fields are:
 - `remediationWorker.recordedOutcome`: optional `failureReason`, `exitCode` and
   `signal` captured from local child error/exit events. HQ outcomes instead come
   from dispatch status; failed terminal events must confirm that status first.
+  Normalized events preserve SDK terminal/succeeded booleans, including explicit
+  false. Status probes accept wire-only terminal evidence: missing status resolves
+  to `succeeded` or `failed` only when terminality is confirmed.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.

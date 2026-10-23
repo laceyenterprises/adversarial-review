@@ -17,7 +17,7 @@ def pytest_sessionstart(session):
 
 
 def pytest_collectstart(collector):
-    _progress("collect", collector.nodeid)
+    _progress("collect", getattr(collector, "nodeid", ""))
 
 
 def pytest_collection_finish(session):

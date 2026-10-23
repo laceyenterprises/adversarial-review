@@ -84,6 +84,10 @@ export async function runBounded(command, args, {
       return [signal, handler];
     });
     const deadline = setInterval(() => {
+      if (closed && escalation && !groupPresent()) {
+        finish();
+        return;
+      }
       const now = performance.now();
       if (now - started >= timeoutMs) stop('absolute-timeout', 124);
       else if (now - lastOutput >= idleMs) stop('no-progress-timeout', 124);

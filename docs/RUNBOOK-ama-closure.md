@@ -1621,7 +1621,9 @@ Timeout, cancellation or failed tests must exit via the existing lease-release
 trap without a successful validation audit or merge. Diagnose outside the shared
 lease, then reacquire and repeat head/base/file-overlap checks before retrying.
 TERM/INT/HUP cancellation initiates group TERM; KILL follows after five seconds even if
-the leader exits first. This bounds cooperative runner cancellation, not SIGKILL
+the leader exits first. Once the output pipes close, the supervisor rechecks group
+presence at most every 100ms and completes early when all descendants have exited,
+preserving the original failure or cancellation status. This bounds cooperative runner cancellation, not SIGKILL
 of the runner or descendants deliberately escaping its process group; canonical
 worker cleanup remains the backstop. See [evidence and deployment acceptance](validation/lac-2093.md).
 Denied group signals also attempt the still-live direct child. Unconfirmed

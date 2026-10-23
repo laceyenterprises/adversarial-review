@@ -111,6 +111,32 @@ test('unreadable cleanup never reports success or holds the lease indefinitely',
   assert.ok(performance.now() - started < 3000);
 });
 
+test('clean descendant exit completes before escalation and preserves the leader failure', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 42424, exitCode: 7, signalCode: null,
+    stdout: new PassThrough(), stderr: new PassThrough(),
+  });
+  const signals = [];
+  let probes = 0;
+  const status = await runBounded('fixture', [], {
+    timeoutMs: 10_000, idleMs: 10_000, graceMs: 5000,
+    spawnImpl: () => {
+      setImmediate(() => { child.emit('exit', 7, null); child.emit('close'); });
+      return child;
+    },
+    killImpl: (_pid, signal) => {
+      signals.push(signal);
+      if (signal === 0 && ++probes > 1) {
+        throw Object.assign(new Error('descendants exited'), { code: 'ESRCH' });
+      }
+    },
+    stdout: { write() {} }, stderr: { write() {} },
+  });
+  assert.equal(status, 7);
+  assert.ok(probes >= 2, 'cleanup must recheck after close');
+  assert.ok(!signals.includes('SIGKILL'), 'clean exit must cancel escalation');
+});
+
 test('idle failure after first output stops a lease-owning script before its audit', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ham-release-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -214,6 +240,7 @@ with contextlib.redirect_stderr(captured):
     session = types.SimpleNamespace(items=[1, 2])
     p['pytest_sessionstart'](session)
     p['pytest_collectstart'](types.SimpleNamespace(nodeid='fixture.py'))
+    p['pytest_collectstart'](types.SimpleNamespace())
     p['pytest_collection_finish'](session)
     p['pytest_runtest_logstart']('fixture.py::test_real', None)
     p['pytest_runtest_logreport'](types.SimpleNamespace(when='call', outcome='failed', nodeid='fixture.py::test_real'))
@@ -223,7 +250,7 @@ assert captured.getvalue() == ''
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '');
   assert.deepEqual(result.stderr.trimEnd().split('\n'),
-    ['plugin-loaded', 'session-start', 'collect fixture.py', 'collected 2',
+    ['plugin-loaded', 'session-start', 'collect fixture.py', 'collect', 'collected 2',
       'test-start fixture.py::test_real', 'call:failed fixture.py::test_real', 'session-finish 1']
       .map(phase => `HAM pytest: ${phase}`));
 });

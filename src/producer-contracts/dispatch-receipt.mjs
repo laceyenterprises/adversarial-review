@@ -59,8 +59,14 @@ export function parseHqJsonObject(text, label) {
 
 export function parseHqDispatchStatus(stdout, { normalize = true } = {}) {
   const payload = parseHqJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload?.status || '').trim().toLowerCase();
-  if (!status) throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
+  let status = String(payload?.status || '').trim().toLowerCase();
+  if (!status) {
+    if (typeof payload?.terminal !== 'boolean' && typeof payload?.succeeded !== 'boolean') {
+      throw new Error('cwp_dispatch.dispatch: $.status missing/invalid; hq dispatch status payload missing status');
+    }
+    const evidence = readDispatchStatus(payload);
+    status = evidence.terminal ? (evidence.succeeded ? 'succeeded' : 'failed') : 'unknown';
+  }
   if (!normalize) return { ...payload };
   return { ...payload, status, health: String(payload?.health || '').trim().toLowerCase() || null };
 }

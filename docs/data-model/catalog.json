@@ -263,6 +263,7 @@
     },
     {
       "id": "follow-up-jobs",
+      "terminalEventEvidence": "Normalized events and status probes retain SDK terminal/succeeded booleans, including explicit false and wire-only terminal outcomes.",
       "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000, "settledCleanBypassesResolution": true, "attempts": "failed lookups including creation; legacy holds count as one", "maxAttempts": 3, "exhaustedStopCode": "branch-unresolved", "operatorRequeueResetsAttempts": true },
       "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],
       "unpublishedWorkEvidence": "inspected workspace HEAD overrides reply hashes; unchanged revisionRef has no debt; reported commit fallback only without valid workspace HEAD",
@@ -678,6 +679,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "terminalLaunchEvidence": "Wire-only terminal rows override stale active worker observations; succeeded maps to unverified-terminal-success until independent closure proof, failed remains failed.",
       "terminalEvidence": "Wire terminality is independent of status; missing terminal status uses success/failure fallback and explicit false success records failure. No merge authority.",
       "launchOwnership": "SDK 0.3.0 readDispatchStatus interprets public statusVocabulary and independent wire booleans; false wins, missing booleans use vocabulary, and legacy launch aliases remain unknown. Parked receipts and resumed launches retain PR ownership across terminal deferred leases, including rekeyed heads. The recovery probe persists known resolved statuses and the secondary probe persists newly parked statuses under matching receipt identity; unknown status or unreadable retry evidence cannot erase the ownership observation. Positive resumed execution restores fleet capacity accounting, including matching rekeyed deferred leases. Confirmed terminal launch/retry evidence restores existing settlement/retry policy.",
       "preReceiptFields": ["dispatchIdempotencyKey", "dispatchPhase", "preReceiptReconciliation"],

@@ -1636,9 +1636,8 @@ function terminalCloserLaunchStatus(value) {
 }
 
 function amaCloserStatusFromTerminalLaunchRequestStatus(value) {
-  const meaning = launchRequestMeaning(value);
-  const launchRequestStatus = meaning.status;
-  if (launchRequestStatus === 'succeeded') return meaning.succeeded ? 'unverified-terminal-success' : 'failed';
+  const launchRequestStatus = terminalCloserLaunchStatus(value);
+  if (launchRequestStatus === 'succeeded') return 'unverified-terminal-success';
   if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(launchRequestStatus)) {
     return launchRequestStatus;
   }
@@ -5861,7 +5860,7 @@ async function maybeDispatchAmaCloserAttempt({
     // auto-merge and no-merge audit evidence decide ownership before retry/refund.
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
       && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
-      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(terminalCloserLaunchStatus(prefetchedLaunchRequestProbe.row))) {
       const row = prefetchedLaunchRequestProbe.row;
       const terminalStatus = terminalCloserLaunchStatus(row);
       status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
@@ -5871,7 +5870,7 @@ async function maybeDispatchAmaCloserAttempt({
     const finalRoundLaunchEnded = dispatchContext?.dispatchReason === 'exhausted-final-hammer'
       && prefetchedLaunchRequestProbe?.ok
       && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row)
-      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(terminalCloserLaunchStatus(prefetchedLaunchRequestProbe.row));
     if (isTerminalLaunchRequestStatus(statusProbe) || isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
@@ -6077,7 +6076,7 @@ async function maybeDispatchAmaCloserAttempt({
             : noMergeAuditForCurrentHead === null ? 'audit-comments-unreadable' : 'live-pr-state-unknown';
           updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
-            lastObservedStatus: status,
+            lastObservedStatus: amaCloserStatusFromTerminalLaunchRequestStatus(status),
             lastObservedAt: dispatchContext.dispatchedAt,
             lastError: `${HAMMER_OUTCOME_UNCONFIRMED}:${unconfirmedReason}`,
           }));
@@ -6701,7 +6700,7 @@ async function maybeDispatchAmaCloserAttempt({
         hqRoot,
         rootDir,
       });
-      const launchRequestStatus = String(launchRequestProbe?.row?.status || '').trim().toLowerCase();
+      const launchRequestStatus = terminalCloserLaunchStatus(launchRequestProbe?.row);
       if (launchRequestProbe?.ok && isTerminalLaunchRequestStatus(launchRequestProbe.row)
         && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
         status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestProbe.row);

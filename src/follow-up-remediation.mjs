@@ -1484,7 +1484,8 @@ async function reconcileFollowUpJob({
 
   let paths = null;
   let pathsError = null;
-  if (readDispatchStatus(workerTerminalEvent).terminal && readDispatchStatus(workerTerminalEvent).succeeded
+  const terminalEventEvidence = readDispatchStatus(workerTerminalEvent);
+  if (terminalEventEvidence.terminal && terminalEventEvidence.succeeded
     && workerTerminalEventMatches(worker, workerTerminalEvent)) {
     try {
       paths = buildReconciliationPaths(rootDir, job);

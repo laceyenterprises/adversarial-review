@@ -2215,8 +2215,9 @@ for (const ageMs of [30 * 60_000 - 1, 30 * 60_000]) {
   });
 }
 
+for (const wireOnly of [false, true])
 for (const ageMs of [0, 59_999, 60_000]) {
-  test(`dispatch fallback respects prefetched terminal settle grace at age ${ageMs}`, async t => {
+  test(`dispatch fallback respects prefetched terminal settle grace at age ${ageMs}, wireOnly=${wireOnly}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-settle-grace-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchReason: 'exhausted-final-hammer' } });
@@ -2232,7 +2233,7 @@ for (const ageMs of [0, 59_999, 60_000]) {
     deps.execFileImpl = async (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
       ? { stdout: JSON.stringify({ status: 'starting' }) } : baseExec(cmd, argv, options);
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
-      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded',
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { ...(wireOnly ? { terminal: true, succeeded: true } : { status: 'succeeded' }),
         terminal_at: new Date(Date.parse(now) - ageMs).toISOString() } }),
       // Early reconciliation has no live PR evidence; the dispatch fallback does.
       readPullRequestStateImpl: () => null,
@@ -2706,13 +2707,14 @@ for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
   });
 }
 
-for (const source of ['dispatch probe', 'preflight ledger']) {
+for (const source of ['dispatch probe', 'preflight ledger', 'stale starting worker', 'unknown worker']) {
   for (const succeeded of [false, true]) {
     test(`SDK terminal evidence records ${source} success=${succeeded} without a status`, async t => {
       const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-terminal-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const args = findingsRemediationArgs(rootDir, { dispatchContext: {
-        reviewCycleCapReached: true, livePrProbeImpl: async () => ({ state: 'UNKNOWN' }),
+        reviewCycleCapReached: true, dispatchReason: 'exhausted-final-hammer',
+        livePrProbeImpl: async () => ({ state: 'UNKNOWN' }),
       } });
       const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
       const now = args.dispatchContext.dispatchedAt;
@@ -2723,19 +2725,18 @@ for (const source of ['dispatch probe', 'preflight ledger']) {
       const payload = { status: null, terminal: true, succeeded };
       const deps = testDeps();
       const result = await maybeDispatchAmaCloser({ ...args, ...deps,
-        readLaunchRequestStatusImpl: () => source === 'preflight ledger'
+        readLaunchRequestStatusImpl: () => source !== 'dispatch probe'
           ? { ok: true, row: payload } : { ok: false },
         execFileImpl: async (_command, argv) => {
           assert.deepEqual(argv.slice(0, 2), ['dispatch', 'status'], 'unknown PR evidence prevents redispatch');
-          return { stdout: JSON.stringify(source === 'dispatch probe' ? payload : { status: 'future' }) };
+          return { stdout: JSON.stringify(source === 'dispatch probe' ? payload
+            : { status: source === 'stale starting worker' ? 'starting' : 'future' }) };
         },
       });
       const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
       assert.equal(record.state, 'launch-terminal', JSON.stringify({ result, record }));
       assert.equal(record.terminalLaunchStatus, succeeded ? 'succeeded' : 'failed');
-      if (source === 'preflight ledger' || !succeeded) {
-        assert.equal(record.lastObservedStatus, succeeded ? 'unverified-terminal-success' : 'failed');
-      }
+      assert.equal(record.lastObservedStatus, succeeded ? 'unverified-terminal-success' : 'failed');
     });
   }
 }

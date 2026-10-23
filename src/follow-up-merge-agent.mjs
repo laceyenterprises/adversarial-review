@@ -883,15 +883,17 @@ async function probeDispatchStatusViaHq({
 function isRetryableRecordedDispatchStatus(value) {
   const payload = typeof value === 'string' ? { status: value } : value;
   const evidence = readDispatchStatus(payload);
+  const status = evidence.status ?? (evidence.succeeded ? 'succeeded' : 'failed');
   return (payload?.status === 'not-found' && payload?.terminal !== false)
-    || (evidence.terminal && _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(evidence.status));
+    || (evidence.terminal && _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(status));
 }
 
 function isWatcherAutonomousRetryableRecordedDispatchStatus(value) {
   const payload = typeof value === 'string' ? { status: value } : value;
   const evidence = readDispatchStatus(payload);
+  const status = evidence.status ?? (evidence.succeeded ? 'succeeded' : 'failed');
   return (payload?.status === 'not-found' && payload?.terminal !== false)
-    || (evidence.terminal && _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(evidence.status));
+    || (evidence.terminal && _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(status));
 }
 
 
@@ -1231,7 +1233,7 @@ async function reconcileProactivePhantomHandoffs({
       rootDir,
       job: currentPR,
       recordedDispatch,
-      dispatchStatus: recordedDispatchStatus.status,
+      dispatchStatus: recordedDispatchStatus.status ?? (readDispatchStatus(recordedDispatchStatus).succeeded ? 'succeeded' : 'failed'),
       labels: currentPR.labels,
       ghExecFileImpl,
       execFileImpl,
@@ -2319,7 +2321,7 @@ async function dispatchMergeAgentForPR({
         rootDir,
         job,
         recordedDispatch: latestRecordedDispatch,
-        dispatchStatus: recordedDispatchStatus.status,
+        dispatchStatus: recordedDispatchStatus.status ?? (readDispatchStatus(recordedDispatchStatus).succeeded ? 'succeeded' : 'failed'),
         labels,
         ghExecFileImpl,
         logger,

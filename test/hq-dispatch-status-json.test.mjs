@@ -215,6 +215,8 @@ const dispatchCases = [
   ['negative explicit both false', { status: 'succeeded', terminal: false, succeeded: false }],
   ['negative explicit terminal true', { status: 'running', terminal: true, succeeded: false }],
   ['legacy missing booleans', { status: 'succeeded' }],
+  ['wire-only success', { terminal: true, succeeded: true }],
+  ['wire-only failure', { terminal: true, succeeded: false }],
   ['negative unknown', { status: 'future' }],
   ['negative malformed', { status: { value: 'succeeded' } }],
   ...['completed', 'complete', 'done', 'cancelled'].map(status => [`negative alias ${status}`, { status }]),
@@ -246,8 +248,10 @@ for (const [scenario, payload] of dispatchCases) {
     });
     assert.equal(liveness.state, evidence.terminal ? 'exited' : 'active');
     const event = normalizeWorkerTerminalEvent(`health.worker.terminal.${LRQ}`, { ...payload, lrq: LRQ });
-    assert.equal(Boolean(event), evidence.terminal && evidence.status !== null);
+    assert.equal(Boolean(event), evidence.terminal);
     if (event) {
+      assert.equal(event.terminal, evidence.terminal);
+      assert.equal(event.succeeded, evidence.succeeded);
       const projected = workerTerminalEventToDispatchStatus(event);
       assert.equal(projected.terminal, evidence.terminal);
       assert.equal(projected.succeeded, evidence.succeeded);
@@ -330,6 +334,8 @@ for (const payload of [
   { status: 'succeeded', terminal: false },
   { status: 'succeeded', terminal: true, succeeded: false },
   { status: 'succeeded', terminal: true, succeeded: true },
+  { terminal: true, succeeded: false },
+  { terminal: true, succeeded: true },
 ]) {
   test(`remediation reconcile requires terminal success before missing-artifact settlement: ${JSON.stringify(payload)}`, async t => {
     const f = fixture(t);
@@ -356,6 +362,7 @@ for (const payload of [
       } });
     const result = await reconcileFollowUpJob({
       rootDir: f.rootDir, jobPath: spawned.jobPath, job: spawned.job,
+      workerTerminalEvent: normalizeWorkerTerminalEvent(`health.worker.terminal.${LRQ}`, payload),
       now: () => new Date(NOW).toISOString(),
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha }),
       execFileImpl: async (_command, args) => {

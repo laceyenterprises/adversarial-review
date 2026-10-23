@@ -87,7 +87,7 @@ function normalizeWorkerTerminalEvent(topic, event = {}) {
   const lrq = String(event?.lrq || event?.launch_request_id || event?.launchRequestId || match?.[1] || '').trim();
   const evidence = readDispatchStatus(event);
   const status = evidence.status;
-  if (!lrq || !status || !evidence.terminal) {
+  if (!lrq || !evidence.terminal) {
     return null;
   }
   return {
@@ -95,6 +95,8 @@ function normalizeWorkerTerminalEvent(topic, event = {}) {
     topic: normalizedTopic,
     lrq,
     status,
+    terminal: evidence.terminal,
+    succeeded: evidence.succeeded,
     health: String(event?.health || '').trim().toLowerCase() || (evidence.succeeded ? 'healthy' : 'failed'),
   };
 }

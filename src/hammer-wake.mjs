@@ -171,7 +171,7 @@ function requestEligibleHammerWake({
   // Fleet descendants reuse the ancestor receipt. Their completed IDs must
   // advance wake identity too; status/timestamp changes alone must not.
   const retryIds = [...new Set((Array.isArray(retryEvidence?.retryChain) ? retryEvidence.retryChain : [])
-    .map(row => row?.launch_request_id).filter(id => typeof id === 'string' && id))].sort();
+    .map(row => row?.launch_request_id || row?.launchRequestId || row?.id).filter(id => typeof id === 'string' && id))].sort();
   const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
   if (shared) {

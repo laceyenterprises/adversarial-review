@@ -612,7 +612,7 @@
     },
     {
       "id": "hammer-wakes",
-      "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity; retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt.",
+      "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity and a stable descendant-ID set digest; descendant IDs accept launch_request_id, launchRequestId, then id. retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt.",
       "title": "Hammer Wakes",
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",

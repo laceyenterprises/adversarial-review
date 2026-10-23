@@ -52,6 +52,9 @@ for (const [name, observations, reason, requested] of [
   ['unrelated push', { reviews: { ...clean, headSha: OLD },
     remediation: { finalPush: { headSha: OLD, suppressed: true } } }, 'stale-verdict', false],
   ['no push clean head', {}, 'clean-exact-head', true],
+  ['disabled execution stays held', { policy: { autonomousMergeExecutionEnabled: false } }, 'merge-execution-disabled', false],
+  ['non-blocking findings need final validation', { reviews: { ...clean, verdict: 'comment-only',
+    nonBlockingFindingCount: 1 } }, 'review-findings-final', true],
   ['pending checks', { checks: { conclusion: 'PENDING' } }, 'checks-pending', false],
   ['missing required context', { checks: { rollup: [
     { name: 'check-1', status: 'COMPLETED', conclusion: 'SUCCESS' }], requiredContexts: ['check-2'] } }, 'checks-pending', false],
@@ -117,6 +120,21 @@ test('completed fleet retry descendants advance identity without depending on ro
   assert.equal(run([descendant, child]).outcome, 'duplicate');
   assert.equal(f.calls.length, 3);
 });
+
+for (const idKey of ['launch_request_id', 'launchRequestId', 'id']) {
+  test(`completed retry identity accepts ${idKey} and deduplicates across representations`, t => {
+    const f = fixture(t);
+    const run = retryChain => f.wake(pair({ launches: { closer: { ...terminal, retryChain } } }));
+    assert.equal(run([]).outcome, 'requested');
+    assert.equal(run([{ [idKey]: 'attempt-2', status: 'succeeded' }]).outcome, 'requested');
+    for (const alias of ['launch_request_id', 'launchRequestId', 'id']) {
+      assert.equal(run([{ [alias]: 'attempt-2', status: 'succeeded' }]).outcome, 'duplicate');
+    }
+    assert.equal(run([{ [idKey]: 'attempt-2', status: 'succeeded' },
+      { [idKey]: 'attempt-3', status: 'failed' }]).outcome, 'requested');
+    assert.equal(f.calls.length, 3);
+  });
+}
 
 test('transport failure retries through the existing bounded election on the same attempt', t => {
   const f = fixture(t), shared = pair({ launches: { closer: terminal } });

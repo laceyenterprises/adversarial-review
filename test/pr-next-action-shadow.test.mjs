@@ -150,6 +150,22 @@ for (const awaitBaseline of [false, true]) test(`bare pass read cannot suppress 
   assert.equal(pass.observations.launches.value.closer, null, 'baseline evidence remains immutable');
 });
 
+for (const [name, evidence, primaryChange, reason] of [
+  ['valid', { headSha: HEAD, hasHammerCommits: false }, { ok: true, reason: null }, 'stale-verdict'],
+  ['unreadable', { headSha: OLD }, { ok: false, reason: 'primary-change-read-failed' }, 'primary-change-unreadable'],
+]) test(`shared resolution preserves ${name} primary-change observation through launch enrichment`, async () => {
+  const pass = base({ observations: { progress: { diffEmpty: false } } });
+  const shared = await resolveSharedNextAction({ passSnapshot: pass, evidence: {
+    observations: { progress: {} },
+    primaryChangeInput: { evidence, head: HEAD },
+    readLaunches: async () => ({ state: 'complete', value: { closer: null } }),
+  } });
+  assert.deepEqual(shared.snapshot.observations.progress.value, { diffEmpty: false, primaryChange });
+  assert.equal(shared.decision.reason, reason);
+  assert.deepEqual(pass.observations.progress.value, { diffEmpty: false });
+  assert.ok(Object.isFrozen(shared.snapshot.observations.progress.value.primaryChange));
+});
+
 test('round enrichment preserves the original pass remediation owner with failed CI', async () => {
   const pass = base({ observations: { remediation: {
     job: { status: 'in_progress', headSha: HEAD }, completedRounds: 1, maxRounds: 3,

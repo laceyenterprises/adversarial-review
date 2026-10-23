@@ -74,7 +74,9 @@ Directory: `data/hammer-wakes/`
 - A current `requested` record suppresses duplicates for the same attempt.
   A reconciled retryable no-merge decision gets a new attempt key from the
   completed LRQ and completed retry descendant IDs, even on the same head
-  and after terminal lease removal. Row order and timestamp changes do not rearm.
+  and after terminal lease removal. Descendant IDs accept `launch_request_id`,
+  `launchRequestId`, or `id` in that precedence order; equivalent representations
+  share the same digest. Row order and timestamp changes do not rearm.
   Live descendants or unreadable retry chains never rearm it. Transport does
   not re-read launch state or final-push proof for shared routing. The retained
   legacy adapter still uses terminal lease/dispatch evidence to rearm.

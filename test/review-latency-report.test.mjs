@@ -585,15 +585,18 @@ test('shared repair wakes do not end clean-verdict latency; daemon wakes do', ()
   try {
     recordReviewLatencyEvent(db, { repo: 'subject-03', prNumber: 3, eventType: 'clean_verdict',
       at: '2026-01-01T00:00:00Z', source: 'synthetic', idempotencyKey: 'clean-03' });
-    for (const [action, minute] of [['hammer', '01'], ['daemon-merge', '05']]) {
+    for (const [action, reason, minute] of [
+      ['hammer', 'ci-red-final', '01'], ['hammer', 'review-findings-final', '02'],
+      ['hammer', 'retry-no-merge', '03'], ['daemon-merge', 'clean-exact-head', '05'],
+    ]) {
       recordReviewLatencyEvent(db, { repo: 'subject-03', prNumber: 3, eventType: 'hammer_wake',
-        at: `2026-01-01T00:${minute}:00Z`, source: 'synthetic', idempotencyKey: `wake-${action}`,
-        payload: { nextAction: { action } } });
+        at: `2026-01-01T00:${minute}:00Z`, source: 'synthetic', idempotencyKey: `wake-${reason}`,
+        payload: { nextAction: { action, reason } } });
     }
   } finally { db.close(); }
   const report = collectReviewLatencyReport({ rootDir, since: '24h',
     now: () => new Date('2026-01-01T01:00:00Z') });
-  assert.equal(report.surfaces.explicitEvents, 3);
+  assert.equal(report.surfaces.explicitEvents, 5);
   const stage = report.stages.find(stage => stage.key === 'clean_verdict_to_hammer_wake');
   assert.equal(stage.sampleCount, 1);
   assert.equal(stage.p50Ms, 5 * 60 * 1000);

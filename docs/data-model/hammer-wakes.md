@@ -92,10 +92,13 @@ Directory: `data/hammer-wakes/`
 - The returned event's `retryable` value describes whether the persisted
   state lets a later watcher tick resume. It is diagnostic only; the AMA caller
   does not consume it as a retry instruction.
-- Retention is enforced by `src/hammer-wake.mjs`: eligible wake attempts sweep
+- Retention is enforced by `src/hammer-wake.mjs`: eligible wake attempts start
+  best-effort asynchronous maintenance, coalesced per audit directory while a
+  sweep runs and for 60 seconds afterward. An unref'd cooldown timer permits
+  process exit; dispatch never waits for directory traversal. Sweeps remove
   `.json` audit records older than 30 days and then retain only the newest 5000
-  files by filesystem mtime. Both `.retry-` and legacy `.failed-` archives
-  follow the same retention rule.
+  files by filesystem mtime. These bounds are eventual between sweeps. Both
+  `.retry-` and legacy `.failed-` archives follow the same retention rule.
 - The health collector excludes retry and legacy failed archives, sorts the
   current audit files by mtime, and parses only the newest 20 records before
   rendering the health surface.

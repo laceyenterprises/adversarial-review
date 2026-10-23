@@ -61,7 +61,7 @@ function testDeps() {
     readPullRequestStateImpl: () => null,
     execFileImpl: async (cmd, args, options = {}) => {
       calls.push({ cmd, args, options });
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${args[args.indexOf('--pr') + 1]}`, dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
     },
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
@@ -876,7 +876,7 @@ test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch 
         stderr: "error: unrecognized argument '--priority'",
       });
     }
-    return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
+    return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${args[args.indexOf('--pr') + 1]}`, dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
   };
 
   const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...deps });
@@ -1854,7 +1854,7 @@ test('DRAINDEFER-01: first clear pass dispatches deferred PRs in order within th
       execFileImpl: async (_cmd, args) => {
         assert.ok(args.includes('dispatch'));
         launched.push(prNumber);
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: `synthetic-${prNumber}` }) };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`, launchRequestId: `synthetic-${prNumber}` }) };
       },
     });
   };
@@ -1985,7 +1985,7 @@ test('CLOSERGATE-01: slow pre-receipt acknowledgements serialize only their own 
         waiters.push(resolve);
         if (starts.length === 4) allStarted();
       });
-      return { stdout: JSON.stringify({ dispatchId: `lrq_fixture_${prNumber}`, launchRequestId: `lrq_fixture_${prNumber}` }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`, dispatchId: `lrq_fixture_${prNumber}`, launchRequestId: `lrq_fixture_${prNumber}` }), stderr: '' };
     },
   }));
   try {
@@ -2587,4 +2587,51 @@ test('LEGACYINTENT-01: automatic negative ledger proof releases an old intent fo
   assert.equal(record.state, 'dispatched');
   assert.equal(record.launchRequestId, 'lrq_hammer_1');
   assert.ok(record.dispatchIdempotencyKey);
+});
+
+for (const patch of [
+  { ticketRef: 'CONFLICT-REBASE-404' }, { repo: 'other/project' }, { headSha: 'b'.repeat(40) },
+]) test(`CLOSERINTENT-01: dispatch output rejects foreign identity ${JSON.stringify(patch)}`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-identity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const messages = [];
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    logger: { warn: text => messages.push(text) },
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-404',
+      repo: 'acme/repo', headSha: HEAD, launchRequestId: 'lrq_other', ...patch }) }),
+  });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'non-hammer-launch-not-adopted');
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD })));
+  assert.equal(record.state, 'dispatching');
+  assert.equal(record.launchRequestId, null);
+  assert.equal(record.unadoptedLaunchRequestId, 'lrq_other');
+  assert.ok(messages.some(line => line.includes('launch_identity_mismatch')));
+});
+
+test('CLOSERINTENT-01: new submitting intent cannot inherit the previous attempt receipt', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-predecessor-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, reviewedSha: HEAD,
+    targetRemediationSha: HEAD, workerClass: 'hammer', state: 'dispatch-failed', retryCount: 1,
+    launchRequestId: 'lrq_previous', dispatchId: 'dispatch_previous',
+    dispatchedAt: '2026-07-20T10:00:00Z', lastObservedStatus: 'failed' }));
+  let submitted = false;
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] !== 'dispatch' || args[1] === 'status') return { stdout: '{"status":"failed"}' };
+      submitted = true;
+      const intent = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+      assert.equal(intent.dispatchPhase, 'submitting');
+      assert.ok(intent.dispatchIdempotencyKey);
+      assert.equal(intent.launchRequestId, null);
+      assert.equal(intent.dispatchId, null);
+      return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-404', launchRequestId: 'lrq_new' }) };
+    },
+  });
+  assert.equal(submitted, true, JSON.stringify(result));
+  assert.equal(result.dispatched, true, JSON.stringify(result));
 });

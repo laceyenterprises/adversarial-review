@@ -1,11 +1,11 @@
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
-import { isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
+import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
+import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
-import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
@@ -3844,6 +3844,8 @@ function normalizeDispatchIdentifiers(payload) {
   const evidence = readDispatchReceipt(payload, { identityFields: ['launchRequestId', 'lrq', 'dispatchId'] });
   return {
     ticketRef: payload.ticketRef || payload.ticket_ref || payload.ticket || null,
+    targetRepo: payload.target_repo || payload.repo || null,
+    headSha: payload.head_sha || payload.headSha || payload.prHeadSha || null,
     dispatchId: String(payload.dispatchId || '').trim() || null,
     launchRequestId: String(evidence.rawIdentity || '').trim() || null,
     ...(evidence.identityDiagnostic || evidence.status.diagnostic ? { diagnostic: [evidence.identityDiagnostic, evidence.status.diagnostic].filter(Boolean).join('; ') } : {}),
@@ -7454,8 +7456,8 @@ async function maybeDispatchAmaCloserAttempt({
       dispatchTimeoutMs,
       lastAttemptedAt: dispatchContext.dispatchedAt,
       dispatchedAt: null,
-      dispatchId: existingRecord?.dispatchId || null,
-      launchRequestId: existingRecord?.launchRequestId || null,
+      dispatchId: null,
+      launchRequestId: null,
       retryCount: priorRetryCount + 1,
       unresolvedForkHeadSince: targetRecord?.unresolvedForkHeadSince || null,
       unexecutedRefundCount: existingDispatchHeadAdvanced ? 0 : Number(existingRecord?.unexecutedRefundCount || 0),
@@ -7849,21 +7851,34 @@ async function maybeDispatchAmaCloserAttempt({
       launchRequestId: payload.launchRequestId, rootDir, hqRoot,
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
-    const ticket = probe?.ok && probe.row?.ticket_ref || payload.ticketRef;
-    // A missing ledger row is not evidence of a foreign owner. Preserve the
-    // launch receipt and dispatched lease so later ticks cannot spawn a duplicate.
-    // Its conservative attempt charge is refunded if a foreign ticket appears.
-    if (!ticket || isAmaHammerLaunchTicket(ticket, prNumber)) return null;
+    const row = probe?.ok ? probe.row : null;
+    const ticket = row?.ticket_ref || payload.ticketRef;
+    const targetRepo = row?.target_repo || payload.targetRepo;
+    const launchHead = row?.head_sha || payload.headSha;
+    // The CLI response is scoped to these dispatch arguments; any supplied
+    // ledger/response identity must agree. Missing ticket evidence stays fenced
+    // and unreceipted until exact-key reconciliation can prove ownership.
+    const expected = { repo, prNumber, headSha: targetRemediationSha };
+    const mismatch = (ticket && ticket !== `AMA-PR-${prNumber}`)
+      || (targetRepo && ![repo, repo.split('/').at(-1)].includes(targetRepo))
+      || (launchHead && launchHead !== targetRemediationSha);
+    if (!mismatch && ticket && closerLaunchMatches(expected, {
+      ticket_ref: ticket, target_repo: targetRepo || repo, head_sha: launchHead || targetRemediationSha,
+    })) return null;
+    logger?.warn?.(JSON.stringify({ event: 'ama_closer.launch_identity_mismatch', repo, prNumber,
+      headSha: targetRemediationSha, launchRequestId: payload.launchRequestId,
+      ticketRef: ticket || null, targetRepo: targetRepo || null, launchHead: launchHead || null }));
+    if (!mismatch) {
+      retainScratchDir = true;
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-receipt-unverified' });
+    }
     // Dispatch deduplication can return another owner's launch for this PR.
     // Never adopt its LRQ, charge its attempt, cancel it, or record its outcome.
     const reason = 'non-hammer-launch-not-adopted';
-    retainScratchDir = false;
-    finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
-      now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+    retainScratchDir = true;
     updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
-      ...(current || {}), state: 'no-dispatch', reason,
-      launchRequestId: null, dispatchId: null, retryCount: priorRetryCount,
-      lastError: null, unadoptedLaunchRequestId: payload.launchRequestId,
+      ...(current || {}), launchRequestId: null, dispatchId: null,
+      lastError: reason, unadoptedLaunchRequestId: payload.launchRequestId,
     }));
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
   };
@@ -7912,7 +7927,25 @@ async function maybeDispatchAmaCloserAttempt({
         })).catch(() => ({ ok: false }))) : null;
       const retryChainUnknown = liveClaimRefusal && existingRecord?.launchRequestId
         && (!retryProbe?.ok || retryProbe.retryChainUnreadable);
-      if (retryProbe?.ok && retryProbe.liveRetryLaunchRequestId) {
+      if (retryChainUnknown) {
+        retainScratchDir = true;
+        logRetryChainUnreadable(logger, retryProbe, { repo, prNumber });
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          preservePredecessorArtifacts: true, reason: 'dispatch-retry-chain-unreadable' });
+      }
+      if (retryProbe?.ok && retryProbe.liveRetryLaunchRequestId
+        && !closerLaunchMatches(existingRecord, retryProbe.row)) {
+        retainScratchDir = true;
+        logAmaCloserDispatchEvent(logger, 'ama_closer.launch_identity_mismatch', {
+          repo, prNumber, headSha: existingRecord.headSha,
+          launchRequestId: retryProbe.liveRetryLaunchRequestId,
+          ticketRef: retryProbe.row?.ticket_ref || null,
+        });
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          preservePredecessorArtifacts: true, reason: 'dispatch-retry-identity-mismatch' });
+      }
+      if (retryProbe?.ok && !retryProbe.retryChainUnreadable && retryProbe.liveRetryLaunchRequestId
+        && closerLaunchMatches(existingRecord, retryProbe.row)) {
         // Only a proven descendant owns these artifacts. Keep its original head
         // identity even if this admission was targeting a newer remediation head.
         const previous = existingRecord;
@@ -8064,16 +8097,6 @@ async function maybeDispatchAmaCloserAttempt({
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
-      if (retryChainUnknown) {
-        logRetryChainUnreadable(logger, retryProbe, { repo, prNumber });
-        // Charge the refusal, but preserve the ancestor's identity/artifacts for
-        // the next probe. Incomplete evidence is not a dispatched worker claim.
-        updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({
-          ...existingRecord, state: 'dispatch-failed', reason: 'dispatch-retry-chain-unreadable',
-          retryCount: priorRetryCount + 1, lastError: dispatchError,
-          lastObservedStatus: 'unknown', terminalLaunchStatus: null,
-        }));
-      }
       // A worker DID spawn (hq emitted an lrq/dispatchId) even though the launch
       // call surfaced as an error — the classic `worker_killed`-shortly-after-spawn
       // shape. Count it against the per-PR firing ceiling so a hammer that spawns
@@ -8125,8 +8148,7 @@ async function maybeDispatchAmaCloserAttempt({
         // closer (not merge-agent) re-dispatches once the throttle/broker
         // clears, since the budget was preserved above and re-dispatch is
         // guaranteed to be retry-eligible on the next tick.
-        skipMergeAgent: Boolean(configurationRefusal) || Boolean(retryChainUnknown) || branchHolderBlocked || ambiguousLaunch || transientFailure,
-        ...(retryChainUnknown ? { preservePredecessorArtifacts: true } : {}),
+        skipMergeAgent: Boolean(configurationRefusal) || branchHolderBlocked || ambiguousLaunch || transientFailure,
         reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : ambiguousLaunch ? 'dispatch-response-ambiguous' : (
           branchHolderBlocked ? (
             branchHolderBlockExhausted

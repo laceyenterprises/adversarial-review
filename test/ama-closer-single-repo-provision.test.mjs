@@ -51,7 +51,7 @@ function testDeps() {
     calls,
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-2', dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
     },
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},

@@ -1,4 +1,4 @@
-import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
+import { launchRetryFixture as baseLaunchRetryFixture } from './helpers/launch-retry-fixture.mjs';
 import Database from 'better-sqlite3';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
@@ -21,6 +21,16 @@ import { acquireAmaCloserLease, amaCloserLeaseFilePath, deleteAmaCloserLease, re
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
 const head = 'b'.repeat(40);
 const logger = { log() {}, info() {}, warn() {}, error() {} };
+function launchRetryFixture(root, status) {
+  const target = baseLaunchRetryFixture(root, status);
+  const db = new Database(target.path);
+  db.exec('ALTER TABLE launch_requests ADD COLUMN target_repo TEXT; ALTER TABLE launch_requests ADD COLUMN head_sha TEXT');
+  db.prepare('UPDATE launch_requests SET ticket_ref = ?, target_repo = ?, head_sha = ?')
+    .run('AMA-PR-42', 'fixture/repo', head);
+  db.close();
+  return target;
+}
+
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-scratch-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -86,7 +96,7 @@ for (const clock of ['wall', 'timestamp', 'function']) {
     const args = dispatchArgs(root);
     const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
     assert.equal((await maybeDispatchAmaCloser({ ...args,
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }),
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }),
     })).dispatched, true);
     const path = amaCloserDispatchFilePath(root, identity);
     const scratchDir = JSON.parse(readFileSync(path)).scratchDir;
@@ -162,7 +172,7 @@ for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
   test(`HAMTMP-01: dispatch renders one private directory and ${status} run cleanup removes it`, async t => {
     const root = fixture(t);
     const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
-      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }) }) });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
     const record = JSON.parse(readFileSync(path));
@@ -255,7 +265,7 @@ test('HAMTMP-01: a launch with an ambiguous response retains scratch until termi
   const root = fixture(t);
   const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root), execFileImpl: async () => {
     throw Object.assign(new Error('synthetic response lost after launch'), {
-      stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }),
+      stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }),
     });
   } });
   assert.equal(result.reason, 'dispatch-response-ambiguous');
@@ -282,7 +292,7 @@ test('HAMTMP-01: the next admitted run removes a dead predecessor and renders a 
   const args = dispatchArgs(root);
   args.dispatchContext.promptDir = promptDir;
   const result = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-new-lrq', dispatchId: 'synthetic-new-dispatch' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-new-lrq', dispatchId: 'synthetic-new-dispatch' }) }) });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
   const record = JSON.parse(readFileSync(path));
@@ -367,7 +377,7 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const args = dispatchArgs(root);
   args.readTemplateImpl = () => readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8');
   const result = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
     { repo: 'fixture/repo', prNumber: 42, headSha: head })));
@@ -425,7 +435,7 @@ test('HAMTMP-02: hammer spawn inherits private TMPDIR and terminal cleanup remov
         { env: options.env, encoding: 'utf8', timeout: 5000 });
       assert.equal(improvised.status, 0, improvised.stderr);
       writeFileSync(join(improvised.stdout.trim(), 'state'), 'synthetic state');
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq' }) };
+      return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) };
     } });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   await reconcileAmaCloserDispatches(root, { logger,
@@ -468,7 +478,7 @@ for (const status of ['requested', 'starting', 'running', 'parked']) {
     const root = fixture(t);
     const args = dispatchArgs(root);
     const first = await maybeDispatchAmaCloser({ ...args,
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
     const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
     const before = readFileSync(path, 'utf8');
     const record = JSON.parse(before);
@@ -495,7 +505,7 @@ for (const status of ['requested', 'starting', 'running', 'parked']) {
 test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch', async t => {
   const root = fixture(t);
   const first = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   const scratchDir = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
   const ledgerTarget = launchRetryFixture(root, 'succeeded');
   const reconciled = await reconcileAmaCloserDispatches(root, { logger, ledgerTarget });
@@ -507,7 +517,7 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
   const root = fixture(t);
   const args = dispatchArgs(root);
   const first = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
   const ledgerTarget = { backend: 'postgres', databaseName: 'synthetic' };
   let chainReads = 0;
@@ -520,16 +530,16 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
           chainReads += 1;
           assert.match(options.input, /SELECT :'lrq'::text/);
           return { status: 0, stdout: ['succeeded', 'canceled'].map((status, index) => JSON.stringify({
-            launch_request_id: `synthetic-terminal-${index}`, status, ticket_ref: 'HAM',
+            launch_request_id: `synthetic-terminal-${index}`, status, ticket_ref: 'AMA-PR-42',
           })).join('\n') };
         }
         return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq',
-          status: 'failed', ticket_ref: 'HAM' }) };
+          status: 'failed', ticket_ref: 'AMA-PR-42' }) };
       },
     }),
     readPullRequestStateImpl: () => ({ state: 'OPEN' }),
     execFileImpl: async (_command, argv) => argv[0] === 'dispatch' && argv.includes('--prompt')
-      ? { stdout: JSON.stringify({ launchRequestId: 'synthetic-fresh-hammer' }) }
+      ? { stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-fresh-hammer' }) }
       : { stdout: JSON.stringify({ status: 'failed' }) },
   });
   assert.ok(chainReads > 0);
@@ -538,12 +548,12 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
   assert.equal(existsSync(previousScratch), false);
 });
 
-for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number']) {
+for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head']) {
   test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
     const first = await maybeDispatchAmaCloser({ ...args,
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
     const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
     const previous = JSON.parse(readFileSync(path));
     const prompt = readFileSync(first.promptPath, 'utf8');
@@ -567,7 +577,7 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
       retryArgs.dispatchContext.dispatchRecordHeadSha = head;
       retryArgs.dispatchContext.livePrProbeImpl = async () => ({ state: 'OPEN', headRefOid: targetHead,
         headBranchExists: true, headRefName: 'synthetic-branch' });
-    } else if (repoSource !== 'dispatchContext') {
+    } else if (repoSource !== 'dispatchContext' && !repoSource.startsWith('foreign-retry')) {
       delete retryArgs.dispatchContext.repo;
       if (repoSource === 'prMetadata') retryArgs.prMetadata = { ...args.prMetadata, repo: 'fixture/repo' };
       else retryArgs.repo = 'fixture/repo';
@@ -585,6 +595,9 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
           const db = new Database(ledgerTarget.path);
           db.prepare('UPDATE launch_requests SET status = ? WHERE launch_request_id = ?')
             .run('requested', 'synthetic-retry-leaf');
+          if (repoSource === 'foreign-retry-ticket') db.exec("UPDATE launch_requests SET ticket_ref = 'CONFLICT-REBASE-42' WHERE launch_request_id = 'synthetic-retry-leaf'");
+          if (repoSource === 'foreign-retry-repo') db.exec("UPDATE launch_requests SET target_repo = 'other/project' WHERE launch_request_id = 'synthetic-retry-leaf'");
+          if (repoSource === 'foreign-retry-head') db.prepare("UPDATE launch_requests SET head_sha = ? WHERE launch_request_id = 'synthetic-retry-leaf'").run('c'.repeat(40));
           db.close();
           throw Object.assign(new Error('synthetic dispatch refused'), {
             stderr: 'duplicate key value violates unique constraint "uq_worker_runs_live_logical_job"',
@@ -593,6 +606,14 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
         return { stdout: JSON.stringify({ status: 'failed' }) };
       },
     });
+    if (repoSource.startsWith('foreign-retry')) {
+      assert.equal(result.reason, 'dispatch-retry-identity-mismatch', JSON.stringify(result));
+      const current = JSON.parse(readFileSync(path));
+      assert.equal(current.state, 'dispatching');
+      assert.equal(current.launchRequestId, null);
+      assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+      return;
+    }
     assert.equal(result.reason, 'dispatch-retry-live', JSON.stringify(result));
     assert.ok(attemptedPrompt, 'exercise the admission race after the terminal ledger snapshot');
     assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
@@ -639,7 +660,7 @@ test('SCRATCHRACE-01: ordinary redispatch failure still cleans terminal predeces
   const root = fixture(t);
   const args = dispatchArgs(root);
   const first = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
   const ledgerTarget = launchRetryFixture(root, 'failed');
   let newScratch;
@@ -666,7 +687,7 @@ for (const predecessor of [true, false]) {
     const args = dispatchArgs(root);
     const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
     if (predecessor) await maybeDispatchAmaCloser({ ...args,
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
     const ledgerTarget = launchRetryFixture(root, 'failed');
     const result = await maybeDispatchAmaCloser({ ...args,
       dispatchContext: { ...args.dispatchContext, ledgerTarget },
@@ -708,7 +729,7 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   const root = fixture(t);
   const args = dispatchArgs(root);
   const first = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
   const path = amaCloserDispatchFilePath(root, identity);
   const before = readFileSync(path, 'utf8');
@@ -746,11 +767,11 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   assert.equal(existsSync(JSON.parse(before).scratchDir), true);
 });
 
-test('SCRATCHRACE-01: retry traversal failure during refusal is charged without deleting predecessor artifacts', async t => {
+test('SCRATCHRACE-01: retry traversal failure keeps an unreceipted intent and predecessor artifacts', async t => {
   const root = fixture(t);
   const args = dispatchArgs(root);
   const first = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
   const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
   const path = amaCloserDispatchFilePath(root, identity);
   const previous = JSON.parse(readFileSync(path));
@@ -767,13 +788,13 @@ test('SCRATCHRACE-01: retry traversal failure during refusal is charged without 
       return { stdout: JSON.stringify({ status: 'failed' }) };
     },
   });
-  assert.equal(result.reason, 'dispatch-failed');
+  assert.equal(result.reason, 'dispatch-retry-chain-unreadable');
   assert.equal(result.skipMergeAgent, true, 'incomplete retry evidence prevents fallback spawning');
   const record = JSON.parse(readFileSync(path));
-  assert.equal(record.state, 'dispatch-failed');
+  assert.equal(record.state, 'dispatching');
   assert.equal(record.retryCount, previous.retryCount + 1);
-  assert.equal(record.launchRequestId, previous.launchRequestId);
-  assert.equal(readAmaCloserLease(root, identity), null);
+  assert.equal(record.launchRequestId, null);
+  assert.equal(readAmaCloserLease(root, identity).status, 'pending');
   assert.equal(existsSync(previous.scratchDir), true);
   assert.equal(existsSync(first.promptPath), true);
 });
@@ -837,7 +858,7 @@ for (const interrupted of ['prelaunch', 'dispatch']) {
     const root = fixture(t);
     const args = dispatchArgs(root);
     const first = await maybeDispatchAmaCloser({ ...args,
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-lrq' }) }) });
     const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
     const helper = join(previousScratch, 'synthetic-phase.sh');
     writeFileSync(helper, 'synthetic phase helper');
@@ -910,7 +931,7 @@ test('SCRATCHLEAK-01: dispatch environment contains one private pytest base temp
   let dispatchEnv;
   const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root), execFileImpl: async (_cmd, argv, options) => {
     if (argv[0] === 'dispatch') dispatchEnv = options.env;
-    return { stdout: JSON.stringify({ launchRequestId: 'synthetic-temp-lrq' }) };
+    return { stdout: JSON.stringify({ ticketRef: 'AMA-PR-42', launchRequestId: 'synthetic-temp-lrq' }) };
   } });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head })));

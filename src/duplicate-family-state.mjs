@@ -924,6 +924,7 @@ export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = 
   return { families, familyIds };
 }
 
+const censusFailures = new Map();
 export async function runDuplicateFamilyCensusForWatcher({
   db,
   subjectEntries,
@@ -948,7 +949,7 @@ export async function runDuplicateFamilyCensusForWatcher({
     signals.set(key, result);
     if (!result?.ok && shouldDisableProvenanceForTick(result?.reason)) {
       provenanceDisabledReason = result?.reason || 'duplicate-family-provenance-unavailable';
-      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
+      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}${result?.detail ? `: ${result.detail}` : ''}`);
     }
     return result;
   }
@@ -962,7 +963,7 @@ export async function runDuplicateFamilyCensusForWatcher({
     if (!result) throw new Error('Transient provenance failure: missing-census-snapshot');
     if (!result?.ok && shouldDisableProvenanceForTick(result.reason)) {
       provenanceDisabledReason = result.reason || 'duplicate-family-provenance-unavailable';
-      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
+      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}${result?.detail ? `: ${result.detail}` : ''}`);
     }
     return result;
   };
@@ -1038,12 +1039,19 @@ export async function runDuplicateFamilyCensusForWatcher({
         ({ ...pair, overlapCount: overlap.length })) };
       log.log(JSON.stringify({ familyId: family.familyId, identitySignals: family.identitySignals, contentSignals, holdDecisions: family.holdDecisions }));
     }
+    censusFailures.delete(`${rootDir}:${repoPath}`);
     return duplicateCensus;
   } catch (err) {
-    log.error(
-      `[watcher] duplicate-family advisory census failed for ${repoPath}:`,
-      err?.message || err
-    );
+    const key = `${rootDir}:${repoPath}`;
+    const message = err?.message || String(err);
+    if (censusFailures.get(key) !== message) {
+      if (censusFailures.size >= 1000) censusFailures.delete(censusFailures.keys().next().value);
+      censusFailures.set(key, message);
+      log.error(
+        `[watcher] duplicate-family advisory census failed for ${repoPath}:`,
+        message
+      );
+    }
     return { families: [], familyIds: [], error: err };
   }
 }

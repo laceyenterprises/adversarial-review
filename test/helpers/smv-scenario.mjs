@@ -757,13 +757,16 @@ if (scenario === 'clean') {
   await reconcilePreReceiptIntent(rootDir, identity(), {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }), now: recoveryNow, deliverAlertImpl: refuse });
   updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
-    dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-smoke-prepared' }));
+    dispatchPhase: 'submitting', dispatchIdempotencyKey: 'ama-closer-smoke-expired', dispatchTimeoutMs: 600_000 }));
   const noLaunch = await reconcilePreReceiptIntent(rootDir, identity(), {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); },
   });
   assert.equal(noLaunch.status, 'no-launch');
+  assert.equal(noLaunch.record.reason, 'keyed-no-launch-proven');
+  assert.equal(noLaunch.evidence.ok, true);
+  assert.equal(noLaunch.evidence.rowCount, 0);
   assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'deferred');
   const legacyIdentity = { ...identity(), prNumber: prNumber + 2 };
   updateAmaCloserDispatchRecord(rootDir, legacyIdentity, () => ({ ...legacyIdentity,
@@ -814,7 +817,7 @@ if (scenario === 'clean') {
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
-    nativeFinalHammerWake: true, terminalIntentRetiredWithoutPage: true, inspectionPagedOnce: true, unresolvedIntentHoldsNoFleetCapacity: true,
+    nativeFinalHammerWake: true, terminalIntentRetiredWithoutPage: true, inspectionPagedOnce: true, expiredKeyedIntentSettled: true, unresolvedIntentHoldsNoFleetCapacity: true,
     repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };

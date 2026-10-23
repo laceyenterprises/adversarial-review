@@ -13,7 +13,7 @@ const usage = `Usage: node bin/settle-legacy-closer-intent.mjs
   --root-dir <review-root> --hq-root <hq-root> --ledger-target <canonical-target>
   --repo <owner/repo> --pr <number> --head <dispatch-head-sha>
   [--apply --reason <operator-reason>]
-Dry-run is the default. Apply requires the dispatch directory owner.
+Dry-run is the default. Apply requires the dispatch directory owner. Supports legacy and expired keyed intents.
 `;
 
 export async function main(args = process.argv.slice(2), options = {}) {
@@ -51,19 +51,19 @@ export async function main(args = process.argv.slice(2), options = {}) {
     reason: values.reason, idempotencyKey: randomUUID() };
   const audit = row => appendOperatorMutationAuditRow(rootDir, { ...auditBase, ...row });
   const result = await reconcilePreReceiptIntent(rootDir, identity, {
-    ...options, now, dryRun, legacyOnly: true, hqRoot: resolve(values['hq-root']),
+    ...options, now, dryRun, operatorSettlement: true, hqRoot: resolve(values['hq-root']),
     ledgerTarget: values['ledger-target'],
-    beforeLegacySettlement: next => audit({ outcome: 'settlement-authorized',
+    beforeSettlement: next => audit({ outcome: 'settlement-authorized',
       evidence: next.preReceiptReconciliation.query }),
   });
-  const conclusive = result.status === 'no-launch' && result.record?.reason === 'legacy-no-launch-proven';
+  const conclusive = result.status === 'no-launch';
   const output = { dryRun, ...identity, conclusive, status: result.status,
-    reason: result.reason || result.record?.preReceiptReconciliation?.reason || 'not-a-legacy-intent',
+    reason: result.reason || result.record?.preReceiptReconciliation?.reason || 'not-a-pre-receipt-intent',
     evidence: result.evidence || null };
   if (!dryRun) output.auditPath = audit({ outcome: conclusive ? 'settled-no-dispatch'
     : `refused:${output.reason}`, evidence: output.evidence });
   print(JSON.stringify(output));
-  if (!conclusive) throw new Error(`Legacy settlement refused: ${output.reason}`);
+  if (!conclusive) throw new Error(`Closer intent settlement refused: ${output.reason}`);
   return output;
 }
 

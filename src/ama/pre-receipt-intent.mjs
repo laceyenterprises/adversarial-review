@@ -1,12 +1,14 @@
 // LAC-2081: a dead caller is not proof that its dispatch child never enqueued.
 import fsExt from 'fs-ext';
+import { setTimeout as delay } from 'node:timers/promises';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../session-ledger-read-adapter.mjs';
 import { amaCloserDispatchFilePath } from './dispatch-record-read.mjs';
-import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease } from './closer-lease.mjs';
+import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
@@ -67,6 +69,41 @@ function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
   catch { return false; }
 }
 
+// Match the exact closer ticket; a generic HAM or conflict worker is not this PR's closer.
+export function closerLaunchMatches(record, row) {
+  return row?.ticket_ref === `AMA-PR-${record.prNumber}`
+    && [record.repo, record.repo.split('/').at(-1)].includes(row.target_repo)
+    && (!row.head_sha || row.head_sha === (record.targetRemediationSha || record.headSha));
+}
+
+async function lookupReceipt(read, args, options) {
+  const attempts = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    options.signal?.throwIfAborted();
+    let result;
+    try { result = await read(args); }
+    catch (error) {
+      options.signal?.throwIfAborted();
+      result = { ok: false, reason: 'ledger-read-failed', detail: error.message || String(error),
+        transient: ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EIO'].includes(error.code) };
+    }
+    attempts.push({ ok: result?.ok === true && Array.isArray(result.rows),
+      reason: result?.reason || null, detail: result?.detail || null });
+    if (attempts.at(-1).ok || !result?.transient || attempt === 2) return { ...result, attempts };
+    await (options.delayAsyncImpl || ((ms) => delay(ms, undefined, { signal: options.signal })))(100 * (attempt + 1));
+  }
+}
+
+function queryEvidence(query, probe) {
+  const rows = probe?.ok && Array.isArray(probe.rows) ? probe.rows : null;
+  return { ...query, ok: rows !== null, rowCount: rows?.length ?? null,
+    backend: probe?.target?.backend || null, source: probe?.target?.source || null,
+    reason: rows === null ? probe?.reason || 'ledger-lookup-unreadable' : null,
+    detail: rows === null ? probe?.detail || null : null,
+    timeoutMs: query.timeoutMs, attempts: probe?.attempts || [],
+    launchRequestIds: rows?.map(row => row?.launch_request_id).filter(id => typeof id === 'string') || [] };
+}
+
 export async function reconcilePreReceiptIntent(rootDir, identity, options = {}) {
   const release = tryAcquireCloserIntentLock(rootDir, identity);
   if (!release) return { status: 'held', reason: 'intent-lock-held' };
@@ -77,7 +114,6 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     if (!isPreReceiptIntent(record)) return { status: 'unchanged' };
     if (record.repo !== identity.repo || Number(record.prNumber) !== Number(identity.prNumber)
       || record.headSha !== identity.headSha) return { status: 'held', reason: 'intent-identity-mismatch' };
-    if (options.legacyOnly && record.dispatchIdempotencyKey) return { status: 'held', reason: 'keyed-intent' };
     const legacy = !record.dispatchIdempotencyKey;
     const leaseIdentity = { ...record, headSha: record.targetRemediationSha || record.headSha };
     let lease;
@@ -93,6 +129,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
       return { status: 'held', reason: 'intent-or-lease-changed' };
     }
     if (isTerminalCloserPullRequest(pr)) {
+      if (options.operatorSettlement) return { status: 'held', reason: 'pr-terminal' };
       // PR retirement says nothing about submission or worker liveness. Preserve
       // lease, launch evidence and budgets; only end this intent's PR hold/page.
       const next = { ...record, state: 'completed', reason: 'pr-terminal',
@@ -107,54 +144,66 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     // New dispatchers hold this lock for their whole launch. Also honor legacy
     // or independently renewed leases; neither age nor a missing receipt wins.
     const settledNoLaunch = matchingLease && lease?.status === 'terminal'
-      && lease.terminalOutcome === 'deferred' && !lease.lrqId && (legacy || record.dispatchPhase === 'prepared');
+      && lease.terminalOutcome === 'deferred' && !lease.lrqId;
     const promotedLease = !legacy && matchingLease && lease?.status === 'dispatched' && lease.lrqId;
     // Legacy watcher PIDs may still be alive long after their old dispatch call
     // returned. Ticket/time ledger evidence, not caller death, proves absence.
-    const legacyPendingLease = legacy && matchingLease && lease?.status === 'pending' && !lease.lrqId;
-    const foreignLease = lease && !legacyPendingLease && !(matchingLease && localDead)
+    const matchingPendingLease = (legacy || !lease?.holderHost || lease.holderHost === hostname()) && matchingLease && lease?.status === 'pending' && !lease.lrqId;
+    const foreignLease = lease && !matchingPendingLease && !(matchingLease && localDead)
       && !settledNoLaunch && !promotedLease;
-    let probe;
-    if (!foreignLease && record.dispatchIdempotencyKey) {
-      try {
-        probe = await (options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync)({
-          ...options, rootDir, hqRoot: options.hqRoot || record.hqRoot,
-          idempotencyKey: record.dispatchIdempotencyKey, timeoutMs: 1000,
-        });
-      } catch { probe = { ok: false }; }
+    const prior = record.preReceiptReconciliation;
+    const firstObservedAt = Number.isFinite(Date.parse(prior?.firstObservedAt)) ? prior.firstObservedAt : now;
+    const started = Date.parse(record.lastAttemptedAt);
+    const timeout = Number(record.dispatchTimeoutMs);
+    const deadlineAt = (Number.isFinite(Date.parse(prior?.deadlineAt)) && prior.deadlineAt) || new Date(Number.isFinite(started) && timeout > 0
+      ? started + Math.min(timeout, 2 ** 31 - 1) : Date.parse(firstObservedAt) + 30 * 60_000).toISOString();
+    const deadlinePassed = Date.parse(now) >= Date.parse(deadlineAt);
+    // Use the adapter's normal 30s ledger budget, scaled once for host load.
+    const timeoutMs = loadAwareTimeoutMs(30_000, options.loadAwareTimeoutOptions);
+    const ticketQuery = { kind: 'launch-requests-for-ticket-since',
+      ticketRef: `AMA-PR-${record.prNumber}`, requestedAtOrAfter: record.lastAttemptedAt, limit: 1, timeoutMs };
+    const query = legacy ? ticketQuery : { kind: 'launch-request-by-idempotency-key',
+      idempotencyKey: record.dispatchIdempotencyKey, limit: 2, timeoutMs };
+    const read = legacy ? options.readLegacyIntentLaunchesImpl || readLaunchRequestsForTicketSinceAsync
+      : options.readIntentReceiptImpl || readLaunchRequestByIdempotencyKeyAsync;
+    const args = { ...options, rootDir, hqRoot: options.hqRoot || record.hqRoot, ...query };
+    const probe = !foreignLease ? await lookupReceipt(read, args, options) : null;
+    let evidence = queryEvidence(query, probe);
+    // Operator recovery also supports keyed historical records: prove absence
+    // across the entire closer ticket, never only the misattributed launch ID.
+    let operatorAbsence = false;
+    if (!legacy && !foreignLease && options.operatorSettlement && deadlinePassed) {
+      const ticketProbe = await lookupReceipt(options.readLegacyIntentLaunchesImpl || readLaunchRequestsForTicketSinceAsync,
+        { ...args, ...ticketQuery }, options);
+      const ticketEvidence = queryEvidence(ticketQuery, ticketProbe);
+      evidence = { ...evidence, ticketQuery: ticketEvidence, recordedLaunchRequestId: record.launchRequestId || null };
+      operatorAbsence = ticketEvidence.ok && ticketEvidence.rowCount === 0;
     }
-    const query = legacy ? { kind: 'launch-requests-for-ticket-since',
-      ticketRef: `AMA-PR-${record.prNumber}`, requestedAtOrAfter: record.lastAttemptedAt,
-      limit: 1 } : null;
-    if (!foreignLease && legacy) {
-      try {
-        probe = await (options.readLegacyIntentLaunchesImpl || readLaunchRequestsForTicketSinceAsync)({
-          ...options, rootDir, hqRoot: options.hqRoot || record.hqRoot,
-          ticketRef: query.ticketRef, requestedAtOrAfter: query.requestedAtOrAfter, timeoutMs: 1000,
-        });
-      } catch { probe = { ok: false, reason: 'ledger-read-failed' }; }
-    }
-    // Evidence reads yield. Re-read the entire record and lease, preserving even
-    // unrelated annotations or a same-timestamp replacement owner.
+    // Evidence reads yield. Preserve replacement records and leases.
     if (!intentSnapshotMatches(path, bytes, rootDir, leaseIdentity, lease)) {
       return { status: 'held', reason: 'intent-or-lease-changed' };
     }
     const rows = probe?.ok && Array.isArray(probe.rows) ? probe.rows : null;
-    const evidence = query ? { ...query, ok: rows !== null,
-      rowCount: rows?.length ?? null,
-      backend: probe?.target?.backend || null, source: probe?.target?.source || null,
-      reason: rows === null ? probe?.reason || 'ledger-lookup-unreadable' : null,
-      launchRequestIds: rows?.map(row => row?.launch_request_id).filter(id => typeof id === 'string') || [],
-    } : null;
     const receipt = rows?.length === 1 ? rows[0] : null;
     options.signal?.throwIfAborted();
     const matchingReceipt = !legacy && receipt && receipt.idempotency_key === record.dispatchIdempotencyKey
       && typeof receipt.launch_request_id === 'string' && receipt.launch_request_id.startsWith('lrq_')
-      && receipt.ticket_ref === `AMA-PR-${record.prNumber}`
-      && [record.repo, record.repo.split('/').at(-1)].includes(receipt.target_repo);
+      && closerLaunchMatches(record, receipt);
+    if (!legacy && receipt && !matchingReceipt) {
+      evidence = { ...evidence, receiptIdentityMismatch: {
+        ticketRef: receipt.ticket_ref || null, targetRepo: receipt.target_repo || null,
+        headSha: receipt.head_sha || null,
+      } };
+    }
+    const misattributedLease = options.operatorSettlement && operatorAbsence && promotedLease
+      && record.launchRequestId === lease.lrqId && receipt?.launch_request_id === lease.lrqId
+      && typeof receipt.ticket_ref === 'string' && receipt.ticket_ref.length > 0
+      && receipt.ticket_ref !== `AMA-PR-${record.prNumber}`;
+    if (misattributedLease) evidence = { ...evidence, misattributedLeaseLaunchRequestId: lease.lrqId };
     let budgetUnreadable = false;
     const recoverableReceipt = !foreignLease && matchingReceipt
       && (!lease?.lrqId || lease.lrqId === receipt.launch_request_id) && !settledNoLaunch;
+    if (options.operatorSettlement && recoverableReceipt) return { status: 'held', reason: 'closer-receipt-exists', evidence };
     if (recoverableReceipt && !options.dryRun && String(record.workerClass).startsWith('hammer')) {
       // Charge before receipt persistence, keyed across a crash on either side.
       try {
@@ -185,18 +234,27 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         dispatchId: receipt.launch_request_id, dispatchedAt: receipt.requested_at || record.lastAttemptedAt,
         // Let ordinary reconciliation resolve live retries and terminal status.
         lastObservedStatus: 'unknown', lastObservedAt: now, lastError: null,
-        preReceiptReconciliation: { status, observedAt: now } };
-    } else if (legacy && !foreignLease && rows?.length === 0
-      && Number.isFinite(Date.parse(record.lastAttemptedAt))) {
+        preReceiptReconciliation: { status, observedAt: now, query: evidence } };
+    } else if (!foreignLease && ((legacy && rows?.length === 0 && Number.isFinite(started))
+      || (!legacy && (!promotedLease || misattributedLease) && deadlinePassed && (rows?.length === 0 || operatorAbsence))
+      || (!legacy && matchingLease && (localDead || settledNoLaunch)
+        && record.dispatchPhase === 'prepared' && rows?.length === 0))) {
       status = 'no-launch';
-      next = { ...record, state: 'no-dispatch', reason: 'legacy-no-launch-proven',
+      const reason = legacy ? 'legacy-no-launch-proven' : operatorAbsence ? 'closer-ticket-no-launch-proven'
+        : deadlinePassed ? 'keyed-no-launch-proven' : 'interrupted-before-submission';
+      next = { ...record, state: 'no-dispatch', reason,
         retryCount: Math.max(0, Number(record.retryCount || 0) - 1),
         launchRequestId: null, dispatchId: null,
-        preReceiptReconciliation: { status, reason: 'legacy-no-launch-proven', observedAt: now, query: evidence } };
+        preReceiptReconciliation: { status, reason, observedAt: now, query: evidence } };
       if (!options.dryRun) {
-        // The operator CLI fsyncs its authorization audit before any mutation.
-        options.beforeLegacySettlement?.(next);
-        if (lease) {
+        options.beforeSettlement?.(next);
+        if (misattributedLease) {
+          // This lease carries the very foreign receipt proven above. Remove
+          // only that unchanged local attribution; never act on its worker.
+          if (!deleteAmaCloserLeaseIfCurrent(rootDir, lease)) {
+            return { status: 'held', reason: 'lease-mutation-raced', evidence };
+          }
+        } else if (lease) {
           try { updateAmaCloserLease({ rootDir, ...leaseIdentity, expectedLease: lease,
             status: 'terminal', terminalOutcome: 'deferred', now }); }
           catch (error) {
@@ -205,32 +263,8 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
           }
         }
       }
-    } else if (!foreignLease && (localDead || settledNoLaunch) && matchingLease
-      && record.dispatchPhase === 'prepared' && record.dispatchIdempotencyKey
-      && rows?.length === 0) {
-      // prepared is persisted before submission; submitting is persisted before
-      // exec. Only the former plus a dead fenced owner proves no launch.
-      status = 'no-launch';
-      next = { ...record, state: 'no-dispatch', reason: 'interrupted-before-submission',
-        retryCount: Math.max(0, Number(record.retryCount || 0) - 1),
-        launchRequestId: null, dispatchId: null,
-        preReceiptReconciliation: { status, observedAt: now } };
-      if (!options.dryRun) {
-        try { updateAmaCloserLease({ rootDir, ...leaseIdentity, expectedLease: lease,
-          status: 'terminal', terminalOutcome: 'deferred', now }); }
-        catch (error) {
-          if (!['EBUSY', 'ESTALE'].includes(error.code)) throw error;
-          return { status: 'held', reason: 'lease-mutation-raced' };
-        }
-      }
     } else {
       status = 'unknown';
-      const prior = record.preReceiptReconciliation;
-      const firstObservedAt = Number.isFinite(Date.parse(prior?.firstObservedAt)) ? prior.firstObservedAt : now;
-      const started = Date.parse(record.lastAttemptedAt);
-      const timeout = Number(record.dispatchTimeoutMs);
-      const deadlineAt = (Number.isFinite(Date.parse(prior?.deadlineAt)) && prior.deadlineAt) || new Date(Number.isFinite(started) && timeout > 0
-        ? started + Math.min(timeout, 2 ** 31 - 1) : Date.parse(firstObservedAt) + 30 * 60_000).toISOString();
       const diagnosticStatus = Date.parse(now) >= Date.parse(deadlineAt) ? 'inspection-required' : 'unknown';
       const reason = foreignLease ? 'lease-ownership-unresolved'
         : budgetUnreadable ? 'receipt-budget-unreadable'
@@ -242,8 +276,8 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         ...(evidence ? { query: evidence } : {}),
         ...(prior?.alertedAt ? { alertedAt: prior.alertedAt } : {}) } };
       // Bounded diagnostics: no launch timestamp refresh, no unbounded history,
-      // no polling write/log storm. The deadline never clears ownership.
-      if (prior?.status === diagnosticStatus && prior?.reason === reason
+      // no polling write/log storm. Only successful ledger proof clears ownership.
+      if (prior?.status === diagnosticStatus && prior?.reason === reason && same(prior?.query, evidence)
         && Date.parse(now) - Date.parse(prior.observedAt) < 60_000) next = record;
     }
     if (!options.dryRun && next.preReceiptReconciliation?.status === 'inspection-required'
@@ -270,7 +304,9 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     }
     if (!options.dryRun && next !== record) {
       writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
-      if (record.preReceiptReconciliation?.status !== next.preReceiptReconciliation.status) {
+      if (record.preReceiptReconciliation?.status !== next.preReceiptReconciliation.status
+        || record.preReceiptReconciliation?.reason !== next.preReceiptReconciliation.reason
+        || !same(record.preReceiptReconciliation?.query, next.preReceiptReconciliation.query)) {
         options.logger?.warn?.(JSON.stringify({ event: 'ama_closer.pre_receipt_reconciled',
           repo: record.repo, prNumber: record.prNumber, headSha: record.headSha,
           ...next.preReceiptReconciliation }));

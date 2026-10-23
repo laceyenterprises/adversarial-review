@@ -347,7 +347,7 @@ function closerDeps({ nextLaunch, comments = [PREMERGE_AUDIT_COMMENT], alerts = 
       }
       if (args[0] === 'dispatch') {
         launches.push(args);
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: nextLaunch, launchRequestId: nextLaunch }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: nextLaunch, launchRequestId: nextLaunch }), stderr: '' };
       }
       return { stdout: '{}', stderr: '' };
     },

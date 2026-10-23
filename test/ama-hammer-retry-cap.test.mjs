@@ -127,7 +127,7 @@ function hammerDispatchDeps(overrides = {}) {
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -1079,7 +1079,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1159,7 +1159,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           throw new Error('worker teardown should not run before merge signal succeeds');
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1246,7 +1246,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       attemptDaemonCleanMergeImpl: async ({ liveGate, requiredCheckContexts }) => {
         observedLiveGate = liveGate;
@@ -1321,7 +1321,7 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
           err.stderr = 'launchctl teardown failed';
           throw err;
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1381,7 +1381,7 @@ test('same-head terminal HAM remediation parks for operator when structural gate
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
           mergeCalls.push(args);
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1437,7 +1437,7 @@ test('same-head terminal HAM remediation parks for operator on head mismatch wit
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
           mergeCalls.push(args);
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1516,7 +1516,7 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
         launchedArgs = args;
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
       },
     }),
   });
@@ -1618,7 +1618,7 @@ test('stale target-head pending lease on head advance is reclaimed before dispat
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'not-found' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
       },
     }),
   });
@@ -1684,7 +1684,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
     }),
   });
@@ -1762,7 +1762,7 @@ test('fresh succeeded current-head hammer without HAM evidence is retried as a f
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
     }),
     // A clean missing signal permits the ordinary bounded exit refund.
@@ -1847,7 +1847,7 @@ test('fresh succeeded current-head hammer trusts live open state over stale merg
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
       readBuildCompletionProducerEvidenceImpl: () => ({
@@ -1938,7 +1938,7 @@ test('fresh succeeded hammer accepts a producer-realistic merge-commit signal fo
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: (args) => {
         assert.equal(args.repo, REPO);
@@ -2051,7 +2051,7 @@ test('terminal failed current-head hammer without HAM evidence is redispatched',
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
     }),
   });
@@ -2136,7 +2136,7 @@ test('current-head hammer dispatch ignores old-head audit terminal outcome while
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
       readBuildCompletionProducerEvidenceImpl: () => ({
@@ -2263,7 +2263,7 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
         assert.equal(Object.hasOwn(intent, 'reconciledAt'), false);
         assert.throws(() => updateAmaCloserDispatchRecord(rootDir, intent, current => ({ ...current, terminalLaunchStatus: 'failed', reconciledAt: 'old-cli-write' })), /owned by another writer/);
       }
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: async (args) => {
       launchRequestStatusCalls.push(args);
@@ -2998,7 +2998,7 @@ function spawnThenDieDeps(overrides = {}) {
       const err = new Error('worker_killed ~36s into planning');
       // hq already emitted the launch identifiers before the worker died — this is
       // what makes the closer treat it as an ambiguous (spawned) launch.
-      err.stdout = JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      err.stdout = JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       err.stderr = 'worker_killed';
       throw err;
     },
@@ -3469,7 +3469,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
         execFileImpl: async (_cmd, args) => {
           calls.push(args);
           if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: scenario === 'stale park active repair' ? 'running' : 'failed' }), stderr: '' };
-          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
+          return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
         },
         attemptDaemonCleanMergeImpl: async () => { merges++; throw new Error('unsafe daemon merge'); },
       }),
@@ -3742,7 +3742,7 @@ test('REBASEPROV-01 ambiguous dispatch cannot charge a conflict owner', async t 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const deps = hammerDispatchDeps({
     execFileImpl: async () => { throw Object.assign(new Error('Interrupted after dedup'), {
-      stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'foreign-launch' }),
+      stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: 'foreign-launch' }),
     }); },
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running', ticket_ref: 'CONFLICT-PR-42-REBASE' } }),
   });
@@ -3774,17 +3774,16 @@ for (const ambiguous of [false, true]) {
     const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
     await maybeDispatchAmaCloser({ ...args, ...deps });
     const record = readAmaCloserDispatchRecord(root, identity);
-    assert.equal(record.launchRequestId, 'unverified-launch');
-    assert.equal(record.state, 'dispatched');
-    assert.equal(readAmaCloserLease(root, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+    assert.equal(record.launchRequestId, null);
+    assert.equal(record.state, 'dispatching');
+    assert.equal(readAmaCloserLease(root, identity).status, AMA_CLOSER_LEASE_STATUS.PENDING);
     await maybeDispatchAmaCloser({ ...args, ...deps });
     assert.equal(spawns, 1, 'unknown ticket must not permit another spawn');
-    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 1, 'ambiguous launches are conservatively charged');
+    assert.equal(readHammerRetryCapLedger(root, identity), null, 'unverified receipts cannot charge a foreign launch');
     ticket = 'CONFLICT-PR-42-REBASE';
     await maybeDispatchAmaCloser({ ...args, ...deps });
     assert.equal(readAmaCloserDispatchRecord(root, identity).launchRequestId, null);
-    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
-    assert.equal(readHammerRetryCapLedger(root, identity).lifetimeAttemptCount, 0);
+    assert.equal(readHammerRetryCapLedger(root, identity), null);
   });
 }
 
@@ -3809,7 +3808,7 @@ test('REBASEPROV-01 key/value HAM receipt preserves the launched lease during le
   const root = mkdtempSync(join(tmpdir(), 'ham-ticket-receipt-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...hammerDispatchDeps({
-    execFileImpl: async () => ({ stdout: 'dispatchId=dispatch_hammer\nlaunchRequestId=lrq_hammer\nticketRef=HAM\n' }),
+    execFileImpl: async () => ({ stdout: 'dispatchId=dispatch_hammer\nlaunchRequestId=lrq_hammer\nticketRef=AMA-PR-3116\n' }),
   }) });
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_hammer');

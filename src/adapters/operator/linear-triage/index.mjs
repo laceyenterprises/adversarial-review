@@ -213,7 +213,7 @@ async function incidentIssueReason(issue) {
   }
 }
 
-function terminalState(state, terminalStateNames) {
+function terminalState(state, terminalStateNames = []) {
   return ['completed', 'canceled'].includes(state?.type)
     || terminalStateNames.includes(String(state?.name || '').toLowerCase());
 }
@@ -223,7 +223,7 @@ async function setLinearState({
   logger,
   ticketId,
   targetStateName,
-  terminalStateNames,
+  terminalStateNames = [],
 }) {
   if (!ticketId || !targetStateName) return;
   const targetStateNames = Array.isArray(targetStateName)

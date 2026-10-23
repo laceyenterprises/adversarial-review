@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 import {
   buildCriticalFlagComment,
@@ -62,6 +63,37 @@ function subjectRef() {
 function adapterRoot() {
   return mkdtempSync(path.join(tmpdir(), 'adversarial-review-linear-adapter-'));
 }
+
+test('internal state helpers tolerate omitted terminal aliases without losing typed incident protection', async () => {
+  // Exercise private helpers without adding them to the adapter's public API.
+  const source = readFileSync(new URL('../../src/adapters/operator/linear-triage/index.mjs', import.meta.url), 'utf8');
+  const { terminalState, setLinearState } = runInNewContext(
+    source.slice(source.indexOf('async function incidentIssueReason('), source.indexOf('function criticalWordsInSummary('))
+      + '\n({ terminalState, setLinearState })',
+    { IncidentIdentityUnavailableError: class extends Error {} },
+  );
+  assert.equal(terminalState({ name: 'In Progress', type: 'started' }), false);
+  assert.equal(terminalState(undefined), false);
+  assert.equal(terminalState({ type: 'completed' }), true);
+  assert.equal(terminalState({ type: 'canceled' }), true);
+  assert.equal(terminalState({ name: 'Accepted' }, ['accepted']), true);
+
+  const { linear, issue, states, updates } = makeLinearFixture({ labels: ['incident'] });
+  const errors = [];
+  const options = {
+    linearClientProvider: async () => linear,
+    logger: { error: (...args) => errors.push(args) },
+    ticketId: 'LAC-486',
+  };
+  await setLinearState({ ...options, targetStateName: 'In Progress' });
+  assert.deepEqual(updates.map(({ payload }) => payload.stateId), ['state-progress']);
+  states.find((state) => state.name === 'Done').type = 'completed';
+  await setLinearState({ ...options, targetStateName: 'Done' });
+  issue.state = { name: 'Done', type: 'completed' };
+  await setLinearState({ ...options, targetStateName: 'In Review' });
+  assert.equal(updates.length, 1, 'omitted aliases cannot authorize incident closure or reopening');
+  assert.deepEqual(errors, [], 'omitted aliases must not silently discard a state update');
+});
 
 test('routePR returns builder class and Linear ticket id for representative titles', () => {
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {

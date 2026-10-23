@@ -1,0 +1,76 @@
+{
+  "provenance": "LAC-2092: preserved rescue evidence, plus Linear stateHistory read 2026-10-23. Source publication time is bounded by current-head CI, not invented as an exact timestamp.",
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 9047,
+  "linearTicketId": "LAC-2089",
+  "issue": {
+    "title": "SEV3: registry audit batching reads withdrawal history before locking candidate rows",
+    "labels": []
+  },
+  "review": {
+    "createdAt": "2026-10-23T19:56:32.327Z",
+    "revisionRef": "ebcb6a47fbc3c0582d2bff27cb8b42a6e33fbf2f",
+    "nonBlockingOnly": true,
+    "finalRound": "comment-only",
+    "reviewBody": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini \u00b7 Gemini 3.8 Flash (High) \u00b7 none\n\n## Summary\n\nThis PR addresses a concurrency race condition in worker-class deployment drift reconciliation under PostgreSQL `READ COMMITTED` (LAC-2089). Previously, `reconcile_seed_drift` fetched audit histories for candidate classes before acquiring per-row locks on those candidates, creating a window where an operator model withdrawal could be overridden by an earlier snapshot or a newly created class could lack an audit history entry.\n\nThe change locks candidate rows in deterministic lexicographical order (`sorted(seed)`) using `cfg.get_worker_class(..., for_update=True)` before calling `_audit_histories`, and reuses the locked row envelopes in the subsequent reconciliation loop. Concurrency edge cases around absent seed candidates, inactive rows, and missing classes are correctly guarded without deadlocks or unhandled exceptions. The accompanying tests in `modules/worker-pool/test/test_worker_class_deploy.py` use deterministic monkeypatching to verify both the pre-lock withdrawal boundary and the post-audit queue boundary. No blocking defects, security vulnerabilities, or contract drifts were found.\n\n## Blocking issues\n\n- None.\n\n## Non-blocking issues\n\n- **Redundant Ownership Column Checks in Candidate Comprehension**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py`\n  - **Lines:** `335-338`\n  - **Problem:** In `reconcile_seed_drift`, the comprehension `candidates = {name: cfg.get_worker_class(conn, name, include_ownership=True, for_update=True) for name in sorted(seed)}` requests ownership metadata for every seed item, immediately after projecting governed classes on line 332. Each call with `include_ownership=True` invokes `_reg.ensure_apx_registry_columns(conn)` inside `get_worker_class`, performing schema column inspection queries on each iteration even though `reconcile_seed_drift` only consumes `row[\"spec\"]` and `row[\"status\"]`.\n  - **Why it matters:** While `ensure_apx_registry_columns` is idempotent, repeatedly querying PRAGMA table information for every candidate class adds unnecessary database overhead during deploy drift reconciliation.\n  - **Recommended fix:** Pass `include_ownership=False` to `get_worker_class` when populating `candidates` since ownership metadata is not evaluated by `reconcile_seed_drift`, or hoist a single `_reg.ensure_apx_registry_columns(conn)` call before the comprehension.\n- **Audit History Query for Inactive Candidate Classes**\n  - **File:** `modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py`\n  - **Lines:** `338-341`\n  - **Problem:** The audit history batch call `histories = _audit_histories(conn, {name for name, row in candidates.items() if row is not None})` includes all non-null candidates, while immediately below in the loop at line 349 the code executes `if row is None or row[\"status\"] != \"active\": continue` and skips drift processing for inactive rows.\n  - **Why it matters:** If a candidate worker class exists in `worker_classes` but has `status != \"active\"` (e.g. retired), its revision snapshots and audit history are fetched from `worker_class_audit` and parsed into memory only to be discarded without being read.\n  - **Recommended fix:** Filter the candidate name set passed to `_audit_histories` to only include active classes via `{name for name, row in candidates.items() if row is not None and row.get(\"status\") == \"active\"}`.\n\n## Suggested fixes\n\n1. In `modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py:335-338`, pass `include_ownership=False` in `cfg.get_worker_class` to avoid redundant column introspection per candidate class during lock acquisition.\n2. In `modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py:338-341`, filter `{name for name, row in candidates.items() if row is not None and row.get(\"status\") == \"active\"}` before calling `_audit_histories` to avoid loading audit trails for retired classes.\n\n## Verdict\n\nComment only"
+  },
+  "observedDoneAt": "2026-10-23T19:56:33.634Z",
+  "claimedAt": "2026-10-23T19:58:23.283Z",
+  "spawnedAt": "2026-10-23T19:58:54.758Z",
+  "publishedHead": "2bef8f7cc61c9caaedc7fa157950b6e1e7479a0e",
+  "publishedHeadCiStartedAt": "2026-10-23T20:01:00Z",
+  "openSnapshot": "OPEN",
+  "operatorReopenedAt": "2026-10-23T20:06:28.377Z",
+  "nativeReply": {
+    "kind": "adversarial-review-remediation-reply",
+    "schemaVersion": 1,
+    "jobId": "laceyenterprises__agent-os-pr-9047-2026-10-23T19-56-32-327Z",
+    "repo": "laceyenterprises/agent-os",
+    "prNumber": 9047,
+    "outcome": "partial",
+    "summary": "Both non-blocking findings are fixed and published in 2bef8f7cc61c9caaedc7fa157950b6e1e7479a0e after a fresh origin/main rebase and clean contamination audits. Candidate locks omit unused ownership metadata, and only active candidates load audit histories. Existing lock ordering and withdrawal behavior remain intact. No persistent schema, public interface, lifecycle or operational-contract changes require canonical doc updates. Implementation is complete; PR-head CI remains pending after the single bounded wait. No additional adversarial review is requested; AMA can close after required checks pass.",
+    "validation": [
+      "Fresh git fetch --prune origin main and git rebase origin/main succeeded; git cherry origin/main HEAD contained no patch-equivalent upstream commits.",
+      "57 targeted tests passed: modules/worker-pool/test/test_worker_class_deploy.py and modules/worker-pool/test/test_worker_class_doctor.py, using the foreground run-bounded.sh runner with a 120-second limit and isolated SQLite settings. The initial invocation was refused by the live-ledger environment guard before tests ran; inherited ledger routing was removed for the successful invocation.",
+      "Extended the existing presence-drift regression to assert zero ownership schema introspection queries and zero audit-history reads for missing/retired candidates at modules/worker-pool/test/test_worker_class_deploy.py:473.",
+      "python3 scripts/ruff_baseline_gate.py on both changed Python files passed with zero lint or format findings; git diff --check passed.",
+      "Guarded remediation-publish.mjs succeeded with headSha 2bef8f7cc61c9caaedc7fa157950b6e1e7479a0e; worktree is clean.",
+      "Confirmed GitHub PR head matches the published SHA. Single 45-second bounded gh pr checks --watch wait ended with release-freeze-gate, repo-guards-select and submodule-pointer-gate passing; repo-guards-core and repo-guards-suites-1/2 pending, suites-3/4 skipped, and no observed failed lanes."
+    ],
+    "addressed": [],
+    "pushback": [],
+    "blockers": [],
+    "operationalBlockers": [
+      {
+        "kind": "pending-ci",
+        "title": "PR-head CI pending",
+        "finding": "Required checks on published head 2bef8f7cc61c9caaedc7fa157950b6e1e7479a0e remain pending after the single 45-second bounded wait.",
+        "reasoning": "repo-guards-core and repo-guards-suites-1/2 were still pending; no observed lane failed. Remediation implementation and targeted validation are complete. AMA must wait for required checks to turn green before merging."
+      }
+    ],
+    "nonBlocking": [
+      {
+        "title": "Redundant Ownership Column Checks in Candidate Comprehension",
+        "finding": "Candidate locking requested unused ownership metadata and repeated schema column inspection for every seed item.",
+        "action": "Set include_ownership=False while retaining for_update=True and sorted candidate locking. Extended query-trace coverage to reject ownership schema inspections during presence-only drift reconciliation. The sibling reconcile_seed_delta call retains ownership metadata because it evaluates local overrides.",
+        "files": [
+          "modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py:336",
+          "modules/worker-pool/test/test_worker_class_deploy.py:473"
+        ]
+      },
+      {
+        "title": "Audit History Query for Inactive Candidate Classes",
+        "finding": "Audit histories were fetched for retired candidates whose drift processing immediately skips them.",
+        "action": "Filter the post-lock audit batch to non-null active candidates. Extended the existing missing/retired presence-drift test to assert no audit-history query occurs while preserving existing reported presence drift and unchanged rows.",
+        "files": [
+          "modules/worker-pool/lib/python/cwp_dispatch/worker_class_deploy.py:341",
+          "modules/worker-pool/test/test_worker_class_deploy.py:481"
+        ]
+      }
+    ],
+    "reReview": {
+      "requested": false,
+      "reason": null
+    }
+  }
+}

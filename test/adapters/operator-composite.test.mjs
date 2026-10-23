@@ -37,6 +37,8 @@ test('composite operator surface forwards controls and triage calls through the 
           linearCalls.push({ type: 'issue', ticketId });
           return {
             id: 'issue-1',
+            title: 'Improve review routing',
+            labels: async () => ({ nodes: [] }),
             team: Promise.resolve({
               states: async () => ({ nodes: [{ id: 'state-done', name: 'Done' }] }),
             }),

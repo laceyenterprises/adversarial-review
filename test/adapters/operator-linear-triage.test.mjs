@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  __test__,
   buildCriticalFlagComment,
   createLinearTriageAdapter,
   extractLinearTicketId,
@@ -22,7 +23,7 @@ const ALWAYS_ON_ROUTE_OPTIONS = {
   geminiReviewerMode: 'always-on',
 };
 
-function makeLinearFixture({ currentState = 'Todo' } = {}) {
+function makeLinearFixture({ currentState = 'Todo', title = 'Improve review routing', labels = [] } = {}) {
   const updates = [];
   const comments = [];
   const states = [
@@ -32,6 +33,8 @@ function makeLinearFixture({ currentState = 'Todo' } = {}) {
   ];
   const issue = {
     id: 'issue-1',
+    title,
+    labels: async () => ({ nodes: labels.map((name) => ({ name })) }),
     team: Promise.resolve({
       states: async () => ({ nodes: states }),
     }),
@@ -45,7 +48,7 @@ function makeLinearFixture({ currentState = 'Todo' } = {}) {
     updateIssue: async (issueId, payload) => updates.push({ issueId, payload }),
     createComment: async (payload) => comments.push(payload),
   };
-  return { linear, updates, comments };
+  return { linear, issue, updates, comments, states };
 }
 
 function subjectRef() {
@@ -60,6 +63,61 @@ function subjectRef() {
 function adapterRoot() {
   return mkdtempSync(path.join(tmpdir(), 'adversarial-review-linear-adapter-'));
 }
+
+test('internal state helpers tolerate omitted terminal aliases without losing typed incident protection', async () => {
+  const { terminalState, setLinearState } = __test__;
+  assert.equal(terminalState({ name: 'In Progress', type: 'started' }), false);
+  assert.equal(terminalState(undefined), false);
+  assert.equal(terminalState({ type: 'completed' }), true);
+  assert.equal(terminalState({ type: 'canceled' }), true);
+  assert.equal(terminalState({ name: 'Accepted' }, ['accepted']), true);
+
+  const { linear, issue, states, updates } = makeLinearFixture({ labels: ['incident'] });
+  const errors = [];
+  const options = {
+    linearClientProvider: async () => linear,
+    logger: { error: (...args) => errors.push(args) },
+    ticketId: 'LAC-486',
+  };
+  await setLinearState({ ...options, targetStateName: 'In Progress' });
+  assert.deepEqual(updates.map(({ payload }) => payload.stateId), ['state-progress']);
+  states.find((state) => state.name === 'Done').type = 'completed';
+  await setLinearState({ ...options, targetStateName: 'Done' });
+  issue.state = { name: 'Done', type: 'completed' };
+  await setLinearState({ ...options, targetStateName: 'In Review' });
+  assert.equal(updates.length, 1, 'omitted aliases cannot authorize incident closure or reopening');
+  assert.deepEqual(errors, [], 'omitted aliases must not silently discard a state update');
+});
+
+test('already-matched terminal sync skips unreadable labels without retrying or writing', async () => {
+  for (const title of ['Improve review routing', 'SEV3: incident response']) {
+    const { linear, issue, updates, states } = makeLinearFixture({ currentState: 'Done', title });
+    states.find((state) => state.name === 'Done').type = 'completed';
+    issue.state = { name: 'Done', type: 'completed' };
+    let labelReads = 0;
+    issue.labels = async () => {
+      labelReads += 1;
+      throw new Error('Linear unavailable');
+    };
+    await __test__.setLinearState({
+      linearClientProvider: async () => linear,
+      logger: {},
+      ticketId: 'LAC-486',
+      targetStateName: 'Done',
+    });
+    assert.equal(labelReads, 0);
+    assert.deepEqual(updates, []);
+    const reopen = __test__.setLinearState({
+      linearClientProvider: async () => linear,
+      logger: {},
+      ticketId: 'LAC-486',
+      targetStateName: 'In Review',
+    });
+    if (title.startsWith('SEV')) await reopen;
+    else await assert.rejects(reopen, /incident identity unavailable/);
+    assert.deepEqual(updates, [], 'a real terminal transition still requires incident protection');
+  }
+});
 
 test('routePR returns builder class and Linear ticket id for representative titles', () => {
   assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
@@ -451,4 +509,5 @@ test('installed @linear/sdk still exposes the surface the triage adapter drives'
 
   // `await team.states()` supplies the workflow states the adapter matches by name.
   assert.equal(typeof Team.prototype.states, 'function');
+  assert.equal(typeof Issue.prototype.labels, 'function');
 });

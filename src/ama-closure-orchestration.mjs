@@ -1,3 +1,4 @@
+import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -853,7 +854,14 @@ export function writeAutonomousMergeDisabledAudit({
  * AMA-06A/06N wire in the full snapshot in the cutover ticket.
  */
 
-export async function maybeDispatchAmaClosureFor({
+export function maybeDispatchAmaClosureFor(args = {}) {
+  return withDaemonMergeReservation({ rootDir: args.rootDir || ROOT,
+    repo: args.repoPath, base: args.candidate?.baseBranch, pr: args.prNumber,
+    head: args.candidate?.headSha || args.currentRevisionRef,
+  }, () => maybeDispatchAmaClosureForInner(args));
+}
+
+async function maybeDispatchAmaClosureForInner({
   // The rescue dispatch-only contract (agent-os merge-agent rescue) names these.
   orphanRecovery,
   runDaemonCleanMergeAttemptImpl,

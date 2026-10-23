@@ -1,3 +1,4 @@
+import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { createWatcherLatencyMonitor } from './watcher-latency.mjs';
@@ -1666,7 +1667,7 @@ async function main() {
     // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
     authProvider: () => process.env.GITHUB_TOKEN,
   });
-  const intervalMs = config.pollIntervalMs ?? 300_000;
+  const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   const configuredDeadlineMs = config.pollDeadlineMs;
   // Always resolve a stable heartbeat path (env override → HQ_ROOT →
   // rootDir default) so the file is written every poll and the external

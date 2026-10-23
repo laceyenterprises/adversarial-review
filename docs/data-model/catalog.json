@@ -327,7 +327,7 @@
       "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/ama/dispatch-closer.mjs", "bin/merge-lease.mjs"],
       "owner": "AMA daemon and hammer merge lane",
       "optionalWaiterFields": ["priority"],
-      "daemonReservationSeconds": 120,
+      "daemonReservationSeconds": "2 * pollIntervalMs / 1000, load-scaled once and capped at floor((2^31 - 1) / 1000)",
       "servedWaiterRemoval": "under-holder-acquisition-lock",
       "queuePosition": "one-based-or-null-if-absent",
       "progressWait": "load-scaled-once-no-progress-interval-with-six-hour-nominal-ceiling"

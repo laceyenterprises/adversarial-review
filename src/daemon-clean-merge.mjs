@@ -25,7 +25,7 @@ import { SETTLED_SUCCESS_VERDICTS, hasOperatorApprovedOverride } from './ama/eli
 import { appendAmaAuditAttempt, readAmaAuditEntry } from './ama/audit.mjs';
 import { clobberGuardBlocks, evaluateMovedHeadClobberGuard } from './ama/clobber-guard.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -364,9 +364,17 @@ export function headHasValidatedHamTerminalRemediation({
  * Returns the `attemptDaemonCleanMerge` result. The caller short-circuits the
  * closer/merge-agent dispatch on any disposition other than `not-taken`.
  */
-export async function runDaemonCleanMergeAttempt({
+export function runDaemonCleanMergeAttempt(args = {}) {
+  return withDaemonMergeReservation({ rootDir: args.rootDir || ROOT,
+    repo: args.repoPath, base: args.candidate?.baseBranch, pr: args.prNumber,
+    head: args.currentPrHeadSha || args.candidate?.headSha,
+  }, () => runDaemonCleanMergeAttemptInner(args));
+}
+
+async function runDaemonCleanMergeAttemptInner({
   rootDir = ROOT,
   cfg,
+  pollIntervalMs,
   repoPath,
   prNumber,
   candidate,
@@ -1090,6 +1098,7 @@ export async function runDaemonCleanMergeAttempt({
     acquireLeaseImpl: () => {
       const res = acquireDaemonMergeLease({
         acquireMergeLeaseImpl,
+        pollIntervalMs,
         rootDir,
         repo: repoPath,
         base,

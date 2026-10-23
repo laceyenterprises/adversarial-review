@@ -21,13 +21,31 @@ waiter-removal write rolls back the new holder and propagates the error.
 
 `acquireDaemonMergeLease` registers `daemon_<pr>_<head>` on every acquisition
 attempt. This identity survives watcher passes and process restarts. A daemon
-reservation expires 120 seconds after its last refresh; unlike a closer waiter,
-it is not removed merely because its original process exited. Ordinary waiters
-retain their existing arrival-based deadline and dead-process cleanup. Expired
-reservations lose their old arrival order on renewal. Acquisition removes the
-matching waiter; abandoned or newly ineligible heads therefore block closer
-acquisitions for at most 120 seconds after their last attempt. No holder is
+reservation expires after at least twice the watcher's configured poll interval
+(default 300 seconds), scaled once by the existing load-aware timeout policy.
+The stored whole-second deadline is capped at `floor((2^31 - 1) / 1000)`, so
+conversion to milliseconds remains within the JavaScript timer limit. Unlike a
+closer waiter, it is not removed merely because its original process exited.
+Direct `upsertMergeLeaseWaiter` callers may supply a nominal `deadlineSeconds`
+for daemon waiters, scaled once like closer deadlines. An already-sized
+`effectiveDeadlineSeconds` takes precedence for either class without rescaling.
+Ordinary waiters retain their existing arrival-based deadline and dead-process
+cleanup. Expired reservations lose their old arrival order on renewal.
+Acquisition removes the matching waiter. Watcher eligibility exits, head moves,
+terminal outcomes and merge completion remove the PR's obsolete reservation
+immediately; only eligible lease contention retains it. An absent daemon's
+reservation still expires after the stored deadline.
+Cleanup requires a resolved head; an absent head leaves existing reservations
+intact while the caller's attempt handles the unresolved candidate.
+
+LEASEFAIR-04 makes both ordinary holder release and retryable-abort release
+request one watcher wake when the first surviving waiter is a daemon. The wake
+carries that waiter's PR and exact head, and uses the existing consumer's per-head
+cap. A stale fence requests no wake. A failed wake write leaves the release
+successful and ordinary watcher polling supplies recovery. No holder is
 preempted, including a live same-host holder past its nominal deadline.
+Release-wake pruning holds the same per-base mutation lock used by waiter
+registration and cleanup; there is no separate waiter-file lock to acquire.
 
 Contention results include `queuePosition` (one-based service order, or `null`
 when the requester is absent from the pruned queue). The daemon

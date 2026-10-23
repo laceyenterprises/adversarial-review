@@ -624,6 +624,23 @@ if (scenario === 'clean') {
     assert.equal(shared.decision.deadline.anchoredAt, closeoutAt);
     assert.equal(closeoutJob.remediationPlan.currentRound, 2);
   }
+  const nonFinalCloseout = remediationCloseout({ rootDir,
+    job: { ...closeoutJob, remediationPlan: { currentRound: 1, maxRounds: 2 } },
+    snapshot: closeoutSnapshot, headSha, workerPushedHeadSha: headSha,
+    completedAt: closeoutAt, ciGate: { headSha, state: 'pending' } });
+  assert.equal(nonFinalCloseout.decision.action, 'wait-for-CI');
+  assert.equal(closeoutRereview(nonFinalCloseout).requested, true);
+  const closeoutDb = openReviewStateDb(rootDir);
+  closeoutDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref)
+    VALUES (?,?,'2026-01-01','gemini','posted',?)`).run(closeoutJob.repo, closeoutJob.prNumber, closeoutJob.revisionRef);
+  assert.equal(requestReviewRereview({ db: closeoutDb, rootDir, repo: closeoutJob.repo,
+    prNumber: closeoutJob.prNumber, targetRevisionRef: headSha, requestedAt: closeoutAt,
+    reason: 'Synthetic non-final closeout.', logger: quiet }).triggered, true);
+  const admissionRow = closeoutDb.prepare('SELECT review_status,revision_ref FROM reviewed_prs WHERE repo=? AND pr_number=?')
+    .get(closeoutJob.repo, closeoutJob.prNumber);
+  assert.equal(admissionRow.review_status, 'pending');
+  assert.equal(admissionRow.revision_ref, headSha);
+  closeoutDb.close();
   const unreadableSubject = { ...retrySubject, prNumber: prNumber + 11 };
   updateAmaCloserDispatchRecord(rootDir, unreadableSubject, () => ({ ...unreadableSubject,
     state: 'dispatched', launchRequestId: 'synthetic-unreadable', lastObservedStatus: 'starting',

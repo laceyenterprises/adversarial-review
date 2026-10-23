@@ -377,6 +377,16 @@ test('buildRemediationOutcomeCommentBody on stopped (worker chose blocked) flags
   assert.match(body, /worker reported blockers it could not resolve/);
 });
 
+for (const action of ['completed', 'failed', 'stopped']) {
+  test(`successor card only describes active completed closeout (${action})`, () => {
+    const body = buildRemediationOutcomeCommentBody({ workerClass: 'codex', action, job: makeJob(),
+      failure: { code: 'ci-regression', message: 'CI retry budget exhausted.' },
+      reReview: { requested: false, nextAction: { action: 'remediate', actor: 'remediator', reason: 'ci-red',
+        head: 'a'.repeat(40), deadline: { at: '2026-01-01T00:30:00.000Z' } } } });
+    assert.equal(body.includes('**Next action:**'), action === 'completed');
+  });
+}
+
 test('buildRemediationOutcomeCommentBody on failed with a short reason uses inline-code (single tight line)', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',

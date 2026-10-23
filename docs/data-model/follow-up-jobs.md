@@ -259,8 +259,9 @@ requests; `reReview` records the request intent and then its outcome. Ordinary
 rounds use the same shared successor adapter as ordinary completion. `reReview.nextAction`
 records the action, actor, reason, anchored UTC deadline, head, evidence references
 and decision key. Re-review and its durable wake run only when that decision
-assigns a new exact-head review. Other decisions retain one owner and wake the
-watcher. `completion.workerPushedHeadSha` records the proven publication;
+assigns a new exact-head review or a non-final CI observer needs durable
+watcher admission. Other decisions retain one owner and wake the watcher.
+`completion.workerPushedHeadSha` records the proven publication;
 `completion.finalRemediationPush` binds final handoff intent to that exact head.
 Recovery itself grants no CI waiver or merge decision.
 
@@ -308,8 +309,16 @@ or wake. A suppressed rereview therefore names
 its consumer, reason, head and anchored UTC deadline. The existing comment-only
 suppression marker remains compatible with older readers.
 
-Pending or unreadable CI completes the worker round with an observer owner;
-it does not fail remediation, request a rereview, or consume an extra round.
+Pending or unreadable CI completes the worker round with an observer owner
+without failing remediation or consuming an extra round. When rounds remain,
+`reReview.requested: true` registers intent through `requestReviewRereview`
+as part of closeout, moving the review row to `pending`. The shared decision
+remains `wait-for-CI`; this intent does not authorize reviewer dispatch. The
+watcher CI admission gate observes settlement, admitting a reviewer on green
+or requeueing remaining remediation on red. Recovered publication with CI already
+red registers the same intent for admission to requeue the remaining round.
+Final rounds retain suppression
+and the existing final-push hammer observer.
 The former private CI settlement timeout no longer decides closeout. Later
 passes use fresh checks: a proven final pushed head belongs to hammer on green
 or as CI repair on red, including runner-less failure. An unrelated/unproven

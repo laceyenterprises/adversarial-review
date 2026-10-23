@@ -67,6 +67,13 @@ reviews.db row -> posted
                                      watcher can review again
 ```
 
+Non-final remediation closeout registers re-review intent even when the shared
+successor is `wait-for-CI`. This durable `pending` row lets the watcher observe
+settlement after the queue job completes. Reviewer CI admission defers pending
+or unreadable checks, admits green checks and requeues remaining remediation on
+red checks. A proven final push retains its existing hammer handoff and
+suppression instead of registering this non-final admission intent.
+
 ---
 
 ## 1) Watcher delivery state machine

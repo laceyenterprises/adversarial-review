@@ -46,7 +46,8 @@ function fixture(t, finalRound = null) {
     completedAt: AT, snapshot, ciGate: { state: 'green', headSha: HEAD },
     execFileSyncImpl: () => `${HEAD}\nSynthetic commit\n\nWorker-Job-Id: ${job.jobId}\n`,
     requestReviewRereviewImpl: () => { effects.push('review'); return { triggered: true, status: 'pending' }; },
-    requestRereviewWakeImpl: () => { effects.push('rereview-wake'); return { requested: true }; },
+    requestRereviewWakeImpl: () => { effects.push('rereview-wake'); return {
+      requested: true, wakeReason: 'remediation-closeout', outcome: 'requested' }; },
     requestWatcherWakeImpl: () => { effects.push('watcher-wake'); return { requested: true }; }, ...options });
   return { rootDir, job, jobPath, snapshot, decide, complete, effects };
 }
@@ -140,6 +141,50 @@ test('delivery contention changes no records; retry retains one successor and on
   assert.deepEqual(f.effects, ['watcher-wake']);
 });
 
+for (const state of ['pending', 'unknown']) {
+  for (const settled of ['green', 'failed']) test(`recovered non-final ${state} CI retains admission through ${settled}`, async t => {
+    const f = fixture(t);
+    f.job.remediationPlan.currentRound = 1;
+    f.job.remediationPlan.rounds[0].round = 1;
+    writeFileSync(f.jobPath, JSON.stringify(f.job));
+    const result = f.complete({ ciGate: { headSha: HEAD, state } });
+    assert.equal(result.job.reReview.requested, true);
+    assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
+    assert.equal(result.job.remediationPlan.currentRound, 1);
+    assert.deepEqual(f.effects, ['review', 'rereview-wake']);
+    assert.deepEqual(JSON.parse(readFileSync(result.jobPath, 'utf8')).reReview, result.job.reReview);
+    const admit = state => guardRereviewCiBeforeReviewer({ rootDir: f.rootDir, repo: f.job.repo, prNumber: 4,
+      passKind: 'rereview', reviewerHeadSha: HEAD, log: quiet,
+      inspectCiImpl: async () => ({ headSha: HEAD, state,
+        failedChecks: state === 'failed' ? [{ name: 'unit', state: 'FAILURE' }] : [] }) });
+    assert.equal((await admit(state)).proceed, false);
+    const after = await admit(settled);
+    if (settled === 'green') assert.equal(after.proceed, true);
+    else {
+      assert.equal(after.reason, 'ci-regression-requeued');
+      assert.equal(after.job.status, 'pending');
+    }
+  });
+}
+
+test('recovered non-final failed CI registers admission for the remaining remediation round', async t => {
+  const f = fixture(t);
+  f.job.remediationPlan.currentRound = 1;
+  f.job.remediationPlan.rounds[0].round = 1;
+  writeFileSync(f.jobPath, JSON.stringify(f.job));
+  const result = f.complete({ ciGate: { headSha: HEAD, state: 'failed' } });
+  assert.equal(result.job.reReview.requested, true);
+  assert.equal(result.job.reReview.nextAction.action, 'remediate');
+  assert.deepEqual(f.effects, ['review', 'rereview-wake']);
+  const admission = await guardRereviewCiBeforeReviewer({ rootDir: f.rootDir, repo: f.job.repo, prNumber: 4,
+    passKind: 'rereview', reviewerHeadSha: HEAD, log: quiet,
+    inspectCiImpl: async () => ({ headSha: HEAD, state: 'failed',
+      failedChecks: [{ name: 'unit', state: 'FAILURE' }] }) });
+  assert.equal(admission.proceed, false);
+  assert.equal(admission.reason, 'ci-regression-requeued');
+  assert.equal(admission.job.status, 'pending');
+});
+
 for (const reason of ['review-row-missing', 'malformed-title-terminal', 'pr-not-open']) {
   test(`a refused recovery rereview retains one recovery owner: ${reason}`, t => {
     const f = fixture(t);
@@ -151,6 +196,11 @@ for (const reason of ['review-row-missing', 'malformed-title-terminal', 'pr-not-
     assert.equal(result.job.reReview.nextAction.actor, 'closure-recovery');
     assert.equal(result.job.reReview.nextAction.reason, 'automated-stop');
     assert.equal(result.job.reReview.nextAction.deadline.anchoredAt, AT);
+    const persisted = JSON.parse(readFileSync(result.jobPath, 'utf8'));
+    assert.deepEqual(persisted.reReview, result.job.reReview);
+    assert.deepEqual(persisted.remediationPlan.rounds[0].reReview, result.job.reReview);
+    assert.ok(persisted.commentDelivery.body.includes('closure-recovery'));
+    assert.equal(f.complete(), null, 'a later sweep preserves the durable refusal');
     assert.deepEqual(f.effects, []);
   });
 }

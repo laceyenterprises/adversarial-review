@@ -789,7 +789,7 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
-  if (successor) {
+  if (action === 'completed' && successor) {
     lines.push('');
     lines.push(`**Next action:** ${sanitizeInlineText(successor.action, 80)} · **Owner:** ${sanitizeInlineText(successor.actor, 80)} · **Reason:** ${sanitizeInlineText(successor.reason, 120)}`);
     lines.push(`**Head:** ${sanitizeInlineText(successor.head || 'unknown', 80)} · **Deadline (UTC):** ${sanitizeInlineText(successor.deadline?.at || 'explicit hold', 80)}`);

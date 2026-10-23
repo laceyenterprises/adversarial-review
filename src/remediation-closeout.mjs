@@ -94,7 +94,14 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
 
 export function closeoutRereview(shared, reason = null) {
   const decision = shared.decision;
-  const requested = decision.action === 'review' && decision.queue.intent === 'dispatch';
+  // Register durable admission intent before completing a non-final job. The
+  // watcher, rather than the terminal queue record, observes CI settlement:
+  // green admits review; red requeues the remaining remediation round.
+  // This queues intent only; reviewer-ci-admission still requires green CI.
+  const awaitingCiAdmission = ((decision.action === 'wait-for-CI' && decision.actor === 'ci')
+    || (decision.action === 'remediate' && decision.actor === 'remediator'))
+    && shared.snapshot.observations.remediation.value.roundsLeft === true;
+  const requested = (decision.action === 'review' && decision.queue.intent === 'dispatch') || awaitingCiAdmission;
   return { requested, requestedAt: shared.snapshot.observedAt,
     status: requested ? 'pending' : 'suppressed', reason,
     ...(!requested ? { suppressed: 'shared-next-action' } : {}), nextAction: decision };

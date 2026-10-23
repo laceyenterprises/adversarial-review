@@ -1204,7 +1204,10 @@ projection or smoke promise changes.
 NXA-04: normal and recovered remediation closeout use one shared successor.
 `reReview.nextAction` supplies suppression and comments with one owner, reason,
 head and anchored UTC deadline. Pending CI completes the worker round under an
-observer; CI admission retains its progress without another waiting round.
+observer. Non-final rounds register durable re-review intent during closeout;
+the watcher holds admission until green CI or requeues remediation on red CI,
+including recovered publication whose CI is already red.
+Final pushed heads retain their existing hammer observer and suppression.
 A proven final push goes to hammer after settlement or as failed-CI repair. Unproven heads retain exact-head review. Verdicts, round/retry budgets,
 delivery claims, authenticated cancellation and execution safety remain intact.
 The handoff smoke checks pending-to-hammer redecision; scoped coverage is
@@ -1486,7 +1489,8 @@ deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
 <a id="smv-handoff"></a>**smv-handoff:** NXA-04 verifies one closeout successor through pending, green
-and red CI without another remediation round. NXA-03 verifies shared immutable
+and red CI without another remediation round, plus durable re-review admission
+intent for a pending non-final round. NXA-03 verifies shared immutable
 decision wake routing, live-owner suppression and one wake per reconciled
 no-merge attempt at the same head; the next shadow consumer receives the same
 decision. No merge permission is granted. Null same-repository head metadata

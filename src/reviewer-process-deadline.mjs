@@ -1,22 +1,6 @@
-// CHUNKTIME-01 follow-up: a Gemini reviewer process bounds its own run.
-//
-// The watcher's outer limit for every Gemini review is sized for the largest
-// chunk plan (resolveGeminiReviewerProcessTimeoutMs, hours at the default cap),
-// because the watcher cannot know the plan when it spawns the reviewer. On a
-// host with one Gemini reviewer seat that backstop alone would let a review
-// that hangs outside an agy call hold the seat for hours. This deadline keeps
-// each review at its own budget: the single-call budget plus slack, extended to
-// the chunk plan's deadline plus slack once a plan exists.
-//
-// Expiry aborts the review through the harness signal with the same
-// `Command timed out after <ms>ms` text the watcher already classifies as
-// reviewer-timeout, then exits after a short grace if nothing settles.
-
-import {
-  REVIEWER_PROCESS_SLACK_MS,
-  resolveAgyReviewerSubprocessTimeoutMs,
-  resolveReviewerTimeoutMs,
-} from './reviewer-timeout.mjs';
+// Gemini process deadlines share the claim/parent budget and extend only when
+// the harness builds its actual chunk plan. No cap-sized default lease.
+import { resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { timerDelayMs } from './load-aware-timeout.mjs';
 
 const REVIEWER_PROCESS_DEADLINE_EXIT_GRACE_MS = 30_000;
@@ -82,7 +66,7 @@ function createReviewerProcessDeadline({
     extendTo(ms) {
       if (disposed || controller.signal.aborted) return false;
       if (!Number.isFinite(ms) || ms <= 0) return false;
-      const candidate = now() + timerDelayMs(ms);
+      const candidate = startedAt + timerDelayMs(ms);
       if (candidate <= deadlineAt) return false;
       deadlineAt = candidate;
       arm();
@@ -100,20 +84,24 @@ function createReviewerProcessDeadline({
 // reviewer.mjs wiring, kept here so the entrypoint stays inside its size budget
 // (ARC-10). arm() is idempotent; extendForPlan() takes the chunk plan that
 // reviewAgyOversizedInChunks reports through onChunkPlan.
-function createGeminiReviewerProcessDeadline({ env = process.env, initialMs = null, ...options } = {}) {
+function createGeminiReviewerProcessDeadline({ env = process.env, initialMs = null,
+  reportPlan = plan => { if (process.connected) process.send({ type: 'gemini-chunk-plan', plan }, () => {}); },
+  ...options } = {}) {
   let deadline = null;
   return {
     arm() {
       deadline ??= createReviewerProcessDeadline({
-        initialMs: initialMs ?? Math.max(resolveReviewerTimeoutMs(env), resolveAgyReviewerSubprocessTimeoutMs(env))
-          + REVIEWER_PROCESS_SLACK_MS,
+        initialMs: initialMs ?? resolveGeminiReviewerProcessTimeoutMs(env),
         ...options,
       });
       return deadline;
     },
     get signal() { return deadline?.signal; },
     extendForPlan: (plan) => {
-      if (plan && Number.isFinite(plan.timeoutMs)) deadline?.extendTo(plan.timeoutMs + REVIEWER_PROCESS_SLACK_MS);
+      if (plan && Number.isFinite(plan.timeoutMs)) {
+        reportPlan(plan);
+        deadline?.extendTo(resolveGeminiReviewerProcessTimeoutMs(env, { plan }));
+      }
     },
     dispose() { deadline?.dispose(); },
   };

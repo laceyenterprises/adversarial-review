@@ -18,7 +18,12 @@ import {
   reviewerLaneFloor,
   persistedSpawnReservationSource,
 } from '../src/watcher-reviewer-pool.mjs';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { parse } from 'acorn';
+import Database from 'better-sqlite3';
+import { normalizeReviewerModel } from '../src/adapters/subject/github-pr/routing.mjs';
+import { resolveGeminiReviewerProcessTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { resolveReviewerCeilingSeconds } from '../src/reviewer-timeout-model.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
@@ -2135,4 +2140,130 @@ test('SEATIDLE-03: saturation hooks obey a candidate-specific credential cap aft
   assert.equal(preparations, 1);
   assert.equal(result.deferred, 1);
   assert.equal(result.maxObservedConcurrency, 0);
+});
+
+
+test('GEMTIMEOUT-01: detached reservations follow the current plan budget per review', async () => {
+  let nowMs = 0;
+  const budgets = new Map([[1, 25 * 60_000], [2, 25 * 60_000]]);
+  const pending = [];
+  const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(),
+    now: () => nowMs, graceMs: 0, timeoutMs: record => budgets.get(record.prNumber),
+    logger: { warn() {} },
+  });
+  for (const prNumber of [1, 2]) {
+    const promise = new Promise(resolve => pending.push(resolve));
+    tracker.track({ candidate: { repoPath: 'example/project', prNumber, reviewerModel: 'gemini' }, promise });
+  }
+  budgets.set(2, 65 * 60_000);
+  nowMs = 26 * 60_000;
+  assert.deepEqual(tracker.liveEntries().map(row => row.pr), [2]);
+  nowMs = 66 * 60_000;
+  assert.deepEqual(tracker.liveEntries(), []);
+  pending.forEach(resolve => resolve());
+});
+
+// Execute the production callback, rather than a test copy of its policy, with
+// real SQLite bindings and the actual in-memory/persisted tracker record shapes.
+function watcherDispatchTimeout(stmtGetReviewRow) {
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
+  const declaration = ast.body.flatMap(node => node.declarations || [])
+    .find(node => node.id.name === 'detachedReviewerDispatchTracker');
+  const callback = declaration.init.arguments[0].properties.find(node => node.key?.name === 'timeoutMs').value;
+  return new Function('stmtGetReviewRow', 'normalizeReviewerModel', 'resolveGeminiReviewerProcessTimeoutMs',
+    'resolveReviewerCeilingSeconds', `return (${source.slice(callback.start, callback.end)});`)(
+    stmtGetReviewRow, normalizeReviewerModel, resolveGeminiReviewerProcessTimeoutMs, resolveReviewerCeilingSeconds);
+}
+
+test('GEMTIMEOUT-01: watcher callback reads SQLite plan budgets for tracked candidates and persisted sessions', async () => {
+  const db = new Database(':memory:');
+  const pending = [];
+  try {
+    db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, review_status TEXT,
+      reviewer_timeout_ms INTEGER, reviewer_session_uuid TEXT);
+      INSERT INTO reviewed_prs VALUES ('example/project', 1, 'reviewing', 1500000, 'session-1');`);
+    const timeoutMs = watcherDispatchTimeout(db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'));
+    const persisted = { repo: 'example/project', pr: 1, reviewerModel: 'gemini', reviewerSessionUuid: 'session-1' };
+    let nowMs = 0;
+    const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs,
+      now: () => nowMs, graceMs: 0, logger: { warn() {} },
+    });
+    tracker.track({ candidate: { repoPath: 'example/project', prNumber: 1, reviewerModel: 'gemini' },
+      promise: new Promise(resolve => pending.push(resolve)),
+    });
+    assert.equal(tracker.activeCounts().get('gemini'), 1, 'candidate identity binds without throwing');
+    db.prepare('UPDATE reviewed_prs SET reviewer_timeout_ms = ?').run(65 * 60_000);
+    nowMs = 26 * 60_000;
+    assert.equal(tracker.activeCounts().get('gemini'), 1, 'plan extension retains the in-memory reservation');
+    assert.deepEqual(tracker.liveEntries().map(row => [row.repo, row.pr]), [['example/project', 1]],
+      'live-entry pruning retains the candidate past its initial budget using the normalized repository key');
+    assert.equal(timeoutMs(persisted), 65 * 60_000);
+    assert.equal(timeoutMs({ repoPath: 'example/project', prNumber: 1, reviewerModel: 'gemini' }), 65 * 60_000,
+      'raw candidate repository identity resolves the persisted plan budget');
+    assert.equal(timeoutMs({ ...persisted, reviewerSessionUuid: 'replaced-session' }), resolveGeminiReviewerProcessTimeoutMs());
+    nowMs = 66 * 60_000;
+    assert.deepEqual(tracker.liveEntries(), []);
+  } finally {
+    pending.forEach(resolve => resolve());
+    db.close();
+  }
+});
+
+test('GEMTIMEOUT-01: active streamed reservations retain their process ceiling beyond the legacy DB timeout', async () => {
+  const db = new Database(':memory:');
+  const pending = [];
+  try {
+    db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, review_status TEXT,
+      reviewer_timeout_ms INTEGER, reviewer_session_uuid TEXT);
+      INSERT INTO reviewed_prs VALUES ('example/project', 1, 'reviewing', 1200000, 'session-1');`);
+    const timeoutMs = watcherDispatchTimeout(db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'));
+    const ceilingMs = resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000;
+    assert.ok(ceilingMs > 21 * 60_000, 'fixture must exceed the legacy twenty-minute budget');
+    for (const reviewerModel of ['codex', 'claude']) {
+      const persisted = { repo: 'example/project', pr: 1, reviewerModel, reviewerSessionUuid: 'session-1',
+        spawnedAt: new Date(0).toISOString(), spawnToken: `streamed-${reviewerModel}`, pipelineGeminiSeats: 2 };
+      assert.equal(timeoutMs(persisted), ceilingMs);
+      let nowMs = 0;
+      const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs,
+        now: () => nowMs, graceMs: 0, logger: { warn() {} },
+      });
+      tracker.track({ candidate: { repoPath: 'example/project', prNumber: 1, reviewerModel },
+        promise: new Promise(resolve => pending.push(resolve)),
+      });
+      const restarted = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs,
+        now: () => nowMs, graceMs: 0, loadPersistedSpawnRecords: () => [persisted],
+        isPersistedSpawnLive: () => true, logger: { warn() {} },
+      });
+      nowMs = 21 * 60_000;
+      assert.equal(tracker.activeCounts().get(reviewerModel), 1);
+      assert.equal(tracker.liveEntries().length, 1, 'in-memory dispatch survives the legacy DB timeout');
+      assert.equal(restarted.activeCounts().get('gemini'), 2, 'persisted panel reservation survives watcher restart');
+      assert.equal(restarted.liveSpawnEntries().length, 1, 'persisted streamed process remains live');
+      nowMs = ceilingMs + 1;
+      assert.deepEqual(tracker.liveEntries(), []);
+      assert.equal(restarted.activeCounts().get('gemini') || 0, 0, 'process ceiling still expires reservations');
+      assert.deepEqual(restarted.liveSpawnEntries(), []);
+    }
+  } finally {
+    pending.forEach(resolve => resolve());
+    db.close();
+  }
+});
+
+test('GEMTIMEOUT-01: watcher fallback normalizes supported Gemini aliases for missing and settled rows', () => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, review_status TEXT,
+      reviewer_timeout_ms INTEGER, reviewer_session_uuid TEXT);
+      INSERT INTO reviewed_prs VALUES ('example/project', 1, 'posted', 21600000, 'session-1');`);
+    const timeoutMs = watcherDispatchTimeout(db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'));
+    for (const pr of [1, 2]) {
+      for (const reviewerModel of ['gemini', 'gemini-reviewer', ' GEMINI-REVIEWER ']) {
+        assert.equal(timeoutMs({ repo: 'example/project', pr, reviewerModel }), resolveGeminiReviewerProcessTimeoutMs());
+      }
+      assert.equal(timeoutMs({ repo: 'example/project', pr, reviewerModel: 'codex' }),
+        resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000);
+    }
+  } finally { db.close(); }
 });

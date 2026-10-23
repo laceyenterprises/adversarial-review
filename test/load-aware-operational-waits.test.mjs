@@ -187,7 +187,7 @@ test('reviewer budgets scale once, including the derived multi-chunk budget', t 
   const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 2, env: {} });
   assert.equal(plan.perChunkTimeoutMs, 20 * 60_000 * 6);
   assert.equal(plan.timeoutMs, plan.perChunkTimeoutMs * 2 + 120_000);
-  assert.equal(plan.capMs, 6 * 60 * 60_000 * 6);
+  assert.equal(plan.capMs, 6 * 60 * 60_000, 'the refusal cap stays unscaled (GEMTIMEOUT-01)');
 });
 
 test('closer dispatch, readiness probes, ownerless and pending lease bounds scale', t => {

@@ -530,3 +530,42 @@ test('a silent non-streaming child succeeds when no first-output deadline is arm
   assert.equal(result.code, 0);
   assert.match(result.stdout, /\{"ok":true\}/);
 });
+
+
+test('GEMTIMEOUT-01: IPC plan extends the parent wall timer and still reaps a hung child', async () => {
+  let reported = false;
+  const startedAt = Date.now();
+  await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+    'process.send({type:"plan"}); setInterval(() => {}, 100);',
+  ], { timeout: 2000, progressTimeout: 0, killGraceMs: 0,
+    onMessage(message) {
+      assert.equal(message.type, 'plan');
+      reported = true;
+      return 3000;
+    },
+  }), /timed out after 3000ms/);
+  assert.equal(reported, true);
+  assert.ok(Date.now() - startedAt >= 2900);
+});
+
+test('GEMTIMEOUT-01: refused lease extension terminates the child', async () => {
+  await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+    'process.send({type:"plan"}); setInterval(() => {}, 100);',
+  ], { timeout: 5000, progressTimeout: 0, killGraceMs: 0,
+    onMessage() { throw new Error('synthetic lost claim'); },
+  }), /onMessage callback failed: synthetic lost claim/);
+});
+
+test('GEMTIMEOUT-01: IPC plan arms a wall timer when the initial timeout is zero or omitted', async () => {
+  for (const initial of [{ timeout: 0 }, {}]) {
+    const controller = new AbortController();
+    const watchdog = setTimeout(() => controller.abort(), 5000);
+    try {
+      await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+        'process.send({type:"plan"}); setInterval(() => {}, 100);',
+      ], { ...initial, progressTimeout: 0, killGraceMs: 0, signal: controller.signal,
+        onMessage() { return 500; },
+      }), /timed out after 500ms/);
+    } finally { clearTimeout(watchdog); }
+  }
+});

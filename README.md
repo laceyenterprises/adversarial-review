@@ -867,6 +867,24 @@ do not send the terminal size alert. Chunked reviews sum available provider
 usage (marked partial when some chunks omit usage), and rejected Codex chunks
 use the same forensic writer as single-shot reviews.
 
+GEMTIMEOUT-01: a Gemini claim starts with one load-scaled call budget plus
+five minutes for preparation and posting (25 minutes at idle defaults). Once
+its chunk plan exists, local IPC extends the parent's process timer and the
+matching session's persisted timeout and lease to that plan plus process slack.
+The load multiplier applies only to each call budget; neither composed deadlines
+nor the refusal cap are scaled again. Both process deadlines are bounded by the
+unscaled chunk cap (six hours by default) and Node's timer limit. Deadlines stay
+anchored to process start, and stale or terminal claims cannot be extended.
+Offline regressions cover single/multiple chunks, maximum load, timer expiry,
+lease fencing and orphan recovery:
+`node test/run-tests.mjs reviewer-timeout.test.mjs reviewer-chunk-timeout.test.mjs reviewer-process-deadline.test.mjs process-group-spawn.test.mjs watcher-reviewer-pool.test.mjs`.
+After deployment, naturally scheduled Gemini reviews should record a single-call
+lease initially and a larger lease only when they build a larger chunk plan.
+Detached reservations use persisted plan budgets only for Gemini, resolving both
+candidate (`repoPath`/`prNumber`) and persisted (`repo`/`pr`) identities. Codex
+and Claude reservations retain their streamed process ceiling even when an active
+claim records the legacy 20-minute database timeout.
+
 Environment overrides follow the existing `ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES`
 mechanism (no shared configuration-schema keys):
 

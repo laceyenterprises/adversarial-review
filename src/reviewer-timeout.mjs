@@ -25,7 +25,7 @@ const AGY_CHUNK_TIMEOUT_CAP_MS = 6 * 60 * 60 * 1000;
 const REVIEWER_PROCESS_SLACK_MS = 5 * 60 * 1000;
 
 function resolveAgyChunkTimeoutCapMs(env = process.env) {
-  return loadAwareTimeoutMs(_resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS), { maxMs: Infinity });
+  return timerDelayMs(_resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS));
 }
 
 function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = process.env } = {}) {
@@ -38,8 +38,11 @@ function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = proc
   return plan;
 }
 
-function resolveGeminiReviewerProcessTimeoutMs(env = process.env) {
-  return timerDelayMs(Math.max(resolveAgyReviewerSubprocessTimeoutMs(env), resolveAgyChunkTimeoutCapMs(env)) + REVIEWER_PROCESS_SLACK_MS);
+function resolveGeminiReviewerProcessTimeoutMs(env = process.env, { plan = null } = {}) {
+  // Per-call budgets are already load-scaled. Compose them once; the refusal
+  // cap is never load-scaled or used as the nominal process deadline.
+  const workMs = plan?.timeoutMs ?? resolveAgyReviewerSubprocessTimeoutMs(env);
+  return timerDelayMs(Math.min(workMs + REVIEWER_PROCESS_SLACK_MS, resolveAgyChunkTimeoutCapMs(env)));
 }
 
 function _resolvePositiveInt(value, fallback) {

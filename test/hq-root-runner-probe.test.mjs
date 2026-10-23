@@ -13,6 +13,10 @@ test('runner gives the shared HQ resolver canonical roots inside its sandbox', (
   assert.equal(process.env.HQ_ROOT, process.env.AGENT_OS_HQ_ROOT);
   assert.equal(process.env.AGENT_OS_WORKER_RUN_AS_USER, undefined);
   assert.equal(process.env.HQ_WORKER_RUN_AS_USER, undefined);
+  for (const key of ['HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+    'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'GH_TOKEN_REFRESH_COMMAND', 'GITHUB_TOKEN_REFRESH_COMMAND']) {
+    assert.equal(process.env[key], undefined, `runner must remove inherited ${key}`);
+  }
   for (const directory of [root, homedir()]) {
     assert.equal(directory, realpathSync(directory), 'worker roots must be canonical');
     const beneathWorker = relative(process.env.ADVERSARIAL_REVIEW_TEST_CWD, directory);

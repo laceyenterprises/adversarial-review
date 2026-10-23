@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
+  AGY_CHUNK_TIMEOUT_CAP_MS,
+  REVIEWER_PROCESS_SLACK_MS,
+  resolveAgyChunkTimeoutCapMs,
   DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_FIRST_OUTPUT_TIMEOUT_MS,
@@ -1061,4 +1064,34 @@ test('reapRunningPassTimeouts honors custom threshold via env', () => {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+
+test('GEMTIMEOUT-01: one-chunk leases use one scaled call plus process slack', () => {
+  const callMs = resolveAgyReviewerSubprocessTimeoutMs({});
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs({}), callMs + REVIEWER_PROCESS_SLACK_MS);
+  assert.ok(resolveGeminiReviewerProcessTimeoutMs({}) < AGY_CHUNK_TIMEOUT_CAP_MS);
+  const single = resolveAgyChunkTimeoutPlan({ chunkCount: 1, env: {} });
+  const multi = resolveAgyChunkTimeoutPlan({ chunkCount: 4, env: {} });
+  assert.ok(resolveGeminiReviewerProcessTimeoutMs({}, { plan: multi }) > resolveGeminiReviewerProcessTimeoutMs({}, { plan: single }));
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: multi }), multi.timeoutMs + REVIEWER_PROCESS_SLACK_MS);
+});
+
+test('GEMTIMEOUT-01: maximum load scales each call once, never the refusal cap', async t => {
+  const os = await import('node:os');
+  t.mock.method(os.default, 'loadavg', () => [os.default.cpus().length * 100, 0, 0]);
+  // Unavailable CPU evidence grants the full configured load multiplier.
+  const cp = await import('node:child_process');
+  t.mock.method(cp.default, 'execFileSync', () => { throw new Error('synthetic unavailable sample'); });
+  const { syncBuiltinESMExports } = await import('node:module');
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal(resolveAgyChunkTimeoutCapMs({}), AGY_CHUNK_TIMEOUT_CAP_MS);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs({}), DEFAULT_REVIEWER_TIMEOUT_MS * 6 + REVIEWER_PROCESS_SLACK_MS);
+  const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 2, env: {} });
+  const leaseMs = resolveGeminiReviewerProcessTimeoutMs({}, { plan });
+  assert.equal(leaseMs, plan.timeoutMs + REVIEWER_PROCESS_SLACK_MS);
+  assert.ok(leaseMs <= AGY_CHUNK_TIMEOUT_CAP_MS && leaseMs <= MAX_TIMER_DELAY_MS);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: { timeoutMs: AGY_CHUNK_TIMEOUT_CAP_MS } }), AGY_CHUNK_TIMEOUT_CAP_MS);
+  assert.throws(() => resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} }), /chunk-budget-exceeded/);
 });

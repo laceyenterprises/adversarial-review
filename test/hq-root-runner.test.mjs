@@ -33,6 +33,11 @@ test('runner replaces inherited HQ roots, clears host run-as users, ignores exha
         AGENT_OS_HQ_ROOT: secondaryRoot,
         AGENT_OS_WORKER_RUN_AS_USER: 'fixture-primary-worker',
         HQ_WORKER_RUN_AS_USER: 'fixture-fallback-worker',
+        HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'exit 91',
+        MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND: 'exit 91',
+        HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: 'exit 91',
+        GH_TOKEN_REFRESH_COMMAND: 'exit 91',
+        GITHUB_TOKEN_REFRESH_COMMAND: 'exit 91',
         HQ_ROOT_FIXTURE_REPORT: report,
         HQ_ROOT_FIXTURE_FAIL: fail === true ? '1' : fail || '0',
       };

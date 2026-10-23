@@ -111,3 +111,14 @@ Reattach projects their attribution into the matching pass without renaming a
 historic subject, changing signed bytes, or rewriting this run record. Account
 identity never determines the GitHub actor or HCP subject. The existing per-session
 run paths, per-review holder scratch and per-PR reply paths remain unchanged.
+
+GEMTIMEOUT-01 keeps the existing run-record shape. The associated `reviewed_prs`
+claim starts with a single-call Gemini `reviewer_timeout_ms` and
+`reviewer_lease_expires_at`. When the child builds its chunk plan, it reports the
+plan over local IPC. The parent extends those existing fields only for the same
+session UUID while the row remains `reviewing` and its PR remains open, then
+extends its wall timer. Lease expiry remains `reviewer_started_at +
+reviewer_timeout_ms`; a repeated plan cannot renew it relative to the current
+time. Per-call budgets already include load scaling; process composition and the
+six-hour default refusal cap do not scale again. The process deadline is clamped
+to that unscaled cap and the platform timer limit.

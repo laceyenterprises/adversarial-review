@@ -7,7 +7,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs, resolveAgyChunkTimeoutCapMs } from '../../../reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
@@ -518,6 +518,9 @@ function createCliDirectReviewerRuntimeAdapter({
 
     try {
       const reviewerArgs = buildReviewerProcessArgs(subjectContext);
+      let geminiTimeoutMs = isGeminiModel(req.model)
+        ? Math.min(req.timeoutMs || resolveGeminiReviewerProcessTimeoutMs(reviewerEnv), resolveAgyChunkTimeoutCapMs(reviewerEnv))
+        : null;
       const sideChannels = reviewerRunSideChannelPaths(rootDir, sessionUuid);
       const { stdout, stderr } = await spawnCapturedImpl(
         resolveNodeBinImpl(),
@@ -529,8 +532,23 @@ function createCliDirectReviewerRuntimeAdapter({
               changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
             }) * 1000)
             : isGeminiModel(req.model)
-              ? req.timeoutMs || resolveGeminiReviewerProcessTimeoutMs(reviewerEnv)
+              ? geminiTimeoutMs
               : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
+          ...(isGeminiModel(req.model) ? { onMessage: message => {
+            if (message?.type !== 'gemini-chunk-plan') return;
+            const plan = message.plan;
+            if (!Number.isSafeInteger(plan?.chunkCount) || plan.chunkCount < 1
+              || !Number.isFinite(plan.perChunkTimeoutMs) || plan.perChunkTimeoutMs <= 0
+              || !Number.isFinite(plan.timeoutMs) || plan.timeoutMs < plan.chunkCount * plan.perChunkTimeoutMs
+              || plan.timeoutMs > resolveAgyChunkTimeoutCapMs(reviewerEnv)) {
+              throw new Error('Invalid Gemini chunk timeout plan');
+            }
+            const timeoutMs = resolveGeminiReviewerProcessTimeoutMs(reviewerEnv, { plan });
+            if (timeoutMs <= geminiTimeoutMs) return;
+            req.onReviewerTimeoutPlan?.({ timeoutMs, sessionUuid });
+            geminiTimeoutMs = timeoutMs;
+            return timeoutMs;
+          } } : {}),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,
           stdoutPath: sideChannels.stdoutPath,

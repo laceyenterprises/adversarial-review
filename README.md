@@ -1104,6 +1104,12 @@ Unidentified forks retain a per-head six-hour window, then stop in `no-dispatch`
 with `live-head-fork-unresolved` and require operator inspection. The smoke also
 verifies expiry preserves launch budget and prevents further same-head probes.
 
+MERGESIGNAL-01: after head advancement, only a merged completion signal for the
+target head can settle closure as succeeded. An obsolete reviewed-head signal
+follows the absent-signal path and cannot suppress target hammer dispatch.
+The offline `ama-closer-dispatch-priority` fixtures verify target dispatch,
+lease outcome and one mismatch diagnostic; existing smoke promises are unchanged.
+
 [state-machines.json](state-machines.json) maps the six owned lifecycle objects.
 A terminal flag means this attempt or decision is quiescent; explicit recovery
 may start another attempt. Closure owner is a computed decision, not a stored PR

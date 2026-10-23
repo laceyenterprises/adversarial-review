@@ -5705,39 +5705,18 @@ async function maybeDispatchAmaCloserAttempt({
       existingLease: terminalizedLease,
     });
   }
-  const targetHeadMergedSignal = headAdvancedDuringDispatch
-    ? await readMergedBuildCompletionSignalAsync({
-        repo,
-        prNumber,
-        headSha: targetRemediationSha,
-        logger,
-        hqRoot,
-        rootDir,
-        env: process.env,
-        readBuildCompletionProducerEvidenceImpl,
-        readBuildCompletionSignalForPrImpl,
-      })
-    : null;
-  // The PR-scoped row normally names the current target after advancement.
-  // Accept it before probing the obsolete reviewed head and logging a mismatch.
-  const reviewedHeadMergedSignal = targetHeadMergedSignal?.ok
-    ? null
-    : await readMergedBuildCompletionSignalAsync({
-        repo,
-        prNumber,
-        headSha: reviewedSha,
-        logger,
-        hqRoot,
-        rootDir,
-        env: process.env,
-        readBuildCompletionProducerEvidenceImpl,
-        readBuildCompletionSignalForPrImpl,
-      });
-  const mergedSignal = reviewedHeadMergedSignal?.ok
-    ? reviewedHeadMergedSignal
-    : targetHeadMergedSignal && !isCleanMissingMergedSignal(targetHeadMergedSignal)
-      ? targetHeadMergedSignal
-      : reviewedHeadMergedSignal;
+  // After advancement, the obsolete reviewed head cannot prove target completion.
+  const mergedSignal = await readMergedBuildCompletionSignalAsync({
+    repo,
+    prNumber,
+    headSha: headAdvancedDuringDispatch ? targetRemediationSha : reviewedSha,
+    logger,
+    hqRoot,
+    rootDir,
+    env: process.env,
+    readBuildCompletionProducerEvidenceImpl,
+    readBuildCompletionSignalForPrImpl,
+  });
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       finalizeAmaCloserLeaseBestEffort({

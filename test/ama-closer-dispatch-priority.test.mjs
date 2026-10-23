@@ -2775,6 +2775,7 @@ for (const advanced of [false, true]) {
       const rootDir = mkdtempSync(join(tmpdir(), 'merge-signal-head-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const target = advanced ? 'b'.repeat(40) : HEAD;
+      const repo = `acme/merge-signal-${advanced}-${signalHead}`;
       const producer = signalHead === 'matching' ? target : signalHead === 'reviewed' ? HEAD : signalHead === 'foreign' ? 'c'.repeat(40) : signalHead;
       const logs = [];
       let signalReads = 0;
@@ -2787,7 +2788,8 @@ for (const advanced of [false, true]) {
             branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
           },
           reviewState: { reviewCycleExhausted: true },
-          dispatchContext: { targetRemediationSha: target, allowStaleReviewHeadHammerResume: true },
+          dispatchContext: { repo, prUrl: `https://github.com/${repo}/pull/404`,
+            targetRemediationSha: target, allowStaleReviewHeadHammerResume: true },
         }),
         ...deps,
         logger: { info: line => logs.push(JSON.parse(line)), log() {}, warn() {} },
@@ -2801,17 +2803,22 @@ for (const advanced of [false, true]) {
           } };
         },
       });
-      if (signalHead === 'matching' || signalHead === 'reviewed') {
+      assert.equal(signalReads, 1, 'only the current target head is probed');
+      const mismatches = logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch');
+      if (signalHead === 'matching' || (!advanced && signalHead === 'reviewed')) {
         assert.equal(result.reason, 'merged-signal-present');
         assert.equal(result.dispatched, false);
-        if (signalHead === 'matching') {
-          assert.equal(signalReads, 1, 'matching target needs no obsolete reviewed-head probe');
-          assert.equal(logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch').length, 0);
-        }
+        assert.equal(mismatches.length, 0);
       } else {
         assert.notEqual(result.reason, 'merged-signal-present');
         assert.equal(result.dispatched, true, JSON.stringify(result));
-        assert.notEqual(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: target })?.terminalOutcome, 'succeeded');
+        assert.notEqual(readAmaCloserLease(rootDir, { repo, prNumber: 404, headSha: target })?.terminalOutcome, 'succeeded');
+        assert.equal(mismatches.length, 1, 'unmatched signal logs once per dispatch cycle');
+        assert.equal(mismatches[0].reviewedHeadSha, target);
+        const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, {
+          repo, prNumber: 404, headSha: target,
+        }), 'utf8'));
+        assert.equal(record.targetRemediationSha, target, 'hammer dispatch owns the current target');
       }
     });
   }

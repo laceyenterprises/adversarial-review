@@ -1597,7 +1597,7 @@ for (const evidence of ['merged signal', 'terminal audit', 'terminal audit witho
     const args = { rootDir, ...identity, hqRoot: rootDir, now,
       ...testDeps(),
       readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
-      readBuildCompletionSignalForPrImpl: () => merged ? { ok: true, row: { head_sha: 'merge-commit' } }
+      readBuildCompletionSignalForPrImpl: () => merged ? { ok: true, row: { head_sha: HEAD } }
         : { ok: false, reason: 'missing-build-completion-signal' },
     };
     if (evidence === 'terminal audit without hqRoot') delete args.hqRoot;
@@ -1638,7 +1638,7 @@ for (const routing of [
       readBuildCompletionSignalForPrImpl: input => {
         reads.push(['signal', input]);
         const routed = input.ledgerTarget === routing.ledgerTarget && input.ledgerDbPath === routing.ledgerDbPath;
-        return merged && routed ? { ok: true, row: { head_sha: 'merge-commit' } }
+        return merged && routed ? { ok: true, row: { head_sha: HEAD } }
           : { ok: false, reason: 'missing-build-completion-signal' };
       },
       readBuildCompletionProducerEvidenceImpl: input => {
@@ -1710,7 +1710,7 @@ for (const scenario of [
       readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: scenario.status || 'succeeded',
         terminal_at: scenario.terminalAt ?? (scenario.age === undefined ? undefined
           : new Date(Date.parse(now) - scenario.age * 1000).toISOString()) } }),
-      readBuildCompletionSignalForPrImpl: () => scenario.merged ? { ok: true, row: { head_sha: 'merge-head' } } : { ok: false },
+      readBuildCompletionSignalForPrImpl: () => scenario.merged ? { ok: true, row: { head_sha: HEAD } } : { ok: false },
       readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
       readPullRequestStateImpl: input => {
         reads++;
@@ -2768,3 +2768,75 @@ for (const status of ['succeeded', 'starting', 'running', 'future']) {
     assert.equal(record.lastObservedStatus, 'failed');
   });
 }
+
+for (const advanced of [false, true]) {
+  for (const signalHead of ['shaN', 'matching', 'reviewed', 'foreign', null]) {
+    test(`MERGESIGNAL-01: ${advanced ? 'advanced target' : 'reviewed'} head with ${signalHead} signal`, async t => {
+      const rootDir = mkdtempSync(join(tmpdir(), 'merge-signal-head-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const target = advanced ? 'b'.repeat(40) : HEAD;
+      const producer = signalHead === 'matching' ? target : signalHead === 'reviewed' ? HEAD : signalHead === 'foreign' ? 'c'.repeat(40) : signalHead;
+      const logs = [];
+      const deps = testDeps();
+      const result = await maybeDispatchAmaCloser({
+        ...cleanValidateAndClickArgs(rootDir, {
+          prMetadata: { headSha: target,
+            statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+              { __typename: 'CheckRun', name: 'ci/test', status: 'IN_PROGRESS' }],
+            branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
+          },
+          reviewState: { reviewCycleExhausted: true },
+          dispatchContext: { targetRemediationSha: target, allowStaleReviewHeadHammerResume: true },
+        }),
+        ...deps,
+        logger: { info: line => logs.push(JSON.parse(line)), log() {}, warn() {} },
+        readBuildCompletionProducerEvidenceImpl: () => signalHead === 'reviewed'
+          ? { ok: false, reason: 'missing-build-completion-producer-evidence' }
+          : { ok: true, row: { producer_class: 'synthetic-producer' } },
+        readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
+          head_sha: producer, completion_id: 'synthetic-completion', signal_kind: 'merged',
+        } }),
+      });
+      if (signalHead === 'matching' || signalHead === 'reviewed') {
+        assert.equal(result.reason, 'merged-signal-present');
+        assert.equal(result.dispatched, false);
+      } else {
+        assert.notEqual(result.reason, 'merged-signal-present');
+        assert.equal(result.dispatched, true, JSON.stringify(result));
+        assert.notEqual(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: target })?.terminalOutcome, 'succeeded');
+      }
+    });
+  }
+}
+
+test('MERGESIGNAL-01: foreign signal does not settle lease and logs once for its head', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'merge-signal-lease-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/synthetic-signal', prNumber: 51, headSha: HEAD };
+  const now = '2026-07-20T12:00:00Z';
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_synthetic', now });
+  const before = readAmaCloserLease(rootDir, identity);
+  const logs = [];
+  const args = {
+    rootDir, ...identity, now,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
+      head_sha: 'shaN', completion_id: 'synthetic-completion', signal_kind: 'merged',
+    } }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: {} }),
+    logger: { info: line => logs.push(JSON.parse(line)) },
+  };
+  assert.equal(reconcileAmaCloserLease(args), false);
+  assert.equal(reconcileAmaCloserLease(args), false);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+  const mismatches = logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch');
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].producerHeadSha, 'shaN');
+  assert.equal(mismatches[0].completionId, 'synthetic-completion');
+  const advanced = 'b'.repeat(40);
+  rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: HEAD, toHeadSha: advanced, now });
+  assert.equal(reconcileAmaCloserLease({ ...args, headSha: advanced }), false);
+  assert.equal(logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch').length, 2);
+});

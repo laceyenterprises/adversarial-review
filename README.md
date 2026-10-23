@@ -1127,6 +1127,18 @@ source counts across consumers/passes, head/effect invalidation, immutable histo
 terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
+NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
+successor to `decideClosureOwner`. It runs in **shadow only** at the current
+closure consumers; legacy owners keep authority and effects. Disagreements and
+overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
+path only with `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`. The
+[shadow runbook](docs/RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02) and
+[reason inventory](docs/NEXT-ACTION-REASON-INVENTORY.md) describe rows, sources
+and rollout acceptance. `node test/run-tests.mjs test/pr-next-action.test.mjs
+test/pr-next-action-shadow.test.mjs test/next-action-disagreements.test.mjs`
+verifies them with synthetic I/O. No lifecycle state, transition, state
+projection or smoke promise changes.
+
 LEASEDEADPID-01: ownership ignores pending leases whose local watcher is dead or
 whose pending reclaim window expired, using the same predicates as closer dispatch.
 PID probes require a matching `holderHost` or a legacy hostless lease; foreign

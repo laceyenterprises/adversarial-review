@@ -1,4 +1,5 @@
 import { decideClosureOwner } from './ama/closure-owner.mjs';
+import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { classifyCheckRollup } from './checks-summary.mjs';
@@ -160,6 +161,9 @@ function isMergeable(input) {
 // authority and preserves the pipeline's bounded wait/page evidence.
 export function classifyClosureOwnership(input) {
   const closureOwner = decideClosureOwner(input);
+  // NXA-02 observational shadow only; rescue keeps the legacy answer.
+  void shadowNextActionLater({ source: 'rescue-classifier', legacy: closureOwner, rootDir: input?.rootDir || null,
+    evidence: () => closureOwnerShadowEvidence(input, { observedAt: new Date().toISOString() }) });
   return rescueOwnershipDecision(closureOwner);
 }
 

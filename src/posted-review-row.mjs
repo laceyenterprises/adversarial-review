@@ -1,6 +1,8 @@
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createMergeAgentSnapshotPass, fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
+import { fromLegacyNoProgressLane, fromLegacyPostedReviewOutcome, noteNextActionLegacyLater,
+  shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -633,6 +635,8 @@ async function handlePostedReviewRowWithinReadCache({
           `${terminalReason} under operator-skip-label — dropping ownership`
         );
         clearNoProgressLane(rootDir, { repo: repoPath, prNumber }, { logger });
+        void shadowNextActionLater({ source: 'posted-review', legacy: () => fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason }),
+          passSnapshot, repo: repoPath, prNumber, rootDir });
         return {
           handled: true,
           dispatchJob,
@@ -645,6 +649,8 @@ async function handlePostedReviewRowWithinReadCache({
         `[watcher] posted-review handler held for ${repoPath}#${prNumber}: ` +
           'operator-skip-label blocks merge/hammer closeout for this tick',
       );
+      void shadowNextActionLater({ source: 'posted-review', legacy: () => fromLegacyPostedReviewOutcome({ outcome: 'operator-skip-label' }),
+        passSnapshot, repo: repoPath, prNumber, rootDir });
       return {
         handled: true,
         outcome: 'operator-skip-label',
@@ -735,6 +741,9 @@ async function handlePostedReviewRowWithinReadCache({
         },
       };
     }
+    // NXA-02 shadow: same pass decision as closure orchestration; no effect.
+    void shadowNextActionLater({ source: 'posted-review', passSnapshot, repo: repoPath, prNumber, rootDir,
+      legacy: () => fromLegacyPostedReviewOutcome(coexistenceDecision, { includeClosureOwner: false }) });
     const leaseWaitMessage = coexistenceDecision.amaClosureResult?.reason === 'daemon-deferred'
       && coexistenceDecision.amaClosureResult?.daemonCleanMerge?.reason === 'lease-contended'
       ? coexistenceDecision.amaClosureResult.daemonCleanMerge.waitMessage
@@ -1104,6 +1113,8 @@ export function createNoProgressLaneGate({
           logger,
         });
       }
+      noteNextActionLegacyLater({ source: 'no-progress-lane', subjectKey: `${handler.repoPath}#${handler.prNumber}`,
+        head: handler.headSha, legacy: () => fromLegacyNoProgressLane(decision) });
       return { run: decision.due, ...decision };
     },
     async record(handler, { timedOut = false, error = null, value = null, laneAdmission = null } = {}) {

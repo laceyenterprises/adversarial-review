@@ -9,6 +9,7 @@ import { meteredExecFile } from './metered-gh.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
+import { handoffWakeLegacy, handoffWakeShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
 import { closeEmptyPullRequest } from './empty-pr-close.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
@@ -814,6 +815,11 @@ export async function processReviewSubject(entry, ctx) {
         } catch (error) {
           console.warn(`[watcher] handoff wait observation failed: ${error?.message || error}`);
         }
+        // NXA-02 observational shadow of the handoff wake; no effect.
+        void shadowNextActionLater({ source: 'watcher-handoff-wake', legacy: () => handoffWakeLegacy(subject.headSha),
+          repo: repoPath, prNumber, rootDir: ROOT, evidence: () => handoffWakeShadowEvidence({
+            subjectKey: `${repoPath}#${prNumber}`, headSha: subject.headSha, isDraft: draft, lease: handoffLease,
+            reviewRow: existing, observedAt: new Date().toISOString() }) });
       }
       try {
         const loaded = loadConfigCached();

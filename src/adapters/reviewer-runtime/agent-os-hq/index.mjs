@@ -11,6 +11,7 @@ import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import {
   extractReviewVerdict,
   normalizeReviewVerdict,
+  promoteCanonicalReviewSectionHeadings,
   sanitizeCodexReviewPayload,
 } from '../../../kernel/verdict.mjs';
 import {
@@ -237,13 +238,27 @@ function buildReviewerPrompt(req, artifactPath) {
 }
 
 function validateReviewArtifact(markdown) {
-  const sanitized = sanitizeCodexReviewPayload(markdown);
+  // Normalize transport decoration before strict validation, without the
+  // sanitizer's first-section-wins truncation hiding duplicate sections.
+  let payload = promoteCanonicalReviewSectionHeadings(String(markdown ?? '').replace(/\r\n/g, '\n').trim());
+  const firstSection = payload.search(/^##[ \t]+(?:Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/im);
+  if (firstSection >= 0) {
+    const wrapper = payload.slice(0, firstSection)
+      .match(/(?:^|\n)(`{3,}|~{3,})(?:markdown|md)?[ \t]*\n/i)?.[1];
+    if (wrapper) {
+      const closing = new RegExp(`\\n${wrapper[0]}{${wrapper.length},}[ \\t]*$`);
+      if (!closing.test(payload)) throw new Error('[reviewer-output] review artifact has an unclosed whole-reply fence');
+      payload = payload.replace(closing, '');
+    }
+    payload = payload.slice(firstSection);
+  }
+  const sanitized = sanitizeCodexReviewPayload(payload);
   const verdict = normalizeReviewVerdict(extractReviewVerdict(sanitized));
   if (!['request-changes', 'comment-only', 'approved'].includes(verdict)) {
     throw new Error('review artifact missing recognized Verdict value');
   }
   // REVIEWVALID-01: a template echo fails as reviewer-output, never a verdict.
-  assertReviewerReply(markdown);
+  assertReviewerReply(payload);
   return sanitized;
 }
 

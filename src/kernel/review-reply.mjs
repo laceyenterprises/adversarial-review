@@ -9,12 +9,11 @@
 // `Request changes`. This module is the strict check that runs on the raw
 // reply before anything is posted:
 //
-//   - no field or section body may be a template placeholder (`<Title>`,
-//     `<path>`, `<range>`, `<one paragraph>`, ...). The list is derived from
-//     the `Output requirements:` block of the reviewer prompts, so it follows
-//     the template. A placeholder only counts when it is the whole value of a
-//     line or field: a real review may quote `<path>` while discussing code,
-//     the same false-positive lesson as the remediation-reply placeholders;
+//   - at least two finding fields may not be whole-value template placeholders
+//     (`<Title>`, `<path>`, `<range>`, `<one paragraph>`, ...), derived from the
+//     prompts' `Output requirements:` block. A whole Summary or Suggested fixes
+//     body of `<text>` is also an echo. Fenced examples and arbitrary prose
+//     labels are excluded, so real reviews may discuss markup tags freely;
 //   - nothing but blank lines and the optional `## Adversarial Review ...`
 //     header (which the Antigravity prompt asks for) may precede the first
 //     required heading;
@@ -29,6 +28,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  isTemplatePlaceholderFinding,
+  parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
+} from './review-findings.mjs';
 import {
   normalizeVerdictSectionLine,
   normalizeWhitespace,
@@ -90,17 +94,8 @@ function reviewTemplatePlaceholders({ promptsDir = PROMPTS_DIR } = {}) {
   return result;
 }
 
-// The value a line carries once its heading marker, bullet, field label and
-// emphasis are removed: `- **<Title>**`, `  - **File:** \`<path>\`` and a bare
-// `<text>` line all reduce to the placeholder itself.
-function lineValue(line) {
-  return String(line ?? '')
-    .trim()
-    .replace(/^#{1,6}[ \t]+/, '')
-    .replace(/^(?:[-*+]|\d+\.)[ \t]+/, '')
-    .replace(/^\*\*[^*]+?:\*\*[ \t]*/, '')
-    .replace(/^\*\*[^*]+?\*\*[ \t]*:[ \t]*/, '')
-    .replace(/^[A-Za-z][A-Za-z ]{0,30}:[ \t]+/, '')
+function bareValue(value) {
+  return String(value ?? '').trim()
     .replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/g, '')
     .trim();
 }
@@ -123,10 +118,8 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   const lines = text.split('\n');
   const reasons = [];
 
-  const echoed = [...new Set(lines.map(lineValue).filter((value) => isTemplatePlaceholderValue(value, placeholders)))];
-  if (echoed.length > 0) reasons.push(`template placeholders ${echoed.join(', ')}`);
-
   const headings = [];
+  const unfencedLines = Array(lines.length).fill('');
   let openFence = null;
   lines.forEach((line, index) => {
     const fence = line.match(FENCE_RE);
@@ -139,9 +132,29 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
       openFence = fence[1];
       return;
     }
+    unfencedLines[index] = line;
     const match = line.match(REQUIRED_HEADING_RE);
     if (match) headings.push({ name: REQUIRED_HEADINGS.find((name) => name.toLowerCase() === match[1].toLowerCase()), index });
   });
+  // Inspect parsed card fields, never arbitrary prose labels or code examples.
+  // Share the corroboration rule with consumers of historical review bodies.
+  const unfenced = unfencedLines.join('\n');
+  const echoed = new Set();
+  for (const finding of [
+    ...(parseBlockingFindingsSection(unfenced) ?? []),
+    ...(parseNonBlockingFindingsSection(unfenced) ?? []),
+  ]) {
+    if (!isTemplatePlaceholderFinding(finding, placeholders)) continue;
+    for (const value of Object.values(finding).map(bareValue)) {
+      if (isTemplatePlaceholderValue(value, placeholders)) echoed.add(value);
+    }
+  }
+  for (const [index, heading] of headings.entries()) {
+    if (!['Summary', 'Suggested fixes'].includes(heading.name)) continue;
+    const body = bareValue(unfencedLines.slice(heading.index + 1, headings[index + 1]?.index).join('\n'));
+    if (isTemplatePlaceholderValue(body, GENERIC_PLACEHOLDERS)) echoed.add(body);
+  }
+  if (echoed.size > 0) reasons.push(`template placeholders ${[...echoed].join(', ')}`);
   if (headings.length === 0) return { ok: false, reasons: [...reasons, 'no required heading'] };
 
   const preamble = lines.slice(0, headings[0].index).filter((line) => line.trim());
@@ -157,7 +170,9 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
     reasons.push('no Verdict section');
   } else {
     const verdictLines = lines.slice(verdictHeading.index + 1).filter((line) => line.trim());
-    if (verdictLines.some((line) => ANY_HEADING_RE.test(line))) {
+    if (verdictLines.length === 0) {
+      reasons.push('missing verdict line');
+    } else if (verdictLines.some((line) => ANY_HEADING_RE.test(line))) {
       reasons.push('Verdict is not the last section');
     } else if (verdictLines.some((line) => FENCE_RE.test(line))
       || !KNOWN_VERDICTS.has(normalizeVerdictSectionLine(verdictLines.at(-1) ?? ''))) {

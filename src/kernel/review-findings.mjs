@@ -282,12 +282,14 @@ function parseNonBlockingFindingsSection(reviewBody) {
 
 }
 
-// REVIEWVALID-01: only known whole-value template placeholders are echoes.
-// Component titles (`<AuthProvider>`) and virtual paths (`<stdin>`) are valid.
+// REVIEWVALID-01: require corroborating whole-value placeholders. A title
+// alone can name real markup (`<path>`, `<text>`), even when it matches a token.
 const TEMPLATE_PLACEHOLDER_VALUES = new Set(['<title>', '<path>', '<range>', '<one paragraph>', '<text>']);
-function isTemplatePlaceholderFinding(finding) {
+function isTemplatePlaceholderFinding(finding, placeholders = TEMPLATE_PLACEHOLDER_VALUES) {
   const bare = (value) => String(value ?? '').trim().replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/g, '').trim();
-  return [finding?.title, finding?.file].some((value) => TEMPLATE_PLACEHOLDER_VALUES.has(bare(value).toLowerCase()));
+  const tokens = new Set([...placeholders].map((value) => value.toLowerCase()));
+  return ['title', 'file', 'lines', 'problem', 'whyItMatters', 'recommendedFix']
+    .filter((field) => tokens.has(bare(finding?.[field]).toLowerCase())).length >= 2;
 }
 
 // One count/identity contract for attestations and merge eligibility. Missing
@@ -296,7 +298,7 @@ function isTemplatePlaceholderFinding(finding) {
 // unknown, so no consumer counts, remediates or merges on it.
 function parseReviewFindings(body) {
   const normalized = String(body ?? '').replace(/\r\n/g, '\n');
-  const classify = (findings) => (findings?.some(isTemplatePlaceholderFinding)
+  const classify = (findings) => (findings?.some((finding) => isTemplatePlaceholderFinding(finding))
     ? { count: 0, state: 'unknown', malformed: 'template-placeholder', findings: [] }
     : {
       count: findings?.length ?? 0,

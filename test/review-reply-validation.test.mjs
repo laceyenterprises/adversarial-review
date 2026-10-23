@@ -194,8 +194,9 @@ test('REVIEWVALID-01: a placeholder only counts as a whole value, not when quote
     'The usage text prints `--root <path>` and the template token `<Title>` inline.',
   );
   assert.equal(validateReviewerReply(quoting).ok, true);
-  const echoedTitle = VALID_REPLY.replace('- **Retry loop never terminates**', '- **<Title>**');
-  assert.deepEqual(validateReviewerReply(echoedTitle).reasons, ['template placeholders <Title>']);
+  const echoedCard = VALID_REPLY.replace('Retry loop never terminates', '<Title>')
+    .replace('src/synthetic-retry.mjs', '<path>');
+  assert.deepEqual(validateReviewerReply(echoedCard).reasons, ['template placeholders <Title>, <path>']);
 });
 
 test('REVIEWVALID-01: a rejection carries the reviewer-output tag and evidence for forensics', () => {
@@ -281,9 +282,9 @@ test('REVIEWVALID-01: the finding parser refuses placeholder findings', () => {
   assert.equal(parsed.nonBlocking.state, 'unknown');
   assert.equal(parsed.findingsCount, null);
 
-  // A real card whose File field alone is a placeholder is malformed too.
+  // One ambiguous token alone is insufficient evidence of a template echo.
   const fileOnly = VALID_REPLY.replace('`src/synthetic-retry.mjs`', '`<path>`');
-  assert.equal(parseReviewFindings(fileOnly).blocking.state, 'unknown');
+  assert.equal(parseReviewFindings(fileOnly).blocking.state, 'known');
 
   // A real finding that merely mentions a token inline is still a finding.
   const inline = VALID_REPLY.replace('Retry loop never terminates', 'Retry loop ignores `<T>` bound');
@@ -319,19 +320,26 @@ test('REVIEWVALID-01: rescue classifier and closer do not treat placeholders as 
   assert.equal(real.reason, 'addressable-findings');
 });
 
-test('REVIEWVALID-01: known placeholder title and file values remain malformed', () => {
-  for (const token of ['<Title>', '<PATH>', '<range>', '<one paragraph>', '<text>']) {
-    for (const reply of [
-      VALID_REPLY.replace('Retry loop never terminates', token),
-      VALID_REPLY.replace('src/synthetic-retry.mjs', token),
-    ]) {
-      assert.equal(parseReviewFindings(reply).blocking.malformed, 'template-placeholder', token);
-    }
+test('REVIEWVALID-01: corroborating placeholder fields remain malformed', () => {
+  for (const field of ['title', 'file', 'lines', 'problem']) {
+    const values = {
+      title: ['Retry loop never terminates', '<Title>'],
+      file: ['src/synthetic-retry.mjs', '<path>'],
+      lines: ['10-14', '<range>'],
+      problem: ['The loop retries forever when the stub keeps failing.', '<one paragraph>'],
+    };
+    const [original, token] = values[field];
+    const single = VALID_REPLY.replace(original, token);
+    assert.equal(parseReviewFindings(single).blocking.state, 'known', field);
+    assert.equal(validateReviewerReply(single).ok, true, field);
+    const paired = single.replace(...values[field === 'title' ? 'file' : 'title']);
+    assert.equal(parseReviewFindings(paired).blocking.malformed, 'template-placeholder', field);
+    assert.equal(validateReviewerReply(paired).ok, false, field);
   }
 });
 
 test('REVIEWVALID-01: component titles and virtual files retain all addressable findings', () => {
-  for (const title of ['<AuthProvider>', '<Modal>', '<Select>']) {
+  for (const title of ['<AuthProvider>', '<Modal>', '<Select>', '<path>', '<text>', '<Text>']) {
     const reply = VALID_REPLY.replace('## Non-blocking issues', [
       `- **${title}**`,
       '  - **File:** `<stdin>`',
@@ -356,5 +364,23 @@ test('REVIEWVALID-01: component titles and virtual files retain all addressable 
       .replace('## Non-blocking issues\n- None.', '## Blocking issues\n- None.');
     assert.equal(parseReviewFindings(nonBlocking).nonBlocking.count, 2);
     assert.equal(classifyNonBlockingFindings(nonBlocking).state, 'known');
+  }
+});
+
+test('REVIEWVALID-01: markup in fenced code and prose labels is not a template echo', () => {
+  for (const [opening, closing] of [['```svg', '```'], ['~~~~jsx', '~~~~~']]) {
+    for (const section of ['Blocking issues', 'Non-blocking issues', 'Suggested fixes']) {
+      const example = [opening, ...ECHO_CARD, '<path>', '<text>', closing,
+        '- Element: `<path>`', '- **Element:** <Text>', '- Node: <text>'].join('\n');
+      const reply = VALID_REPLY.replace(`## ${section}\n`, `## ${section}\n${example}\n`);
+      assert.deepEqual(validateReviewerReply(reply), { ok: true, reasons: [] }, section);
+    }
+  }
+});
+
+test('REVIEWVALID-01: an empty Verdict reports a missing verdict line', () => {
+  for (const whitespace of ['', '  \n\t']) {
+    assert.deepEqual(validateReviewerReply(VALID_REPLY.replace(/Request changes$/, whitespace)).reasons,
+      ['missing verdict line']);
   }
 });

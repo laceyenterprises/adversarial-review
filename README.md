@@ -265,12 +265,17 @@ cost of an explicit, recoverable failure.
 
 A reply that echoes the output template is not a review either
 (REVIEWVALID-01). Before anything is posted, `src/kernel/review-reply.mjs`
-checks the raw reply of every reviewer model, every oversized-diff chunk and
-every hosted `agent-os-hq` artifact. It rejects a reply if:
+checks the raw reply of every direct reviewer model and every oversized-diff
+chunk. Hosted `agent-os-hq` artifacts first shed their model preamble and an
+optional whole-reply Markdown fence. Validation still precedes lossy section
+trimming, so normalization cannot hide duplicate sections or trailing text.
+It rejects a reply if:
 
-- a line or field is exactly a template placeholder (`<Title>`, `<path>`,
-  `<range>`, `<one paragraph>`, `<text>`; the list is derived from the
-  prompts' `Output requirements:` block);
+- at least two fields of a finding card are whole-value template placeholders
+  (`<Title>`, `<path>`, `<range>`, `<one paragraph>`, `<text>`; the list is
+  derived from the prompts' `Output requirements:` block), or an entire Summary
+  or Suggested fixes body is `<text>`. Fenced code and arbitrary prose labels
+  are excluded from placeholder detection;
 - any text other than the optional `## Adversarial Review …` header comes
   before the first required heading;
 - a required heading outside fenced code appears twice;
@@ -279,13 +284,14 @@ every hosted `agent-os-hq` artifact. It rejects a reply if:
 A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
 on the bounded `reviewer-output` path and records the reason in
 `failure_message`. It is never posted and never stored as a verdict. As
-defence in depth, `parseReviewFindings` reads a section whose finding title or
-file is a whole-value known placeholder (`<Title>`, `<path>`, `<range>`,
-`<one paragraph>` or `<text>`, case-insensitive) as `unknown` with
+defence in depth, `parseReviewFindings` uses the same corroboration rule: a
+section with at least two whole-value known placeholders in one finding card
+(title, file, lines, problem, impact or fix; case-insensitive) reads as `unknown` with
 `malformed: 'template-placeholder'`. The rescue classifier then reports
 `malformed-review` and the closer refuses, so neither treats a placeholder as
-an addressable finding. Component titles such as `<AuthProvider>` and virtual
-paths such as `<stdin>` remain addressable findings.
+an addressable finding. Markup titles such as `<path>`, `<text>` and
+`<AuthProvider>`, and virtual paths such as `<stdin>`, remain addressable
+findings when they lack corroborating placeholder fields.
 
 **7a. But refusing is not the same as dropping.** The reviewer is resolved
 from the worker-class prefix in the PR title, and a dependency bot cannot

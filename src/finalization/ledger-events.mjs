@@ -201,3 +201,38 @@ export function isFinalizationEvent(value) {
 export function isRevisionScopedEvent(type) {
   return REVISION_SCOPED_SET.has(type);
 }
+
+// Lane vocabulary is separate from subject eligibility: a queue acknowledgement
+// is never review evidence or authority to merge.
+export const QUEUE_PHASES = Object.freeze([
+  'acknowledged', 'ready', 'rebasing', 'publishing', 'waiting-checks',
+  'finalizing', 'merged', 'parked-hold', 'parked-permission',
+  'parked-infrastructure', 'returned-to-closer', 'closed-observed',
+]);
+export const QUEUE_ACTIONABLE_PHASES = Object.freeze(QUEUE_PHASES.slice(0, 6));
+export const QUEUE_EVENT_TYPES = Object.freeze([
+  'acknowledged', 'progress', 'operation-intent', 'operation-result',
+  'owner-claimed', 'owner-renewed', 'owner-released', 'owner-parked',
+]);
+
+export function resolveLaneKey({ repository, base } = {}) {
+  if (typeof repository !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
+    throw new TypeError('lane requires repository full name');
+  }
+  // Repository names are case insensitive; Git refs are not. Accept only short
+  // branch refs to avoid aliasing main and refs/heads/main into separate lanes.
+  if (typeof base !== 'string' || !base || base.startsWith('refs/')
+    || base.startsWith('/') || base.endsWith('/') || base.endsWith('.')
+    || base.includes('..') || base.includes('@{') || base === '@'
+    || /[\s~^:?*\[\\\x00-\x1f\x7f]/.test(base)
+    || base.split('/').some(p => !p || p.startsWith('.') || p.endsWith('.lock'))) {
+    throw new TypeError('lane requires a short, valid base branch ref');
+  }
+  return { repository: repository.toLowerCase(), base };
+}
+
+export function makeQueueEvent(type, lane, fields) {
+  if (!QUEUE_EVENT_TYPES.includes(type)) throw new TypeError('unknown queue event');
+  if (!Number.isFinite(Date.parse(fields?.at))) throw new TypeError('queue event requires at');
+  return { ...fields, type, lane: resolveLaneKey(lane) };
+}

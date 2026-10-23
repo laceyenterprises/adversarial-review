@@ -26,6 +26,10 @@ import { resolveSubjectKey } from './ledger-events.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 
+// Subject leases remain the legacy v2 seam. Lane ownership additionally
+// serializes issuance and takeover; a subject lease is not a queue fence.
+export { createQueueOwner, resolveQueueOwnerAdapter } from './queue-owner.mjs';
+
 /** Idempotent schema convergence — mirrors the 20260719 migration exactly. */
 export function ensureFinalizationExecutorLeaseSchema(db) {
   db.exec(`

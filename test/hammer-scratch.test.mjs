@@ -548,7 +548,7 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
   assert.equal(existsSync(previousScratch), false);
 });
 
-for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head']) {
+for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number', 'missing-retry-repo', 'null-retry-repo', 'foreign-retry-ticket', 'foreign-retry-repo', 'foreign-retry-head']) {
   test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
@@ -577,7 +577,7 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
       retryArgs.dispatchContext.dispatchRecordHeadSha = head;
       retryArgs.dispatchContext.livePrProbeImpl = async () => ({ state: 'OPEN', headRefOid: targetHead,
         headBranchExists: true, headRefName: 'synthetic-branch' });
-    } else if (repoSource !== 'dispatchContext' && !repoSource.startsWith('foreign-retry')) {
+    } else if (repoSource !== 'dispatchContext' && !repoSource.includes('retry-repo') && !repoSource.startsWith('foreign-retry')) {
       delete retryArgs.dispatchContext.repo;
       if (repoSource === 'prMetadata') retryArgs.prMetadata = { ...args.prMetadata, repo: 'fixture/repo' };
       else retryArgs.repo = 'fixture/repo';
@@ -598,6 +598,8 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
           if (repoSource === 'foreign-retry-ticket') db.exec("UPDATE launch_requests SET ticket_ref = 'CONFLICT-REBASE-42' WHERE launch_request_id = 'synthetic-retry-leaf'");
           if (repoSource === 'foreign-retry-repo') db.exec("UPDATE launch_requests SET target_repo = 'other/project' WHERE launch_request_id = 'synthetic-retry-leaf'");
           if (repoSource === 'foreign-retry-head') db.prepare("UPDATE launch_requests SET head_sha = ? WHERE launch_request_id = 'synthetic-retry-leaf'").run('c'.repeat(40));
+          if (repoSource === 'missing-retry-repo') db.exec('ALTER TABLE launch_requests DROP COLUMN target_repo');
+          if (repoSource === 'null-retry-repo') db.exec("UPDATE launch_requests SET target_repo = NULL WHERE launch_request_id = 'synthetic-retry-leaf'");
           db.close();
           throw Object.assign(new Error('synthetic dispatch refused'), {
             stderr: 'duplicate key value violates unique constraint "uq_worker_runs_live_logical_job"',

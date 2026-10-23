@@ -958,13 +958,15 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
     rootDir, hqRoot, requiredTables: ['launch_requests'] });
   if (!resolution.ok) return resolution;
-  let columns = 'launch_request_id, idempotency_key, ticket_ref, target_repo, status, requested_at';
+  let columns = 'launch_request_id, idempotency_key, status, requested_at';
   if (resolution.target.backend === 'sqlite') {
-    const head = sqliteTableHasColumn(resolution.target, 'launch_requests', 'head_sha');
-    if (!head.ok) return head;
-    if (head.exists) columns += ', head_sha';
+    for (const column of ['ticket_ref', 'target_repo', 'head_sha']) {
+      const probe = sqliteTableHasColumn(resolution.target, 'launch_requests', column);
+      if (!probe.ok) return probe;
+      columns += probe.exists ? `, ${column}` : `, NULL AS ${column}`;
+    }
   } else {
-    columns += ', :launch_head AS head_sha';
+    columns += ', :launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha';
   }
   if (resolution.target.backend === 'sqlite') {
     return querySqliteRows(resolution.target,

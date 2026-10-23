@@ -51,7 +51,7 @@ function fixture(t, { charged = 1, ledgerStatus = 'succeeded', reportedStatus = 
       livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: headSha, headBranchExists: true }) },
     execFileImpl: async (_cmd, argv) => {
       if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: reportedStatus }) };
-      if (argv[0] === 'dispatch') { launches.push(argv); return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'lrq_next', launchRequestId: 'lrq_next' }) }; }
+      if (argv[0] === 'dispatch') { launches.push(argv); return { stdout: JSON.stringify({ ticketRef: argv[argv.indexOf('--ticket') + 1], dispatchId: 'lrq_next', launchRequestId: 'lrq_next' }) }; }
       return { stdout: '{}' };
     },
     readLaunchRequestStatusImpl: async ({ launchRequestId }) => launchRequestId === 'lrq_finished'

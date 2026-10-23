@@ -32,6 +32,10 @@ foreign tickets, repositories or heads are refused and logged. An unverified
 response stays fenced and unreceipted for exact-key recovery. The attempt key
 binds that recovery to its dispatch head; an explicit different ledger head
 cannot be adopted.
+Ledger repository metadata may be absent or null in older schemas; when present,
+it must match the full repository name or its basename. The exact closer ticket
+is always required, and an explicit head mismatch still refuses adoption.
+Exact-key reads project missing identity columns as null on SQLite and Postgres.
 
 Receipt lookups use the ledger's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.

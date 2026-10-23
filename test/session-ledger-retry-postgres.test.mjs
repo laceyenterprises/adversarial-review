@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestByIdempotencyKeyAsync } from '../src/session-ledger-read-adapter.mjs';
+import { closerLaunchMatches } from '../src/ama/pre-receipt-intent.mjs';
 
 function reserveLoopbackPort() {
   const reserve = spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -148,6 +149,39 @@ function isolatedPostgres(t) {
   }
   return { sql, spawnSyncImpl, explainLastRead, responseBytes: () => responseBytes };
 }
+
+test('native PostgreSQL keyed receipt tolerates optional identity columns and refuses explicit mismatches', async t => {
+  const fixture = isolatedPostgres(t);
+  if (!fixture) return;
+  fixture.sql(`ALTER TABLE launch_requests ADD COLUMN idempotency_key text, ADD COLUMN requested_at timestamptz;
+    INSERT INTO launch_requests (launch_request_id, status, ticket_ref, idempotency_key, requested_at)
+    VALUES ('synthetic-closer', 'running', 'AMA-PR-8', 'synthetic-key', '2026-10-22');`);
+  const record = { repo: 'fixture/repo', prNumber: 8, headSha: 'a'.repeat(40) };
+  const read = async () => {
+    const result = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: 'synthetic-key', env: {},
+      ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' }, spawnSyncImpl: fixture.spawnSyncImpl });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.rows.length, 1);
+    return result.rows[0];
+  };
+  const legacy = await read();
+  assert.equal(legacy.target_repo, null);
+  assert.equal(legacy.head_sha, null);
+  assert.equal(closerLaunchMatches(record, legacy), true);
+  fixture.sql('ALTER TABLE launch_requests ADD COLUMN target_repo text, ADD COLUMN head_sha text;');
+  assert.equal(closerLaunchMatches(record, await read()), true);
+  for (const repo of ['fixture/repo', 'repo', 'other/repo']) {
+    fixture.sql(`UPDATE launch_requests SET target_repo = '${repo}' WHERE launch_request_id = 'synthetic-closer';`);
+    assert.equal(closerLaunchMatches(record, await read()), repo !== 'other/repo');
+  }
+  fixture.sql(`UPDATE launch_requests SET target_repo = NULL, head_sha = '${'b'.repeat(40)}'
+    WHERE launch_request_id = 'synthetic-closer';`);
+  assert.equal(closerLaunchMatches(record, await read()), false);
+  fixture.sql('ALTER TABLE launch_requests DROP COLUMN ticket_ref;');
+  const noTicket = await read();
+  assert.equal(noTicket.ticket_ref, null);
+  assert.equal(closerLaunchMatches(record, noTicket), false);
+});
 
 test('RETRYCHAIN-01: native psql traverses cycles with SELECT-only authority and skips malformed metadata', async t => {
   const fixture = isolatedPostgres(t);

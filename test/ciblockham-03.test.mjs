@@ -74,17 +74,17 @@ function fixture(t, mode = 'native', liveHammer = false) {
       guardStackedBaseImpl: async () => null,
       execFileImpl: async (_cmd, argv) => {
         if (liveHammer && argv[0] === 'dispatch' && argv[1] === 'status') {
-          return { stdout: JSON.stringify({ status: 'running', ticketRef: 'HAM' }) };
+          return { stdout: JSON.stringify({ status: 'running', ticketRef: `AMA-PR-${prNumber}` }) };
         }
         if (argv[0] === 'dispatch') {
           launches.push(argv);
-          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-dispatch',
+          return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`, dispatchId: 'synthetic-dispatch',
             launchRequestId: 'synthetic-launch' }) };
         }
         throw new Error(`Unexpected external command: ${argv[0]}`);
       },
       readLaunchRequestStatusImpl: () => liveHammer
-        ? ({ ok: true, row: { status: 'running', ticket_ref: 'HAM' } }) : ({ ok: false }),
+        ? ({ ok: true, row: { status: 'running', ticket_ref: `AMA-PR-${prNumber}` } }) : ({ ok: false }),
       readPullRequestStateImpl: () => null,
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: head, comments: [] }),
       readTemplateImpl: () => 'Synthetic <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',

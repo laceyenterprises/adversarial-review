@@ -124,7 +124,7 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
         return { stdout: JSON.stringify(status || { status: 'running' }), stderr: '' };
       }
       if (dispatch) return dispatch(cmd, args);
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -1232,7 +1232,7 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
       if (kind === 'same-live-multiline' || kind === 'multiline-mixed-error') error.stderr = error.stderr.replace('bash <script>', 'bash -c echo\nsynthetic');
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
       if (kind === 'multiline-mixed-error') error.stderr += '\n[hq] error: another refusal';
-      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
     } });
     const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
@@ -1285,11 +1285,11 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
 test('OWNERPROOF-01 recovery dispatch ignores its freshly acquired pending lease', async t => {
   const rootDir = tmpRoot(t, 'ownerproof-self-lease-');
   const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
-  const deps = closerDeps({ dispatch: async () => {
+  const deps = closerDeps({ dispatch: async (_cmd, args) => {
     const lease = readAmaCloserLease(rootDir, identity);
     assert.equal(lease.status, 'pending');
     assert.equal(lease.watcherPid, process.pid);
-    return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+    return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
   } });
   const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
     reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: new Date().toISOString(),

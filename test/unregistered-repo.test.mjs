@@ -95,7 +95,7 @@ test('UNREGREPO-01: unregistered repository pages once and resumes after registr
       if (args[0] === 'fleet') return { stdout: JSON.stringify(codexAccountFixture()) };
       if (args[0] !== 'dispatch') return { stdout: '{}' };
       attempts++;
-      if (registered) return { stdout: JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) };
+      if (registered) return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) };
       throw Object.assign(new Error('hq dispatch failed'), {
         stderr: '[hq] dispatch refused: repo_unregistered; retry your request after registration',
       });
@@ -144,7 +144,7 @@ test('successful dispatch clears a persisted configuration blocker after registr
   assert.match(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).closureBlocker, /repo_unregistered/);
   const result = await maybeDispatchAmaCloser({ ...inputs,
     execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
-      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
+      ? JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
       : args[0] === 'fleet' ? JSON.stringify(codexAccountFixture()) : '{}' }),
     deliverAlertImpl: async () => {}, writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
@@ -201,7 +201,7 @@ test('legacy transient refusal with an exhausted slow window is reclassified and
   let pages = 0;
   const result = await maybeDispatchAmaCloser({ ...inputs,
     execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
-      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
+      ? JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' })
       : args[0] === 'fleet' ? JSON.stringify(codexAccountFixture()) : '{}' }),
     deliverAlertImpl: async () => { pages++; }, writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),

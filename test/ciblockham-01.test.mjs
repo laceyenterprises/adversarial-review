@@ -337,7 +337,7 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
       }
       if (args[0] === 'dispatch') {
         launches.push(args);
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: nextLaunch, launchRequestId: nextLaunch }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: nextLaunch, launchRequestId: nextLaunch }), stderr: '' };
       }
       return { stdout: '{}', stderr: '' };
     },

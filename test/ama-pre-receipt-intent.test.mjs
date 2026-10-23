@@ -110,6 +110,7 @@ test('legacy and submitted intents keep same-PR ownership past any age; diagnost
       prMetadata: { isOpen: true },
       dispatchContext: { rootDir: f.rootDir, ...identity, dispatchedAt: now },
       readLegacyIntentLaunchesImpl: f.options.readLegacyIntentLaunchesImpl,
+      readIntentReceiptImpl: f.options.readIntentReceiptImpl,
       deliverAlertImpl: async () => {},
       execFileImpl: () => { launches++; throw Error('must not launch'); }, logger: { warn() {} } });
     assert.equal(decision.reason, 'existing-dispatch-unknown');
@@ -208,6 +209,7 @@ test('Postgres receipt lookup uses read-only parameterized bounded SQL', async (
       assert.ok(args.includes("intent_key=key'quote"));
       assert.match(options.input, /BEGIN READ ONLY/);
       assert.match(options.input, /idempotency_key = :'intent_key' LIMIT 2/);
+      assert.match(options.input, /:launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha/);
       assert.doesNotMatch(options.input, /key'quote/);
       return { status: 0, stdout: JSON.stringify(receipt) + '\n' };
     } });
@@ -791,7 +793,35 @@ test('CLOSERINTENT-01: thrown transient exception retains details and retries', 
   assert.equal(f.read().preReceiptReconciliation.query.attempts[0].detail, 'synthetic connection reset');
 });
 
-for (const mismatch of [{ ticket_ref: 'CONFLICT-REBASE-8' }, { target_repo: 'different/repo' }, { head_sha: 'b'.repeat(40) }]) {
+for (const targetRepo of [undefined, null, 'repo', 'fixture/repo']) {
+  test(`CLOSERINTENT-01: exact-key receipt accepts repository metadata ${targetRepo}`, async t => {
+    const f = fixture(t);
+    const result = await f.reconcile({ readIntentReceiptImpl: () => ({ ok: true,
+      rows: [{ ...receipt, target_repo: targetRepo }] }) });
+    assert.equal(result.status, 'receipt-recovered');
+    assert.equal(f.read().state, 'dispatched');
+    assert.equal(readAmaCloserLease(f.rootDir, identity).lrqId, receipt.launch_request_id);
+  });
+}
+
+for (const missingColumn of ['target_repo', 'ticket_ref']) {
+  test(`CLOSERINTENT-01: SQLite exact-key recovery with no ${missingColumn} column`, async t => {
+    const f = fixture(t);
+    f.insert(receipt);
+    const db = new Database(f.options.ledgerDbPath);
+    try { db.exec(`ALTER TABLE launch_requests DROP COLUMN ${missingColumn}`); }
+    finally { db.close(); }
+    const probe = await readLaunchRequestByIdempotencyKeyAsync({ ...f.options, idempotencyKey: key });
+    assert.equal(probe.ok, true);
+    assert.equal(probe.rows[0][missingColumn], null);
+    const result = await f.reconcile();
+    assert.equal(result.status, missingColumn === 'target_repo' ? 'receipt-recovered' : 'unknown');
+    assert.equal(f.read().state, missingColumn === 'target_repo' ? 'dispatched' : 'dispatching');
+  });
+}
+
+for (const mismatch of [{ ticket_ref: 'CONFLICT-REBASE-8' }, { ticket_ref: null, target_repo: null },
+  { target_repo: 'different/repo' }, { target_repo: '' }, { head_sha: 'b'.repeat(40) }]) {
   test(`CLOSERINTENT-01: exact-key receipt rejects ${JSON.stringify(mismatch)}`, async t => {
     const f = fixture(t);
     await f.reconcile({ readIntentReceiptImpl: () => ({ ok: true, rows: [{ ...receipt, ...mismatch }] }) });

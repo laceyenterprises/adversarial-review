@@ -1154,7 +1154,9 @@ time. The audited single-PR command defaults to dry-run and shares automatic
 reconciliation. CLOSERINTENT-01 also settles keyed intents after their dispatch deadline
 on successful empty-key evidence, or through audited empty closer-ticket evidence.
 New attempts never inherit predecessor receipt IDs; adoption requires the closer ticket
-and matching repository/head context. Load-aware ledger reads retry transient failures
+and matching supplied repository/head context. Absent or null ledger repository
+metadata supports older schemas; a missing closer ticket or explicit identity mismatch
+still refuses adoption. Load-aware ledger reads retry transient failures
 and preserve reason/detail evidence; unchanged failures log once. Unprovable absence reaches a fixed diagnostic
 inspection deadline and retains ownership; no lease, budget or merge gate is
 waived. See [the owner runbook](docs/follow-up-runbook.md#interrupted-dispatch-intents-lac-2081).
@@ -1341,7 +1343,8 @@ idempotent retry accounting (`test/ama-pre-receipt-intent.test.mjs`). LEGACYINTE
 extends the smoke with legacy unreadable-evidence holds and empty ticket/time
 settlement to a deferred lease; unit fixtures cover in-range evidence and audited
 operator dry-run/apply. CLOSERINTENT-01 additionally tests deadline-bound keyed absence,
-foreign receipt refusal, scaled timeouts, transient retries, failure detail/deduplication
+foreign receipt refusal, missing/null repository compatibility in exact-key and live-retry
+unit fixtures, scaled timeouts, transient retries, failure detail/deduplication
 and audited keyed settlement. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
 ownership agree for `FAILURE`, `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`,
 `ACTION_REQUIRED` and `ERROR`.

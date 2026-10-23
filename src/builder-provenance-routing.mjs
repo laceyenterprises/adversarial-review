@@ -54,9 +54,9 @@ function finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, r
     if (!routingFindings.has(key)) {
       try { previous = readFileSync(auditPath, 'utf8'); } catch { /* First observation. */ }
     }
-    if (previous === serialized) return result;
     if (routingFindings.size >= 1000) routingFindings.delete(routingFindings.keys().next().value);
     routingFindings.set(key, serialized);
+    if (previous === serialized) return result;
     // Audit failure does not alter the routing or claim-deferral decision.
     try {
       const dir = join(rootDir, 'data', 'builder-routing');

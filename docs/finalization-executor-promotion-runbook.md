@@ -130,3 +130,78 @@ event. A revision mismatch or unstructured refusal remains a failed attempt.
 If you need to stop mutations **without** ceding authority back to v1 (e.g. mid
 investigation), prefer the **kill switch** (§4) over rollback — it keeps the v2
 ledger authoritative and audited while pausing all execution.
+
+## Queue owner storage observation (MGQ-01; no activation)
+
+The repository/base owner foundation ships unconnected to either live writer.
+Its additive migration and schema are documented in
+[data-model/finalization-ledger.md](data-model/finalization-ledger.md#repositorybase-queue-mgq-01).
+A subject lease alone is insufficient for lane serialization.
+
+After normal reviewed deployment, the named operator uses the documented system
+service owner and deployment/restart procedure in `DEPLOYMENT.md`. This slice
+needs no service restart or route change: no owner loop has been wired yet. If
+later composition changes a running watcher, the operator must drain it, use the
+registered system-domain restart entry and prove the running build before routing.
+Workers must not bounce services or create traffic to exercise ownership.
+
+From the deployed checkout, under its runtime account, run this read-only probe
+with the existing load-aware command supervisor (1-second nominal DB wait,
+5-second finite DB ceiling; outer supervisor bounded to 30 seconds):
+
+```sh
+node src/finalization/queue-probe.mjs --capability owner --json
+```
+
+The CLI requires an explicit `--capability owner`; missing or unsupported
+capabilities exit 2 without emitting observations.
+
+Record `.capabilities.owner.available == true` and `.runtime.build != null`.
+Availability is computed from exact deployed table/index definitions, DB
+readability/ownership and the resolved local lock adapter. The build is a digest
+of the actual loaded queue module/schema bytes, not a release constant. Record
+it with the deployment revision. It identifies the probe process; it does not
+prove that an already-running watcher loaded those bytes.
+
+`observations.lanes` shows persisted claims/generations/heartbeat/expiry/parking;
+`unresolvedOperations` exposes ambiguous work. An empty lane list is valid
+capability evidence with `organicOwnershipObserved=false`; organic execution
+and watcher build/route evidence remain pending until later operator rollout.
+The probe cannot create schema, claim/release a lane, write a lock file, call
+GitHub, dispatch a worker or page. A missing/incompatible store or unresolved
+owner adapter returns unavailable and exit 1 without manufacturing evidence.
+This is an observation assertion, not a CI check or promotion gate.
+
+Takeover must use the shared issuance lock and reconcile every unresolved
+operation after proven stop/drain. Never delete a lock file or clear an intent
+based on age/PID death. Unproven quiescence parks that lane for operator recovery;
+other lanes remain independent. Retain events, intents, original deadlines and
+receipts through recovery and eventual rollback. Production recovery adapters
+and remote receipt verification are supplied by subsequent executor slices.
+
+The operator must apply `migrations/20261023_finalization_queue.sql` through the
+normal app-store migration procedure before expecting schema availability.
+Deploying source alone may leave the probe unavailable; it never installs its
+own schema. This additive migration creates no lane and changes no route.
+
+Focused validation record (synthetic fixtures, no external services):
+
+| Variant | Observed contention outcomes |
+|---|---|
+| Existing subject-only leases | 30/30 trials retained two subject holders on one repository/base. |
+| First process-based lane implementation | 30/30 single persisted owner; 13/13 focused tests passed. |
+| Recovery results and successor claim made atomic | 30/30 single owner; 67/68 tests passed, with one IPC assertion shape error corrected in the fixture. |
+| Result currency and parked-event deduplication | 30/30 single owner; 76/76 focused and existing ledger/executor tests passed. |
+| Final fixtures including concurrent readiness and probe CLI | 30/30 single owner; 79/79 tests passed across nine selected files. |
+
+The final two process-based runs give 60 consecutive single-owner outcomes,
+with DB outcome read-back on every trial and zero duplicates. Initial thread
+fixtures produced no usable contention denominator: one hit its 150-second
+bound and the next exposed the native lock addon's lack of Worker-thread
+support. The fixtures now use independent foreground child processes and the
+existing test runner, with a 120-second outer bound and command-local netguard.
+No native addon or host installation was changed. Touched JavaScript lint and
+`git diff --check` passed. The selected runner files are
+`finalization-{lane-baseline,queue-owner,ledger-events,ledger-fold,ledger-store,executor-lease,executor,ledger-regression-fixtures,port}.test.mjs`.
+Deployed runtime-owner probe results and organic ownership observations are
+pending; local fixture availability is not deployment evidence.

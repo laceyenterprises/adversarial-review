@@ -177,3 +177,7 @@ export function openFinalizationLedgerStore({ rootDir, db, busyTimeoutMs } = {})
 }
 
 export { FINALIZATION_EVENT_TYPES };
+
+// Repository/base queue storage shares the app DB but never changes the
+// subject ledger's eligibility semantics.
+export { ensureFinalizationQueueSchema, openFinalizationQueueStore } from './queue-store.mjs';

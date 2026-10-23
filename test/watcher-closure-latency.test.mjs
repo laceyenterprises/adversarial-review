@@ -545,11 +545,13 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(candidate.database.count, 0);
   assert.equal(closure.runs, 3);
   assert.equal(closure.github['rest:reviews-page'].count, 6, 'two live pages per PR still read');
-  // The findings migration adds one sentinel read per schema initialization.
-  // Keep the prior read budget pinned independently of those six new reads.
+  // Each additive migration adds one sentinel read per schema initialization.
+  // Pin those reads separately so the existing non-migration budget stays fixed.
   const findingMigrationChecks = closure.database.migrationChecks['20261021_review_findings.sql'];
+  const queueMigrationChecks = closure.database.migrationChecks['20261023_finalization_queue.sql'];
   assert.equal(findingMigrationChecks, 6);
-  assert.equal(closure.database.count - findingMigrationChecks, 111,
+  assert.equal(queueMigrationChecks, 6);
+  assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks, 111,
     'round counter and wake telemetry reuse the initialized connection');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));

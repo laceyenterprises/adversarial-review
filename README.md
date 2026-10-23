@@ -2184,3 +2184,29 @@ production state from the checkout. Restricted workers can set
 `ADVERSARIAL_REVIEW_TEST_TEMP_BASE` to an owned temporary parent; this disables
 the runner's short-path `/tmp` fallback. Socket-based tests still need a parent
 short enough for the platform's Unix socket path limit.
+
+### V2 repository/base queue foundation (MGQ-01)
+
+The finalization port now has durable lane storage and a fenced single-host
+owner seam in `src/finalization/`; it remains unwired from live execution.
+Acknowledged readiness is atomic, parked entries rejoin the tail explicitly,
+and replay preserves candidate, phase and original infrastructure deadline.
+Owner states are `idle`, `active`, `parked`. A per-lane issuance lock spans
+intent, remote operation and drain; an expired lease cannot authorize takeover
+while a request is ambiguous. Missing stop/drain and authoritative reconciliation
+proof parks the lane. Subject leases continue to protect only individual subjects.
+
+Focused offline fixtures in `test/finalization-queue-owner.test.mjs` exercise
+simultaneous claims, stale generations/routes, paused issuance, ambiguous push
+and merge intents, phase replay, FIFO/readmission, publication restart cases,
+bounded waits and a probe that performs no store mutation. These are focused
+fixtures; the existing smoke promises gain no new live action or CI check.
+
+After normal deployment, the operator runs
+`node src/finalization/queue-probe.mjs --capability owner --json` under the
+runtime account in the deployed checkout. It checks actual schema/adapter
+availability and reports the probe's runtime module digest and existing claims.
+Empty lanes mean organic execution evidence is pending. No route/config flag,
+service bounce or synthetic traffic is part of this slice. See the
+[owner observation and recovery procedure](docs/finalization-executor-promotion-runbook.md#queue-owner-storage-observation-mgq-01-no-activation)
+and [store contract](docs/data-model/finalization-ledger.md#repositorybase-queue-mgq-01).

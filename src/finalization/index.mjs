@@ -127,3 +127,15 @@ export {
 } from './execution-surfaces.mjs';
 
 export { createFinalizationExecutor } from './executor.mjs';
+
+// Repository/base queue foundation (MGQ-01). No runtime route is installed.
+export {
+  QUEUE_ACTIONABLE_PHASES,
+  QUEUE_EVENT_TYPES,
+  QUEUE_PHASES,
+  makeQueueEvent,
+  resolveLaneKey,
+} from './ledger-events.mjs';
+export { foldQueue, reconcileQueuePublication } from './ledger-fold.mjs';
+export { ensureFinalizationQueueSchema, openFinalizationQueueStore } from './ledger-store.mjs';
+export { createQueueOwner, resolveQueueOwnerAdapter } from './executor-lease-store.mjs';

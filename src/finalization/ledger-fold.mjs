@@ -228,3 +228,40 @@ export function foldFrom(snapshot, events) {
 export function fold(events) {
   return foldFrom(initialLedgerState(), events);
 }
+
+/** Replay lane events without resetting candidate, readiness or patience. */
+export function foldQueue(events, snapshot = { entries: {}, owner: null, operations: {} }) {
+  const state = cloneState(snapshot);
+  for (const event of events) {
+    if (event.type === 'acknowledged') state.entries[event.entry.entryId] = cloneState(event.entry);
+    if (event.type === 'progress') {
+      const entry = state.entries[event.entryId];
+      if (!entry) throw new Error('queue progress without acknowledgement');
+      Object.assign(entry, cloneState(event.patch));
+    }
+    if (event.type.startsWith('owner-')) state.owner = cloneState(event.owner);
+    if (event.type === 'operation-intent') state.operations[event.operation.operationId] = cloneState(event.operation);
+    if (event.type === 'operation-result') state.operations[event.operationId].result = cloneState(event.result);
+  }
+  return state;
+}
+
+/** Pure publication restart classification; caller first drains/reconciles all
+ * operation intents and supplies an authoritative live observation. */
+export function reconcileQueuePublication(entry, observation) {
+  if (!observation?.sourceRef || !observation.head || !observation.base) {
+    return { phase: 'parked-infrastructure', reason: 'publication-observation-unavailable' };
+  }
+  if (observation.state === 'closed') return { phase: 'closed-observed', reason: 'live-closed' };
+  // Merge receipt reconciliation belongs to the final merge executor; a live
+  // merged state alone cannot prove the candidate or its merge SHA here.
+  if (observation.state !== 'open') return { phase: 'parked-infrastructure', reason: 'terminal-state-requires-reconciliation' };
+  if (![entry.candidate, entry.expectedOldHead].includes(observation.head)) {
+    return { phase: 'returned-to-closer', reason: 'external-head-change' };
+  }
+  if (observation.base !== entry.exactBase) {
+    return { phase: 'rebasing', reason: 'external-base-change', checks: null };
+  }
+  if (observation.head === entry.candidate) return { phase: 'waiting-checks', reason: 'candidate-already-published' };
+  return { phase: 'publishing', reason: 'expected-old-head-observed' };
+}

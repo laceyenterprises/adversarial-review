@@ -240,21 +240,27 @@ head. File and Lines must cover every reverted line, and the commit must
 actually touch that region; uncited lines in the same hunk remain protected.
 
 **Your adjudication of a disputed blocking finding is final** (HAMFINAL-01;
-operator decision 2026-10-10 after agent-os PR 7987 was hand-merged over
-CHANGES_REQUESTED while the hammer sat "pending adjudication": "Hammers
-judgement is final"). If a blocking finding is false on this exact head (for
-example a chunked review calls a JSON file malformed that parses fine),
-preserve the code and write the evidence to a temporary file. The evidence MUST
-be concrete and exact-head: a fenced block quoting the repro command you ran on
-`HEAD` together with its output, or a fenced quote of the head file showing the
-cited defect is absent. Prose alone is refused. Withdraw the finding through:
+operator decision 2026-10-10, agent-os PR 7987). For a false finding, preserve
+the code and write exact-head evidence to a temporary file: a fenced command
+run on `HEAD` with its output, or a fenced head-file quote showing the defect
+is absent. Prose alone is refused. Withdraw through:
 
 ```bash
 # Resolve the canonical daemon owner from the existing database, not the worker login.
 HAM_DISPUTE_OWNER=$(stat -f '%Su' <<ROOT_DIR>>/data/reviews.db) || exit 1
 HAM_DISPUTE_RUN=()
 if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
-  HAM_DISPUTE_RUN=(sudo --preserve-env=HAM_ROOT_DIR,HAMMER_LACEY_GH_TOKEN,HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND,MERGE_AGENT_GH_TOKEN,MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND,HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND -A -H -u "$HAM_DISPUTE_OWNER")
+  # Refresh as the worker before crossing the user boundary.
+  HAM_DISPUTE_TOKEN=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_NODE_BIN" --input-type=module -e '
+    const s=(await import(process.argv[1])).hammerTokenSession({hammerToken:true});
+    process.stdout.write(s.prepare().env.GH_TOKEN);
+  ' '<<ROOT_DIR>>/src/hammer-token.mjs') || exit 1
+  HAM_DISPUTE_RUN=(sudo -A -H -u "$HAM_DISPUTE_OWNER" env
+    -u HAMMER_LACEY_GH_TOKEN -u MERGE_AGENT_GH_TOKEN
+    -u HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND -u MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND
+    -u HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND
+    "GH_TOKEN=$HAM_DISPUTE_TOKEN" "GITHUB_TOKEN=$HAM_DISPUTE_TOKEN")
+  unset HAM_DISPUTE_TOKEN
 fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
 if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
@@ -272,12 +278,10 @@ fi
 ```
 
 The helper posts a HAM-authored `Resolution: withdrawn-by-hammer` comment with
-the finding identity, the exact head and the evidence digest (`Evidence-SHA256`),
-records the same in `ham_finding_disputes`, and wakes the watcher. It requests
-NO re-review, so the same-head duplicate guard can never strand the PR. Exit 0
-means the withdrawal is recorded; any other exit means it is not, and the
-finding still stands (remediate it or stop with the exit's reason). A rerun on
-the same head or a proven closer rebase is idempotent.
+finding identity, exact head and `Evidence-SHA256`, records it in
+`ham_finding_disputes`, and wakes the watcher. NO re-review is requested.
+Only exit 0 records withdrawal; otherwise remediate or stop with the exit's
+reason. Same-head and proven closer-rebase reruns are idempotent.
 The predicate verifies the posted comment against the successful admission in
 the canonical `--root-dir` database, including its node ID and full-body digest.
 A comment left by a failed helper call cannot resolve a finding. Withdrawal

@@ -12,8 +12,7 @@ function credentialRejected(error) {
 // every call: each shell phase may resume after an arbitrarily long CI wait.
 function tokenContext(options) {
   const { credentialEnv = options.env || process.env, hammerToken = false, ...childOptions } = options;
-  const variable = ENTITLED_VARS.find(key => credentialEnv[key])
-    || ENTITLED_VARS.find(key => credentialEnv[`${key}_REFRESH_COMMAND`])
+  const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
   const command = (variable && credentialEnv[`${variable}_REFRESH_COMMAND`])
     || credentialEnv.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND;
@@ -69,10 +68,25 @@ export function hammerTokenSession(options = {}) {
     secrets.add(token);
   }
   function redact(value) {
-    if (typeof value === 'string' || Buffer.isBuffer(value)) {
-      let clean = String(value);
+    if (Buffer.isBuffer(value)) {
+      let clean = value;
+      for (const secret of secrets) {
+        const needle = Buffer.from(secret);
+        const chunks = [];
+        let start = 0;
+        let index;
+        while ((index = clean.indexOf(needle, start)) !== -1) {
+          chunks.push(clean.subarray(start, index), Buffer.from('[redacted]'));
+          start = index + needle.length;
+        }
+        if (start) clean = Buffer.concat([...chunks, clean.subarray(start)]);
+      }
+      return clean;
+    }
+    if (typeof value === 'string') {
+      let clean = value;
       for (const secret of secrets) clean = clean.replaceAll(secret, '[redacted]');
-      return Buffer.isBuffer(value) ? Buffer.from(clean) : clean;
+      return clean;
     }
     if (value && typeof value === 'object') {
       for (const key of ['stdout', 'stderr', 'message', 'stack']) {

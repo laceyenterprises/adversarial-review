@@ -4634,7 +4634,9 @@ request marker and per-head evidence, and confirm pushed edges never satisfy
 
 All closer GitHub calls use `bin/metered-gh.mjs` or Node's shared metered
 execution seam. `src/hammer-token.mjs` selects `HAMMER_LACEY_GH_TOKEN`, with
-`MERGE_AGENT_GH_TOKEN` as the legacy fallback. It resolves the credential before
+`MERGE_AGENT_GH_TOKEN` as the legacy fallback. The dedicated refresh command
+takes precedence over a legacy static token.
+It resolves the credential before
 admission-cache lookup and rate-limit accounting, including when dispatch only
 supplies a refresh command. Each invocation, including after a CI wait, runs
 that variable's `<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch
@@ -4666,6 +4668,18 @@ values are redacted from returned output and errors. Use `ham_gh` and `ham_pr`
 from the closer inputs; do not copy a launch token into a long-lived shell
 variable or print it while diagnosing a wait. No configuration change is needed.
 
+Binary output is redacted by matching token bytes without decoding the buffer;
+unrelated bytes remain unchanged. Cancellation handlers are removed after each
+child attempt, including before an authentication retry.
+
+Cross-user finding disputes refresh in the worker account immediately before
+`sudo -A -H -u` invokes the database owner. Only the resolved static credential
+is forwarded using `env`; entitlement tokens and all refresh commands are
+explicitly removed from the owner's child environment. No `sudo --preserve-env`
+or `SETENV` permission is required, and caller-provided commands never execute
+as the database owner. This one-shot handoff places the token in the `env`
+arguments; never print the command array or enable shell tracing.
+
 Git publication uses the same credential session: `hammer-publish.sh` invokes
 `bin/metered-gh.mjs exec-git` through `ham_git`, and `hammer-api-publish.mjs`
 explicitly enables hammer credentials for its Git fetches. Each child receives
@@ -4673,5 +4687,5 @@ fresh `GH_TOKEN` and `GITHUB_TOKEN` plus an inline `!gh auth git-credential`
 helper, after resetting inherited credential helpers and preserving other
 inline Git configuration. Authentication rejection refreshes and retries once
 with the original Git arguments, including the exact-head push lease. Tokens
-never enter persistent shell assignments, argv or Git configuration. Ordinary
+never enter persistent shell assignments, Git argv or Git configuration. Ordinary
 non-hammer Git execution remains outside this opt-in credential path.

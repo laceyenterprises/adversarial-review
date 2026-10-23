@@ -30,6 +30,98 @@ process.stdout.write(${JSON.stringify(fresh)});
 }
 const rejected = () => Object.assign(new Error('gh: Bad credentials (HTTP 401)'), { stderr: 'Bad credentials', code: 1 });
 
+test('dedicated refresh-only entitlement takes precedence over legacy static and refresh credentials', t => {
+  const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  f.env.MERGE_AGENT_GH_TOKEN = 'synthetic-legacy-token';
+  f.env.MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND = 'exit 99';
+  const session = hammerTokenSession({ env: f.env });
+  assert.equal(session.prepare().env.GH_TOKEN, fresh);
+  assert.equal(f.count(), 1);
+  delete f.env.MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND;
+  assert.equal(hammerTokenSession({ env: f.env }).prepare().env.GH_TOKEN, fresh);
+  assert.equal(f.count(), 2);
+});
+
+test('binary redaction preserves invalid UTF-8 around repeated secrets and in errors', t => {
+  const f = fixture(t);
+  const session = hammerTokenSession({ env: f.env });
+  session.prepare();
+  const bytes = Buffer.from([0xff, 0xfe, 0, 0x80, 0xc3]);
+  assert.deepEqual(session.redact(bytes), bytes);
+  const input = Buffer.concat([bytes, Buffer.from(expired), bytes, Buffer.from(fresh), Buffer.from(fresh), bytes]);
+  const expected = Buffer.concat([bytes, Buffer.from('[redacted]'), bytes, Buffer.from('[redacted][redacted]'), bytes]);
+  assert.deepEqual(session.redact(input), expected);
+  const error = Object.assign(new Error('permission denied'), { stdout: input, stderr: bytes, output: [null, input, bytes] });
+  assert.throws(() => session.retry(error), actual => {
+    assert.deepEqual(actual.stdout, expected);
+    assert.deepEqual(actual.stderr, bytes);
+    assert.deepEqual(actual.output, [null, expected, bytes]);
+    return true;
+  });
+});
+
+test('metered CLI removes cancellation listeners after both authentication attempts', t => {
+  const f = fixture(t);
+  const calls = join(f.dir, 'calls');
+  const preload = join(f.dir, 'listeners.cjs');
+  writeFileSync(preload, `const assert = require('node:assert/strict');
+const before = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));
+process.on('exit', () => {
+  assert.deepEqual(['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal)), before);
+});
+`);
+  writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const retried = fs.existsSync(${JSON.stringify(calls)});
+fs.appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+if (!retried) { process.stderr.write('HTTP 401 Bad credentials'); process.exit(1); }
+process.stdout.write('retried');
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, ['--require', preload, resolve('bin/metered-gh.mjs'), 'exec-hammer', 'api', 'fixture'], {
+    env: f.env, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'retried');
+  assert.equal(readFileSync(calls, 'utf8'), 'call\ncall\n');
+  assert.equal(f.count(), 2);
+});
+
+test('cross-user dispute refreshes before sudo and strips command environment even with env retention', t => {
+  const f = fixture(t);
+  f.env.HAM_NODE_BIN = process.execPath;
+  f.env.MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND = 'exit 99';
+  f.env.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND = 'exit 98';
+  writeFileSync(join(f.dir, 'sudo'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const assert = require('node:assert/strict');
+const args = process.argv.slice(2);
+assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'fixture-owner']);
+assert.ok(!args.some(arg => arg.startsWith('--preserve-env')));
+const result = spawnSync('/usr/bin/env', args.slice(5), { env: process.env, stdio: 'inherit' });
+process.exit(result.status ?? 99);
+`, { mode: 0o755 });
+  const source = readFileSync(resolve('templates/hammer-prompt.md'), 'utf8');
+  const setup = source.slice(source.indexOf('HAM_DISPUTE_RUN=()'), source.indexOf('DISPUTED_HEAD=$'))
+    .replace('"$(id -un)"', '"fixture-worker"').replaceAll('<<ROOT_DIR>>', resolve('.'));
+  const verify = `const assert = require('node:assert/strict');
+assert.equal(process.env.GH_TOKEN, ${JSON.stringify(fresh)});
+assert.equal(process.env.GITHUB_TOKEN, ${JSON.stringify(fresh)});
+for (const key of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND', 'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND']) assert.equal(process.env[key], undefined);
+process.stdout.write('owner received static credential');`;
+  const run = `HAM_DISPUTE_OWNER=fixture-owner\n${setup}\n"\${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" -e ${quote(verify)}`;
+  const result = spawnSync('/bin/bash', ['-c', run], { env: f.env, encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'owner received static credential');
+  assert.equal(f.count(), 1);
+
+  const failed = spawnSync('/bin/bash', ['-c', run], {
+    env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'exit 1' }, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(failed.status, 1);
+  assert.equal(failed.stdout, '');
+});
+
 test('shell credential guards admit refresh-only entitlements and reject ambient credentials', () => {
   for (const [file, expectedCount] of [['bin/hammer-publish.sh', 2], ['bin/hammer-verify-head.sh', 1]]) {
     const source = readFileSync(resolve(file), 'utf8');

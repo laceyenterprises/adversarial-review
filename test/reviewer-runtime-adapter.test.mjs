@@ -844,6 +844,46 @@ test('agent-os-hq validates missing and malformed artifacts', async () => {
   }
 });
 
+test('REVIEWVALID-01: agent-os-hq refuses a template-echo artifact as reviewer-output', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const artifactPath = readFileSync(promptPath, 'utf8').match(/^Artifact path: (.+)$/m)?.[1];
+          writeFileSync(artifactPath, [
+            '## Summary', '<text>', '', '## Blocking issues', '- **<Title>**', '  - **File:** `<path>`',
+            '  - **Lines:** `<range>`', '  - **Problem:** <one paragraph>', '', '## Non-blocking issues', '- None.',
+            '', '## Suggested fixes', '<text>', '', '## Verdict', 'Request changes', '',
+          ].join('\n'));
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_template_echo' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const echoed = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 16, linearTicketId: 'LAC-568' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-template-echo',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(echoed.ok, false);
+    assert.equal(echoed.reviewBody ?? null, null);
+    assert.equal(echoed.failureClass, 'reviewer-output');
+    assert.match(echoed.stderrTail, /reviewer reply rejected: template placeholders/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

@@ -346,14 +346,17 @@ function normalizeReviewVerdict(verdict) {
 }
 
 // normalizeWhitespace is used directly by reviewer.mjs, so it is exported here
-// rather than duplicated inline.
+// rather than duplicated inline. The heading promotion and verdict-line
+// normalizer are shared with the strict reply check in review-reply.mjs.
 export {
   classifyStructuredBlockingIssues,
   extractReviewVerdict,
   looksLikeRuntimeJunk,
   normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
+  normalizeVerdictSectionLine,
   normalizeWhitespace,
+  promoteCanonicalReviewSectionHeadings,
   sanitizeCodexReviewPayload,
   sanitizeReviewPayloadBestEffort,
 };

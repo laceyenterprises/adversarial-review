@@ -61,6 +61,7 @@ import {
   sanitizeReviewPayloadBestEffort,
   sanitizeCodexReviewPayload,
 } from './kernel/verdict.mjs';
+import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   mintClaudeCodeRemediationBrokerToken,
@@ -3673,6 +3674,9 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
           throw error;
         }
       }
+      // REVIEWVALID-01: one template-echo chunk must not reach the merged review.
+      assertReviewerReply(result.rawReviewText ?? result.reviewText, {
+        onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
       chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
       execution ||= result.execution || null;
       chunkReviews.push({

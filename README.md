@@ -263,6 +263,27 @@ output that lacks a `## Verdict` section throws, not warns. The
 philosophy is that the cost of a missed quality gate is higher than the
 cost of an explicit, recoverable failure.
 
+A reply that echoes the output template is not a review either
+(REVIEWVALID-01). Before anything is posted, `src/kernel/review-reply.mjs`
+checks the raw reply of every reviewer model, every oversized-diff chunk and
+every hosted `agent-os-hq` artifact. It rejects a reply if:
+
+- a line or field is exactly a template placeholder (`<Title>`, `<path>`,
+  `<range>`, `<one paragraph>`, `<text>`; the list is derived from the
+  prompts' `Output requirements:` block);
+- any text other than the optional `## Adversarial Review …` header comes
+  before the first required heading;
+- a required heading appears twice;
+- `## Verdict` is not the last section, or anything follows its verdict line.
+
+A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
+on the bounded `reviewer-output` path and records the reason in
+`failure_message`. It is never posted and never stored as a verdict. As
+defence in depth, `parseReviewFindings` reads a section whose finding title or
+file is a bare `<…>` token as `unknown` with `malformed: 'template-placeholder'`.
+The rescue classifier then reports `malformed-review` and the closer refuses,
+so neither treats it as an addressable finding.
+
 **7a. But refusing is not the same as dropping.** The reviewer is resolved
 from the worker-class prefix in the PR title, and a dependency bot cannot
 produce one — so for a while those PRs were written to a *terminal*

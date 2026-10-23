@@ -21,6 +21,7 @@ import {
 } from '../run-state.mjs';
 import { stripForbiddenFallbackEnv } from '../cli-direct/index.mjs';
 import { isReviewerSubprocessTimeout } from '../cli-direct/classification.mjs';
+import { assertReviewerReply } from '../../../kernel/review-reply.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FORBIDDEN_FALLBACKS = ['api-key', 'anthropic-api-key'];
@@ -241,6 +242,8 @@ function validateReviewArtifact(markdown) {
   if (!['request-changes', 'comment-only', 'approved'].includes(verdict)) {
     throw new Error('review artifact missing recognized Verdict value');
   }
+  // REVIEWVALID-01: a template echo fails as reviewer-output, never a verdict.
+  assertReviewerReply(markdown);
   return sanitized;
 }
 

@@ -92,6 +92,7 @@ import {
   resolveReviewerWorkspaceStateDir,
 } from './reviewer-workspace.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
@@ -2151,6 +2152,8 @@ async function main() {
     } else {
       reviewText = dispatch.reviewText;
     }
+    // REVIEWVALID-01: a template echo is never posted; chunk replies were checked one by one.
+    if (!dispatch.chunked) assertReviewerReply(rawReviewText, { onRejected: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }) });
     console.error(`[reviewer] DEBUG: review completed (${reviewText.length} bytes)`);
   } catch (err) {
     if (effectiveModel === 'claude') captureLocalReviewerUsage({ model: effectiveModel, workspacePath: reviewerSubprocessCwd, startedAt: reviewerStartedAt, rootDir: ROOT, failed: true });

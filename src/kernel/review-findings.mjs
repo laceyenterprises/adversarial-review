@@ -282,15 +282,27 @@ function parseNonBlockingFindingsSection(reviewBody) {
 
 }
 
+// REVIEWVALID-01: a title or file that is a bare angle-bracket token
+// (`<Title>`, `<path>`) is the output template echoed back, not a finding.
+// Inline code such as `<T>` inside a longer title does not match.
+function isTemplatePlaceholderFinding(finding) {
+  const bare = (value) => String(value ?? '').trim().replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/g, '').trim();
+  return [finding?.title, finding?.file].some((value) => /^<[^<>\n]+>$/.test(bare(value)));
+}
+
 // One count/identity contract for attestations and merge eligibility. Missing
 // sections remain unknown; unrecognized content is conservatively a finding.
+// A section holding a template-placeholder finding is malformed: it reads as
+// unknown, so no consumer counts, remediates or merges on it.
 function parseReviewFindings(body) {
   const normalized = String(body ?? '').replace(/\r\n/g, '\n');
-  const classify = (findings) => ({
-    count: findings?.length ?? 0,
-    state: findings === null ? 'unknown' : 'known',
-    findings: findings ?? [],
-  });
+  const classify = (findings) => (findings?.some(isTemplatePlaceholderFinding)
+    ? { count: 0, state: 'unknown', malformed: 'template-placeholder', findings: [] }
+    : {
+      count: findings?.length ?? 0,
+      state: findings === null ? 'unknown' : 'known',
+      findings: findings ?? [],
+    });
   const blocking = classify(parseBlockingFindingsSection(normalized));
   const nonBlocking = classify(parseNonBlockingFindingsSection(normalized));
   return {
@@ -301,4 +313,4 @@ function parseReviewFindings(body) {
   };
 }
 
-export { isNoneFindingsSentinelOnly, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };
+export { isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };

@@ -335,6 +335,9 @@ new PR
   per-call budgets, and cannot exceed the unscaled chunk cap or timer limit.
   Orphan reconciliation and detached reservation expiry read the persisted plan
   budget; no lifecycle state or recovery cap changes.
+  Detached reservation expiry uses this database budget only for Gemini;
+  Codex and Claude reservations retain their streamed process ceiling rather
+  than the legacy claim timeout, including after watcher restart.
 - A reviewer size preflight refusal exits with reserved CLI code 76 and settles
   as terminal `reviewer-prompt-too-large` on that head, without lease recovery.
   Only the typed preflight error selects this exit code and queues the

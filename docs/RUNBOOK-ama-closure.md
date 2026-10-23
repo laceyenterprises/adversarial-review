@@ -4703,10 +4703,28 @@ admission-cache lookup and rate-limit accounting, including when dispatch only
 supplies a refresh command. Each invocation, including after a CI wait, runs
 that variable's `<TOKEN_VAR>_REFRESH_COMMAND`, falling back to the launch
 environment's `HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND`. The trusted command has a fixed
-10-second timeout and must print only the new token on stdout. Its diagnostics
-are discarded. After an actual throttle wait it refreshes again immediately
-before execution and attributes the response to that credential. Without a
-refresh command, the current token is used unchanged.
+10-second timeout. Its diagnostics are discarded. After an actual throttle wait
+it refreshes again immediately before execution and attributes the response to
+that credential. Without a refresh command, the current token is used unchanged.
+
+The launch refresh command (`hq github-token refresh`) prints one
+`export NAME=VALUE` line per variable, each value quoted as Python's
+`shlex.quote` does (HAMTOKEN-06). The helper takes the token from the session's
+entitled variable, falling back to `GH_TOKEN`; it also accepts a single bare
+token line. Any other output is rejected as `failed (empty or invalid output)`
+without echoing it, and every exported credential value is redacted.
+
+The refresh before a call is an optimisation. When it fails and the session
+already holds an entitled token (from `HAMMER_LACEY_GH_TOKEN`,
+`MERGE_AGENT_GH_TOKEN` or an earlier refresh; an ambient `GH_TOKEN` does not
+count), the call proceeds with that token and the process
+writes one warning to stderr, naming only the outcome:
+`hammer-token: warning: proactive entitled token refresh failed (...); continuing with the held token`.
+That warning means the refresh command is broken while the held token still
+works; repair the launch refresh path before the held token expires. Without a
+held token the call still fails before GitHub. When the held token's
+`<TOKEN_VAR>_EXPIRES_AT` (ISO-8601, from the launch environment or the last
+refresh) is more than ten minutes away, the proactive refresh is skipped.
 
 Audit publication, gate-cap closing status and pushed-attestation preflights also
 accept a refresh command alone: `HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND`,
@@ -4723,7 +4741,7 @@ Service/reviewer calls with only `HAM_ROOT_DIR` and generic launch refresh retai
 their own credentials.
 
 A 401 or `Bad credentials` response forces one more refresh and one retry of the
-same call. A second rejection reports that refresh succeeded but the retry was
+same call. That forced refresh must succeed; it has no held-token fallback. A second rejection reports that refresh succeeded but the retry was
 rejected; unavailable, failed, empty or invalid refresh output reports its own
 outcome. Closer failures never invoke the watcher's broker refresh path. Token
 values are redacted from returned output and errors. Use `ham_gh` and `ham_pr`

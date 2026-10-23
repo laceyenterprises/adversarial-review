@@ -13,6 +13,14 @@ import { githubCredential, githubBudgetKey, markGitHubRateLimited, withGitHubBud
 const expired = 'synthetic-expired-token';
 const fresh = 'synthetic-fresh-token';
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+// Python shlex.quote, as the launch refresh command quotes each exported value.
+const shlexQuote = value => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
+// The real producer shape: one export line per variable. The fixture's expiry is
+// inside the skip margin, so every call still refreshes.
+const exportLines = (entitled, token, { expiresAt = new Date(Date.now() + 60_000).toISOString(), ...overrides } = {}) =>
+  Object.entries({ [entitled]: token, GH_TOKEN: token, GITHUB_TOKEN: token,
+    [`${entitled}_EXPIRES_AT`]: expiresAt, GH_TOKEN_EXPIRES_AT: expiresAt, ...overrides })
+    .map(([key, value]) => `export ${key}=${shlexQuote(value)}\n`).join('');
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-token-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -21,7 +29,7 @@ function fixture(t) {
   writeFileSync(command, `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(refreshes)}, 'refresh\\n');
 process.stderr.write(${JSON.stringify(fresh)});
-process.stdout.write(${JSON.stringify(fresh)});
+process.stdout.write(${JSON.stringify(exportLines('HAMMER_LACEY_GH_TOKEN', fresh))});
 `);
   const env = { PATH: dir, HOME: dir, HAM_ROOT_DIR: dir, HAMMER_LACEY_GH_TOKEN: expired,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
@@ -115,8 +123,9 @@ process.stdout.write('owner received static credential');`;
   assert.equal(result.stdout, 'owner received static credential');
   assert.equal(f.count(), 1);
 
+  // Without a held token a failed refresh still stops before crossing users.
   const failed = spawnSync('/bin/bash', ['-c', run], {
-    env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'exit 1' }, encoding: 'utf8', timeout: 10000,
+    env: { ...f.env, HAMMER_LACEY_GH_TOKEN: '', HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'exit 1' }, encoding: 'utf8', timeout: 10000,
   });
   assert.equal(failed.status, 1);
   assert.equal(failed.stdout, '');
@@ -273,15 +282,173 @@ test('credentialEnv survives gh-cli allowlisting without falling through to watc
 });
 
 for (const command of ['exit 1', "printf ''", "printf 'invalid output'"]) {
-  test(`failed refresh fails before GitHub: ${command}`, async () => {
+  test(`failed refresh without a held token fails before GitHub: ${command}`, async () => {
     await assert.rejects(meteredExecFile(async () => assert.fail('no GitHub call'), 'gh', ['api', 'fixture'], {
-      env: { HAM_ROOT_DIR: '/synthetic/closer', HAMMER_LACEY_GH_TOKEN: expired, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command },
+      env: { HAM_ROOT_DIR: '/synthetic/closer', HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command },
     }), /refresh failed/);
   });
 }
 
+test('export-line output with a single-quoted value yields the entitled token', () => {
+  const token = 'synthetic~quoted~token';
+  const other = "synthetic'other";
+  const output = exportLines('HAMMER_LACEY_GH_TOKEN', token, { GH_TOKEN: 'synthetic-generic-token', GITHUB_TOKEN: other });
+  assert.match(output, /^export HAMMER_LACEY_GH_TOKEN='synthetic~quoted~token'$/m);
+  assert.match(output, /^export GITHUB_TOKEN='synthetic'"'"'other'$/m);
+  const session = hammerTokenSession({ env: { HAM_ROOT_DIR: '/synthetic/closer',
+    HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: `printf %s ${quote(output)}` } });
+  assert.equal(session.prepare().env.GH_TOKEN, token);
+  // Every minted value is redacted, not only the selected one.
+  assert.equal(session.redact(`${token} synthetic-generic-token ${other}`), '[redacted] [redacted] [redacted]');
+});
+
+test('export-line output without the session variable falls back to GH_TOKEN', () => {
+  const output = exportLines('SYNTHETIC_ENTITLED_GH_TOKEN', fresh);
+  for (const env of [{ MERGE_AGENT_GH_TOKEN: expired }, {}]) {
+    const session = hammerTokenSession({ hammerToken: true, env: { ...env, HAM_ROOT_DIR: '/synthetic/closer',
+      HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: `printf %s ${quote(output)}` } });
+    assert.equal(session.prepare().env.GH_TOKEN, fresh);
+  }
+});
+
+test('a bare token line is still accepted', () => {
+  for (const output of [fresh, `${fresh}\n`, `\n${fresh}\r\n`]) {
+    const session = hammerTokenSession({ env: { HAM_ROOT_DIR: '/synthetic/closer',
+      HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: `printf %s ${quote(output)}` } });
+    assert.equal(session.prepare().env.GH_TOKEN, fresh);
+  }
+});
+
+const secret = 'synthetic-leaked-value';
+for (const output of [
+  `GH_TOKEN=${secret}`,
+  `export GH_TOKEN="${secret}"`,
+  `export GH_TOKEN=$(printf ${secret})`,
+  `export GH_TOKEN=${secret} extra`,
+  `export GH_TOKEN=''`,
+  `export GH_TOKEN='${secret}`,
+  `export GH_TOKEN='${secret} ${secret}'`,
+  `export GH_TOKEN_EXPIRES_AT=${secret}`,
+  `export GH_TOKEN=${secret}\nnot an export line`,
+  `${secret}\n${secret}`,
+  `'${secret}'`,
+]) {
+  test(`garbage refresh output is rejected without leaking it: ${JSON.stringify(output.replaceAll(secret, 'S'))}`, () => {
+    const session = hammerTokenSession({ env: { HAM_ROOT_DIR: '/synthetic/closer',
+      HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: `printf %s ${quote(output)}` } });
+    assert.throws(() => session.prepare(), error => {
+      assert.match(error.message, /refresh failed \(empty or invalid output\)/);
+      assert.doesNotMatch(`${error.message}\n${error.stderr}\n${error.stack}`, new RegExp(secret));
+      return true;
+    });
+  });
+}
+
+// Each case runs in a fresh process: the warning is once per process.
+function runSessions(env, script) {
+  return spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { meteredExecFile } from ${JSON.stringify(new URL('../src/metered-gh.mjs', import.meta.url).href)};
+    const expired = ${JSON.stringify(expired)}, fresh = ${JSON.stringify(fresh)};
+    ${script}`], { env, encoding: 'utf8', timeout: 10000 });
+}
+
+for (const command of ['exit 1', `printf %s ${quote(`export GH_TOKEN="${fresh}"`)}`]) {
+  test(`a failed proactive refresh with a held token proceeds with it and warns once: ${command}`, t => {
+    const f = fixture(t);
+    f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = command;
+    const result = runSessions(f.env, `
+      for (let call = 0; call < 2; call++) {
+        const out = await meteredExecFile(async (_command, _args, options) => ({ stdout: options.env.GH_TOKEN }), 'gh', ['api', 'fixture'], {});
+        if (out.stdout !== '[redacted]') throw new Error('held token was not used');
+        console.log('call ' + call + ' used the held token');
+      }`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'call 0 used the held token\ncall 1 used the held token\n');
+    assert.match(result.stderr, /proactive entitled token refresh failed \((?:command error|empty or invalid output)\); continuing with the held token/);
+    assert.equal(result.stderr.match(/proactive entitled token refresh/g).length, 1);
+    assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
+  });
+}
+
+test('a failed refresh after a 401 fails cleanly even when the proactive refresh also failed', t => {
+  const f = fixture(t);
+  f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = `printf %s ${quote(fresh)} >&2; exit 1`;
+  const result = runSessions(f.env, `
+    let calls = 0;
+    try {
+      await meteredExecFile(async (_command, _args, options) => {
+        calls++;
+        throw Object.assign(new Error('HTTP 401 Bad credentials ' + options.env.GH_TOKEN), { stderr: options.env.GH_TOKEN });
+      }, 'gh', ['api', 'fixture'], {});
+    } catch (error) {
+      console.log(JSON.stringify({ calls, message: error.message, stderr: error.stderr, handled: error.hammerAuthHandled }));
+    }`);
+  assert.equal(result.status, 0, result.stderr);
+  const outcome = JSON.parse(result.stdout);
+  assert.equal(outcome.calls, 1);
+  assert.equal(outcome.handled, true);
+  assert.match(outcome.message, /refresh failed \(command error\)/);
+  assert.equal(outcome.stderr, outcome.message);
+  assert.equal(result.stderr.match(/proactive entitled token refresh/g).length, 1);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
+});
+
+test('the metered CLI keeps a held token through a failed proactive refresh without printing it', t => {
+  const f = fixture(t);
+  f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = `printf %s ${quote(`export GH_TOKEN="${fresh}"`)}`;
+  writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+if (process.env.GH_TOKEN !== ${JSON.stringify(expired)}) process.exit(99);
+process.stdout.write(process.env.GH_TOKEN);
+process.stderr.write(process.env.GITHUB_TOKEN);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [resolve('bin/metered-gh.mjs'), 'exec-hammer', 'api', 'fixture'], {
+    env: f.env, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '[redacted]');
+  assert.equal(result.stderr, 'hammer-token: warning: proactive entitled token refresh failed (empty or invalid output); continuing with the held token\n[redacted]');
+});
+
+test('a held token with a comfortably later known expiry skips the proactive refresh but not the forced one', async t => {
+  const f = fixture(t);
+  let calls = 0;
+  const execute = async (_command, _args, options) => {
+    calls++;
+    if (calls === 1) {
+      assert.equal(options.env.GH_TOKEN, expired);
+      throw rejected();
+    }
+    assert.equal(options.env.GH_TOKEN, fresh);
+    return { stdout: 'ok' };
+  };
+  f.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 60 * 60_000).toISOString();
+  assert.equal(hammerTokenSession({ env: f.env }).prepare().env.GH_TOKEN, expired);
+  assert.throws(() => f.count(), /ENOENT/);
+  assert.equal((await meteredExecFile(execute, 'gh', ['api', 'fixture'], { env: f.env })).stdout, 'ok');
+  assert.equal(calls, 2);
+  assert.equal(f.count(), 1, 'only the refresh after the rejection');
+  for (const expiresAt of [new Date(Date.now() + 60_000).toISOString(), 'not-a-time', '4102444800']) {
+    f.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = expiresAt;
+    assert.equal(hammerTokenSession({ env: f.env }).prepare().env.GH_TOKEN, fresh, expiresAt);
+  }
+  assert.equal(f.count(), 4);
+});
+
+test('an ambient GH_TOKEN is neither kept on a failed refresh nor trusted to expire late', t => {
+  const f = fixture(t);
+  const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  const env = { HAM_ROOT_DIR: f.dir, GH_TOKEN: 'synthetic-ambient-worker',
+    GH_TOKEN_EXPIRES_AT: new Date(Date.now() + 60 * 60_000).toISOString(),
+    HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: command };
+  assert.equal(hammerTokenSession({ env, hammerToken: true }).prepare().env.GH_TOKEN, fresh);
+  assert.equal(f.count(), 1);
+  env.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND = 'exit 1';
+  assert.throws(() => hammerTokenSession({ env, hammerToken: true }).prepare(), /refresh failed \(command error\)/);
+});
+
 test('refresh command has a fixed timeout and discards its diagnostics', t => {
   const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
   const command = `exec ${quote(process.execPath)} -e 'process.stderr.write("synthetic-secret"); setInterval(() => {}, 1000)'`;
   assert.throws(() => hammerTokenSession({ env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command } }).prepare(),
     error => /refresh failed \(timeout or signal\)/.test(error.message) && !error.message.includes('synthetic-secret'));

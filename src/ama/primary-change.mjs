@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
-import { proveDerivedArtifacts } from './derived-artifacts.mjs';
+import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
@@ -650,6 +650,23 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     const authorizationCache = new Map();
     const guardReversals = verifiedGuardReversals(evidence, headSha);
     const primary = preservationChanges(evidence.primaryFiles);
+    // Only verified interiors in this exact merge-base/head pair are derived.
+    // Keep marker lines, renames, opaque files and every outside unit protected.
+    for (const [path, change] of primary) {
+      if (change.opaque || change.renamed || change.status !== 'modified') continue;
+      const blocks = (evidence.generatedBlockProofs || []).filter(proof => proof.path === path
+        && proof.headSha === headSha && proof.mergeBase === evidence.mergeBase
+        && Number.isSafeInteger(proof.start) && Number.isSafeInteger(proof.end)
+        && proof.start > 0 && proof.end >= proof.start);
+      const derived = unit => blocks.some(block => unit.start >= block.start && unit.end <= block.end);
+      change.removed = new Map();
+      for (const region of change.regions) {
+        region.preservationUnits = regionUnits(region).filter(unit => !derived(unit));
+        region.removedLines = region.removedLines.filter(line => !derived({ start: line.position, end: line.position + 1 }));
+        for (const { text } of region.removedLines) change.removed.set(text, (change.removed.get(text) || 0) + 1);
+      }
+      change.derivedOnly = blocks.length > 0 && change.regions.every(region => regionUnits(region).length === 0);
+    }
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
     const final = preservationChanges(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
     const ignored = [...primary.values()].reduce((count, change) => count + (change.whitespaceOnlyUnitsIgnored || 0), 0);
@@ -668,6 +685,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     for (const [path, change] of primary) {
       if (guardReversals.some(proof => proof.path === path)) continue;
       const actual = final.get(path);
+      if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
       if (!isTestPath(change.filename) && actual && isTestPath(actual.filename)) {
@@ -1296,6 +1314,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
 // Keep history failures distinct and retain the existing terminal-state handling.
 export async function fetchPrimaryChange(args, {
   fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
+  proveGeneratedBlocksImpl = proveGeneratedBlocks,
 } = {}) {
   let history;
   if (args.get.persistPrimaryChange && primaryChangeStoreOwned(primaryChangeRoot(args))) {
@@ -1327,7 +1346,20 @@ export async function fetchPrimaryChange(args, {
   const guardEvidence = await fetchGuardReversals(args, history);
   const derivedArtifacts = await proveDerivedArtifactsImpl(args, history);
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
-  return { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
+  // Outside the history cache: a missing sandbox/checkout is retryable optional
+  // evidence, and an old cached refusal must benefit without manual invalidation.
+  for (let attempt = 0; attempt < (result.primaryFiles?.length || 0); attempt++) {
+    const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
+    if (refusal.reason !== 'primary-change-reverted') break;
+    const proofs = await proveGeneratedBlocksImpl({ ...args, rootDir: primaryChangeRoot(args) }, result, refusal);
+    if (!proofs.length) break;
+    const previous = result.generatedBlockProofs || [];
+    const added = proofs.filter(proof => !previous.some(entry => JSON.stringify(entry) === JSON.stringify(proof)));
+    if (!added.length) break;
+    result.generatedBlockProofs = [...previous, ...added];
+  }
+  return result;
 }
 
 // Explicit operator context only. Merge-authority callers use fetchPrimaryChange

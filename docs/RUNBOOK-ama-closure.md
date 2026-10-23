@@ -2550,6 +2550,73 @@ They are collected afresh after history-cache reuse, including under the merge
 lease; an old cached refusal can therefore recover without a cache migration.
 No label or CI status substitutes for this proof.
 
+<a id="derivedblock-01"></a>
+
+DERIVEDBLOCK-01: generated block interiors can also prove preservation by
+regeneration. A repository declares them in its checked-in `package.json`
+application manifest, for example:
+
+```json
+{
+  "generatedArtifacts": [
+    {
+      "path": "docs/*.md",
+      "start": "<!-- smv:state-machines:start -->",
+      "end": "<!-- smv:state-machines:end -->",
+      "cwd": ".",
+      "command": ["node", "scripts/render-inventory.mjs"]
+    }
+  ]
+}
+```
+
+`path` is a repository-relative path or glob (`*`, `**`, `?`); `cwd` is relative to
+the repository root and `command` is an executable/argument array, with no shell
+expansion. Declarations must already exist at the merge base and retain the same
+path, cwd, markers and ordered command arguments at the final head; manifest key
+ordering is immaterial. Marker lines must be unique, exact, ordered lines in both
+versions; the markers themselves remain protected author content. Only existing
+modified text files qualify; additions, deletions, renames and opaque files keep
+their existing rules.
+Each matching declaration is evaluated independently: missing or ambiguous markers
+and generator failures skip that candidate without discarding other proofs.
+Skipped candidates emit bounded diagnostics naming the artifact path, declared
+working directory and failure; missing or non-directory working directories are
+reported explicitly. A failed candidate never supplies preservation evidence.
+
+On a region refusal, shared primary-change collection creates an independent
+scratch Git worktree at the exact head, using `localRepository`, the domain's
+`remediationCloneReferences[repo]`, or a matching `rootDir` checkout. The local
+clone must contain both immutable commits. Both manifests are read from this local
+object store; proof retries issue no GitHub manifest requests, including when
+the merge base has no generated declarations. Missing/unreadable references or
+commits retain the refusal; there is no public HTTPS or ambient-auth fallback.
+Each generator runs from a fresh head checkout with the declared block interior
+cleared. It must
+recreate the final-head block bytes exactly, so a no-op or hand-edited output
+cannot supply proof. Verified base-coordinate interiors are excluded from author
+line preservation; these match the old-side coordinates of primary diff units,
+even when the author inserts or deletes lines above a block. An empty merge-base
+interior has a zero-width interval that admits insertions at that boundary,
+without admitting positive-width marker edits. Outside regions and
+other files are still evaluated normally.
+The proof binds the path, head SHA and merge base. It is collected after history
+cache reuse, so cached refusals can recover without purging history.
+
+Generators run with a sanitized environment, scratch HOME, no host credentials,
+network denied and writes confined to scratch, using macOS `sandbox-exec` or
+Linux `bwrap`. macOS permits reading the root directory entry and metadata of
+scratch ancestors for runtime startup, without granting reads of other descendants.
+Linux creates every scratch mount ancestor in parent-first order, including
+nested custom temporary directories, and exposes only
+the dynamic loader cache from `/etc`, rather than host configuration. Each
+generator has a ten-second process-group deadline; each checkout/proof attempt has
+a thirty-second deadline. No dependency installation
+or network access is available to generators. Missing sandbox support, unavailable
+commits, generator failures, duplicate/missing markers and byte mismatches retain
+the existing refusal. This supplies evidence to the existing primary-change
+predicate and adds no CI check, status, override label or host config key.
+
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary

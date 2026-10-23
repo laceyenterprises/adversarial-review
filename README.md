@@ -1424,6 +1424,13 @@ ownerless recovery stays fenced even when only packaging audit history remains;
 no repeat page or external command is allowed. The closure phase refuses a
 stale head. These checks do not waive any exact-head or primary-change predicate.
 
+The primary-change predicate can prove generated documentation preserved by
+regenerating a declared block at the final head. Declarations live in the target
+repository's existing `package.json` manifest and must be unchanged from the
+merge base. A bounded, network-denied scratch generator must reproduce the block
+exactly; marker lines and changes outside the block remain protected. See
+DERIVEDBLOCK-01 in the [AMA closure runbook](docs/RUNBOOK-ama-closure.md).
+
 [post-merge-verify.json](post-merge-verify.json) is the SMV-01 declaration for the
 registered `tools/adversarial-review` repository integration. Parent discovery
 reads it beside this README and invokes this same command from the deploy root;

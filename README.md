@@ -613,7 +613,10 @@ See the [waiter contract](docs/data-model/merge-lease-waiters.md).
 LAC-2087 extends cleanup to posted-review candidate exits, including operator
 skip before any closure attempt. The clean smoke proves abandoned daemon waiter
 removal with a live watcher PID, preservation of other FIFO requests and next
-closer acquisition. `daemon-waiter-lifecycle` fixtures also exercise head changes,
+closer acquisition. The concrete coexistence operation owns cleanup after a soft
+caller deadline even on terminal/stacked-base exits before closure dispatch or
+rejection; eventual eligible contention retains its reservation.
+`daemon-waiter-lifecycle` fixtures also exercise head changes,
 terminal candidates, an unchanged active holder fence and concrete active
 closure ownership across a soft caller deadline. No lifecycle states
 or merge gates change. Runtime recovery requires separate read-only observations

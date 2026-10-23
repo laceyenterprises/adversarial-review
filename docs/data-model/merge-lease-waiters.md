@@ -38,8 +38,10 @@ reservation still expires after the stored deadline.
 LAC-2087 extends that cleanup boundary to the posted-review candidate handler:
 an operator skip, terminal candidate, or moved head can exit before closure ever
 attempts another acquire. Only the nested daemon `lease-contended` result keeps
-the current reservation. A concrete closure promise that outlives the caller’s
-soft deadline retains its reservation until its inner attempt settles. The
+the current reservation. A concrete coexistence promise that outlives the caller’s
+soft deadline owns its own reservation scope until settlement. Terminal and
+stacked-base exits before closure dispatch, and rejected operations, remove the
+reservation; eventual eligible lease contention retains it. The
 long-lived watcher PID proves service liveness,
 not an active acquire. Cleanup uses the existing per-base mutation lock and
 removes only this PR's obsolete daemon requests; ordinary waiters, other PRs'

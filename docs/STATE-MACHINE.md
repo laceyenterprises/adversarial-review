@@ -981,8 +981,9 @@ the existing capped watcher wake path. No holder is preempted.
 LAC-2087 puts the posted-review candidate exits inside this cleanup lifecycle:
 operator skip and terminal/head-change exits remove abandoned daemon ownership
 even when no next acquire runs. Only eligible daemon contention retains it;
-a concrete in-flight closure promise also retains ownership across a soft caller
-deadline until its inner scope settles. Watcher PID liveness supplies no acquire
+a concrete in-flight coexistence promise also retains ownership across a soft
+caller deadline until its reservation scope settles, including terminal or
+stacked-base exits before closure dispatch and rejected operations. Watcher PID liveness supplies no acquire
 ownership. Other FIFO waiters and the
 holder fence are unchanged. The clean smoke covers empty-lane progress after a
 hold with a live watcher PID; dedicated fixtures also cover head changes and

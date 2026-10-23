@@ -85,8 +85,9 @@ export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head
     // The posted-review boundary includes exits that never invoke closure.
     const closure = result?.amaClosureResult || result;
     const reason = closure?.daemonCleanMerge?.reason || closure?.reason;
-    // A soft caller deadline can return while the concrete closure promise is
-    // still running. Its inner reservation scope owns eventual cleanup.
+    // A soft caller deadline can return while the concrete coexistence promise
+    // is still running. Its reservation scope must own eventual cleanup even
+    // when closure dispatch is never reached.
     prune(reason === 'lease-contended' || isAttemptActive() ? head : null);
   }
 }

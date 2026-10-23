@@ -689,7 +689,12 @@ async function handlePostedReviewRowWithinReadCache({
       coexistenceDecision = await timePostedReviewStep(
         'resolveMergeAgentCoexistence', stepKey, logger, async ({ signal }) => {
           closureInFlight = true;
-          try { return await resolveMergeAgentCoexistenceForWatcherImpl({
+          // This scope follows the concrete promise past a soft deadline,
+          // including terminal/stacked exits that never enter closure dispatch.
+          try { return await withDaemonMergeReservation({ rootDir, repo: repoPath,
+            base: candidate?.baseBranch, pr: prNumber,
+            head: candidate?.headSha || currentRevisionRef,
+          }, () => resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
             reviewStateRow: existing,
             reviewStateDb,
@@ -708,7 +713,7 @@ async function handlePostedReviewRowWithinReadCache({
             signal,
             operationTimeoutMs: coexistenceOperationTimeoutMs,
             operationTracker: coexistenceOperationTracker,
-          }); } finally { closureInFlight = false; }
+          })); } finally { closureInFlight = false; }
         },
         undefined,
         {

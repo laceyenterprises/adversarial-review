@@ -4140,8 +4140,11 @@ wake cap applies; a failed wake write falls back to the next poll. See the
 LAC-2087: the posted-review candidate handler owns reservation cleanup even when
 an operator skip or terminal candidate prevents closure dispatch. It drops the
 old head before evaluating closure and keeps the current reservation only for
-eligible daemon lease contention or while its concrete closure promise still
-runs after a soft caller deadline (the inner attempt owns eventual cleanup).
+eligible daemon lease contention or while its concrete coexistence promise still
+runs after a soft caller deadline. That entire operation owns a reservation
+scope, including terminal and stacked-base exits before closure dispatch; its
+settlement removes the reservation on those exits or errors and retains it only
+for eligible daemon lease contention.
 A live watcher PID does not prove an acquire
 is still active. Other PRs' daemon reservations, ordinary FIFO waiters and the
 holder fence are preserved. Offline `daemon-waiter-lifecycle` fixtures reproduce

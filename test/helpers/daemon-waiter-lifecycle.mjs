@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { handlePostedReviewRow } from '../../src/posted-review-row.mjs';
+import { resolveMergeAgentCoexistenceForWatcher } from '../../src/ama-closure-orchestration.mjs';
 import {
   acquireDaemonMergeLease, acquireMergeLease, inspectMergeLease,
   mergeLeaseFilePath, readMergeLeaseWaiters, releaseMergeLease,
@@ -61,7 +62,12 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
   }
   // No service exit, timeout or PID death authorizes this cleanup.
   assert.doesNotThrow(() => process.kill(process.pid, 0));
-  held = !['head', 'deadline'].includes(change);
+  const deadline = change.startsWith('deadline');
+  held = change !== 'head' && change !== 'terminal' && !deadline;
+  const resolveWithoutClosure = options => resolveMergeAgentCoexistenceForWatcher({
+    ...options,
+    maybeDispatchAmaClosureForImpl: () => assert.fail('early coexistence exit must not dispatch closure'),
+  });
   if (change === 'head') {
     candidate.headSha = 'new-head';
     args.resolveMergeAgentCoexistenceForWatcherImpl = async () => {
@@ -69,19 +75,35 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
       return { outcome: 'ama-pending', amaClosureResult: { reason: 'head-moved' } };
     };
   }
-  if (change === 'terminal') { candidate.prState = 'merged'; candidate.merged = true; }
+  if (change === 'terminal' || change === 'deadline-terminal') {
+    candidate.prState = 'merged'; candidate.merged = true;
+  }
+  if (change === 'deadline-closed') candidate.prState = 'closed';
+  if (change === 'deadline-stacked') candidate.stackedBaseHold = { reason: 'stacked-base-not-ready' };
+  if (change === 'terminal') args.resolveMergeAgentCoexistenceForWatcherImpl = resolveWithoutClosure;
   let result;
-  if (change === 'deadline') {
+  if (deadline) {
     const previous = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
     process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
     let finish;
     const pending = new Promise(resolve => { finish = resolve; });
     let active;
-    args.resolveMergeAgentCoexistenceForWatcherImpl = () => {
-      active = withDaemonMergeReservation({ ...lane, pr: 2, head: 'old-head' }, async () => {
+    args.resolveMergeAgentCoexistenceForWatcherImpl = options => {
+      const attempt = async () => {
         await pending;
+        if (change === 'deadline-error') throw new Error('coexistence failed before closure');
+        if (['deadline-terminal', 'deadline-closed', 'deadline-stacked'].includes(change)) {
+          return resolveWithoutClosure(options);
+        }
+        if (change === 'deadline-contended') return { outcome: 'ama-pending',
+          amaClosureResult: { reason: 'daemon-deferred', daemonCleanMerge: { reason: 'lease-contended' } } };
         return { outcome: 'ama-pending', amaClosureResult: { reason: 'not-eligible' } };
-      });
+      };
+      // Only the original fixture enters closure's inner reservation scope.
+      // The other cases must be owned by the concrete coexistence operation.
+      active = change === 'deadline'
+        ? withDaemonMergeReservation({ ...lane, pr: 2, head: 'old-head' }, attempt)
+        : attempt();
       return active;
     };
     try {
@@ -91,11 +113,22 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
         'concrete in-flight closure keeps its reservation across the soft deadline');
     } finally {
       finish();
-      await active;
+      if (change === 'deadline-error') await assert.rejects(active, /coexistence failed before closure/);
+      else await active;
+      // Drain the detached operation's promise chain, including its cleanup.
+      await new Promise(resolve => setImmediate(resolve));
       if (previous === undefined) delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
       else process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = previous;
     }
   } else result = await handlePostedReviewRow(args);
+  if (change === 'terminal') assert.equal(result.prTerminal, true, 'unheld candidate reaches terminal coexistence guard');
+  if (change === 'deadline-contended') {
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [reservation, ...survivors],
+      'eventual eligible contention retains the exact FIFO reservation');
+    candidate.prState = 'closed';
+    args.resolveMergeAgentCoexistenceForWatcherImpl = resolveWithoutClosure;
+    assert.equal((await handlePostedReviewRow(args)).prTerminal, true);
+  }
   assert.equal(acquires, 2, 'hold bypasses the next daemon attempt entirely');
   assert.ok(['operator-skip-label', 'ama-pending', 'coexistence-deadline'].includes(result?.outcome) || result?.prTerminal === true);
   assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), survivors, 'all other FIFO waiters preserved exactly');

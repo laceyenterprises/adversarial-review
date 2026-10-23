@@ -174,6 +174,9 @@ if (scenario === 'clean') {
   assert.equal(leaseHistory.find(row => row.leaseId === served.lease.leaseId).holderRole, 'daemon');
   const { exerciseDaemonWaiterLifecycle } = await import('./daemon-waiter-lifecycle.mjs');
   await exerciseDaemonWaiterLifecycle(join(rootDir, 'abandoned-daemon'), 'hold', { sibling: true });
+  for (const change of ['hold-base-ref', 'hold-base-branch']) {
+    await exerciseDaemonWaiterLifecycle(join(rootDir, change), change);
+  }
   for (const exit of ['terminal', 'closed', 'stacked', 'error', 'contended']) {
     await exerciseDaemonWaiterLifecycle(join(rootDir, `detached-daemon-${exit}`), `deadline-${exit}`);
   }

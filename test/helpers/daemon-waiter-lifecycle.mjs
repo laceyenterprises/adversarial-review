@@ -22,6 +22,7 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
   const row = { review_status: 'posted', reviewer_head_sha: 'old-head' };
   let acquires = 0;
   let held = false;
+  const errors = [];
   const args = {
     rootDir, repoPath: lane.repo, prNumber: 2, existing: row, currentRevisionRef: 'old-head',
     projectGateStatusSafe: async () => ({ decision: held
@@ -38,9 +39,12 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
       return { outcome: 'ama-pending', amaClosureResult: { reason: 'daemon-deferred',
         daemonCleanMerge: { reason: 'lease-contended', waitMessage: 'waiting for the merge lease, position 1' } } };
     },
-    logger: { log() {}, warn() {}, error() {} },
+    logger: { log() {}, warn() {}, error(message) { errors.push(message); } },
   };
-  assert.equal((await handlePostedReviewRow(args)).outcome, 'ama-pending');
+  const firstPass = handlePostedReviewRow(args);
+  assert.equal((await handlePostedReviewRow(args)).outcome, 'posted-review-in-flight',
+    'the PR guard is acquired before the first yielding read');
+  assert.equal((await firstPass).outcome, 'ama-pending');
   const reservation = readMergeLeaseWaiters(rootDir, lane)[0];
   assert.equal(reservation.waiterId, 'daemon_2_old-head');
   // A repeated eligible pass keeps exactly the same FIFO reservation.
@@ -64,6 +68,10 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
   assert.doesNotThrow(() => process.kill(process.pid, 0));
   const deadline = change.startsWith('deadline');
   held = change !== 'head' && change !== 'terminal' && !deadline;
+  if (change === 'hold-base-ref' || change === 'hold-base-branch') {
+    row[change === 'hold-base-ref' ? 'base_ref' : 'baseBranch'] = 'main';
+    delete candidate.baseBranch;
+  }
   const resolveWithoutClosure = options => resolveMergeAgentCoexistenceForWatcher({
     ...options,
     maybeDispatchAmaClosureForImpl: () => assert.fail('early coexistence exit must not dispatch closure'),
@@ -87,38 +95,58 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
     process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
     let finish;
     const pending = new Promise(resolve => { finish = resolve; });
-    let active;
+    let settled;
+    const settlement = new Promise(resolve => { settled = resolve; });
     args.resolveMergeAgentCoexistenceForWatcherImpl = options => {
       const attempt = async () => {
-        await pending;
-        if (change === 'deadline-error') throw new Error('coexistence failed before closure');
-        if (['deadline-terminal', 'deadline-closed', 'deadline-stacked'].includes(change)) {
-          return resolveWithoutClosure(options);
-        }
-        if (change === 'deadline-contended') return { outcome: 'ama-pending',
-          amaClosureResult: { reason: 'daemon-deferred', daemonCleanMerge: { reason: 'lease-contended' } } };
-        return { outcome: 'ama-pending', amaClosureResult: { reason: 'not-eligible' } };
+        try {
+          await pending;
+          if (change === 'deadline-error') throw new Error('coexistence failed before closure');
+          if (['deadline-terminal', 'deadline-closed', 'deadline-stacked'].includes(change)) {
+            return await resolveWithoutClosure(options);
+          }
+          if (change === 'deadline-contended') return { outcome: 'ama-pending',
+            amaClosureResult: { reason: 'daemon-deferred', daemonCleanMerge: { reason: 'lease-contended' } } };
+          return { outcome: 'ama-pending', amaClosureResult: { reason: 'not-eligible' } };
+        } finally { settled(); }
       };
       // Only the original fixture enters closure's inner reservation scope.
       // The other cases must be owned by the concrete coexistence operation.
-      active = change === 'deadline'
+      return change === 'deadline'
         ? withDaemonMergeReservation({ ...lane, pr: 2, head: 'old-head' }, attempt)
         : attempt();
-      return active;
     };
     try {
       result = await handlePostedReviewRow(args);
       assert.equal(result?.outcome, 'coexistence-deadline');
       assert.deepEqual(readMergeLeaseWaiters(rootDir, lane).filter(w => w.priority === 'daemon'), [reservation],
         'concrete in-flight closure keeps its reservation across the soft deadline');
+      for (const head of ['old-head', 'new-head']) {
+        const next = await handlePostedReviewRow({ ...args, currentRevisionRef: head,
+          projectGateStatusSafe: () => assert.fail('a competing poll must not enter the handler'),
+          fetchMergeAgentCandidateImpl: () => assert.fail('a competing poll must not fetch a candidate'),
+        });
+        assert.equal(next.outcome, 'posted-review-in-flight');
+        assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [reservation, ...survivors],
+          'same-PR polls at either head cannot prune the active reservation');
+      }
+      // A different PR still progresses while this one is detached.
+      const unrelated = await handlePostedReviewRow({ ...args, prNumber: 99,
+        currentReviewRowReader: () => null,
+      });
+      assert.equal(unrelated.outcome, 'stale-posted-review-snapshot');
     } finally {
       finish();
-      if (change === 'deadline-error') await assert.rejects(active, /coexistence failed before closure/);
-      else await active;
-      // Drain the detached operation's promise chain, including its cleanup.
+      // No test-owned catch or await on the inner promise: production owns
+      // rejection handling. Let cleanup and any unhandled rejection run.
+      await settlement;
       await new Promise(resolve => setImmediate(resolve));
       if (previous === undefined) delete process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
       else process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = previous;
+    }
+    if (change === 'deadline-error') {
+      assert.ok(errors.some(message => message.includes('failed in background after deadline')
+        && message.includes('coexistence failed before closure')));
     }
   } else result = await handlePostedReviewRow(args);
   if (change === 'terminal') assert.equal(result.prTerminal, true, 'unheld candidate reaches terminal coexistence guard');
@@ -128,6 +156,12 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
     candidate.prState = 'closed';
     args.resolveMergeAgentCoexistenceForWatcherImpl = resolveWithoutClosure;
     assert.equal((await handlePostedReviewRow(args)).prTerminal, true);
+  }
+  if (deadline) {
+    held = true;
+    candidate.prState = 'open'; candidate.merged = false;
+    assert.equal((await handlePostedReviewRow(args)).outcome, 'operator-skip-label',
+      'settlement releases the per-PR guard for the next poll');
   }
   assert.equal(acquires, 2, 'hold bypasses the next daemon attempt entirely');
   assert.ok(['operator-skip-label', 'ama-pending', 'coexistence-deadline'].includes(result?.outcome) || result?.prTerminal === true);

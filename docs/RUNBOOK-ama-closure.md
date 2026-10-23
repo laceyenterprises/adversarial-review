@@ -4145,11 +4145,22 @@ runs after a soft caller deadline. That entire operation owns a reservation
 scope, including terminal and stacked-base exits before closure dispatch; its
 settlement removes the reservation on those exits or errors and retains it only
 for eligible daemon lease contention.
+A process-local guard keyed by review root, repository and PR excludes competing
+posted-review passes, including moved heads, until both the handler and its
+concrete coexistence operation settle. A competing poll returns
+`posted-review-in-flight` without reading candidates or mutating reservations;
+other PRs remain eligible. The next poll can enter after success or rejection.
+`timePostedReviewStep` logs post-deadline failures, and its `Promise.race` keeps
+the work promise's rejection observed after the caller returns. Cleanup falls
+back to the review row's `base_ref` or `baseBranch` when the candidate lacks a base.
 A live watcher PID does not prove an acquire
 is still active. Other PRs' daemon reservations, ordinary FIFO waiters and the
 holder fence are preserved. Offline `daemon-waiter-lifecycle` fixtures reproduce
 acquire → hold/head change → no next acquire, with both empty and held lanes;
 the clean smoke also exercises next-closer progress and surviving daemon priority.
+It also verifies competing-poll exclusion, admission after settlement, missing
+candidate-base cleanup and late failure logging without a test-owned rejection
+handler on the coexistence promise.
 
 Source tests and PR publication do not establish runtime recovery. After normal
 deployment, observe a naturally scheduled hold/head-change pass and record that

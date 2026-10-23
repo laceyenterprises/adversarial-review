@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exerciseDaemonWaiterLifecycle } from './helpers/daemon-waiter-lifecycle.mjs';
 
-for (const change of ['hold', 'head', 'terminal']) {
+for (const change of ['hold', 'hold-base-ref', 'hold-base-branch', 'head', 'terminal']) {
   for (const keepHolder of [false, true]) {
     test(`LAC-2087 ${change} bypasses next acquire with live watcher PID; holder=${keepHolder}`, async t => {
       const rootDir = mkdtempSync(join(tmpdir(), 'daemon-waiter-lifecycle-'));

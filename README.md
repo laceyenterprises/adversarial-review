@@ -616,6 +616,12 @@ removal with a live watcher PID, preservation of other FIFO requests and next
 closer acquisition. The concrete coexistence operation owns cleanup after a soft
 caller deadline even on terminal/stacked-base exits before closure dispatch or
 rejection; eventual eligible contention retains its reservation.
+An in-process guard excludes overlapping passes for the same review root/repo/PR,
+including changed heads, until the handler and concrete operation both settle.
+Other PRs continue; a later poll resumes after settlement. Late failures are
+logged and observed by the step's existing promise race. Cleanup uses the stored
+review base when candidate base metadata is missing. The clean smoke verifies
+these boundaries without catching the detached operation in the test harness.
 `daemon-waiter-lifecycle` fixtures also exercise head changes,
 terminal candidates, an unchanged active holder fence and concrete active
 closure ownership across a soft caller deadline. No lifecycle states

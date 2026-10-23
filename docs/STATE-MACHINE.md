@@ -1812,6 +1812,16 @@ pass refunds failure charges and resumes without contention backoff. The daemon
 keeps priority. All holder transitions, including LEASEFAIR-02's CI retry hold,
 are retained in the bounded per-base JSONL history.
 
+LAC-2087 serializes posted-review handling per review root/repository/PR within
+the watcher process. A soft caller deadline leaves the guard held until the
+concrete coexistence operation and handler both settle, preventing a later poll
+at any head from pruning an active reservation. Competing polls return
+`posted-review-in-flight`; other PRs continue. Success and rejection release the
+guard for the next poll, and late failures remain logged and rejection-observed
+by the existing step promise race. Candidate cleanup falls back to the stored
+review base when candidate base metadata is absent. No durable states or merge
+authority change.
+
 ## Interrupted dispatch intents (LAC-2081)
 
 CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output

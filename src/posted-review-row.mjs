@@ -21,7 +21,7 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   MERGE_AGENT_REQUESTED_LABEL,
@@ -338,12 +338,29 @@ export async function timePostedReviewStep(
   }
 }
 
+// A soft deadline releases the caller, not the PR's reservation ownership.
+// Exclude newer passes (including moved heads) until both scopes have settled.
+const postedReviewAttempts = new Map();
+
 export async function handlePostedReviewRow(options = {}) {
+  const key = JSON.stringify([resolve(options.rootDir || ROOT), options.repoPath, Number(options.prNumber)]);
+  if (postedReviewAttempts.has(key)) {
+    return { handled: true, outcome: 'posted-review-in-flight' };
+  }
   const snapshotPass = createMergeAgentSnapshotPass({ now: options.now });
+  const attempt = { handlerActive: true, coexistenceActive: false,
+    release() {
+      if (!this.handlerActive && !this.coexistenceActive) postedReviewAttempts.delete(key);
+    } };
+  postedReviewAttempts.set(key, attempt);
   try {
     return await withPostedReviewReadCache({ repo: options.repoPath, prNumber: options.prNumber,
-      headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache({ ...options, snapshotPass }));
-  } finally { snapshotPass.close(); }
+      headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache({ ...options, snapshotPass, attempt }));
+  } finally {
+    snapshotPass.close();
+    attempt.handlerActive = false;
+    attempt.release();
+  }
 }
 
 async function handlePostedReviewRowWithinReadCache({
@@ -372,6 +389,7 @@ async function handlePostedReviewRowWithinReadCache({
   logGate = postedReviewRowLogGate,
   logger = console,
   snapshotPass,
+  attempt,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
   const retireTerminalHammerIntent = () => {
@@ -565,10 +583,10 @@ async function handlePostedReviewRowWithinReadCache({
     }
     // Own reservation cleanup outside closure dispatch: operator holds and
     // terminal/head changes can prevent the next daemon acquire entirely.
-    let closureInFlight = false;
+    const reservationBase = candidate?.baseBranch || existing?.base_ref || existing?.baseBranch;
     return await withDaemonMergeReservation({ rootDir, repo: repoPath, pr: prNumber,
-      base: candidate?.baseBranch, head: candidate?.headSha || currentRevisionRef,
-      isAttemptActive: () => closureInFlight,
+      base: reservationBase, head: candidate?.headSha || currentRevisionRef,
+      isAttemptActive: () => attempt.coexistenceActive,
     }, async () => {
     // End advisory reuse before any closure, lease or dispatch freshness read.
     closePostedReviewReadCache();
@@ -688,11 +706,11 @@ async function handlePostedReviewRowWithinReadCache({
     try {
       coexistenceDecision = await timePostedReviewStep(
         'resolveMergeAgentCoexistence', stepKey, logger, async ({ signal }) => {
-          closureInFlight = true;
+          attempt.coexistenceActive = true;
           // This scope follows the concrete promise past a soft deadline,
           // including terminal/stacked exits that never enter closure dispatch.
           try { return await withDaemonMergeReservation({ rootDir, repo: repoPath,
-            base: candidate?.baseBranch, pr: prNumber,
+            base: reservationBase, pr: prNumber,
             head: candidate?.headSha || currentRevisionRef,
           }, () => resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
@@ -713,7 +731,10 @@ async function handlePostedReviewRowWithinReadCache({
             signal,
             operationTimeoutMs: coexistenceOperationTimeoutMs,
             operationTracker: coexistenceOperationTracker,
-          })); } finally { closureInFlight = false; }
+          })); } finally {
+            attempt.coexistenceActive = false;
+            attempt.release();
+          }
         },
         undefined,
         {

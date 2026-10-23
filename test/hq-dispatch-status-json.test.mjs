@@ -36,7 +36,8 @@ function fixture(t, { status = 'failed', wire = {}, malformed = false, malformed
   mkdirSync(join(hqRoot, '.hq'), { recursive: true });
   writeFileSync(join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ownerUser: 'fixture-owner' }));
   const callsPath = join(rootDir, 'calls.jsonl');
-  const hqBin = join(rootDir, 'hq');
+  // Keep CommonJS fixtures independent of the temporary parent's package type.
+  const hqBin = join(rootDir, 'hq.cjs');
   writeFileSync(hqBin, `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -298,7 +299,8 @@ for (const payload of [
 for (const status of [null, '', 42, 'future', 'succeeded']) {
   test(`negative wire-only merge transport ${JSON.stringify(status)} retains explicit terminal false`, async t => {
     const f = fixture(t, { wire: { status, terminal: false, succeeded: false } });
-    assert.equal((await active(f)).active, true);
+    const result = await active(f);
+    assert.equal(result.active, true, JSON.stringify({ result, warnings: f.warnings }));
     assert.ok(f.calls()[0].includes('--json'));
   });
 }
@@ -340,10 +342,14 @@ for (const payload of [
   test(`remediation reconcile requires terminal success before missing-artifact settlement: ${JSON.stringify(payload)}`, async t => {
     const f = fixture(t);
     const priorHqRoot = process.env.HQ_ROOT;
+    const priorDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
     process.env.HQ_ROOT = f.hqRoot;
+    process.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.rootDir, 'fake-deploy');
     t.after(() => {
       if (priorHqRoot === undefined) delete process.env.HQ_ROOT;
       else process.env.HQ_ROOT = priorHqRoot;
+      if (priorDeployCheckout === undefined) delete process.env.AGENT_OS_DEPLOY_CHECKOUT;
+      else process.env.AGENT_OS_DEPLOY_CHECKOUT = priorDeployCheckout;
     });
     const headSha = 'a'.repeat(40);
     createFollowUpJob({ rootDir: f.rootDir, repo: HEAD.repo, prNumber: HEAD.prNumber,
@@ -377,7 +383,7 @@ for (const payload of [
       assert.equal(result.job.remediationWorker.state, 'spawned');
     } else {
       assert.equal(result.action, 'failed');
-      assert.equal(result.job.failure.code, payload.succeeded ? 'artifact-missing-completion' : 'hq-dispatch-failed');
+      assert.equal(result.job.failure.code, payload.succeeded ? 'artifact-missing-completion' : 'hq-dispatch-failed', JSON.stringify(result.job.failure));
     }
   });
 }

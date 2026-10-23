@@ -2707,9 +2707,10 @@ for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
   });
 }
 
+for (const status of [null, 'starting', 'running', 'future'])
 for (const source of ['dispatch probe', 'preflight ledger', 'stale starting worker', 'unknown worker']) {
   for (const succeeded of [false, true]) {
-    test(`SDK terminal evidence records ${source} success=${succeeded} without a status`, async t => {
+    test(`SDK terminal evidence records ${source} success=${succeeded} status=${status}`, async t => {
       const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-terminal-'));
       t.after(() => rmSync(rootDir, { recursive: true, force: true }));
       const args = findingsRemediationArgs(rootDir, { dispatchContext: {
@@ -2722,7 +2723,7 @@ for (const source of ['dispatch probe', 'preflight ledger', 'stale starting work
       updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
         workerClass: 'hammer', launchRequestId: 'synthetic-owner', retryCount: 2,
         reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
-      const payload = { status: null, terminal: true, succeeded };
+      const payload = { status, terminal: true, succeeded };
       const deps = testDeps();
       const result = await maybeDispatchAmaCloser({ ...args, ...deps,
         readLaunchRequestStatusImpl: () => source !== 'dispatch probe'
@@ -2741,8 +2742,9 @@ for (const source of ['dispatch probe', 'preflight ledger', 'stale starting work
   }
 }
 
-for (const withLease of [false, true]) {
-  test(`SDK terminal evidence rejects explicit false success during preflight recording withLease=${withLease}`, async t => {
+for (const withLease of [false, true])
+for (const status of ['succeeded', 'starting', 'running', 'future']) {
+  test(`SDK terminal evidence rejects non-success during preflight recording status=${status} withLease=${withLease}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-success-false-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const args = findingsRemediationArgs(rootDir);
@@ -2757,7 +2759,7 @@ for (const withLease of [false, true]) {
       reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
     await maybeDispatchAmaCloser({ ...args, ...testDeps(),
       readLaunchRequestStatusImpl: () => ({ ok: true,
-        row: { status: 'succeeded', terminal: true, succeeded: false } }),
+        row: { status, terminal: true, succeeded: false } }),
       execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'future' }) }),
     });
     const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));

@@ -1,8 +1,8 @@
-import { readLaunchRequestStatus, readDispatchStatus } from './launch-status.mjs';
+import { readDispatchStatus } from './launch-status.mjs';
 
 const producer = 'cwp_dispatch.dispatch';
 
-/** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readLaunchRequestStatus>}} */
+/** @returns {{payload: any, rawIdentity: unknown, launchRequestId: string|null, identityDiagnostic: string|null, status: ReturnType<typeof readDispatchStatus> & {diagnostic: string|null}}} */
 export function readDispatchReceipt(value, { identityFields = ['launchRequestId', 'dispatchId', 'lrq'], allowNonObject = false } = {}) {
   if (typeof value === 'string' && !allowNonObject) {
     if (!value.trim()) throw new Error(`${producer}: $stdout empty`);
@@ -12,7 +12,9 @@ export function readDispatchReceipt(value, { identityFields = ['launchRequestId'
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     const diagnostic = `${producer}: $stdout invalid type; expected object`;
     if (!allowNonObject) throw new Error(diagnostic);
-    return { payload: value, rawIdentity: null, launchRequestId: null, identityDiagnostic: diagnostic, status: readLaunchRequestStatus(null) };
+    const evidence = readDispatchStatus(null);
+    return { payload: value, rawIdentity: null, launchRequestId: null, identityDiagnostic: diagnostic,
+      status: { ...evidence, diagnostic: evidence.diagnostics[0] || null } };
   }
   const selected = identityFields.find(key => typeof value[key] === 'string' ? value[key].trim() : value[key]);
   const rawIdentity = value[selected || identityFields.at(-1)];

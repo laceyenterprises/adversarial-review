@@ -347,7 +347,8 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
   );
 });
 
-for (const payload of [{ status: 'failed' }, { terminal: true, succeeded: false }]) {
+for (const payload of [{ status: 'failed' }, { terminal: true, succeeded: false },
+  { status: 'succeeded', terminal: true, succeeded: false }]) {
   test(`phantom handoff after grace escalates without re-dispatch: ${JSON.stringify(payload)}`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = makeHqRoot('airlock');
@@ -419,6 +420,8 @@ for (const payload of [{ status: 'failed' }, { terminal: true, succeeded: false 
     ghCalls.some((a) => a[0] === 'pr' && a[1] === 'comment'),
     'a durable operator comment must explain the phantom-handoff escalation',
   );
+  assert.equal(listMergeAgentDispatches(rootDir)[0].phantomHandoffCommentDelivery.context.dispatchStatus, 'failed',
+    'the persisted escalation must retain explicit false success evidence');
 });
 }
 

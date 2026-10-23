@@ -888,6 +888,15 @@ function isRetryableRecordedDispatchStatus(value) {
     || (evidence.terminal && _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(status));
 }
 
+// Reconciliation accepts a status string, so preserve explicit SDK success
+// evidence before crossing that boundary.
+function recordedDispatchReconciliationStatus(value) {
+  const evidence = readDispatchStatus(value);
+  const status = evidence.status ?? value?.status;
+  if (status === 'succeeded' && !evidence.succeeded) return 'failed';
+  return status ?? (evidence.succeeded ? 'succeeded' : 'failed');
+}
+
 function isWatcherAutonomousRetryableRecordedDispatchStatus(value) {
   const payload = typeof value === 'string' ? { status: value } : value;
   const evidence = readDispatchStatus(payload);
@@ -1233,7 +1242,7 @@ async function reconcileProactivePhantomHandoffs({
       rootDir,
       job: currentPR,
       recordedDispatch,
-      dispatchStatus: recordedDispatchStatus.status ?? (readDispatchStatus(recordedDispatchStatus).succeeded ? 'succeeded' : 'failed'),
+      dispatchStatus: recordedDispatchReconciliationStatus(recordedDispatchStatus),
       labels: currentPR.labels,
       ghExecFileImpl,
       execFileImpl,
@@ -2212,7 +2221,8 @@ async function dispatchMergeAgentForPR({
         rootDir,
         job,
         recordedDispatch: latestRecordedDispatch,
-        dispatchStatus: recordedDispatchStatus?.status || latestRecordedDispatch?.phantomHandoffCommentDelivery?.context?.dispatchStatus || null,
+        dispatchStatus: recordedDispatchStatus ? recordedDispatchReconciliationStatus(recordedDispatchStatus)
+          : latestRecordedDispatch?.phantomHandoffCommentDelivery?.context?.dispatchStatus || null,
         execFileImpl: ghExecFileImpl,
         env: runtimeEnv,
         logger,
@@ -2321,7 +2331,7 @@ async function dispatchMergeAgentForPR({
         rootDir,
         job,
         recordedDispatch: latestRecordedDispatch,
-        dispatchStatus: recordedDispatchStatus.status ?? (readDispatchStatus(recordedDispatchStatus).succeeded ? 'succeeded' : 'failed'),
+        dispatchStatus: recordedDispatchReconciliationStatus(recordedDispatchStatus),
         labels,
         ghExecFileImpl,
         logger,

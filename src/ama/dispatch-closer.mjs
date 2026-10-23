@@ -1632,6 +1632,9 @@ function terminalCloserLaunchStatus(value) {
   const meaning = launchRequestMeaning(value);
   const status = normalizeWorkerRunStatus(typeof value === 'string' ? value : value?.status);
   if (status === 'succeeded' && !meaning.succeeded) return 'failed';
+  if (meaning.terminal && !AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) {
+    return meaning.succeeded ? 'succeeded' : 'failed';
+  }
   return status || (meaning.succeeded ? 'succeeded' : 'failed');
 }
 

@@ -2063,7 +2063,11 @@ evidence is available; launch success alone never proves a merge. Merge-agent
 retry predicates resolve missing statuses to `succeeded`/`failed` only after
 terminality is confirmed, retaining the existing retry budget and label gates.
 Normalized terminal events retain both SDK booleans; status probes accept
-wire-only evidence and preserve explicit false values.
+wire-only evidence and preserve explicit false values. Terminal wire evidence paired with an active or
+unknown status string is persisted as `succeeded` or `failed`, rather than an
+active closer status. Merge-agent phantom-handoff reconciliation and pending
+comment retries project `status: succeeded` with explicit `succeeded: false`
+as `failed` before crossing the status-string boundary.
 
 SEV1 2026-10-10: open PRs sat for hours with no actor until the operator
 relabelled them. A PR with a posted review is now always either owned by an

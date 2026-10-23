@@ -86,6 +86,9 @@ test('post-dispatch JSON string evidence stays recordable with null identity', (
   assert.equal(result.payload, 'queued worker');
   assert.equal(result.launchRequestId, null);
   assert.match(result.identityDiagnostic, /\$stdout invalid type/);
+  assert.equal(result.status.terminal, false);
+  assert.equal(result.status.succeeded, false);
+  assert.ok(result.status.diagnostics.includes(result.status.diagnostic));
 });
 
 test('terminal policies fail loudly on drift and reject legacy launch aliases', () => {

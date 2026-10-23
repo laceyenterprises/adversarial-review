@@ -1,26 +1,10 @@
 #!/usr/bin/env node
-import { meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execFileSync } from 'node:child_process';
-import { isTransientGhError } from '../src/gh-cli.mjs';
+import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
 import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 const [repo, pr] = process.argv.slice(2);
 const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
-// Retry transport failures only, preserving the entitled token and expected-head
-// CAS on every mutation attempt. An ambiguous server-side success still fails
-// closed through the lease-protected git fallback if the CAS rejects a retry.
-async function network(command, args, input) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      return meteredExecFileSync(execFileSync, command, args, { input, hammerToken: true, timeout: 15000,
-        maxBuffer: 64 * 1024 * 1024, env: process.env });
-    } catch (error) {
-      const transient = isTransientGhError(error) || (command === 'git'
-        && /timed out|TLS|SSL|early EOF|RPC failed|remote end hung up unexpectedly|HTTP.*5\d\d/i.test(String(error.stderr || error.message)));
-      if (!transient || attempt === 2) throw error;
-      await new Promise(resolve => setTimeout(resolve, 500 * (2 ** attempt)));
-    }
-  }
-}
+const network = hammerNetworkCall;
 const api = async (path, input) => JSON.parse((await network('gh',
   ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
 let fallback = {};

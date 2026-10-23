@@ -2,7 +2,8 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { parse } from 'acorn';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -2241,7 +2242,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-lease': "export const DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS = 3; export function computeReviewerLeaseExpiryAt() { return null; } export function extendReviewerLeaseForPlan() { return false; } export function isReviewerLeaseExpired() { return false; } export function resolveReviewerLeaseRecoveryEnabled() { return false; }",
     'fixture:reviewer-pass-tokens': "export function beginReviewerPass() { return { ok: true }; } export function completeReviewerPass() { return { ok: true }; } export function nextReviewerPassAttemptNumber(_rootDir, { fallbackReviewAttempts = 0 } = {}) { return Number(fallbackReviewAttempts || 0) + 1; } export function normalizeReviewerClass(value) { const text = String(value || '').toLowerCase(); if (text.includes('codex') || text.includes('gpt')) return 'codex'; if (text.includes('gemini') || text.includes('antigravity') || text.includes('agy')) return 'gemini'; return 'claude'; } export function readBestReviewerEvidenceTokenUsage() { return null; } export function readClaudeTranscriptTokenUsage() { return null; } export function readCodexTranscriptTokenUsage() { return null; } export function readWorkerRunTokenUsageResult() { return { ok: false, reason: 'missing-worker-run-row' }; } export function tagTokenUsage(tokenUsage) { return tokenUsage || null; } export function writeReviewerTokenUsageArtifact() { return null; }",
     'fixture:reviewer-reattach': "export function makeReviewPostedProbe() { return async () => null; } export function reviewerBotLogin(reviewer) { return reviewer ? 'codex-reviewer-lacey' : null; } export function probeReviewerSession() { return { alive: false, matched: false }; } export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
-    'fixture:reviewer-timeout': "export const REVIEWER_PROCESS_SLACK_MS = 300000; export function resolveReviewerTimeoutMs() { return 300000; } export function resolveAgyReviewerSubprocessTimeoutMs() { return 300000; } export function resolveGeminiReviewerProcessTimeoutMs() { return 300000; }",
+    'fixture:reviewer-timeout': "export const REVIEWER_PROCESS_SLACK_MS = 300000; export function resolveReviewerTimeoutMs() { return 300000; } export function resolveAgyReviewerSubprocessTimeoutMs() { return 300000; } export function resolveGeminiReviewerProcessTimeoutMs() { return 300000; } export function resolveAgyChunkTimeoutCapMs() { return 21600000; }",
     'fixture:routing-tier-readiness': "export function createRoutingTierReadinessProbeCache() { return { get: () => null, set: () => {} }; } export async function probeRoutingTierReadiness() { return { ready: true }; }",
     // Keep provenance reads inert so watcher lifecycle fixtures never access the host ledger.
     'fixture:session-ledger-read-adapter': "export async function readLaunchRequestByIdempotencyKeyAsync() { return { ok: false, reason: 'fixture' }; }export async function readLaunchRequestsForTicketSinceAsync() { return { ok: false, reason: 'fixture' }; } export const LIVE_DAG_RUN_STATES = Object.freeze(['pending', 'running', 'parked', 'awaiting-merge']); export function readActiveDagRunsForPlan() { return { ok: false, reason: 'fixture' }; } export function readBuildCompletionProducerEvidence() { return { ok: false, reason: 'missing-build-completion-producer-evidence' }; } export function readBuildCompletionSignalForPr() { return { ok: false, reason: 'missing-build-completion-signal' }; } export function readPrBuilderProvenance() { return { ok: false, reason: 'missing-builder-provenance' }; } export function readLaunchRequestStatusFromLedger() { return { ok: false, reason: 'fixture' }; } export function readLatestWorkerRunStatusFromLedger() { return null; } export function resolveSessionLedgerReadTarget() { return null; } export const readActiveDagRunsForPlanAsync = async (...args) => readActiveDagRunsForPlan(...args); export const readBuildCompletionProducerEvidenceAsync = async (...args) => readBuildCompletionProducerEvidence(...args); export const readBuildCompletionSignalForPrAsync = async (...args) => readBuildCompletionSignalForPr(...args); export const readPrBuilderProvenanceAsync = async (...args) => readPrBuilderProvenance(...args); export const readLaunchRequestSnapshotFromLedgerAsync = async () => ({ ok: false, reason: 'fixture' }); export const readLaunchRequestStatusFromLedgerAsync = async (...args) => readLaunchRequestStatusFromLedger(...args); export const readLatestWorkerRunStatusFromLedgerAsync = async (...args) => readLatestWorkerRunStatusFromLedger(...args);",
@@ -2263,6 +2264,21 @@ export async function load(url, context, nextLoad) {
 }
 `;
 }
+
+test('watcher timeout fixture exports every timeout symbol imported by cli-direct', async () => {
+  const loader = await import(`data:text/javascript,${encodeURIComponent(buildWatcherLoaderSource({}))}`);
+  const { source } = await loader.load('fixture:reviewer-timeout');
+  const fixture = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const runtime = parse(readFileSync(new URL('../src/adapters/reviewer-runtime/cli-direct/index.mjs', import.meta.url), 'utf8'),
+    { ecmaVersion: 'latest', sourceType: 'module' });
+  const timeoutImport = runtime.body.find(node => node.type === 'ImportDeclaration'
+    && node.source.value === '../../../reviewer-timeout.mjs');
+  assert.ok(timeoutImport, 'cli-direct must import its timeout policy');
+  for (const specifier of timeoutImport.specifiers) {
+    assert.equal(typeof fixture[specifier.imported.name], 'function',
+      `fixture:reviewer-timeout is missing ${specifier.imported.name}`);
+  }
+});
 
 function buildWatcherRegisterSource(loaderPath) {
   return `

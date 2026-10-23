@@ -2196,6 +2196,8 @@ test('GEMTIMEOUT-01: watcher callback reads SQLite plan budgets for tracked cand
     db.prepare('UPDATE reviewed_prs SET reviewer_timeout_ms = ?').run(65 * 60_000);
     nowMs = 26 * 60_000;
     assert.equal(tracker.activeCounts().get('gemini'), 1, 'plan extension retains the in-memory reservation');
+    assert.deepEqual(tracker.liveEntries().map(row => [row.repo, row.pr]), [['example/project', 1]],
+      'live-entry pruning retains the candidate past its initial budget using the normalized repository key');
     assert.equal(timeoutMs(persisted), 65 * 60_000);
     assert.equal(timeoutMs({ ...persisted, reviewerSessionUuid: 'replaced-session' }), resolveGeminiReviewerProcessTimeoutMs());
     nowMs = 66 * 60_000;

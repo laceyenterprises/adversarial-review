@@ -165,23 +165,40 @@ test('launch evidence through the ledger seam: terminal exit-zero no-merge retri
 for (const exhausted of [false, true]) test(`failed terminal launch supersedes a dispatched lease (${exhausted ? 'exhausted' : 'retry available'})`, async () => {
   const lease = { status: 'dispatched', lrqId: 'lrq-failed', headSha: HEAD, updatedAt: ANCHOR };
   const launches = launchSource({ state: 'complete', value: {
-    launchRequestId: 'lrq-failed', launch: { status: 'failed' }, terminal: true, processSucceeded: false,
+    launchRequestId: 'lrq-failed', launch: { status: 'failed', attempt: 2 }, terminal: true, processSucceeded: false,
     retryChain: [], retryChainUnreadable: false,
   } }, lease, { retryExhausted: exhausted, lifetimeExhausted: false });
   assert.deepEqual([launches.value.closer.outcome, launches.value.closer.retryable], ['no-merge', !exhausted]);
   const snapshot = base({ observations: { leases: { closer: lease }, launches,
     reviews: { verdict: 'approved', headSha: HEAD, blockingFindingState: 'known', blockingFindingCount: 0,
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } } });
-  const outcome = await shadowNextAction({ source: 'closure-orchestration', snapshot, env, sink: () => {},
+  const records = [];
+  const outcome = await shadowNextAction({ source: 'closure-orchestration', snapshot, env, sink: record => records.push(record),
+    legacy: { owner: 'wait', reason: 'in-flight' },
     now: () => Date.parse(ANCHOR) });
   assert.deepEqual([outcome.decision.actor, outcome.decision.reason, outcome.decision.queue.intent], exhausted
     ? ['closure-recovery', 'hammer-final-no-merge', 'reconcile'] : ['hammer', 'retry-no-merge', 'dispatch']);
+  assert.equal(outcome.decision.attempt, exhausted ? 2 : 3);
+  assert.equal(records.find(record => record.kind === 'disagreement').next.attempt, exhausted ? 2 : 3);
   const unreadable = deriveNextActionSnapshot({ base: snapshot, observations: {
     launches: { ...launches, value: { closer: { ...launches.value.closer, retryChainUnreadable: true } } },
   } });
   assert.equal(nextAction(unreadable).reason, 'ownership-unreadable', 'terminal evidence cannot bypass unreadable descendants');
   const merged = deriveNextActionSnapshot({ base: snapshot, observations: { pr: { state: 'MERGED', headSha: HEAD } } });
   assert.equal(nextAction(merged).reason, 'merged', 'remote PR state remains authoritative');
+});
+
+test('ledger launch attempts prefer the row, fall back to the observation and preserve zero', () => {
+  for (const [value, expected] of [
+    [{ launch: { attempt: 2 }, attempt: 4 }, 2],
+    [{ launch: { attempt: 0 }, attempt: 4 }, 0],
+    [{ launch: { attempt: null }, attempt: 4 }, 4],
+    [{ attempt: 0 }, 0],
+    [{ launch: {} }, null],
+  ]) {
+    const source = launchSource({ state: 'complete', value }, null, {});
+    assert.equal(source.value.closer.attempt, expected);
+  }
 });
 
 test('the NXA-01 ledger observation maps to launch evidence: exit zero on an open PR is a no-merge', () => {

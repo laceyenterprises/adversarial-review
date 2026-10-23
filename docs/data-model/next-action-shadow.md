@@ -38,6 +38,11 @@ semantics are defined in [the reason inventory](../NEXT-ACTION-REASON-INVENTORY.
 `decisionKey` is the first 32 hex characters of SHA-256 over subject, head,
 action, actor, reason, round, attempt and deadline anchor.
 
+For ledger-derived launches, the consumer projects `launch.attempt`, falling
+back to the observation's `attempt` and then null; zero is preserved. Terminal
+no-merge recovery (R07) records that attempt, while retry admission (R08)
+records the next attempt (current plus one), or null when unavailable.
+
 Disagreement records additionally contain:
 
 - `fields`: the differing members of `action`, `actor`, `reason`.

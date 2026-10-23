@@ -101,6 +101,7 @@ export function launchSource(observation, lease, cap) {
   return { state: 'complete', provenance: { sourceRef: 'launch-requests' }, value: { closer: {
     row: value.launch, retryChain: value.retryChain ?? undefined, retryChainUnreadable: value.retryChainUnreadable === true,
     launchRequestId: value.liveRetryLaunchRequestId || value.launchRequestId || null, headSha: lease?.headSha ?? null,
+    attempt: value.launch?.attempt ?? value.attempt ?? null,
     outcome: terminalNoMerge ? 'no-merge' : null,
     retryable: terminalNoMerge ? !(cap.retryExhausted || cap.lifetimeExhausted) : null,
   } } };

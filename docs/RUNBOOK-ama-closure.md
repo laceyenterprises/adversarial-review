@@ -2466,8 +2466,9 @@ committer and all three terminal trailers (`Worker-Class: hammer`, including
 `hammer-corp` / `hammer-claude`, `Worker-Ticket: HAM` / `AMA-PR-<n>`, and
 `Closed-By: hammer (adversarial-pipe-mode)`). A HAM committer stamped onto a
 linked foreign author cannot authorize reversals, even with valid trailers.
-Binary and omitted-patch files can pass only with an identical GitHub blob SHA and change status;
-otherwise their preservation remains unknown. Structural hammer merge refusals
+Binary and omitted-patch files pass with an identical GitHub blob SHA and change status,
+or the declared-derived-artifact proof described below; otherwise preservation
+remains unknown. Structural hammer merge refusals
 are audited immediately with their primary-change reason, while read failures
 retry within the bounded gate window. Every
 changed region in production and config paths must still differ from that base, and removed-line occurrence
@@ -2487,6 +2488,67 @@ diff's renamed paths enforce this production-to-test boundary. Chained renames
 from a builder-renamed path may collect the same identical-blob hammer proof
 when both the intermediate path is absent and the merge-base name remains
 removed or renamed; restoring the merge-base name does not qualify.
+
+### Declared opaque build outputs (PRIMARYOPAQUE-01)
+
+Repositories opt in through the existing `scripts` object in a checked-in
+`package.json`, without AMA configuration or another status check. For example,
+`sdk/node/package.json` can declare:
+
+```json
+{
+  "scripts": {
+    "build:artifact:fixture-sdk-1.0.0.tgz": "npm pack --ignore-scripts --offline"
+  }
+}
+```
+
+The script suffix is an exact output path relative to that manifest, whose
+directory is the build working directory. Ancestor manifests are searched from
+nearest to repository root. The same nonempty script must exist at both the
+protected author's head and final head; a closer cannot introduce or change its
+own build authority. This supports added or modified files at the same path
+with the same change status. Removed files and structural changes retain their
+existing rules. Text source preservation is evaluated independently.
+
+The shared collector materializes the final head's immutable GitHub tree into
+an isolated scratch worktree, validating every fetched blob's Git hash. It
+does not expose a live checkout, Git hooks, credentials, inherited environment
+or installed repository dependencies. Symlinks, submodules, unsafe paths,
+truncated trees and unavailable sources decline proof. Each declared output is
+removed before building, and each build starts with fresh head sources. Existing
+tracked `.home` and `.tmp` directories are supported. Source file mtimes and all
+directory mtimes (including the scratch root, output parents, `.home` and `.tmp`)
+are fixed to epoch zero after output removal and sandbox directory setup, just
+before executing the build. `SOURCE_DATE_EPOCH=0`, UTC and a fixed locale
+are supplied. The resulting regular file must match the final head's **exact
+Git blob SHA-1**; archive contents are not normalized for comparison. Repositories
+whose tool still embeds nondeterministic bytes must fix their recorded build.
+
+Builds have a 30-second process-group budget and the complete proof has a
+120-second budget, at most four changed candidates, 10,000 source entries and
+128 MiB each of unique source blobs and materialized source bytes. Outputs are
+also capped at 128 MiB. A clean
+environment disables implicit npm lifecycle hooks, audit, funding and network
+dependency installation; only the recorded command runs. OS isolation denies
+network access and host writes: macOS uses `sandbox-exec`, allowing reads of the
+running Node executable's directory and sibling `lib` tree (for bundled npm),
+filesystem metadata and the root directory
+needed for loader/path resolution, while other file contents remain restricted
+to the listed system/build subtrees. Linux requires Bubblewrap with unshared
+namespaces, explicitly creates the scratch parent in its mount namespace, and
+exposes only `/etc/ld.so.cache` and `/etc/alternatives` from host `/etc` for
+loader/tool resolution. Node's executable directory and sibling `lib` tree are
+also mounted read-only when outside the existing system mounts, supporting
+user-space and hosted-toolcache installations without mounting their entire
+installation prefix or host home. Missing/unsupported isolation or a failed,
+timed-out, no-op or mismatched build leaves `primary-change-unknown` unchanged.
+Build descendants are killed and scratch trees removed after each attempt.
+
+Successful proofs bind the author head, final head, path and both blob hashes.
+They are collected afresh after history-cache reuse, including under the merge
+lease; an old cached refusal can therefore recover without a cache migration.
+No label or CI status substitutes for this proof.
 
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,

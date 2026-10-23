@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
+import { proveDerivedArtifacts } from './derived-artifacts.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
@@ -684,6 +685,12 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       if (!actual) continue;
       if (change.opaque) {
         if (actual.sha !== change.sha || actual.status !== change.status) {
+          if (actual.status === change.status && actual.filename === change.filename
+            && ['added', 'modified'].includes(change.status)
+            && evidence.derivedArtifacts?.some(proof => proof.headSha === headSha
+              && proof.primaryHead === evidence.primaryHead && proof.path === change.filename
+              && proof.primaryBlob === change.sha && proof.blob === actual.sha
+              && proof.comparison === 'git-blob-sha1')) continue;
           return { ok: false, reason: 'primary-change-unknown', detail: 'opaque file changed without readable patch', path, testRegionsChanged: testChanges, ...whitespaceEvidence };
         }
         continue;
@@ -1287,7 +1294,9 @@ async function describeRevertedRegions(args, evidence, refusal) {
 
 // Every production primary-change read also proves the independent cost gate.
 // Keep history failures distinct and retain the existing terminal-state handling.
-export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost } = {}) {
+export async function fetchPrimaryChange(args, {
+  fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
+} = {}) {
   let history;
   if (args.get.persistPrimaryChange && primaryChangeStoreOwned(primaryChangeRoot(args))) {
     try {
@@ -1316,7 +1325,8 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
   const guardEvidence = await fetchGuardReversals(args, history);
-  const evidence = { ...history, ciCost, ...guardEvidence };
+  const derivedArtifacts = await proveDerivedArtifactsImpl(args, history);
+  const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   return { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
 }
 

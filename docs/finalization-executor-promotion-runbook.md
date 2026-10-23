@@ -153,6 +153,9 @@ with the existing load-aware command supervisor (1-second nominal DB wait,
 node src/finalization/queue-probe.mjs --capability owner --json
 ```
 
+The CLI requires an explicit `--capability owner`; missing or unsupported
+capabilities exit 2 without emitting observations.
+
 Record `.capabilities.owner.available == true` and `.runtime.build != null`.
 Availability is computed from exact deployed table/index definitions, DB
 readability/ownership and the resolved local lock adapter. The build is a digest

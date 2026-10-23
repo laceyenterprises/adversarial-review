@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from '../load-aware-timeout.mjs';
 
 // Nominal inputs only; an expired absolute budget gives zero, never a 1ms retry.
-export function queueWaitMs(nominalMs, { ceilingMs, deadline, now, load = {} } = {}) {
+export function queueWaitMs(nominalMs, { ceilingMs, deadline, now = new Date().toISOString(), load = {} } = {}) {
   if (!Number.isFinite(ceilingMs) || ceilingMs <= 0) throw new TypeError('finite wait ceiling required');
   const remaining = deadline == null ? Infinity : Date.parse(deadline) - Date.parse(now);
   if (Number.isNaN(remaining)) throw new TypeError('invalid wait deadline');

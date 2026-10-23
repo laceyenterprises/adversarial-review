@@ -49,12 +49,18 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
 
 export function queueProbeMain(argv = process.argv.slice(2)) {
   let rootDir;
+  let ownerCapability = false;
+  const usage = 'usage: queue-probe.mjs --capability owner --json [--root DIR]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && argv[i + 1] === 'owner') i++;
+    if (argv[i] === '--capability' && argv[i + 1] === 'owner') {
+      ownerCapability = true;
+      i++;
+    }
     else if (argv[i] === '--json') continue;
     else if (argv[i] === '--root' && argv[i + 1]) rootDir = argv[++i];
-    else throw new Error('usage: queue-probe.mjs --capability owner --json [--root DIR]');
+    else throw new Error(usage);
   }
+  if (!ownerCapability) throw new Error(usage);
   const result = probeQueueOwner({ rootDir });
   process.stdout.write(JSON.stringify(result) + '\n');
   return result.capabilities.owner.available ? 0 : 1;

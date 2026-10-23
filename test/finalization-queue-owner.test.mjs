@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fork, execFileSync } from 'node:child_process';
+import { fork, execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import Database from 'better-sqlite3';
@@ -224,6 +224,16 @@ test('waits scale nominal once, clip remaining deadline, cap effective patience 
   assert.deepEqual(ack(f.store, 'q-101', { at: time(300), load: high }).patience, entry.patience);
 });
 
+test('wait deadline defaults to the current clock while explicit clocks and invalid dates retain their behavior', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(time(0)) });
+  const options = { ceilingMs: 6_000, load: { enabled: false } };
+  assert.equal(queueWaitMs(5_000, { ...options, deadline: time(2) }), 2_000);
+  assert.equal(queueWaitMs(5_000, { ...options, deadline: time(-1) }), 0);
+  assert.equal(queueWaitMs(5_000, { ...options, deadline: time(2), now: time(1) }), 1_000);
+  assert.throws(() => queueWaitMs(5_000, { ...options, deadline: 'invalid' }), /invalid wait deadline/);
+  assert.throws(() => queueWaitMs(5_000, { ...options, deadline: time(2), now: 'invalid' }), /invalid wait deadline/);
+});
+
 function tree(root) {
   return readdirSync(root, { recursive: true, withFileTypes: true }).filter(e => e.isFile())
     .map(e => [join(e.parentPath, e.name).slice(root.length), readFileSync(join(e.parentPath, e.name)).toString('hex')]);
@@ -356,5 +366,20 @@ test('deployed probe CLI uses real disposable store and creates no schema or cla
   assert.equal(result.capabilities.owner.available, true);
   assert.ok(result.runtime.build);
   assert.deepEqual(result.observations.lanes, []);
+  assert.deepEqual(tree(f.root), before);
+});
+
+test('probe CLI rejects missing or unsupported capability before emitting observations', t => {
+  const f = fixture(t); const before = tree(f.root);
+  const cli = fileURLToPath(new URL('../src/finalization/queue-probe.mjs', import.meta.url));
+  for (const args of [[], ['--json'], ['--capability'], ['--capability', 'other', '--json']]) {
+    const result = spawnSync(process.execPath, [cli, ...args, '--root', f.root], {
+      encoding: 'utf8', timeout: 10_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2, JSON.stringify(args));
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'invalid queue probe arguments\n');
+  }
   assert.deepEqual(tree(f.root), before);
 });

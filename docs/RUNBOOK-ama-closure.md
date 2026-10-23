@@ -2516,8 +2516,11 @@ an isolated scratch worktree, validating every fetched blob's Git hash. It
 does not expose a live checkout, Git hooks, credentials, inherited environment
 or installed repository dependencies. Symlinks, submodules, unsafe paths,
 truncated trees and unavailable sources decline proof. Each declared output is
-removed before building, and each build starts with fresh head sources. Source
-mtimes are fixed to epoch zero, and `SOURCE_DATE_EPOCH=0`, UTC and a fixed locale
+removed before building, and each build starts with fresh head sources. Existing
+tracked `.home` and `.tmp` directories are supported. Source file mtimes and all
+directory mtimes (including the scratch root, output parents, `.home` and `.tmp`)
+are fixed to epoch zero after output removal and sandbox directory setup, just
+before executing the build. `SOURCE_DATE_EPOCH=0`, UTC and a fixed locale
 are supplied. The resulting regular file must match the final head's **exact
 Git blob SHA-1**; archive contents are not normalized for comparison. Repositories
 whose tool still embeds nondeterministic bytes must fix their recorded build.
@@ -2528,8 +2531,13 @@ Builds have a 30-second process-group budget and the complete proof has a
 also capped at 128 MiB. A clean
 environment disables implicit npm lifecycle hooks, audit, funding and network
 dependency installation; only the recorded command runs. OS isolation denies
-network access and host writes: macOS uses `sandbox-exec`; Linux requires
-Bubblewrap with unshared namespaces. Missing/unsupported isolation or a failed,
+network access and host writes: macOS uses `sandbox-exec`, allowing reads of the
+running Node executable's directory, filesystem metadata and the root directory
+needed for loader/path resolution, while other file contents remain restricted
+to the listed system/build subtrees. Linux requires Bubblewrap with unshared
+namespaces, explicitly creates the scratch parent in its mount namespace, and
+exposes only `/etc/ld.so.cache` and `/etc/alternatives` from host `/etc` for
+loader/tool resolution. Missing/unsupported isolation or a failed,
 timed-out, no-op or mismatched build leaves `primary-change-unknown` unchanged.
 Build descendants are killed and scratch trees removed after each attempt.
 

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { artifactSandbox, proveDerivedArtifacts, runArtifactBuild } from '../src/ama/derived-artifacts.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 
@@ -15,7 +15,7 @@ const runFixtureBuild = async spec => execFileSync('/bin/sh', spec.args.slice(-2
 const proveFixture = (args, evidence) => proveDerivedArtifacts(args, evidence, { runBuildImpl: runFixtureBuild });
 
 function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared = true,
-  tamper = false, finalCommand = command, symlink = false } = {}) {
+  tamper = false, finalCommand = command, symlink = false, sourceFiles = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cwd = join(root, 'sdk');
@@ -38,8 +38,12 @@ function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared 
     { cwd, env, timeout: 15000, stdio: ['ignore', 'ignore', 'pipe'] });
   writeFileSync(join(cwd, 'package.json'), manifest(command));
   writeFileSync(join(cwd, 'source.txt'), 'Author source\n');
+  for (const [path, content] of Object.entries(sourceFiles)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content);
+  }
   pack();
-  git('add', 'sdk'); git('commit', '-q', '-m', 'Fixture author');
+  git('add', 'sdk', ...Object.keys(sourceFiles)); git('commit', '-q', '-m', 'Fixture author');
   const primaryHead = git('rev-parse', 'HEAD');
   const primaryBlob = git('rev-parse', `HEAD:${archive}`);
   writeFileSync(join(cwd, 'source.txt'), 'Repaired author source\n');
@@ -105,6 +109,27 @@ test('npm lifecycle hooks stay disabled even when the recorded command omits ign
   assert.equal((await proveFixture(f.args, f.evidence)).length, 1);
 });
 
+test('tracked HOME and TMPDIR directories do not prevent a declared rebuild', async t => {
+  const f = fixture(t, { sourceFiles: { '.home/config.txt': 'fixture home', '.tmp/fixture.txt': 'fixture temp' } });
+  assert.equal((await proveFixture(f.args, f.evidence)).length, 1);
+});
+
+test('all source and sandbox directory mtimes are epoch zero after final build preparation', async t => {
+  const f = fixture(t, { sourceFiles: { 'sdk/nested/source.txt': 'nested source' } });
+  let snapshot;
+  const proofs = await proveDerivedArtifacts(f.args, f.evidence, { runBuildImpl: async spec => {
+    const root = dirname(spec.cwd);
+    snapshot = {
+      directories: ['', 'sdk', 'sdk/nested', '.home', '.tmp'].map(path => statSync(join(root, path)).mtimeMs),
+      sources: ['sdk/source.txt', 'sdk/nested/source.txt', 'sdk/package.json'].map(path => statSync(join(root, path)).mtimeMs),
+      outputExists: existsSync(join(root, f.archive)),
+    };
+    await runFixtureBuild(spec);
+  } });
+  assert.deepEqual(snapshot, { directories: [0, 0, 0, 0, 0], sources: [0, 0, 0], outputExists: false });
+  assert.equal(proofs.length, 1);
+});
+
 for (const [name, options] of [
   ['hand-edited archive', { tamper: true }],
   ['undeclared binary', { declared: false }],
@@ -119,7 +144,7 @@ for (const [name, options] of [
   assert.equal(checkPrimaryChange({ ...f.evidence, derivedArtifacts }, f.args.headSha).reason, 'primary-change-unknown');
 });
 
-test('native sandbox rebuilds archives and denies network and host file writes', async t => {
+test('native sandbox rebuilds archives and denies network, host file reads and writes', async t => {
   const f = fixture(t);
   const spec = artifactSandbox(f.root, f.root, 'true');
   const probe = spawnSync(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, encoding: 'utf8', timeout: 5000 });
@@ -128,17 +153,20 @@ test('native sandbox rebuilds archives and denies network and host file writes',
     t.skip(`OS sandbox unavailable: ${probe.error?.message || probe.stderr.trim()}`);
     return;
   }
-  assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
+  assert.equal(probe.status, 0, probe.stderr || probe.error?.message || `sandbox exited with signal ${probe.signal}`);
   assert.equal((await proveDerivedArtifacts(f.args, f.evidence)).length, 1);
   const sentinel = join(tmpdir(), `derived-host-${process.pid}`);
-  t.after(() => rmSync(sentinel, { force: true }));
+  const secret = join(tmpdir(), `derived-secret-${process.pid}`);
+  writeFileSync(secret, 'host secret');
+  t.after(() => { rmSync(sentinel, { force: true }); rmSync(secret, { force: true }); });
   for (const command of [
     `node -e 'require("fs").writeFileSync(${JSON.stringify(sentinel)}, "bad")'`,
+    `node -e 'require("fs").readFileSync(${JSON.stringify(secret)})'`,
     'node -e \'require("net").connect({host:"127.0.0.1",port:9}).on("error",()=>process.exit(1))\'',
     'test -n "$GITHUB_TOKEN"',
   ]) {
-    const denied = fixture(t, { command });
-    assert.deepEqual(await proveDerivedArtifacts(denied.args, denied.evidence), []);
+    await assert.rejects(runArtifactBuild(artifactSandbox(f.root, f.root, command), AbortSignal.timeout(5000)),
+      /failed or exceeded/, command);
   }
   assert.throws(() => readFileSync(sentinel), { code: 'ENOENT' });
 });
@@ -148,7 +176,29 @@ test('sandbox specification isolates Linux and strips inherited secrets', () => 
   assert.ok(spec.args.includes('--unshare-all'));
   assert.equal(spec.env.npm_config_ignore_scripts, 'true');
   assert.equal(spec.env.GITHUB_TOKEN, undefined);
+  for (const root of ['/tmp/fixture', '/var/tmp/custom/fixture']) {
+    const { args } = artifactSandbox(root, `${root}/sdk`, 'npm pack', 'linux');
+    const parent = args.indexOf(dirname(root));
+    assert.equal(args[parent - 1], '--dir');
+    assert.ok(parent < args.indexOf('--bind'));
+    for (const path of ['/etc/ld.so.cache', '/etc/alternatives']) {
+      const index = args.indexOf(path);
+      assert.equal(args[index - 1], '--ro-bind-try');
+      assert.equal(args[index + 1], path);
+    }
+    assert.equal(args[args.indexOf('/etc') - 1], '--dir', 'host /etc credentials are not mounted');
+  }
   assert.throws(() => artifactSandbox('/tmp/fixture', '/tmp/fixture', 'true', 'unsupported'));
+});
+
+test('Darwin sandbox permits the executable directory advertised on PATH', () => {
+  const execPath = process.execPath;
+  try {
+    process.execPath = '/Users/fixture/.nvm/versions/node/bin/node';
+    const spec = artifactSandbox('/tmp/fixture', '/tmp/fixture', 'node --version', 'darwin');
+    assert.ok(spec.args[1].includes(`(subpath ${JSON.stringify(dirname(process.execPath))})`));
+    assert.equal(spec.env.PATH.split(':')[0], dirname(process.execPath));
+  } finally { process.execPath = execPath; }
 });
 
 test('build cancellation kills background descendants before returning', async t => {

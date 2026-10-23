@@ -33,8 +33,11 @@ export function artifactSandbox(root, cwd, command, platform = process.platform)
   };
   if (platform === 'darwin') {
     const literal = value => JSON.stringify(value);
-    const reads = ['/usr', '/bin', '/sbin', '/System', '/Library/Apple', '/opt/homebrew', '/dev', '/private/var/db/dyld', root];
+    const reads = ['/usr', '/bin', '/sbin', '/System', '/Library/Apple', '/opt/homebrew', '/dev', '/private/var/db/dyld', dirname(process.execPath), root];
+    // dyld opens /; Node resolves executable/cwd ancestors with metadata reads.
+    // File contents still require an explicit allowed subtree.
     const profile = `(version 1)(deny default)(allow process-exec process-fork)(allow sysctl-read)
+      (allow file-read-metadata)(allow file-read* (literal "/"))
       (allow file-read* ${reads.map(path => `(subpath ${literal(path)})`).join(' ')})
       (allow file-write* (subpath ${literal(root)}) (literal "/dev/null"))`;
     return { file: '/usr/bin/sandbox-exec', args: ['-p', profile, '/bin/sh', '-c', command], env, cwd };
@@ -44,6 +47,10 @@ export function artifactSandbox(root, cwd, command, platform = process.platform)
     return { file: 'bwrap', args: ['--unshare-all', '--die-with-parent', '--new-session',
       '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
       '--ro-bind-try', '/lib64', '/lib64',
+      // Permit loader/tool symlink resolution without exposing all host /etc.
+      '--dir', '/etc', '--ro-bind-try', '/etc/ld.so.cache', '/etc/ld.so.cache',
+      '--ro-bind-try', '/etc/alternatives', '/etc/alternatives',
+      '--dir', dirname(root),
       '--proc', '/proc', '--dev', '/dev', '--bind', root, root,
       '--chdir', cwd, '/bin/sh', '-c', command], env, cwd };
   }
@@ -155,6 +162,7 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
     }
     if (!declared.length) return [];
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'derived-artifact-')));
+    const directories = ['', '.home', '.tmp'];
     const checkout = async (ref, directory) => {
       for (const entry of await tree(ref)) {
         bounded.throwIfAborted();
@@ -162,6 +170,7 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
         const path = join(directory, entry.path);
         if (entry.type === 'tree' && entry.mode === '040000') {
           await mkdir(path);
+          directories.push(relative(scratch, path));
           await checkout(entry.sha, path);
         } else if (entry.type === 'blob' && ['100644', '100755'].includes(entry.mode)) {
           const bytes = await blob(entry.sha);
@@ -180,8 +189,14 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
       try {
         await cp(scratch, root, { recursive: true, preserveTimestamps: true });
         for (const item of declared) await rm(join(root, item.path), { force: true });
-        await mkdir(join(root, '.home'));
-        await mkdir(join(root, '.tmp'));
+        await mkdir(join(root, '.home'), { recursive: true });
+        await mkdir(join(root, '.tmp'), { recursive: true });
+        // Copying sources and preparing outputs/HOME/TMPDIR can touch directory
+        // mtimes. Normalize every directory only after the final mutation.
+        for (const directory of new Set(directories)) {
+          bounded.throwIfAborted();
+          await utimes(join(root, directory), 0, 0);
+        }
         await runBuildImpl(artifactSandbox(root, join(root, declaration.directory), declaration.command), bounded);
         const output = join(root, declaration.path);
         const actual = await realpath(output);

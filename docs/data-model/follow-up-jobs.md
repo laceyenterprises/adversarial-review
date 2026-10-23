@@ -7,7 +7,7 @@ replay; no queue state, retry budget or merge decision changes.
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
 ## Branch and publication contract (REMEDBRANCH-01)
@@ -256,9 +256,13 @@ A current valid reply, if
 present, is retained in `remediationReply`; no reply is required to establish the
 independent commit proof. The terminal record is written before follow-on
 requests; `reReview` records the request intent and then its outcome. Ordinary
-rounds request re-review and wake the watcher; comment-only final rounds wake
-the existing cap/closure lane with re-review suppressed. Recovery itself grants
-no CI waiver or merge decision.
+rounds use the same shared successor adapter as ordinary completion. `reReview.nextAction`
+records the action, actor, reason, anchored UTC deadline, head, evidence references
+and decision key. Re-review and its durable wake run only when that decision
+assigns a new exact-head review. Other decisions retain one owner and wake the
+watcher. `completion.workerPushedHeadSha` records the proven publication;
+`completion.finalRemediationPush` binds final handoff intent to that exact head.
+Recovery itself grants no CI waiver or merge decision.
 
 Recovery holds a delivery claim across completion and follow-on dispatch. It
 defers without changing the job or dispatching follow-on work if another
@@ -293,40 +297,42 @@ If reply reconciliation still reports `active` after the stale gates pass,
 the sweep continues to the existing signal-and-requeue path. A reply file
 therefore cannot reserve a hung worker's slot indefinitely.
 
-## Re-review accepted with CI pending at timeout (CIBLOCKHAM-01)
+## Shared remediation closeout successor (NXA-04)
 
-When a valid reply requests re-review and the bounded CI settlement wait expires
-with external checks still `pending`, reconcile accepts the request and completes
-the job. Its `reReview` object adds `ciSettlement: "pending-at-timeout"` and
-`ciGate`, the last CI inspection snapshot: `state: "pending"`, `headSha`,
-`conclusion`, `rollupKnown`, `totalExternalChecks`, `failedChecks`, and
-`pendingChecks`. Check
-entries retain the classifier's check name, state, workflow name and details URL.
-This is observation evidence, not CI greenness or merge authority. Unknown CI
-at timeout retains the failure path; green CI does not add these fields.
+Normal completion and recovered publication use `src/remediation-closeout.mjs`
+to derive one immutable snapshot and call the shared `nextAction` policy.
+The same decision is stored as `reReview.nextAction` at job and round level,
+and rendered in the closeout comment. An existing rereview refusal invalidates
+that generation and records its shared recovery owner without another request
+or wake. A suppressed rereview therefore names
+its consumer, reason, head and anchored UTC deadline. The existing comment-only
+suppression marker remains compatible with older readers.
 
-`markFollowUpJobCompleted` persists the same object at job-level `reReview` and
-at `remediationPlan.rounds[].reReview` for the completed current round. These
-optional fields accompany the ordinary request fields (`requested`,
-`requestedAt`, `reason`, `triggered`, `status`, `outcomeReason`, `reviewRow`). The
-watcher still gates reviewer dispatch on live green external CI.
+Pending or unreadable CI completes the worker round with an observer owner;
+it does not fail remediation, request a rereview, or consume an extra round.
+The former private CI settlement timeout no longer decides closeout. Later
+passes use fresh checks: a proven final pushed head belongs to hammer on green
+or as CI repair on red, including runner-less failure. An unrelated/unproven
+head retains ordinary exact-head review; withheld comment-only heads keep their
+existing audited recovery path before a review request. A remaining remediation round still
+uses the existing bounded CI-regression requeue and retry accounting, with the
+shared decision in retry metadata. Deadlines report through the existing
+closure-wait/shadow delivery; expiry grants no refusal or extra work.
 
-For a reply whose operational blockers are only CI, reconciliation also projects
-`completion.pendingCiOnly: true` and `completion.workerPushedHeadSha`. For ordinary
-rounds, the live PR head must differ from the current round's `startHeadSha`
-(falling back to `revisionRef`), and an independent CI probe must match that head
-and satisfy `classifyFinalRoundOperationalBlockers`. Comment-only final rounds
-instead require the worker push proof described below and probed pending CI.
-`resolvePendingCiCompletion` in `src/comment-only-final-round-completion.mjs`
-owns this projection and reply normalization. The fields select the public
-CI-running completion comment; they do not suppress an ordinary requested
-re-review or grant merge authority.
+`completion.pendingCiOnly` remains reply-normalization evidence. It cannot
+substitute for independent worker push proof or waive an execution gate.
+`completion.finalRemediationPush` and the exact published head feed the existing
+final-hammer route, including first-pass budget suppression and merge-agent
+handoff. They do not change the stored verdict or establish merge permission.
+Round/job transitions, delivery claims and comment retries retain their existing
+owners. Historical records without the optional fields remain readable.
 
 Automatic failed-CI admission leaves a stopped `no-progress` job stopped and
 hands ownership to the hammer; it cannot reopen that job on a later CI probe.
 Explicit operator remediation retriggers retain their existing stopped-job allowlist.
 A completed job with `finalRound: "comment-only"` and
-`reReview.suppressed: "comment-only-final-round"` is already
+`reReview.suppressed: "comment-only-final-round"`, or a completed blocking final
+round with the exact `completion.finalRemediationPush` binding, is already
 handed to the hammer. Failed-CI admission returns `ci-regression-hammer-owned`
 without mutating it, and direct round requeue throws before either no-progress
 or round-cap handling. Its job and round remain completed, preserving the

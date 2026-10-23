@@ -610,6 +610,20 @@ if (scenario === 'clean') {
   assert.equal(wakes, 2);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
+  const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
+  const closeoutAt = '2026-01-01T00:00:00.000Z';
+  const closeoutJob = { repo: 'subject-closeout', prNumber: 1, revisionRef: 'a'.repeat(40),
+    completedAt: closeoutAt, remediationPlan: { currentRound: 2, maxRounds: 2 } };
+  const closeoutSnapshot = deriveNextActionSnapshot({ head: headSha, observedAt: closeoutAt, observations: {
+    policy: { autonomousMergeExecutionEnabled: true }, leases: { closer: null }, launches: { closer: null } } });
+  for (const state of ['pending', 'green', 'failed']) {
+    const shared = remediationCloseout({ rootDir, job: closeoutJob, snapshot: closeoutSnapshot,
+      headSha, workerPushedHeadSha: headSha, completedAt: closeoutAt, ciGate: { headSha, state } });
+    assert.equal(shared.decision.action, state === 'pending' ? 'wait-for-CI' : 'hammer');
+    assert.equal(closeoutRereview(shared).requested, false);
+    assert.equal(shared.decision.deadline.anchoredAt, closeoutAt);
+    assert.equal(closeoutJob.remediationPlan.currentRound, 2);
+  }
   const unreadableSubject = { ...retrySubject, prNumber: prNumber + 11 };
   updateAmaCloserDispatchRecord(rootDir, unreadableSubject, () => ({ ...unreadableSubject,
     state: 'dispatched', launchRequestId: 'synthetic-unreadable', lastObservedStatus: 'starting',
@@ -687,7 +701,7 @@ if (scenario === 'clean') {
   evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
-    wakeRearmed: true, merged: true, remoteHeadMatches: true };
+    wakeRearmed: true, remediationCloseoutOwned: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   for (const reviewCycleExhausted of [false, true]) {
     for (const findings of [[], ['verdict-not-settled-success'], ['non-blocking-findings-present']]) {

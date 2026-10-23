@@ -402,16 +402,16 @@ test('reconcileFollowUpJob waits for external CI before requesting re-review', a
     }),
   });
 
-  const stored = JSON.parse(readFileSync(spawned.jobPath, 'utf8'));
-  assert.equal(reconciled.reconciled, false);
-  assert.equal(reconciled.reason, 'ci-settlement-pending');
+  const stored = JSON.parse(readFileSync(reconciled.jobPath, 'utf8'));
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed');
   assert.equal(rereviewCalls, 0);
   assert.equal(readReviewRow(rootDir).review_status, 'posted');
-  assert.equal(stored.status, 'in_progress');
-  assert.equal(stored.lastHeartbeatAt, '2026-04-21T10:05:00.000Z');
-  assert.equal(stored.ciRegressionGuard.state, 'pending');
-  assert.equal(stored.ciRegressionGuard.pendingChecks[0].name, 'repo-guards');
-  assert.equal(stored.remediationPlan.nextAction.type, 'wait-ci-settlement');
+  assert.equal(stored.status, 'completed');
+  assert.equal(stored.reReview.requested, false);
+  assert.equal(stored.reReview.nextAction.action, 'wait-for-CI');
+  assert.equal(stored.reReview.nextAction.actor, 'ci');
+  assert.equal(stored.reReview.nextAction.deadline.anchoredAt, stored.completedAt);
 });
 
 // CIBLOCKHAM-01 (c): agent-os PR 8007's remediation round 2 of 2 ended `failed`
@@ -474,15 +474,11 @@ async function completeRoundWithCiPendingAtTimeout(rootDir, { priorCompletedRoun
     inspectRemediationCiRegressionImpl: pendingGate,
     postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
   });
-  // Inside the bounded wait the round keeps waiting (unchanged).
-  const waiting = await reconcile('2026-04-21T10:05:00.000Z');
-  assert.equal(waiting.reason, 'ci-settlement-pending');
-  // The 30-minute default wait expires with the checks still PENDING.
-  const reconciled = await reconcile('2026-04-21T10:40:00.000Z');
+  const reconciled = await reconcile('2026-04-21T10:05:00.000Z');
   return { claimed, reconciled, comments };
 }
 
-test('CIBLOCKHAM-01: a remediation CI wait that expires while checks are PENDING completes and requests the re-review', async () => {
+test('NXA-04: pending CI completes the round with one observer and no rereview', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { reconciled, comments } = await completeRoundWithCiPendingAtTimeout(rootDir);
 
@@ -490,12 +486,12 @@ test('CIBLOCKHAM-01: a remediation CI wait that expires while checks are PENDING
   assert.equal(reconciled.outcome, 'completed');
   assert.equal(reconciled.job.status, 'completed');
   assert.equal(reconciled.job.failure, undefined);
-  assert.equal(reconciled.job.reReview.requested, true);
-  assert.equal(reconciled.job.reReview.ciSettlement, 'pending-at-timeout');
-  assert.equal(reconciled.job.reReview.ciGate.pendingChecks[0].name, 'repo-guards');
+  assert.equal(reconciled.job.reReview.requested, false);
+  assert.equal(reconciled.job.reReview.nextAction.action, 'wait-for-CI');
+  assert.equal(reconciled.job.reReview.nextAction.actor, 'ci');
   const reviewRow = readReviewRow(rootDir);
-  assert.equal(reviewRow.review_status, 'pending');
-  assert.equal(reviewRow.revision_ref, 'pending-head');
+  assert.equal(reviewRow.review_status, 'posted');
+  assert.equal(reconciled.job.reReview.nextAction.head, 'pending-head');
   for (const comment of comments) {
     assert.doesNotMatch(JSON.stringify(comment), /Human intervention required/);
   }

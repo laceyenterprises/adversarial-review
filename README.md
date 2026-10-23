@@ -1186,12 +1186,12 @@ terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
-successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing;
-HAMATTEST-03 executes its head-bound exact-head review decision through the
-ownerless watchdog. Explicit decisions and selected review intents bind both the
-current and reviewed heads; bounded waits report wait/page until ownership is
-certainly absent and watchdog queueing succeeds. Other closure consumers retain
-legacy authority and observational shadow.
+successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing and
+NXA-04 for remediation closeout; HAMATTEST-03 executes its head-bound exact-head
+review decision through the ownerless watchdog. Explicit decisions and selected
+review intents bind both the current and reviewed heads; bounded waits report
+wait/page until ownership is certainly absent and watchdog queueing succeeds.
+Other closure consumers retain legacy authority and observational shadow.
 Disagreements and overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
 path only with `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`. The
 [shadow runbook](docs/RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02) and
@@ -1200,6 +1200,19 @@ and rollout acceptance. `node test/run-tests.mjs test/pr-next-action.test.mjs
 test/pr-next-action-shadow.test.mjs test/next-action-disagreements.test.mjs`
 verifies them with synthetic I/O. No lifecycle state, transition, state
 projection or smoke promise changes.
+
+NXA-04: normal and recovered remediation closeout use one shared successor.
+`reReview.nextAction` supplies suppression and comments with one owner, reason,
+head and anchored UTC deadline. Pending CI completes the worker round under an
+observer; CI admission retains its progress without another waiting round.
+A proven final push goes to hammer after settlement or as failed-CI repair. Unproven heads retain exact-head review. Verdicts, round/retry budgets,
+delivery claims, authenticated cancellation and execution safety remain intact.
+The handoff smoke checks pending-to-hammer redecision; scoped coverage is
+`node test/run-tests.mjs test/remediation-closeout-next-action.test.mjs
+ test/follow-up-reconcile.test.mjs test/remediation-completion-comments.test.mjs`.
+Live acceptance awaits a separately authorized first suppressed-push hammer,
+including remote merge evidence. Rollback reverts this closeout adapter while
+retaining accepted wake adoption. No production operation is part of this PR.
 
 NXA-03: the closure wake consumes the shared immutable snapshot/decision pair.
 Repair intent may wake on failed required CI, conflict or proven final push;
@@ -1472,7 +1485,8 @@ poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
-<a id="smv-handoff"></a>**smv-handoff:** NXA-03 verifies shared immutable
+<a id="smv-handoff"></a>**smv-handoff:** NXA-04 verifies one closeout successor through pending, green
+and red CI without another remediation round. NXA-03 verifies shared immutable
 decision wake routing, live-owner suppression and one wake per reconciled
 no-merge attempt at the same head; the next shadow consumer receives the same
 decision. No merge permission is granted. Null same-repository head metadata

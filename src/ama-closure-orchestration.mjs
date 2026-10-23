@@ -89,7 +89,7 @@ import {
   writeCloserAuthoredStaleAudit,
 } from './closer-authored-stale.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
-import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
+import { proveCommentOnlyFinalRoundHead, findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -1192,7 +1192,9 @@ async function dispatchAmaClosureFor({
   }
   // CYCLECAPHAM-01: the watcher's review-cycle-cap hand-off. The cap stops
   // review-then-remediate cycles, so the capped PR is a final-hammer close.
-  const reviewCycleCapReached = dispatchJob?.reviewCycleCapReached === true
+  const remediationHandoff = findFinalRemediationPushJob(rootDir, {
+    repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef });
+  const reviewCycleCapReached = Boolean(remediationHandoff) || dispatchJob?.reviewCycleCapReached === true
     || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure';
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
   // remediation job left to fix it.
@@ -1419,7 +1421,7 @@ async function dispatchAmaClosureFor({
   // CEILINGPUSH-01: preserve the last review's findings as terminal-remediation
   // input for a moved head. This grants no closer-only carry-forward proof:
   // candidate/validated heads still differ and every merge gate stays intact.
-  const ceilingMovedHead = reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
+  const ceilingMovedHead = (Boolean(remediationHandoff) || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure')
     && originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha;
   let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead
     : ceilingMovedHead ? originalReviewedHead : settledReviewHeadSha;
@@ -1747,7 +1749,8 @@ async function dispatchAmaClosureFor({
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
     checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
     roundsLeft: !reviewCycleExhausted, ciBlockedHammerOwner,
-    reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
+    finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
+    reviewCeilingReached: Boolean(remediationHandoff) || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
   let closureOwner = decideClosureOwner(closureOwnerInput);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
   if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled };
@@ -1914,6 +1917,7 @@ async function dispatchAmaClosureFor({
       nonBlockingFindingCount: reviewState.nonBlockingFindingCount, logger,
     });
   }
+  let remediationSuccessor = null;
   try {
     // NXA-03: resolve once before waking, then pass this exact immutable pair
     // to shadow consumers. No merge eligibility exceptions are wake policy.
@@ -1927,6 +1931,7 @@ async function dispatchAmaClosureFor({
         checksRollup: candidate?.statusCheckRollup,
         candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels }) });
     if (closureOwnerSink) closureOwnerSink.shared = shared;
+    if (remediationHandoff) remediationSuccessor = shared;
     throwIfAborted(signal);
     let identity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
     let intent = ciBlockedHammerOwner
@@ -1954,6 +1959,29 @@ async function dispatchAmaClosureFor({
       `[watcher] eligible hammer wake failed for ${repoPath}#${prNumber}; continuing AMA closure: ` +
       `${err?.message || err}`,
     );
+  }
+
+  // The closeout's final-push evidence must not turn a pending-check decision
+  // into a ceiling-repair dispatch. Reuse the shared decision and ordinary
+  // bounded observer; an overdue report never consumes another round or refuses
+  // later work. Every settled-head launch still runs the existing gates below.
+  if (remediationSuccessor?.decision.action === 'wait-for-CI') {
+    const decision = remediationSuccessor.decision;
+    closureOwner = { owner: 'wait', reason: decision.reason === 'mergeability-unknown'
+      ? 'pending-mergeability' : 'pending-required-checks' };
+    if (closureOwnerSink) closureOwnerSink.value = closureOwner;
+    let boundedWait = null;
+    try {
+      const observedNow = now();
+      const anchoredAt = Date.parse(decision.deadline?.anchoredAt || '');
+      boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber, headSha: decision.head, env,
+        now: observedNow, startedAt: anchoredAt,
+        reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head} ageMs=${Math.max(0, observedNow - anchoredAt)}` });
+    } catch (error) {
+      logger?.warn?.(`[watcher] closeout observer delivery failed: ${error?.message || error}`);
+    }
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: closureOwner.reason, nextAction: decision, boundedWait }, { amaEnabled: true });
   }
 
   // Transient-only misses on a closer's parked head (exact-head CI pending,

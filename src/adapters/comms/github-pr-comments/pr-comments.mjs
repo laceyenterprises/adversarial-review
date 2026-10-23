@@ -609,6 +609,7 @@ function buildRemediationOutcomeCommentBody({
     action,
   });
   const lines = [];
+  const successor = (reReview || job?.reReview)?.nextAction;
 
   // Marker first so a substring search hits the smallest possible
   // span at the top of the body. HTML comments don't render in
@@ -627,6 +628,10 @@ function buildRemediationOutcomeCommentBody({
 
   if (action === 'refunded') {
     lines.push(`**Outcome:** ${sanitizeFailureText(failure?.message || 'not charged: infrastructure failure')}. Queued once more.`);
+  } else if (action === 'completed' && successor
+    && !(successor.action === 'review' && reReview?.requested)
+    && !(successor.action === 'wait-for-CI' && job?.completion?.pendingCiOnly === true)) {
+    lines.push(`**Outcome:** round finished; ${sanitizeInlineText(successor.action, 80)} owned by ${sanitizeInlineText(successor.actor, 80)}.`);
   } else if (action === 'completed' && job?.completion?.pendingCiOnly !== true
     && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
     lines.push('**Outcome:** round finished; terminal hammer close queued.');
@@ -784,7 +789,11 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
-  if (action === 'completed' && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
+  if (successor) {
+    lines.push('');
+    lines.push(`**Next action:** ${sanitizeInlineText(successor.action, 80)} · **Owner:** ${sanitizeInlineText(successor.actor, 80)} · **Reason:** ${sanitizeInlineText(successor.reason, 120)}`);
+    lines.push(`**Head:** ${sanitizeInlineText(successor.head || 'unknown', 80)} · **Deadline (UTC):** ${sanitizeInlineText(successor.deadline?.at || 'explicit hold', 80)}`);
+  } else if (action === 'completed' && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
     const headDescription = typeof job?.completion?.workerPushedHeadSha === 'string'
       ? "this remediation round's recorded head" : 'the PR head';
     lines.push('');

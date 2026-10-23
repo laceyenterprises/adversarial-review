@@ -334,9 +334,10 @@ change or new check is required.
 policy for "who acts next on this open PR". It is pure and total. It reads one
 NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
 round?, evidenceRefs, decisionKey}`. NXA-03 adopts this decision for hammer wake
-routing; HAMATTEST-03 also executes its head-bound exact-head review decision
-through the ownerless watchdog, including after the old review-round ceiling.
-Other caller routes keep their legacy effects. The decision grants no merge authority. The exact-head, provenance,
+routing, and NXA-04 adopts it for remediation closeout. HAMATTEST-03 also
+executes its head-bound exact-head review decision through the ownerless
+watchdog, including after the old review-round ceiling. Other caller routes
+keep their legacy effects. The decision grants no merge authority. The exact-head, provenance,
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
@@ -407,6 +408,26 @@ and dedupe identity privately; publish only synthetic or aggregate evidence.
 If that case has not happened, acceptance remains pending. Workers do no live
 watch or deployment. Rollback is a source revert of this caller to the retained
 legacy eligibility adapter, with no new override label or fail-closed switch.
+
+### Remediation closeout adoption (NXA-04)
+
+Ordinary completion, recovered published heads and final-round siblings store
+one `reReview.nextAction` decision. Suppression and comments name its owner,
+reason, head and anchored UTC deadline. Pending CI belongs to the observer;
+it neither fails the worker round nor spends another round. The proven final
+published head goes to hammer when checks settle green, or to CI repair on red.
+An unrelated head follows ordinary exact-head review. Existing terminal writers,
+delivery claims, rereview/wake effects, verdicts, budgets and execution gates
+remain authoritative. The final-push binding is intent, never merge evidence.
+
+Operator/SRE acceptance remains pending until the first naturally occurring
+hammer through a suppressed remediation push is observed under separate rollout
+authority. Privately record the exact published head, decision, CI transition,
+wake, admission, terminal outcome and remote merge. No suitable case means
+pending acceptance. Workers perform no production observation or rollout.
+Rollback reverts this closeout adapter and its handoff seams by source revert;
+retain accepted NXA-03 wake adoption. No rollout evidence or deadline is a
+runtime refusal, and no new check, switch or override label is added.
 
 ## Stacked-base reads (STACKEDBASE-01)
 
@@ -2089,10 +2110,10 @@ uses (`src/hammer-owner-route.mjs`).
   launches no retry hammer. That decision or an exhausted hammer retry cap pages
   SEV1 `ama.ci_blocked.hammer_final`, once per `repo#pr@head`.
 
-A remediation round whose CI wait expires with the checks still PENDING now
-completes and requests the re-review (`reReview.ciSettlement` is
-`pending-at-timeout` in the job). It no longer ends `failed` with "Human
-intervention required".
+NXA-04 completes a worker round with pending CI and records an observer as
+`reReview.nextAction`. It queues no extra rereview while checks are pending.
+Fresh evidence on the next pass selects review, remaining remediation or final
+hammer; unreadable CI retains an observer without failing the round.
 
 ### A hammer that died of an infrastructure cause (CLOSERREUSE-01)
 

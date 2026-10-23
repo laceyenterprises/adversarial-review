@@ -162,6 +162,7 @@ export async function load(url, context, nextLoad) {
         return job?.status === 'completed' && job.finalRound === 'comment-only' &&
           job.reReview?.suppressed === 'comment-only-final-round';
       }
+      export function isCompletedFinalRemediationJob(job) { return isCompletedCommentOnlyFinalRoundJob(job); }
       export function hasInProgressCommentOnlyFinalRound() { return false; }
       export function hasCommentOnlyFinalRoundPush() { return false; }
       export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }
@@ -169,6 +170,7 @@ export async function load(url, context, nextLoad) {
       export function scanArchivedStoppedFollowUpJobs() { return []; }
       export function findFinalRoundJobForProvenPush() { return null; }
       export function findCommentOnlyFinalRoundPushJob() { return null; }
+      export function findFinalRemediationPushJob() { return null; }
       export function proveCommentOnlyFinalRoundHead() { return false; }
       export function suppressFinalRoundFollowUp() { return false; }
       export function withheldHeadRecoveryCandidates(root, options) { return options.prNumber === 101 ? [{ job: { completion: {} } }] : []; }

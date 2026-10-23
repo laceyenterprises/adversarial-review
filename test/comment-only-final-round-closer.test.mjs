@@ -4,7 +4,7 @@
 // fails closed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -243,6 +243,34 @@ const WAITING_ROLLUPS = [
   { name: 'empty', rollup: [] },
   { name: 'only the pipeline gate', rollup: [{ __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' }] },
 ];
+
+test('NXA-04: a blocking final-push handoff retains its shared observer until CI settles', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'final-successor-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const id = seedFinalRound(rootDir, { reviewBody: REQUEST_CHANGES_BODY });
+  const path = join(rootDir, 'data', 'follow-up-jobs', 'completed', `${id}.json`);
+  const job = JSON.parse(readFileSync(path, 'utf8'));
+  delete job.finalRound;
+  job.completion.finalRemediationPush = true;
+  job.remediationPlan = { currentRound: 2, maxRounds: 2 };
+  job.reReview = { requested: false, suppressed: 'shared-next-action', nextAction: {
+    action: 'wait-for-CI', actor: 'ci', reason: 'checks-pending', head: PUSHED,
+    deadline: { at: '2026-09-28T23:08:59.717Z', anchoredAt: job.completedAt },
+    decisionKey: 'synthetic-decision', evidenceRefs: ['synthetic-publish'] } };
+  writeFileSync(path, JSON.stringify(job));
+  const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+    candidate: { ...closureArgs(rootDir).candidate, statusCheckRollup: WAITING_ROLLUPS[0].rollup },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, autonomousMergeExecutionEnabled: true }) }),
+    fetchLatestHeadReviewBodiesImpl: async () => [REQUEST_CHANGES_BODY],
+    observeClosureWaitImpl: async () => ({ retryAfterMs: 30000, exhausted: true }),
+    maybeDispatchAmaCloserImpl: async () => { throw new Error('pending CI cannot launch the ceiling hammer'); },
+  }));
+  assert.equal(result.dispatched, false);
+  assert.equal(result.recoveryWait, true);
+  assert.equal(result.nextAction.action, 'wait-for-CI');
+  assert.equal(result.nextAction.actor, 'ci');
+  assert.equal(result.needsOperator, undefined, 'an overdue report cannot refuse later work');
+});
 
 for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
   test(`${name} CI on a proven final-round head waits without spending the retain-loop cap`, async (t) => {

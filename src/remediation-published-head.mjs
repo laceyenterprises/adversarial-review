@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
 // REMLINK-01: recovery requires worker/service evidence, never just a moved head.
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
@@ -76,6 +77,7 @@ export function completeWorkerPublishedHead({
   requestRereviewWakeImpl = requestRereviewWake,
   requestWatcherWakeImpl = requestWatcherWake,
   execFileSyncImpl = execFileSync,
+  ciGate = null, lifecycle = null, snapshot = null,
 }) {
   try {
     return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
@@ -101,12 +103,11 @@ export function completeWorkerPublishedHead({
         // Reconcile the durable reply when it exists; absence never erases a proven publish.
         const remediationReply = reply ? { path: replyPath, state: 'worker-wrote-reply', payload: reply, reconciledAt: completedAt } : job.remediationReply;
         writeFollowUpJob(jobPath, job);
-        // Final comment-only rounds hand off to the ordinary watcher cap/closure lane.
-        // Other rounds request the existing rereview transition, which retains its caps
-        // and authoritative terminal-PR guards. No merge decision is made here.
-        let reReview = job.finalRound === 'comment-only'
-          ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
-          : { requested: true, status: 'pending', requestedAt: completedAt, reason: reply?.reReview?.reason || null };
+        let shared = remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha: headSha,
+          completedAt, ciGate, lifecycle, snapshot });
+        let reReview = closeoutRereview(shared, reply?.reReview?.reason);
+        // Retain the existing final-round reader's compatibility marker.
+        if (job.finalRound === 'comment-only' && !reReview.requested) reReview.suppressed = 'comment-only-final-round';
         const { commentDelivery } = buildReconcileCommentDelivery({
           job, worker, action: 'completed', reply, reReview, now: () => completedAt,
         });
@@ -114,17 +115,20 @@ export function completeWorkerPublishedHead({
           resultingHeadSha: headSha,
           remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
           remediationReply, reReview, commentDelivery,
-          completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
+          completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source,
+            workerPushedHeadSha: headSha, finalRemediationPush: shared.snapshot.observations.remediation.value.finalPush != null },
         });
-        if (job.finalRound === 'comment-only') {
-          reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
-          requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
+        if (completed.alreadyTerminal && completed.job.reReview?.nextAction) return completed;
+        if (!reReview.requested) {
+          requestWatcherWakeImpl({ rootDir, reason: job.finalRound === 'comment-only'
+            ? 'comment-only-final-round-completed' : REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
             repo: job.repo, prNumber: job.prNumber, requestedAt: completedAt });
         } else {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
             requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
-          reReview = buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
-            outcome: { ...outcome, requestedAt: completedAt } });
+          if (!outcome?.triggered && outcome?.status !== 'already-pending') shared = refusedCloseout(shared, outcome);
+          reReview = { ...buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
+            outcome: { ...outcome, requestedAt: completedAt } }), nextAction: shared.decision };
           if (outcome?.triggered || outcome?.status === 'already-pending') {
             const wake = requestRereviewWakeImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
               headSha, reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
@@ -200,7 +204,7 @@ export function buildRereviewResult({ requested, reason, outcome = null }) {
 
 export function completeLiveWorkerPublishedHead({ lifecycle, ...options }) {
   return lifecycle?.source === 'live' && lifecycle.prState === 'open'
-    ? completeWorkerPublishedHead({ ...options, headSha: lifecycle.headSha }) : null;
+    ? completeWorkerPublishedHead({ ...options, lifecycle, headSha: lifecycle.headSha }) : null;
 }
 
 export function completeKnownWorkerPublish({ proof, ...options }) {

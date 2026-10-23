@@ -3,7 +3,7 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
-import { isCompletedCommentOnlyFinalRoundJob } from './comment-only-final-round.mjs';
+import { isCompletedFinalRemediationJob } from './comment-only-final-round.mjs';
 import { recoverCancelledChecks } from './ci-recovery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
@@ -18,7 +18,7 @@ function buildRereviewCiRegressionReason({ repo, prNumber, ciGate }) {
 // external CI); the watcher routes the PR to the hammer for final adjudication.
 const CI_BLOCKED_PARK_CAUSES = Object.freeze({
   'ci-regression-no-job': 'no follow-up job exists to requeue',
-  'ci-regression-hammer-owned': 'the completed comment-only final round handed ownership to the hammer',
+  'ci-regression-hammer-owned': 'the completed final remediation round handed ownership to the hammer',
   // The requeue re-stops a job at its round cap (or a no-progress round).
   'ci-regression-stopped': 'no remediation round is left to requeue',
 });
@@ -166,7 +166,7 @@ async function guardRereviewCiBeforeReviewer({
     }
 
     // Preserve the completed round's start/result edge for the hammer's proof.
-    if (isCompletedCommentOnlyFinalRoundJob(latest.job)) {
+    if (isCompletedFinalRemediationJob(latest.job)) {
       return ciBlockedHammerOwnerResult({
         repo, prNumber, ciGate, reason: 'ci-regression-hammer-owned',
         jobPath: latest.jobPath, job: latest.job,

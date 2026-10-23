@@ -6,7 +6,7 @@ import { observeSynchronousChild } from './watcher-latency.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
-import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
+import { hasCommentOnlyFinalRoundPush, findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { applyMergeAgentStuckLabel as applyStuckLabel } from './merge-agent-stuck-label.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { fetchMergeAgentCandidate, normalizeLabelNames, extractOperatorNotes } from './merge-agent-candidate.mjs';
@@ -2820,11 +2820,12 @@ async function dispatchMergeAgentForPR({
 }
 
 function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {
+  const finalPush = findFinalRemediationPushJob(rootDir, candidate);
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
     revisionRef: candidate.headSha,
-  });
+  }) || finalPush;
   const parsedReview = parseMergeAgentRescueReviewBody(latestJob?.reviewBody);
   const classifierResult = classifyMergeAgentRescue({
     closureOwner: candidate.closureOwner || null,
@@ -2860,6 +2861,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
   const nonBlockingFindings = classifyNonBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   return {
     ...candidate,
+    ...(finalPush ? { reviewCycleCapReached: true } : {}),
     lastVerdict,
     mergeAgentRescueDecision: classifierResult.decision,
     mergeAgentRescueReason: classifierResult.reason,

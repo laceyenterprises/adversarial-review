@@ -183,8 +183,6 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/follow-up-merge-agent.mjs:208` | `Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS` | resolveHqDispatchTimeoutMs |
 | `src/follow-up-merge-agent.mjs:814` | `5000 ms` | _probeDispatchStatusViaHq |
 | `src/follow-up-merge-agent.mjs:867` | `5000 ms` | probeDispatchStatusViaHq |
-| `src/follow-up-remediation.mjs:283` | `DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS = 1800000 ms` | resolveRemediationCiSettleTimeoutMs |
-| `src/follow-up-remediation.mjs:286` | `Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS` | resolveRemediationCiSettleTimeoutMs |
 | `src/follow-up-retrigger-label.mjs:229` | `ACK_COMMENT_LOOKUP_TIMEOUT_MS = 15000 ms` | findExistingAckComment |
 | `src/follow-up-retrigger-label.mjs:333` | `ACK_COMMENT_TIMEOUT_MS = 10000 ms` | deliverRetriggerOperatorNotice |
 | `src/follow-up-retrigger-label.mjs:636` | `Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS` | resolveRetriggerOutcomeTimeoutMs |

@@ -1467,6 +1467,7 @@ async function seedRemlink(t, { published = true, startHead = 'a'.repeat(40), ro
   const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
   let followOns = 0;
   const completePublishedHeadImpl = args => completeWorkerPublishedHead({ ...args,
+    ciGate: { state: 'green', headSha: args.headSha },
     requestReviewRereviewImpl: () => {
       const completedPath = path.join(getFollowUpJobDir(rootDir, 'completed'), path.basename(seeded.jobPath));
       const completed = readJobAtPath(completedPath);
@@ -1680,6 +1681,7 @@ for (const outcome of [null, undefined]) {
     const f = await seedRemlink(t);
     const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
     const completed = completeWorkerPublishedHead({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head,
+      ciGate: { state: 'green', headSha: f.head },
       requestReviewRereviewImpl: () => outcome,
       requestRereviewWakeImpl: () => { assert.fail('a blocked re-review must not wake'); } });
     const persisted = readJobAtPath(completed.jobPath);
@@ -1698,6 +1700,7 @@ test('REMLINK-01 terminal re-review update tolerates an existing completed recor
     remediationPlan: { ...f.job.remediationPlan, rounds: [] } });
   const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
   const completed = completeWorkerPublishedHead({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head,
+    ciGate: { state: 'green', headSha: f.head },
     requestReviewRereviewImpl: () => ({ triggered: true, status: 'pending' }),
     requestRereviewWakeImpl: () => ({ requested: true }) });
   assert.equal(completed.alreadyTerminal, true);
@@ -1735,7 +1738,8 @@ test('REMLINK-01 restart reconciliation recovers publish evidence without top-le
     requestRereviewWakeImpl: () => ({ requested: true }) });
   assert.equal(result.action, 'completed');
   assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
-  assert.equal(followOns, 1);
+  assert.equal(followOns, 0);
+  assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
 });
 
 test('REMLINK-01 an older published round is not a result for a fresh unspawned claim', async t => {
@@ -1804,7 +1808,8 @@ test('REMLINK-01 a CI retry settles an independently proven worker publish inste
   assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
   assert.equal(result.job.remediationPlan.transientRetries, 0);
   assert.equal(existsSync(pendingPathFor(f.rootDir, f.jobPath)), false);
-  assert.equal(followOns, 1);
+  assert.equal(followOns, 0);
+  assert.equal(result.job.reReview.nextAction.action, 'remediate');
 });
 
 test('REMLINK-01 external movement recorded at exit stays untrusted after retry and watcher sweep', async t => {

@@ -1,4 +1,4 @@
-import { readLaunchRequestStatus } from './launch-status.mjs';
+import { readLaunchRequestStatus, readDispatchStatus } from './launch-status.mjs';
 
 const producer = 'cwp_dispatch.dispatch';
 
@@ -19,8 +19,8 @@ export function readDispatchReceipt(value, { identityFields = ['launchRequestId'
   const launchRequestId = typeof rawIdentity === 'string' && rawIdentity.trim() ? rawIdentity : null;
   const identityDiagnostic = launchRequestId ? null : `${producer}: ${(selected ? [selected] : identityFields)
     .map(key => `$.${key} ${Object.hasOwn(value, key) ? 'invalid; expected non-empty string' : 'missing'}`).join('; ')}`;
-  const status = readLaunchRequestStatus(value.status);
-  if (status.diagnostic) status.diagnostic = `${producer}: $.status ${Object.hasOwn(value, 'status') ? `unrecognized value ${JSON.stringify(value.status)}` : 'missing'}`;
+  const evidence = readDispatchStatus(value);
+  const status = { ...evidence, diagnostic: evidence.diagnostics[0] || null };
   return { payload: value, rawIdentity, launchRequestId, identityDiagnostic, status };
 }
 

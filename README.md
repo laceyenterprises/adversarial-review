@@ -917,7 +917,10 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
-LRQSTATUS-01 uses the producer's launch-status vocabulary and wire booleans.
+Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
+`statusVocabulary`. Explicit terminal/succeeded false values win independently;
+missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.
+The SDK artifact is installed through the npm lockfile before service startup.
 Decision-blocked and waiting launches release active closer leases and capacity,
 while their dispatch receipts retain PR ownership through decision resolution
 and resumed execution. Resumed workers fence both redispatch and inline daemon
@@ -928,7 +931,11 @@ Confirmed terminal ledger evidence overrides a stored parked observation;
 unknown ledger evidence preserves parked ownership.
 Producer-terminal decision states retain ownership; wire-only live probes with
 no status string return an `unknown` wait reason without interrupting arbitration.
-The offline `test/launch-request-status.test.mjs` table covers every vocabulary
+The offline `test/hq-dispatch-status-json.test.mjs` uses public SDK serializer
+examples across reviewer, remediation and merge-agent boundaries, including
+negative false/alias/malformed mutations. `test/agent-runtime-os-dispatch.test.mjs`
+covers the app-contract projection, including nested live status and explicit
+false precedence. The `test/launch-request-status.test.mjs` table covers every vocabulary
 status, wire precedence, retry descendants, and parked/resumed ownership without a
 second dispatch. The clean sandbox smoke also verifies repeated resumed-owner
 fences and terminal release. No live action or configuration change is required after deploy.

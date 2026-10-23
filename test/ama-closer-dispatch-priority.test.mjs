@@ -2677,3 +2677,31 @@ for (const failedCall of [false, true]) test(`CLOSERINTENT-01: missing ticket ev
   assert.equal(record.launchRequestId, null);
   assert.equal(readAmaCloserLease(rootDir, record).status, 'pending');
 });
+for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
+  test(`SDK wire terminal false retains closer ownership for ${status}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-wire-false-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-owner' });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-owner', retryCount: 1,
+      reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+    const payload = { status, terminal: false, succeeded: false };
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: payload }),
+      execFileImpl: async (_command, argv) => {
+        assert.deepEqual(argv.slice(0, 2), ['dispatch', 'status'], 'no replacement dispatch');
+        return { stdout: JSON.stringify(payload) };
+      },
+      cleanupScratchImpl: () => assert.fail('nonterminal owner retains scratch'),
+    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+    assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'synthetic-owner');
+  });
+}

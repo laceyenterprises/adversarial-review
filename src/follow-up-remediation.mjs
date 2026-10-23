@@ -1,4 +1,5 @@
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
+import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
@@ -261,7 +262,6 @@ function isHarnessIdentityEnforcementEnabled(env = process.env, options = {}) {
 }
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
@@ -1484,7 +1484,8 @@ async function reconcileFollowUpJob({
 
   let paths = null;
   let pathsError = null;
-  if (workerTerminalEvent?.status === 'succeeded' && workerTerminalEventMatches(worker, workerTerminalEvent)) {
+  if (readDispatchStatus(workerTerminalEvent).terminal && readDispatchStatus(workerTerminalEvent).succeeded
+    && workerTerminalEventMatches(worker, workerTerminalEvent)) {
     try {
       paths = buildReconciliationPaths(rootDir, job);
     } catch (err) {
@@ -2902,7 +2903,7 @@ async function reconcileFollowUpJob({
   return settleMissingRemediationArtifact({
     rootDir, job, jobPath, worker, workerState, completedAt, finalMessage,
     liveness, logText: workerLogText, resumeImpossible, maxRetries: resolveMaxTransientRemediationRetries(),
-    hqDispatchSucceeded: HQ_SUCCESS_STATUSES.has(String(liveness?.dispatchStatus?.status || '')),
+    hqDispatchSucceeded: readDispatchStatus(liveness?.dispatchStatus).succeeded,
     now, log, postCommentImpl,
     buildCommentDelivery: buildReconcileCommentDelivery,
     postOutcomeComment: postReconcileOutcomeCommentSafe,

@@ -1,3 +1,4 @@
+import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
@@ -643,10 +644,10 @@ async function isMergeAgentDispatchActiveForHead(rootDir, {
   const status = typeof dispatchStatus?.status === 'string'
     ? dispatchStatus.status.trim().toLowerCase()
     : null;
-  const active = status === 'running'
-    || status === 'starting'
-    || status === 'blocked'
-    || status === 'stalled';
+  const evidence = readDispatchStatus(dispatchStatus);
+  const active = evidence.terminal ? false
+    : Boolean(evidence.status || dispatchStatus?.terminal === false)
+      || status === 'blocked' || status === 'stalled';
 
   return {
     active,
@@ -728,24 +729,15 @@ function _utcDateString(timestampMs) {
 // some point, refusals are just earlier-in-history attempts. Without
 // this check the helper would mislabel admitted dispatches as
 // pre-spawn BLOCKED forever once historical refusals exist in the audit log.
-const _NON_STUCK_DISPATCH_STATUSES = new Set([
-  // terminal — request finished one way or the other
-  'succeeded',
-  'failed',
-  'cancelled',
-  'canceled',
-  'superseded',
-  // actively progressing — admission already happened
-  'running',
-  'starting',
-  // intentional non-progress, but admission did happen
-  'blocked',
-  'stalled',
-]);
+// Compatibility dispatch/worker observations, separate from launch vocabulary.
+function dispatchWasAdmitted(payload) {
+  const evidence = readDispatchStatus(payload);
+  return evidence.terminal || Boolean(evidence.status && evidence.status !== 'requested')
+    || ['blocked', 'stalled'].includes(String(payload?.status || '').trim().toLowerCase());
+}
 const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
   'succeeded',
   'failed',
-  'cancelled',
   'canceled',
   'superseded',
   // The recorded dispatch's launch request is gone from the ledger (reaped /
@@ -758,7 +750,6 @@ const _REQUESTED_RETRYABLE_DISPATCH_STATUSES = new Set([
 const _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES = new Set([
   'succeeded',
   'failed',
-  'cancelled',
   'canceled',
   'superseded',
   'not-found',
@@ -841,7 +832,8 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
   }
   if (!parsed || typeof parsed !== 'object') return null;
   const status = typeof parsed.status === 'string' ? parsed.status : null;
-  return status ? { status } : null;
+  return status || typeof parsed?.terminal === 'boolean' || typeof parsed?.succeeded === 'boolean'
+    ? { ...parsed, status } : null;
 }
 
 async function probeDispatchStatusViaHq({
@@ -870,7 +862,8 @@ async function probeDispatchStatusViaHq({
     const status = typeof parsed?.status === 'string'
       ? parsed.status.trim().toLowerCase()
       : null;
-    return status ? { status } : null;
+    return status || typeof parsed?.terminal === 'boolean' || typeof parsed?.succeeded === 'boolean'
+      ? { ...parsed, status } : null;
   } catch (err) {
     if (hasAuthoritativeOwnerVisibility(asOwner) && _isNotFoundDispatchStatusError(err)) {
       return { status: 'not-found' };
@@ -887,12 +880,18 @@ async function probeDispatchStatusViaHq({
   }
 }
 
-function isRetryableRecordedDispatchStatus(status) {
-  return _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
+function isRetryableRecordedDispatchStatus(value) {
+  const payload = typeof value === 'string' ? { status: value } : value;
+  const evidence = readDispatchStatus(payload);
+  return (payload?.status === 'not-found' && payload?.terminal !== false)
+    || (evidence.terminal && _REQUESTED_RETRYABLE_DISPATCH_STATUSES.has(evidence.status));
 }
 
-function isWatcherAutonomousRetryableRecordedDispatchStatus(status) {
-  return _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(String(status || '').trim().toLowerCase());
+function isWatcherAutonomousRetryableRecordedDispatchStatus(value) {
+  const payload = typeof value === 'string' ? { status: value } : value;
+  const evidence = readDispatchStatus(payload);
+  return (payload?.status === 'not-found' && payload?.terminal !== false)
+    || (evidence.terminal && _WATCHER_AUTONOMOUS_RETRYABLE_DISPATCH_STATUSES.has(evidence.status));
 }
 
 
@@ -950,7 +949,7 @@ function describeStaleDispatch(recordedDispatch, {
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
   // Optional caller-supplied probe of current dispatch state. When
-  // provided AND the returned status is in _NON_STUCK_DISPATCH_STATUSES,
+  // provided AND the returned evidence proves admission,
   // we return null (the request was admitted at some point — refusal
   // history is just earlier attempts). When omitted, we fall back to
   // refusal-count-only classification (safe for OSS standalone where
@@ -974,8 +973,7 @@ function describeStaleDispatch(recordedDispatch, {
   if (typeof dispatchStateProbe === 'function') {
     let probed = null;
     try { probed = dispatchStateProbe(lrq); } catch { probed = null; }
-    const probedStatus = typeof probed?.status === 'string' ? probed.status.toLowerCase() : null;
-    if (probedStatus && _NON_STUCK_DISPATCH_STATUSES.has(probedStatus)) {
+    if (dispatchWasAdmitted(probed)) {
       return null;
     }
   }
@@ -1225,7 +1223,7 @@ async function reconcileProactivePhantomHandoffs({
       env: runtimeEnv,
       logger,
     });
-    if (!isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) continue;
+    if (!isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus)) continue;
     inspected += 1;
     const beforeObservedAt = recordedDispatch.phantomHandoffObservedAt || null;
     const beforePosted = recordedDispatch.phantomHandoffCommentDelivery?.posted;
@@ -1844,15 +1842,6 @@ async function addMergeAgentDispatchedLabel({
   return result;
 }
 
-// Dispatch statuses that mean the merge-agent worker is gone/done, so the
-// cancel-on-merged cleanup can converge (remove the stale label, stop retrying)
-// even when `hq dispatch cancel` returned an unreadable error. `not-found` is
-// only ever produced by probeDispatchStatusViaHq under authoritative owner
-// visibility, so it cannot false-converge a still-live cross-account worker.
-const MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES = new Set([
-  'succeeded', 'failed', 'cancelled', 'canceled', 'superseded', 'not-found',
-]);
-
 // Best-effort: when the watcher sees a PR has been closed/merged while
 // the `merge-agent-dispatched` label is still set, look up the most
 // recent merge-agent dispatch record for that PR, call `hq dispatch
@@ -1972,7 +1961,7 @@ async function cancelMergeAgentDispatchOnMerge({
         const probedStatus = String(probed?.status || '').trim().toLowerCase();
         if (probedStatus) {
           result.probedDispatchStatus = probedStatus;
-          if (MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES.has(probedStatus)) {
+          if ((probedStatus === 'not-found' && probed?.terminal !== false) || readDispatchStatus(probed).terminal) {
             result.probeConfirmedTerminal = true;
           }
         }
@@ -2233,7 +2222,7 @@ async function dispatchMergeAgentForPR({
   // Threaded into recordMergeAgentDispatch so the per-(PR, head SHA) re-dispatch
   // budget survives across watcher ticks.
   let watcherReDispatchCountForRecord = null;
-  if (latestRecordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)) {
+  if (latestRecordedDispatch && isRetryableRecordedDispatchStatus(recordedDispatchStatus)) {
     // The merge-agent clears its own `merge-agent-dispatched` marker when it
     // hands off to a recovery worker or applies `merge-agent-stuck`. So if the
     // marker is STILL set while the dispatch reads terminal-failed, the worker
@@ -2261,7 +2250,7 @@ async function dispatchMergeAgentForPR({
       });
     } else if (
       diedWithoutHandoff
-      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus)
       && oldEnoughForWatcherRecovery
       && priorReDispatches < _WATCHER_REDISPATCH_BOUND
     ) {
@@ -2281,7 +2270,7 @@ async function dispatchMergeAgentForPR({
       });
     } else if (
       diedWithoutHandoff
-      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus)
       && oldEnoughForWatcherRecovery
     ) {
       // Bound exhausted, still no clean handoff: hand the PR to the operator
@@ -2308,7 +2297,7 @@ async function dispatchMergeAgentForPR({
       });
     } else if (
       !diedWithoutHandoff
-      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus?.status)
+      && isWatcherAutonomousRetryableRecordedDispatchStatus(recordedDispatchStatus)
       && !labelNames.includes(MERGE_AGENT_STUCK_LABEL)
     ) {
       // Phantom handoff (#969-class orphan). The `merge-agent-dispatched` marker
@@ -2431,7 +2420,7 @@ async function dispatchMergeAgentForPR({
       if (stuckDetail && hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)) {
         const statusProbe = await probeDispatchStatusViaHq({ hqPath, lrq: latestRecordedDispatch.launchRequestId,
           asOwner: statusProbeAsOwner, execFileImpl, env: runtimeEnv, logger });
-        if (_NON_STUCK_DISPATCH_STATUSES.has(statusProbe?.status)) stuckDetail = null;
+        if (dispatchWasAdmitted(statusProbe)) stuckDetail = null;
       }
       if (stuckDetail) {
         mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {

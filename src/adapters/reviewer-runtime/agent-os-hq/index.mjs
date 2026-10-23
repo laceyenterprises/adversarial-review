@@ -1,6 +1,6 @@
 import { parseHqDispatchStatusOutput } from '../../../hq-dispatch-status-output.mjs';
 import { readDispatchReceipt, parseHqDispatchStatus } from '../../../producer-contracts/dispatch-receipt.mjs';
-import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../../../producer-contracts/launch-status.mjs';
+import { readDispatchStatus } from '../../../producer-contracts/launch-status.mjs';
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -30,12 +30,6 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['codex', 'codex'],
   ['gemini', 'gemini'],
 ]);
-// Preserve this runtime's terminal handling and legacy canceled spelling.
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => {
-  assertTerminalLaunchPolicy([status]);
-  return readLaunchRequestStatus(status).terminal;
-}).concat('cancelled'));
-const SUCCESS_STATUSES = new Set(['succeeded']);
 const ACTIVE_RECORD_STATES = new Set(['spawned', 'heartbeating']);
 const DEFAULT_POLL_BASE_MS = 30_000;
 const DEFAULT_POLL_JITTER_MS = 5_000;
@@ -455,7 +449,8 @@ function createAgentOsHqReviewerRuntimeAdapter({
         timeout: resolveHqCommandTimeoutMs(deadlineMs),
       });
       const statusPayload = parseHqDispatchStatusOutput(stdout, args, normalizeStatusPayload, logger);
-      const status = String(statusPayload.status || '');
+      const evidence = readDispatchStatus(statusPayload);
+      const status = evidence.status || String(statusPayload.status || '');
       const progressKey = makeProgressKey(statusPayload);
 
       if (statusPayload.lastProgressAt && statusPayload.lastProgressAt !== record.lastHeartbeatAt) {
@@ -489,8 +484,8 @@ function createAgentOsHqReviewerRuntimeAdapter({
         leaseExpiredProgressKey = null;
       }
 
-      if (TERMINAL_STATUSES.has(status)) {
-        if (SUCCESS_STATUSES.has(status)) {
+      if (evidence.terminal) {
+        if (evidence.succeeded) {
           try {
             const reviewBody = readValidatedReviewOutput({
               artifactPath,
@@ -527,7 +522,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
           }
         }
         record = updateReviewerRunRecord(rootDir, record, {
-          state: status === 'canceled' || status === 'cancelled' ? 'cancelled' : 'failed',
+          state: status === 'canceled' ? 'cancelled' : 'failed',
           lastHeartbeatAt: now(),
         });
         return result({

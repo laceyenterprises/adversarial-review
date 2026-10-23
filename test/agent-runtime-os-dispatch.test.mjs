@@ -1,3 +1,5 @@
+import { dispatchStatusExamples } from './helpers/dispatch-status-cases.mjs';
+import { readDispatchStatus } from '@agent-os/app-sdk';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -212,7 +214,8 @@ test('mapTerminalStatus maps each terminal family and leaves in-progress states 
   assert.equal(mapTerminalStatus('failed'), 'failed');
   assert.equal(mapTerminalStatus('canceled'), 'cancelled');
   assert.equal(mapTerminalStatus('superseded'), 'cancelled');
-  assert.equal(mapTerminalStatus('timed_out'), 'timeout');
+  assert.equal(mapTerminalStatus('timed_out'), null);
+  assert.equal(mapTerminalStatus({ status: 'failed', failure_class: 'timeout' }), 'timeout');
   assert.equal(mapTerminalStatus('running'), null);
   assert.equal(mapTerminalStatus('queued'), null);
   assert.equal(mapTerminalStatus(''), null);
@@ -334,7 +337,7 @@ test('run maps a failed terminal state to a failed RunResult with the reported f
 });
 
 test('run maps timeout and cancelled terminal states', async () => {
-  const timeoutSession = fakeSession({ statusSequence: [{ status: 'timed_out' }] });
+  const timeoutSession = fakeSession({ statusSequence: [{ status: 'failed', failure_class: 'timeout' }] });
   const timeoutResult = await (await createOsDispatchAgentRuntime({
     session: timeoutSession, sleepImpl: async () => {},
   }).run(reviewerRequest())).await();
@@ -1177,3 +1180,46 @@ test('stub-endpoint round-trip: dispatch → poll → validated verdict artifact
     ],
   });
 });
+
+for (const { scenario, value } of dispatchStatusExamples) {
+  test(`SDK app-contract status: ${scenario} maps public launch evidence`, async () => {
+    const evidence = readDispatchStatus(value);
+    for (const nested of [false, true]) {
+      const payload = nested ? { status: value.status, live_status: value } : value;
+      const expected = !evidence.terminal ? null : evidence.succeeded ? 'completed'
+        : ['canceled', 'superseded'].includes(value.status) ? 'cancelled' : 'failed';
+      assert.equal(mapTerminalStatus(payload), expected);
+      const session = fakeSession({ statusSequence: [
+        { ...payload, artifact: reviewArtifact() },
+        { status: 'failed', failure_class: 'synthetic-stop' },
+      ] });
+      const result = await (await createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} })
+        .run(reviewerRequest())).await();
+      assert.equal(session.statusCalls.length, evidence.terminal ? 1 : 2);
+      assert.equal(result.status, expected || 'failed');
+    }
+  });
+}
+
+for (const value of [
+  { status: 'succeeded', terminal: false },
+  { status: 'succeeded', terminal: false, live_status: { terminal: true, succeeded: true } },
+  { status: 'succeeded', live_status: { terminal: false, succeeded: false } },
+  { status: 'succeeded', succeeded: false },
+  { status: 'succeeded', succeeded: false, live_status: { succeeded: true } },
+  { status: 'running', terminal: true, succeeded: false },
+  ...['success', 'completed', 'complete', 'done', 'cancelled', 'rejected', 'timed_out', 'future']
+    .map(status => ({ status })),
+  { status: {} }, {},
+]) {
+  test(`negative app-contract status mutation ${JSON.stringify(value)} cannot fabricate completion`, async () => {
+    assert.notEqual(mapTerminalStatus(value), 'completed');
+    const session = fakeSession({ statusSequence: [
+      { ...value, artifact: reviewArtifact() }, { status: 'failed' },
+    ] });
+    const result = await (await createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} })
+      .run(reviewerRequest())).await();
+    assert.equal(result.status, 'failed');
+    assert.equal(session.statusCalls.length, mapTerminalStatus(value) ? 1 : 2);
+  });
+}

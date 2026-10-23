@@ -60,7 +60,11 @@ const scenario = process.argv[2];
 let evidence = {};
 if (scenario === 'clean') {
   // LRQSTATUS-01: scheduling terminality does not release a parked PR owner.
-  const { launchRequestInFlight, launchRequestOwned } = await import('../../src/ama/launch-request-status.mjs');
+  const { launchRequestInFlight, launchRequestOwned, launchRequestMeaning } = await import('../../src/ama/launch-request-status.mjs');
+  assert.equal(launchRequestMeaning({ status: 'succeeded', terminal: false, succeeded: false }).terminal, false);
+  assert.equal(launchRequestMeaning({ status: 'succeeded', succeeded: false }).succeeded, false);
+  assert.equal(launchRequestMeaning('completed').status, null);
+  assert.equal(launchRequestMeaning('blocked_needs_decision').succeeded, false);
   const { launchHoldsCloserCapacity } = await import('../../src/ama/closure-capacity.mjs');
   for (const status of ['blocked_needs_decision', 'waiting_approval', 'waiting_input']) {
     const probe = { ok: true, row: { status } };

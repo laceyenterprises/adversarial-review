@@ -14,7 +14,9 @@ import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 
-const vocabulary = JSON.parse(readFileSync(new URL('../src/producer-contracts/launch-request-statuses.json', import.meta.url)));
+// Use the installed release, with no producer checkout or OS state.
+import { LAUNCH_REQUEST_STATUSES, TERMINAL_LAUNCH_REQUEST_STATUSES, readDispatchStatus } from '@agent-os/app-sdk';
+const vocabulary = { statuses: [...LAUNCH_REQUEST_STATUSES] };
 const scheduling = {
   admitted: [true, true], blocked_needs_decision: [false, true],
   canceled: [false, false], failed: [false, false], leased: [true, true],
@@ -268,3 +270,58 @@ test('an awaited parked probe cannot terminalize a successor lease', async t => 
   assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'successor');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
 });
+
+for (const status of LAUNCH_REQUEST_STATUSES) {
+  test(`SDK evidence: ${status} respects independent explicit and missing booleans`, () => {
+    for (const terminal of [undefined, false, true]) {
+      for (const succeeded of [undefined, false, true]) {
+        const row = { status, terminal, succeeded };
+        const meaning = launchRequestMeaning(row);
+        assert.equal(meaning.terminal, terminal ?? TERMINAL_LAUNCH_REQUEST_STATUSES.has(status));
+        assert.equal(meaning.succeeded, succeeded ?? (status === 'succeeded'));
+        assert.equal(meaning.blockedNeedsDecision, status === 'blocked_needs_decision');
+        assert.equal(meaning.parked, /^(blocked_|waiting_)/.test(status));
+        assert.deepEqual(meaning.diagnostics, []);
+      }
+    }
+  });
+}
+
+for (const status of [undefined, null, false, 42, {}, [], 'future', 'completed', 'complete', 'done', 'cancelled', 'reaped', 'rejected']) {
+  test(`negative SDK launch mutation: ${JSON.stringify(status)} stays unknown without wire evidence`, () => {
+    const row = { status };
+    assert.equal(launchRequestMeaning(row).status, null);
+    assert.equal(launchRequestMeaning(row).succeeded, false);
+    assert.equal(launchRequestMeaning(row).terminal, false);
+    assert.equal(launchRequestInFlight({ ok: true, row }), null);
+    assert.equal(launchRequestMeaning({ ...row, terminal: false, succeeded: false }).terminal, false);
+    assert.equal(launchRequestMeaning({ ...row, terminal: true }).terminal, true);
+    assert.match(readDispatchStatus(row).diagnostics[0], /cwp_dispatch.dispatch: \$\.status/);
+  });
+}
+
+test('negative malformed launch payloads do not fabricate success', () => {
+  for (const row of [null, undefined, false, 42, [], {}]) {
+    assert.equal(launchRequestMeaning(row).status, null);
+    assert.equal(launchRequestMeaning(row).terminal, false);
+    assert.equal(launchRequestMeaning(row).succeeded, false);
+  }
+});
+
+for (const status of ['succeeded', 'failed', 'canceled', 'superseded']) {
+  test(`lease reconciliation retains explicit nonterminal ${status} without cleanup`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'wire-lease-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'fixture/repo', prNumber: 7, headSha: 'synthetic-head' };
+    const now = '2026-10-01T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'wire-launch' });
+    const before = readAmaCloserLease(rootDir, identity);
+    assert.equal(await reconcileAmaCloserLeaseAsync({ rootDir, ...identity, now,
+      statusProbe: { ok: true, row: { status, terminal: false, succeeded: false } },
+      cleanupScratchImpl: () => assert.fail('nonterminal launch keeps scratch'),
+      readPullRequestStateImpl: () => assert.fail('nonterminal launch cannot settle ownership'),
+    }), false);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+  });
+}

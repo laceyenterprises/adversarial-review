@@ -1,6 +1,6 @@
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { parseHqJsonObject, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
-import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from './producer-contracts/launch-status.mjs';
+import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 // Remediation HQ dispatch status/cancel helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave4). This is a
@@ -29,11 +29,6 @@ import { resolveHqRoot } from './remediation-reply-paths.mjs';
 
 const execFileAsync = promisify(execFile);
 
-// Remediation owns its existing terminal-event policy, including legacy spelling.
-const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'superseded'].filter(status => {
-  assertTerminalLaunchPolicy([status]);
-  return readLaunchRequestStatus(status).terminal;
-}).concat('cancelled'));
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'daemon_bounced',
@@ -90,8 +85,9 @@ function normalizeWorkerTerminalEvent(topic, event = {}) {
   const normalizedTopic = String(topic || '').trim();
   const match = normalizedTopic.match(/^health\.worker\.terminal\.([^.\s]+)$/);
   const lrq = String(event?.lrq || event?.launch_request_id || event?.launchRequestId || match?.[1] || '').trim();
-  const status = String(event?.status || '').trim().toLowerCase();
-  if (!lrq || !status || !HQ_TERMINAL_STATUSES.has(status)) {
+  const evidence = readDispatchStatus(event);
+  const status = evidence.status;
+  if (!lrq || !status || !evidence.terminal) {
     return null;
   }
   return {
@@ -99,7 +95,7 @@ function normalizeWorkerTerminalEvent(topic, event = {}) {
     topic: normalizedTopic,
     lrq,
     status,
-    health: String(event?.health || '').trim().toLowerCase() || (status === 'succeeded' ? 'healthy' : 'failed'),
+    health: String(event?.health || '').trim().toLowerCase() || (evidence.succeeded ? 'healthy' : 'failed'),
   };
 }
 
@@ -110,9 +106,12 @@ function workerTerminalEventMatches(worker, terminalEvent) {
 }
 
 function workerTerminalEventToDispatchStatus(terminalEvent, worker = {}) {
+  const evidence = readDispatchStatus(terminalEvent);
   return {
     status: terminalEvent.status,
-    health: terminalEvent.health || (terminalEvent.status === 'succeeded' ? 'healthy' : 'failed'),
+    terminal: evidence.terminal,
+    succeeded: evidence.succeeded,
+    health: terminalEvent.health || (evidence.succeeded ? 'healthy' : 'failed'),
     lrq: terminalEvent.lrq,
     launch_request_id: terminalEvent.lrq,
     failureClass: terminalEvent.failureClass || terminalEvent.failure_class || null,
@@ -264,7 +263,6 @@ async function cancelHqDispatch({
 }
 
 export {
-  HQ_TERMINAL_STATUSES,
   HQ_CANCEL_RETRY_DELAYS_MS,
   TRANSIENT_HQ_DISPATCH_CODES,
   resolveHqBin,

@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { createHqDispatchStatusOutputParser } from '../src/hq-dispatch-status-output.mjs';
 import { parseHqDispatchStatus } from '../src/producer-contracts/dispatch-receipt.mjs';
 import {
+  dispatchMergeAgentForPR,
+  listMergeAgentDispatches,
   isMergeAgentDispatchActiveForHead,
   recordMergeAgentDispatch,
   scanStuckMergeAgentDispatches,
@@ -14,6 +16,9 @@ import {
 import { createAgentOsHqReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/agent-os-hq/index.mjs';
 import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { assessWorkerLivenessDetailed } from '../src/remediation-worker-liveness.mjs';
+import { dispatchStatusExamples } from './helpers/dispatch-status-cases.mjs';
+import { readDispatchStatus, LAUNCH_REQUEST_STATUSES } from '@agent-os/app-sdk';
+import { normalizeWorkerTerminalEvent, workerTerminalEventToDispatchStatus } from '../src/remediation-hq-dispatch.mjs';
 import { resolveHqWorkerWorkspace } from '../src/remediation-hq-dispatch.mjs';
 
 const LRQ = 'lrq_11111111-1111-4111-8111-111111111111';
@@ -21,7 +26,7 @@ const NOW = Date.parse('2026-10-01T02:00:00Z');
 const HEAD = { repo: 'fixture/repo', prNumber: 1, headSha: 'fixture-head' };
 const HUMAN = 'failed — worker exited — next: inspect';
 
-function fixture(t, { status = 'failed', malformed = false, malformedOutput = HUMAN } = {}) {
+function fixture(t, { status = 'failed', wire = {}, malformed = false, malformedOutput = HUMAN } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'status-json-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq-root');
@@ -34,7 +39,7 @@ const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + '\\n');
 if (args[0] !== 'dispatch' || args[1] !== 'status') process.exit(2);
-const payload = ${JSON.stringify({ status, workspaceDir: join(rootDir, 'worker'), failureClass: 'fixture-failure' })};
+const payload = ${JSON.stringify({ status, workspaceDir: join(rootDir, 'worker'), failureClass: 'fixture-failure', ...wire })};
 console.log(${malformed} || !args.includes('--json') ? ${JSON.stringify(malformedOutput)} : JSON.stringify(payload));
 `, { mode: 0o755 });
   const env = {
@@ -195,3 +200,98 @@ test('diagnostics are bounded, renew after a minute, and preserve the thrown err
   assert.throws(() => parse('{}', args, parseHqDispatchStatus, logger), /missing status/);
   assert.equal(warnings.length, 2, 'valid JSON with a missing status is not a non-JSON warning');
 });
+
+assert.deepEqual([...new Set(dispatchStatusExamples.map(x => x.value.status))].sort(),
+  [...LAUNCH_REQUEST_STATUSES].sort(), 'public examples cover every canonical state');
+
+const dispatchCases = [
+  ...dispatchStatusExamples.map(({ scenario, value }) => [scenario, value]),
+  // Negative/compatibility mutations: producer booleans are independent.
+  ['negative explicit terminal false', { status: 'succeeded', terminal: false }],
+  ['negative explicit succeeded false', { status: 'succeeded', succeeded: false }],
+  ['negative explicit both false', { status: 'succeeded', terminal: false, succeeded: false }],
+  ['negative explicit terminal true', { status: 'running', terminal: true, succeeded: false }],
+  ['legacy missing booleans', { status: 'succeeded' }],
+  ['negative unknown', { status: 'future' }],
+  ['negative malformed', { status: { value: 'succeeded' } }],
+  ...['completed', 'complete', 'done', 'cancelled'].map(status => [`negative alias ${status}`, { status }]),
+];
+for (const [scenario, payload] of dispatchCases) {
+  test(`SDK dispatch boundary: ${scenario} controls reviewer, remediation and event handling`, async t => {
+    const f = fixture(t);
+    const evidence = readDispatchStatus(payload);
+    const artifactPath = join(f.rootDir, 'review.md');
+    writeFileSync(artifactPath, '## Summary\nSynthetic review.\n\n## Verdict\nComment only\n');
+    const record = writeReviewerRunRecord(f.rootDir, {
+      sessionUuid: 'sdk-review', runtime: 'agent-os-hq', state: 'heartbeating',
+      reattachToken: LRQ, spawnedAt: '2026-10-01T00:00:00Z',
+      subjectContext: { agentOsHq: { artifactPath, hqRoot: f.hqRoot } },
+    });
+    let polls = 0;
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir: f.rootDir, hqBin: f.hqBin, env: f.env, logger: f.logger,
+      sleepImpl: async () => {},
+      execFileImpl: async () => ({ stdout: JSON.stringify(++polls === 1 ? payload : { status: 'failed' }) }),
+    });
+    const result = await adapter.reattach(record);
+    assert.equal(polls, evidence.terminal ? 1 : 2, 'nonterminal/unknown evidence keeps polling');
+    assert.equal(result.ok, evidence.terminal && evidence.succeeded, 'exit zero and artifact presence alone cannot deliver a review');
+    if (!evidence.succeeded) assert.equal(result.reviewBody, null);
+    const worker = { dispatchMode: 'hq', dispatchId: LRQ, launchRequestId: LRQ, hqRoot: f.hqRoot };
+    const liveness = await assessWorkerLivenessDetailed({ remediationWorker: worker }, {
+      env: f.env, execFileImpl: async () => ({ stdout: JSON.stringify(payload) }),
+    });
+    assert.equal(liveness.state, evidence.terminal ? 'exited' : 'active');
+    const event = normalizeWorkerTerminalEvent(`health.worker.terminal.${LRQ}`, { ...payload, lrq: LRQ });
+    assert.equal(Boolean(event), evidence.terminal && evidence.status !== null);
+    if (event) {
+      const projected = workerTerminalEventToDispatchStatus(event);
+      assert.equal(projected.terminal, evidence.terminal);
+      assert.equal(projected.succeeded, evidence.succeeded);
+    }
+    const active = await isMergeAgentDispatchActiveForHead(f.rootDir, HEAD, {
+      env: f.env, logger: f.logger, detectAgentOsPresenceImpl: () => ({ present: true, path: f.hqBin }),
+      probeDispatchStatusViaHqImpl: async () => payload,
+    });
+    assert.equal(active.active, !evidence.terminal && Boolean(evidence.status || payload.terminal === false));
+  });
+}
+
+for (const payload of [
+  { status: 'succeeded', terminal: false, succeeded: false },
+  { status: 'failed', terminal: false },
+  { status: 'not-found', terminal: false },
+  { status: 'blocked_needs_decision', terminal: true, succeeded: false },
+  { status: 'waiting_approval' }, { status: 'waiting_input' },
+  { status: 'completed' }, { status: 'cancelled' }, { status: 'future' },
+]) {
+  test(`negative/parked merge retry evidence ${JSON.stringify(payload)} cannot redrive a recorded launch`, async t => {
+    const f = fixture(t);
+    const result = await dispatchMergeAgentForPR({
+      rootDir: f.rootDir, ...HEAD, branch: 'fixture-branch', baseBranch: 'main',
+      lastVerdict: 'Comment only', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS',
+      prState: 'open', merged: false, latestFollowUpJobStatus: 'completed',
+      remediationCurrentRound: 1, remediationMaxRounds: 1,
+      labels: [{ name: 'merge-agent-dispatched' }],
+      env: { ...f.env, MERGE_AGENT_PARENT_SESSION: 'session:fixture', MERGE_AGENT_HQ_PROJECT: 'fixture-project' },
+      agentOsDetectImpl: () => ({ present: true, path: f.hqBin }),
+      prepareOriginalWorkerImpl: () => ({ decision: 'ready' }),
+      execFileImpl: async (_command, args) => {
+        assert.deepEqual(args.slice(0, 2), ['dispatch', 'status'], 'no new dispatch');
+        return { stdout: JSON.stringify(payload) };
+      },
+      ghExecFileImpl: async () => ({ stdout: '' }), logger: f.logger,
+      now: new Date(NOW).toISOString(),
+    });
+    assert.equal(result.decision, 'skip-already-dispatched');
+    assert.equal(listMergeAgentDispatches(f.rootDir).length, 1);
+  });
+}
+
+for (const status of [null, '', 42, 'future', 'succeeded']) {
+  test(`negative wire-only merge transport ${JSON.stringify(status)} retains explicit terminal false`, async t => {
+    const f = fixture(t, { wire: { status, terminal: false, succeeded: false } });
+    assert.equal((await active(f)).active, true);
+    assert.ok(f.calls()[0].includes('--json'));
+  });
+}

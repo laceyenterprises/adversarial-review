@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { readLaunchRequestStatus, assertTerminalLaunchPolicy } from '../src/producer-contracts/launch-status.mjs';
+import { readLaunchRequestStatus, readDispatchStatus, assertTerminalLaunchPolicy } from '../src/producer-contracts/launch-status.mjs';
 import { boundedDiagnostics, diagnosticValue } from '../src/producer-contracts/diagnostics.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../src/producer-contracts/dispatch-receipt.mjs';
@@ -88,26 +88,28 @@ test('post-dispatch JSON string evidence stays recordable with null identity', (
   assert.match(result.identityDiagnostic, /\$stdout invalid type/);
 });
 
-test('terminal policies fail loudly on drift and retain legacy capacity aliases', () => {
+test('terminal policies fail loudly on drift and reject legacy launch aliases', () => {
   assert.doesNotThrow(() => assertTerminalLaunchPolicy(AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES));
   assert.throws(() => assertTerminalLaunchPolicy(['future-terminal']), /terminal policy missing/);
   assert.throws(() => assertTerminalLaunchPolicy(['running']), /terminal policy missing/);
   const legacy = ['cancelled', 'completed', 'reaped', 'rejected'];
-  for (const status of legacy) assert.equal(isTerminalLaunchRequestStatus(status), true, status);
-  const probe = withLiveLaunchRetry({ ok: true, row: { ticket_ref: 'HAM' }, retryChain: [
-    ...legacy.map((status, index) => ({ status, launch_request_id: `dead-${index}` })),
+  for (const status of legacy) {
+    assert.equal(isTerminalLaunchRequestStatus(status), false, status);
+    assert.equal(readDispatchStatus({ status }).status, null, status);
+    assert.equal(readDispatchStatus({ status }).succeeded, false, status);
+  }
+  const probe = withLiveLaunchRetry({ ok: true, row: { ticket_ref: 'FIXTURE' }, retryChain: [
+    { status: 'failed', launch_request_id: 'dead' },
     { status: 'running', launch_request_id: 'live' },
   ] });
   assert.equal(probe.liveRetryLaunchRequestId, 'live');
-  assert.equal(probe.row.ticket_ref, 'HAM');
+  assert.equal(probe.row.ticket_ref, 'FIXTURE');
 });
 
 test('consumer modules reject producer drift before filtering terminal policy', () => {
   const vocabularyUrl = new URL('../src/producer-contracts/launch-status.mjs', import.meta.url).href;
   for (const [path, status] of [
     ['../src/ama/launch-request-status.mjs', 'reaped_stuck_requested'],
-    ['../src/remediation-hq-dispatch.mjs', 'succeeded'],
-    ['../src/adapters/reviewer-runtime/agent-os-hq/index.mjs', 'succeeded'],
   ]) {
     const moduleUrl = new URL(path, import.meta.url).href;
     const code = `import { TERMINAL_LAUNCH_REQUEST_STATUSES } from ${JSON.stringify(vocabularyUrl)};
@@ -477,3 +479,17 @@ for (const scenario of ['refused', 'structured-refused', 'dry-run-refused']) {
     }
   });
 }
+
+test('negative dispatch receipt mutation: explicit false cannot become launch success', () => {
+  const completed = JSON.parse(capture('dispatch/completed').stdout);
+  for (const overrides of [
+    { terminal: false }, { succeeded: false }, { terminal: false, succeeded: false },
+  ]) {
+    const receipt = readDispatchReceipt(JSON.stringify({ ...completed, ...overrides }));
+    assert.equal(receipt.status.terminal, overrides.terminal ?? true);
+    assert.equal(receipt.status.succeeded, overrides.succeeded ?? true);
+  }
+  const malformed = readDispatchReceipt({ ...completed, terminal: 'false', succeeded: null });
+  assert.ok(malformed.status.diagnostics.some(d => d.includes('$.terminal')));
+  assert.ok(malformed.status.diagnostics.some(d => d.includes('$.succeeded')));
+});

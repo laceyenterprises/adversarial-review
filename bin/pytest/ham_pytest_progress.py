@@ -5,7 +5,8 @@ import sys
 
 def _progress(phase, detail=""):
     # Bypass pytest's per-test capture; these hooks are supervisor evidence.
-    print(f"HAM pytest: {phase} {detail}", file=sys.__stderr__, flush=True)
+    suffix = f" {detail}" if detail else ""
+    print(f"HAM pytest: {phase}{suffix}", file=sys.__stderr__, flush=True)
 
 
 _progress("plugin-loaded")

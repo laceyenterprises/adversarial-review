@@ -30,6 +30,15 @@ test('legacy lease-owning prompt requires the same bounded validation helper and
   assert.ok(prompt.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));
 });
 
+test('supervisor CLIs are directly executable and report usage for missing input', () => {
+  for (const command of ['./bin/hammer-validate.mjs', './bin/run-bounded.mjs']) {
+    const result = spawnSync(command, [], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 64, result.stderr);
+    assert.match(result.stderr, /^usage: /);
+  }
+});
+
 test('lease validator permits a project nominal budget but refuses malformed or missing input', () => {
   for (const args of [['--nominal-timeout', '0', '--', 'true'],
     ['--nominal-timeout', '3601', '--', 'true'], ['--nominal-timeout'], ['--pytest', '--']]) {
@@ -213,8 +222,8 @@ assert captured.getvalue() == ''
 `], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '');
-  for (const phase of ['plugin-loaded', 'session-start', 'collect fixture.py', 'collected 2',
-    'test-start fixture.py::test_real', 'call:failed fixture.py::test_real', 'session-finish 1']) {
-    assert.ok(result.stderr.includes(`HAM pytest: ${phase}`), result.stderr);
-  }
+  assert.deepEqual(result.stderr.trimEnd().split('\n'),
+    ['plugin-loaded', 'session-start', 'collect fixture.py', 'collected 2',
+      'test-start fixture.py::test_real', 'call:failed fixture.py::test_real', 'session-finish 1']
+      .map(phase => `HAM pytest: ${phase}`));
 });

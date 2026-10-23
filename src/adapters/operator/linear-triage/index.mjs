@@ -249,16 +249,19 @@ async function setLinearState({
     }
 
     const currentState = await issue.state;
-    if (normalizedTargets.includes(currentState?.name?.toLowerCase())) {
-      logger.log?.(`[linear-triage] Linear ${ticketId} already in "${currentState.name}" - skipping`);
-      return;
-    }
-    if (terminalState(targetState, terminalStateNames) || terminalState(currentState, terminalStateNames)) {
+    const alreadyInTargetState = normalizedTargets.includes(currentState?.name?.toLowerCase());
+    if (!alreadyInTargetState
+      && (terminalState(targetState, terminalStateNames) || terminalState(currentState, terminalStateNames))) {
       const incidentReason = await incidentIssueReason(issue);
       if (incidentReason) {
         logger.log?.(`[linear-triage] Linear ${ticketId} incident acceptance owned externally (${incidentReason}) - skipping "${targetState.name}"`);
         return;
       }
+    }
+
+    if (alreadyInTargetState) {
+      logger.log?.(`[linear-triage] Linear ${ticketId} already in "${currentState.name}" - skipping`);
+      return;
     }
 
     await linear.updateIssue(issue.id, { stateId: targetState.id });

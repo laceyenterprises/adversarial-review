@@ -606,6 +606,8 @@ binding or acceptance receipt, so it never infers acceptance from publication,
 dispatch completion, review approval, remediation or source merge. The native
 incident closure owner and operator remain responsible for their evidence.
 
+The incident guard bypasses identity lookup when the current state already matches the target; the existing idempotent return then completes the sync.
+
 For those incidents, transitions into completed/canceled workflow types or the
 configured Done/Cancelled aliases are suppressed. A terminal incident also
 resists stale progress/review updates. Nonterminal progress updates, critical

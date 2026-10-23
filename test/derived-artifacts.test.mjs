@@ -15,7 +15,7 @@ const runFixtureBuild = async spec => execFileSync('/bin/sh', spec.args.slice(-2
 const proveFixture = (args, evidence) => proveDerivedArtifacts(args, evidence, { runBuildImpl: runFixtureBuild });
 
 function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared = true,
-  tamper = false, finalCommand = command, symlink = false, sourceFiles = {} } = {}) {
+  tamper = false, finalCommand = command, symlink = false, sourceFiles = {}, artifactDirectory = '' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cwd = join(root, 'sdk');
@@ -29,12 +29,13 @@ function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared 
   git('init', '-q');
   git('commit', '-q', '--allow-empty', '-m', 'Fixture base');
   const mergeBase = git('rev-parse', 'HEAD');
-  const archive = 'sdk/fixture-sdk-1.0.0.tgz';
-  const key = 'build:artifact:fixture-sdk-1.0.0.tgz';
+  const archive = join('sdk', artifactDirectory, 'fixture-sdk-1.0.0.tgz');
+  const key = `build:artifact:${join(artifactDirectory, 'fixture-sdk-1.0.0.tgz')}`;
   const manifest = value => JSON.stringify({ name: 'fixture-sdk', version: '1.0.0', files: ['source.txt'],
     scripts: { ...(declared ? { [key]: value } : {}),
       prepack: 'node -e "require(\'fs\').writeFileSync(\'source.txt\', \'unexpected lifecycle script\')"' } });
-  const pack = () => execFileSync('npm', ['pack', '--ignore-scripts', '--offline'],
+  mkdirSync(join(cwd, artifactDirectory), { recursive: true });
+  const pack = () => execFileSync('npm', ['pack', '--ignore-scripts', '--offline', '--pack-destination', artifactDirectory || '.'],
     { cwd, env, timeout: 15000, stdio: ['ignore', 'ignore', 'pipe'] });
   writeFileSync(join(cwd, 'package.json'), manifest(command));
   writeFileSync(join(cwd, 'source.txt'), 'Author source\n');
@@ -114,19 +115,21 @@ test('tracked HOME and TMPDIR directories do not prevent a declared rebuild', as
   assert.equal((await proveFixture(f.args, f.evidence)).length, 1);
 });
 
-test('all source and sandbox directory mtimes are epoch zero after final build preparation', async t => {
-  const f = fixture(t, { sourceFiles: { 'sdk/nested/source.txt': 'nested source' } });
+for (const artifactDirectory of ['', 'dist/nested']) test(`directory mtimes are epoch zero after removing ${artifactDirectory || 'manifest-local'} outputs`, async t => {
+  const f = fixture(t, { sourceFiles: { 'sdk/nested/source.txt': 'nested source' }, artifactDirectory,
+    command: `npm pack --ignore-scripts --offline --pack-destination ${artifactDirectory || '.'}` });
   let snapshot;
   const proofs = await proveDerivedArtifacts(f.args, f.evidence, { runBuildImpl: async spec => {
     const root = dirname(spec.cwd);
     snapshot = {
-      directories: ['', 'sdk', 'sdk/nested', '.home', '.tmp'].map(path => statSync(join(root, path)).mtimeMs),
+      directories: ['', 'sdk', 'sdk/nested', ...(artifactDirectory ? ['sdk/dist', 'sdk/dist/nested'] : []), '.home', '.tmp']
+        .map(path => statSync(join(root, path)).mtimeMs),
       sources: ['sdk/source.txt', 'sdk/nested/source.txt', 'sdk/package.json'].map(path => statSync(join(root, path)).mtimeMs),
       outputExists: existsSync(join(root, f.archive)),
     };
     await runFixtureBuild(spec);
   } });
-  assert.deepEqual(snapshot, { directories: [0, 0, 0, 0, 0], sources: [0, 0, 0], outputExists: false });
+  assert.deepEqual(snapshot, { directories: Array(artifactDirectory ? 7 : 5).fill(0), sources: [0, 0, 0], outputExists: false });
   assert.equal(proofs.length, 1);
 });
 
@@ -191,13 +194,32 @@ test('sandbox specification isolates Linux and strips inherited secrets', () => 
   assert.throws(() => artifactSandbox('/tmp/fixture', '/tmp/fixture', 'true', 'unsupported'));
 });
 
-test('Darwin sandbox permits the executable directory advertised on PATH', () => {
+test('Darwin sandbox permits Node and bundled npm without exposing the installation prefix', () => {
   const execPath = process.execPath;
   try {
-    process.execPath = '/Users/fixture/.nvm/versions/node/bin/node';
+    process.execPath = '/Users/fixture/.nvm/versions/node/v22/bin/node';
     const spec = artifactSandbox('/tmp/fixture', '/tmp/fixture', 'node --version', 'darwin');
     assert.ok(spec.args[1].includes(`(subpath ${JSON.stringify(dirname(process.execPath))})`));
+    assert.ok(spec.args[1].includes('(subpath "/Users/fixture/.nvm/versions/node/v22/lib")'));
+    assert.ok(!spec.args[1].includes('(subpath "/Users/fixture/.nvm/versions/node/v22")'));
     assert.equal(spec.env.PATH.split(':')[0], dirname(process.execPath));
+  } finally { process.execPath = execPath; }
+});
+
+test('Linux sandbox mounts custom Node and npm tool directories without mounting host homes', () => {
+  const execPath = process.execPath;
+  try {
+    for (const prefix of ['/opt/hostedtoolcache/node/22/x64', '/home/fixture/.nvm/versions/node/v22', '/home/fixture', '/usr', '/usr/local', '/usr-other/node']) {
+      process.execPath = `${prefix}/bin/node`;
+      const spec = artifactSandbox('/tmp/fixture', '/tmp/fixture', 'npm pack', 'linux');
+      const mounts = spec.args.flatMap((arg, index) => arg.startsWith('--ro-bind') ? [spec.args[index + 1]] : []);
+      for (const path of [`${prefix}/bin`, `${prefix}/lib`]) {
+        assert.equal(mounts.includes(path), !path.startsWith('/usr/'), path);
+      }
+      if (!prefix.startsWith('/usr')) assert.ok(!mounts.includes(prefix), 'custom prefixes are not mounted wholesale');
+      assert.ok(!mounts.includes('/home'), 'host homes are not mounted');
+      assert.equal(spec.env.PATH.split(':')[0], dirname(process.execPath));
+    }
   } finally { process.execPath = execPath; }
 });
 

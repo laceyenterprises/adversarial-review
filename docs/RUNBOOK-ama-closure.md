@@ -2532,12 +2532,16 @@ also capped at 128 MiB. A clean
 environment disables implicit npm lifecycle hooks, audit, funding and network
 dependency installation; only the recorded command runs. OS isolation denies
 network access and host writes: macOS uses `sandbox-exec`, allowing reads of the
-running Node executable's directory, filesystem metadata and the root directory
+running Node executable's directory and sibling `lib` tree (for bundled npm),
+filesystem metadata and the root directory
 needed for loader/path resolution, while other file contents remain restricted
 to the listed system/build subtrees. Linux requires Bubblewrap with unshared
 namespaces, explicitly creates the scratch parent in its mount namespace, and
 exposes only `/etc/ld.so.cache` and `/etc/alternatives` from host `/etc` for
-loader/tool resolution. Missing/unsupported isolation or a failed,
+loader/tool resolution. Node's executable directory and sibling `lib` tree are
+also mounted read-only when outside the existing system mounts, supporting
+user-space and hosted-toolcache installations without mounting their entire
+installation prefix or host home. Missing/unsupported isolation or a failed,
 timed-out, no-op or mismatched build leaves `primary-change-unknown` unchanged.
 Build descendants are killed and scratch trees removed after each attempt.
 

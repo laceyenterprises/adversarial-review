@@ -21,8 +21,12 @@ function safePath(path) {
 // A clean environment plus an OS sandbox: npm's offline flag alone cannot deny
 // networking by arbitrary build programs. Unsupported hosts fail closed.
 export function artifactSandbox(root, cwd, command, platform = process.platform) {
+  const nodeBin = dirname(process.execPath);
+  // npm's bin entry point loads its implementation from the sibling lib tree.
+  // Expose those tool directories, never the entire prefix (which may be HOME).
+  const nodeTools = [nodeBin, resolve(nodeBin, '..', 'lib')];
   const env = {
-    PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin`,
+    PATH: `${nodeBin}:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin`,
     HOME: join(root, '.home'), TMPDIR: join(root, '.tmp'),
     LANG: 'C', LC_ALL: 'C', TZ: 'UTC', SOURCE_DATE_EPOCH: '0',
     npm_config_ignore_scripts: 'true', npm_config_offline: 'true',
@@ -33,7 +37,7 @@ export function artifactSandbox(root, cwd, command, platform = process.platform)
   };
   if (platform === 'darwin') {
     const literal = value => JSON.stringify(value);
-    const reads = ['/usr', '/bin', '/sbin', '/System', '/Library/Apple', '/opt/homebrew', '/dev', '/private/var/db/dyld', dirname(process.execPath), root];
+    const reads = ['/usr', '/bin', '/sbin', '/System', '/Library/Apple', '/opt/homebrew', '/dev', '/private/var/db/dyld', ...nodeTools, root];
     // dyld opens /; Node resolves executable/cwd ancestors with metadata reads.
     // File contents still require an explicit allowed subtree.
     const profile = `(version 1)(deny default)(allow process-exec process-fork)(allow sysctl-read)
@@ -43,10 +47,14 @@ export function artifactSandbox(root, cwd, command, platform = process.platform)
     return { file: '/usr/bin/sandbox-exec', args: ['-p', profile, '/bin/sh', '-c', command], env, cwd };
   }
   if (platform === 'linux') {
+    const toolMounts = nodeTools.filter(path => !['/usr', '/bin', '/lib', '/lib64']
+      .some(system => path === system || path.startsWith(`${system}/`)))
+      .flatMap(path => ['--ro-bind-try', path, path]);
     // No host home, sockets, credentials, Git metadata or network namespace.
     return { file: 'bwrap', args: ['--unshare-all', '--die-with-parent', '--new-session',
       '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
       '--ro-bind-try', '/lib64', '/lib64',
+      ...toolMounts,
       // Permit loader/tool symlink resolution without exposing all host /etc.
       '--dir', '/etc', '--ro-bind-try', '/etc/ld.so.cache', '/etc/ld.so.cache',
       '--ro-bind-try', '/etc/alternatives', '/etc/alternatives',

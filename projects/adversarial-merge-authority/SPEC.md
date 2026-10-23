@@ -151,6 +151,19 @@ or reorder each other's entries through last-writer-wins file replacement.
 
 ## AMG-03 merge-lease base revalidation
 
+LAC-2093 validation liveness: changed-surface validation while holding the shared
+lease uses `bin/hammer-validate.mjs`. A 120-second child-output idle deadline is
+independent of the load-scaled absolute ceiling (nominal 360 seconds). Pytest
+emits actual collection/test phase progress and isolates live ledger runtime
+routing without removing explicit disposable-test opt-ins. Timeout is status
+124, never successful acceptance. TERM/INT/HUP cancellation initiates group TERM and retains
+five-second group KILL escalation after leader exit. Any incomplete/failed
+validation exits the lease-owning script via its existing release trap before
+validated-head publication or merge. Investigation occurs outside the lease;
+retry reacquires and rechecks the head/base/file-overlap contract below.
+No required tests or GitHub checks are waived. Evidence and separate deployment
+acceptance are in `docs/validation/lac-2093.md`.
+
 The merge-lease library exposes
 `assessMergeLeaseNeedsRevalidation({ repoPath, base, validationBase,
 currentBase, changedFilesFrom })`, and `bin/merge-lease.mjs

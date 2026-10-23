@@ -1597,6 +1597,40 @@ recovered-attestation comparison both use the produced head. A foreign push
 still stops with `head-changed`; sync failures release without attesting or
 merging. Rebase conflicts retain the existing lease-release conflict procedure.
 
+LAC-2093: under the shared merge lease use
+`node "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --pytest -- <required test paths>`
+(`-- <command> [args...]` for other validators), followed by `|| exit $?` in the
+lease-owning script. Its 360-second nominal absolute limit scales with host load;
+`--nominal-timeout 1..3600` selects the project's idle-host budget within the
+existing load-helper ceiling. The 120-second child-output idle limit never
+scales. Both timeouts return 124.
+Pytest hooks emit actual plugin-load, session, collection, test and report events,
+including setup/call/teardown failures. No heartbeat simulates test progress.
+The bounded tail and final elapsed/idle/byte/status diagnostic distinguish timeout
+from a real test failure. CPU activity cannot renew the idle deadline.
+
+The pytest profile pins SQLite runtime routing, VDB false, PostgreSQL runtime off
+and a private ledger path, removing inherited live DSNs. It retains all explicit
+test DSNs, Postgres opt-in, test selection and pytest options. Required disposable
+database tests still rely on the repository's real isolation/opt-in fixtures;
+this helper grants no new skip authority. Use the generic command form for a
+validation explicitly requiring a different backend with its own hermetic fixtures.
+Do not nest a buffering runner that conceals real output from this supervisor.
+
+Timeout, cancellation or failed tests must exit via the existing lease-release
+trap without a successful validation audit or merge. Diagnose outside the shared
+lease, then reacquire and repeat head/base/file-overlap checks before retrying.
+TERM/INT/HUP cancellation initiates group TERM; KILL follows after five seconds even if
+the leader exits first. This bounds cooperative runner cancellation, not SIGKILL
+of the runner or descendants deliberately escaping its process group; canonical
+worker cleanup remains the backstop. See [evidence and deployment acceptance](validation/lac-2093.md).
+Denied group signals also attempt the still-live direct child. Unconfirmed
+cleanup returns 125 after escalation plus a one-second drain allowance, with
+`cleanup=unconfirmed`; canonical worker cleanup must reconcile survivors. Never
+treat that result as completed validation or merged state.
+Exit 125 retains the helper's private scratch for canonical cleanup; it is not
+safe for the helper to unlink diagnostic files while process drain is unconfirmed.
+
 HAM-03 stale-head / behind recovery stores its bounded rebase counter in this
 same audit history. The closer initializes the live `Rebase-Attempts` value
 from the maximum prior `attempts[].rebaseAttempts` for the PR/head instead of

@@ -968,6 +968,18 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
+LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
+absolute ceiling scales from 360 seconds, but 120 seconds without child output
+fails with status 124 regardless of load. Pytest reports real collection and test
+phase boundaries and uses local ledger routing; explicit disposable-Postgres
+test settings remain intact. TERM/INT/HUP cancellation initiates group TERM,
+with KILL after five seconds even if its leader has exited. Unconfirmed cleanup
+returns 125 and retains private scratch for canonical teardown. Failure exits through
+the existing lease-release trap before any validated-head audit or merge. Head,
+base and file-overlap gates remain mandatory. This adds no durable states or
+smoke promises. Offline regressions: `test/run-bounded.test.mjs`; deployment
+acceptance and historical evidence: [LAC-2093](docs/validation/lac-2093.md).
+
 Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
 `statusVocabulary`. Explicit terminal/succeeded false values win independently;
 missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.

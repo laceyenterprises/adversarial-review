@@ -1702,6 +1702,15 @@ checks changes or a conflict can also release the hold. Release resumes
 ordinary gates, leases and retry caps. A proven primary-change reversal remains
 refused. Launch records alone cannot establish a baseline.
 
+PRIMARYOPAQUE-01: a changed opaque added/modified file can leave the evidence
+hold when an unchanged `package.json` artifact build script, already declared
+at the author head, rebuilds the final head's exact blob in a bounded,
+network-denied scratch worktree. The shared primary-change collector gathers
+this proof after history-cache lookup on each evaluation. Other source regions
+remain protected. Undeclared, failed, mismatched or unsupported builds retain
+`primary-change-unknown` and the existing evidence hold/escalation transitions.
+See the closure runbook's declared opaque build outputs contract.
+
 ## Deploy drain deferrals (DRAINDEFER-01)
 
 An exit-6 `dispatch refused: drain in effect` refusal persists

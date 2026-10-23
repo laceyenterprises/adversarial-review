@@ -60,6 +60,14 @@ snapshot diagnostics.
 File evidence and reversal citations use the collector's shapes in
 `src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
+PRIMARYOPAQUE-01 derived-artifact proofs are also collected after history reuse
+and never written into these records. Returned evidence may carry
+`derivedArtifacts`, an array of `{ path, primaryBlob, blob, directory, command,
+headSha, primaryHead, comparison: 'git-blob-sha1' }`. Each entry records a
+successful isolated rebuild under the unchanged author-declared package script.
+The evaluator binds it to the protected author blob and final head blob at the
+same path and change status. Failed proofs add no authority and retry on the
+next collection; existing cache keys and durable shapes do not change.
 Within a closure evaluation, object-addressed transport responses can also be
 reused across history readers. These shared response values are deeply frozen;
 consumers cannot rewrite evidence seen by a sibling. Pending reads share only

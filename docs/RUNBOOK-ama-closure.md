@@ -4641,6 +4641,13 @@ invocation, including after a CI wait or throttle wait, it runs that variable's
 10-second timeout and must print only the new token on stdout. Its diagnostics
 are discarded. Without a refresh command, the current token is used unchanged.
 
+Audit publication, gate-cap closing status and pushed-attestation preflights also
+accept a refresh command alone: `HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND`,
+`MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND` or the generic launch fallback. They do
+not require a pre-minted token. `bin/hammer-context.mjs` explicitly enables
+hammer token management for history reads as well as the initial PR snapshot,
+including when it runs before inputs export `HAM_ROOT_DIR`.
+
 A 401 or `Bad credentials` response forces one more refresh and one retry of the
 same call. A second rejection reports that refresh succeeded but the retry was
 rejected; unavailable, failed, empty or invalid refresh output reports its own

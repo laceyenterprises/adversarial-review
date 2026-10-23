@@ -29,6 +29,67 @@ process.stdout.write(${JSON.stringify(fresh)});
 }
 const rejected = () => Object.assign(new Error('gh: Bad credentials (HTTP 401)'), { stderr: 'Bad credentials', code: 1 });
 
+test('shell credential guards admit refresh-only entitlements and reject ambient credentials', () => {
+  for (const [file, expectedCount] of [['bin/hammer-publish.sh', 2], ['bin/hammer-verify-head.sh', 1]]) {
+    const source = readFileSync(resolve(file), 'utf8');
+    const guards = [...source.matchAll(/if (\[ -z [^\n]+); then\n\s+echo "HAM hard-blocker: no entitled hammer token/g)];
+    assert.equal(guards.length, expectedCount, file);
+    for (const [, condition] of guards) {
+      for (const variable of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
+        'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND', 'MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND',
+        'HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND', 'missing']) {
+        const env = { GH_TOKEN: 'synthetic-ambient', GITHUB_TOKEN: 'synthetic-ambient' };
+        if (variable !== 'missing') env[variable] = 'synthetic-entitlement';
+        const result = spawnSync('/bin/bash', ['-c', `if ${condition}; then exit 1; fi`], { env, timeout: 5000 });
+        assert.equal(result.status, variable === 'missing' ? 1 : 0, `${file}: ${variable}`);
+      }
+    }
+  }
+});
+
+test('context history refreshes and retries entitled credentials before HAM_ROOT_DIR is exported', t => {
+  const f = fixture(t);
+  delete f.env.HAM_ROOT_DIR;
+  f.env.GH_TOKEN = 'synthetic-ambient-token';
+  const base = 'a'.repeat(40), head = 'b'.repeat(40);
+  const requests = join(f.dir, 'requests.jsonl');
+  const rejectedOnce = join(f.dir, 'rejected-once');
+  writeFileSync(join(f.dir, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const path = process.argv[3];
+fs.appendFileSync(${JSON.stringify(requests)}, JSON.stringify(path) + '\\n');
+if (process.env.GH_TOKEN !== ${JSON.stringify(fresh)}) {
+  process.stderr.write('Bad credentials (HTTP 401)'); process.exit(1);
+}
+if (path.includes('/compare/')) {
+  if (!fs.existsSync(${JSON.stringify(rejectedOnce)})) {
+    fs.writeFileSync(${JSON.stringify(rejectedOnce)}, '');
+    process.stderr.write('Bad credentials (HTTP 401)'); process.exit(1);
+  }
+  console.log(JSON.stringify({status:'ahead',total_commits:1,merge_base_commit:{sha:'${base}'},
+    commits:[{sha:'${head}',parents:[{sha:'${base}'}],commit:{message:'author change'}}]}));
+} else if (path.includes('/git/trees/')) console.log('{"tree":[],"truncated":false}');
+else if (path.includes('/reviews?') || path.includes('/statuses?')) console.log('[]');
+else if (path.includes('/check-runs?')) console.log('{"check_runs":[]}');
+else if (path.includes('/protection')) console.log('{}');
+else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${base}',ref:'main'}}));
+`, { mode: 0o755 });
+  const state = join(f.dir, 'state.json');
+  writeFileSync(state, '{}');
+  const result = spawnSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main',
+    resolve('bin/hammer-context.mjs'), 'fixture/repo', '42', '--state-file', state], {
+    env: f.env, encoding: 'utf8', timeout: 15000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const snapshot = JSON.parse(result.stdout);
+  assert.equal(snapshot.primaryChange.status, 'available', snapshot.primaryChange.reason);
+  assert.equal(snapshot.primaryChange.primaryHead, head);
+  const calls = readFileSync(requests, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(calls.some(path => path.includes('/git/trees/')));
+  assert.ok(calls.filter(path => path.includes('/compare/')).length >= 3, 'rejected compare, its retry and author diff');
+  assert.equal(f.count(), calls.length, 'every call, including the forced retry, refreshes the entitlement');
+});
+
 for (const mode of ['async', 'sync', 'spawn']) {
   test(`${mode}: refresh an aged launch token before each GitHub call and once more after 401`, async t => {
     const f = fixture(t);

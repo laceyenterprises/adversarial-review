@@ -290,7 +290,7 @@ NODE
       return 20
     fi
     [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 0 ] || return "$HAM_GATE_CAP_AUDIT_EXIT"
-    if [ -z "${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}" ]; then
+    if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
       echo "HAM hard-blocker: no entitled hammer token for gate-cap closing status" >&2
       return 1
     fi

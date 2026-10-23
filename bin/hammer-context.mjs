@@ -75,7 +75,7 @@ try {
       } catch { /* Unreadable local lease is reported as unavailable below. */ }
     }
   }
-  const historyReader = createHistoryReader();
+  const historyReader = createHistoryReader({ hammerToken: true });
   let primaryChange;
   try {
     const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head, rootDir: localRoot,

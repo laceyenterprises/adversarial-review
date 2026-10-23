@@ -92,7 +92,7 @@ HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.X
   ham_publish_abort 1; return 1
 }
 
-if [ -z "${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}" ]; then
+if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
   echo "HAM hard-blocker: no entitled hammer token present for audit comment identity" >&2
   ham_publish_abort 1; return 1
 fi
@@ -265,7 +265,7 @@ ham_existing_terminal_audit_comment_id() {
       "$HAM_AUDIT_BASE_HEAD" "$POST_REMEDIATION_SHA" "$HAM_AUDIT_COMMENT_MARKER"
 
 }
-if [ -z "${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}" ]; then
+if [ -z "${HAMMER_LACEY_GH_TOKEN:-${HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:-${MERGE_AGENT_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND:-${HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND:-}}}}}" ]; then
   echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
   ham_publish_abort 1; return 1
 fi

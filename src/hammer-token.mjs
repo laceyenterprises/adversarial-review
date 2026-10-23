@@ -134,7 +134,7 @@ export function hammerTokenSession(options = {}) {
   // failures from its code, signal and status. A spawn-level child error (a
   // timeout or missing binary) is its own `.error`, so visited objects are
   // never walked twice.
-  function redact(value, seen = new WeakSet()) {
+  function redactLeaf(value) {
     if (Buffer.isBuffer(value)) {
       let clean = value;
       for (const secret of secrets) {
@@ -155,15 +155,26 @@ export function hammerTokenSession(options = {}) {
       for (const secret of secrets) clean = clean.replaceAll(secret, '[redacted]');
       return clean;
     }
-    if (value && typeof value === 'object' && !seen.has(value)) {
-      seen.add(value);
-      for (const key of ['stdout', 'stderr', 'message', 'stack']) {
-        if (value[key] !== undefined) value[key] = redact(value[key], seen);
-      }
-      if (value.error) redact(value.error, seen);
-      if (Array.isArray(value.output)) value.output = value.output.map(item => redact(item, seen));
-    }
     return value;
+  }
+  function redact(value) {
+    // Iterative traversal also handles deep acyclic chains and nested output
+    // arrays without consuming the JS call stack. Keep errors/arrays aliased:
+    // retry callers depend on the original identity and code/signal/status.
+    const pending = [value];
+    const seen = new WeakSet();
+    while (pending.length) {
+      const current = pending.pop();
+      if (!current || typeof current !== 'object' || Buffer.isBuffer(current) || seen.has(current)) continue;
+      seen.add(current);
+      const keys = Array.isArray(current) ? current.keys() : ['stdout', 'stderr', 'message', 'stack', 'error', 'output'];
+      for (const key of keys) {
+        if (current[key] === undefined) continue;
+        current[key] = redactLeaf(current[key]);
+        pending.push(current[key]);
+      }
+    }
+    return redactLeaf(value);
   }
   return {
     managed,

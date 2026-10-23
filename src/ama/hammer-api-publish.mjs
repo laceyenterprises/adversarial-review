@@ -1,4 +1,14 @@
 import { filterGitHubBody } from '../github-outbound-body.mjs';
+// Child-process messages can embed the complete stderr (including repeated
+// finding text). Keep only the first line of each diagnostic, with a fixed cap.
+// Never walk .error/.cause/.output or serialize the child error graph.
+export function hammerPublicationFailureReason(error) {
+  const line = value => String(value || '').split(/\r?\n/, 1)[0];
+  const parts = [...new Set([line(error?.code), line(error?.message), line(error?.stderr)].filter(Boolean))];
+  const reason = parts.join(': ') || 'publication failed';
+  return reason.length > 512 ? `${reason.slice(0, 496)} ... [truncated]` : reason;
+}
+
 // API publication is an optimization. Every unsupported change or read failure
 // returns the ordinary exact-head review route; it never grants merge authority.
 export async function publishHammerTree({ repo, branch, expectedHead, localTree, message, changes, api }) {
@@ -25,6 +35,6 @@ export async function publishHammerTree({ repo, branch, expectedHead, localTree,
     if (commit?.commit?.tree?.sha !== localTree) throw new Error('published tree mismatch');
     return { route: 'published', head, tree: localTree };
   } catch (error) {
-    return { route: 're-review', reason: error.message, fallbackHead: publishedHead || expectedHead, branch };
+    return { route: 're-review', reason: hammerPublicationFailureReason(error), fallbackHead: publishedHead || expectedHead, branch };
   }
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
-import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
+import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 const [repo, pr] = process.argv.slice(2);
-const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024, stdio: 'pipe' });
 const network = hammerNetworkCall;
 const api = async (path, input) => JSON.parse((await network('gh',
   ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
@@ -51,5 +51,5 @@ try {
   }
   process.stdout.write(`${JSON.stringify({ ...result, previousHead })}\n`);
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: error.message, ...fallback, previousHead })}\n`);
+  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: hammerPublicationFailureReason(error), ...fallback, previousHead })}\n`);
 }

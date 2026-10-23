@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
+import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
 import { fleetCommitIdentityMatches, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 const apiCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/api.json', import.meta.url)));
@@ -62,4 +62,19 @@ test('a timed-out post-publication git fetch under a managed token is retried as
   assert.equal(String(result), 'fetched');
   assert.deepEqual(calls, [['git', 'fetch', 'origin', 'published'], ['git', 'fetch', 'origin', 'published']]);
   assert.deepEqual(pauses, [500]);
+});
+
+
+test('publication diagnostics bound multiline child output without traversing error graphs', async () => {
+  const error = Object.assign(new Error('spawnSync git ETIMEDOUT\n' + 'repeated finding\n'.repeat(10_000)), {
+    code: 'ETIMEDOUT', stderr: Buffer.from('scratch fetch timed out\n' + 'repeated finding\n'.repeat(10_000)),
+  });
+  error.error = error;
+  error.output = [null, null, error];
+  assert.equal(hammerPublicationFailureReason(error), 'ETIMEDOUT: spawnSync git ETIMEDOUT: scratch fetch timed out');
+  const result = await publishHammerTree({ ...options, api: async () => { throw error; } });
+  assert.equal(result.reason, hammerPublicationFailureReason(error));
+  const long = hammerPublicationFailureReason(new Error('x'.repeat(10_000)));
+  assert.ok(long.length <= 512);
+  assert.match(long, /\[truncated\]$/);
 });

@@ -928,3 +928,23 @@ test('a non-zero child exit is redacted and rethrown unchanged', t => {
   });
   assert.equal(f.count(), 1);
 });
+
+test('deep error/output graphs are redacted iteratively with identity and cycles intact', () => {
+  const session = hammerTokenSession({ env: { HAMMER_LACEY_GH_TOKEN: expired }, hammerToken: true });
+  const root = Object.assign(new Error(expired), { code: 'ETIMEDOUT', signal: 'SIGTERM', status: null });
+  let leaf = root;
+  for (let i = 0; i < 20_000; i++) leaf = leaf.error = { message: expired };
+  const output = [Buffer.from(expired), root];
+  output.push(output);
+  leaf.output = output;
+  assert.equal(session.redact(root), root);
+  assert.equal(root.message, '[redacted]');
+  assert.equal(root.code, 'ETIMEDOUT');
+  assert.equal(root.signal, 'SIGTERM');
+  assert.equal(root.status, null);
+  for (let node = root.error; node; node = node.error) assert.equal(node.message, '[redacted]');
+  assert.equal(leaf.output, output);
+  assert.equal(String(output[0]), '[redacted]');
+  assert.equal(output[1], root);
+  assert.equal(output[2], output);
+});

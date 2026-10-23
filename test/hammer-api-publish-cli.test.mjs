@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -184,8 +184,11 @@ console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remote
   assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);
 });
 
-for (const route of ['api', 'git-explicit', 'git-tracking']) {
-  test(`HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
+for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover']) {
+  const stops = ['api-timeout', 'api-reset', 'api-tree'].includes(route);
+  test(stops ? `LAC-2086: ${route} preserves publication and stops without a stale push or review`
+    : `HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
+    const apiRoute = route.startsWith('api');
     const root = mkdtempSync(join(tmpdir(), 'hammer-predicate-e2e-'));
     const pr = String(2_000_000 + process.pid);
     t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -251,7 +254,7 @@ else if (args[1] === 'graphql') {
   if (args.some(arg => arg.includes('viewer { login }'))) {
     output({ data: { viewer: { login: 'hammer-worker' } } }); process.exit(0);
   }
-  if (route !== 'api') fail('HTTP 422 unsupported API publication');
+  if (!route.startsWith('api')) fail('HTTP 422 unsupported API publication');
   const input = JSON.parse(fs.readFileSync(0, 'utf8')).variables.input;
   if (input.expectedHeadOid !== head()) fail('HTTP 422 CAS mismatch');
   const env = { ...process.env, GIT_INDEX_FILE: ${JSON.stringify(join(root, 'service.index'))},
@@ -298,10 +301,48 @@ else if (args[1] === 'graphql') {
   else fail('unrecorded fake service API ' + path);
 }
 `, { mode: 0o755 });
+    // Inject genuine execFileSync timeout/exit errors only at the scratch
+    // adoption boundary. The CLI, token redactor, retry helper, publication
+    // procedure and pushed-attestation CLI all execute normally and offline.
+    const faultLoader = join(root, 'scratch-fault.mjs');
+    const failureChild = join(root, 'scratch-child.mjs');
+    writeFileSync(failureChild, `
+process.stderr.write((process.argv[2] === 'timeout' ? 'scratch fetch timed out' : 'scratch reset refused') + '\\n' + 'repeated finding\\n'.repeat(1000));
+if (process.argv[2] === 'timeout') setTimeout(() => {}, 3000);
+else process.exitCode = 7;
+`);
+    const scratchCalls = join(root, 'scratch-calls.jsonl');
+    writeFileSync(scratchCalls, '');
+    writeFileSync(faultLoader, `
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { appendFileSync } from 'node:fs';
+const original = cp.execFileSync, route = ${JSON.stringify(route)};
+let fetches = 0;
+cp.execFileSync = (command, args, options) => {
+  if (command === 'git') {
+    appendFileSync(${JSON.stringify(scratchCalls)}, JSON.stringify(args) + '\\n');
+    if (args[0] === 'fetch' && args[2] !== ${JSON.stringify(reviewed)}) {
+      fetches++;
+      if (route === 'api-timeout' || (route === 'api-recover' && fetches === 1)) {
+        return original(process.execPath, [${JSON.stringify(failureChild)}, 'timeout'], { ...options, timeout: 100 });
+      }
+    }
+    if (args[0] === 'reset' && route === 'api-reset') {
+      return original(process.execPath, [${JSON.stringify(failureChild)}, 'reset'], options);
+    }
+    if (args[0] === 'rev-parse' && args[1] !== 'HEAD^{tree}' && route === 'api-tree') return Buffer.from('wrong-tree');
+  }
+  return original(command, args, options);
+};
+syncBuiltinESMExports();
+`);
     const leaseNode = join(bin, 'lease-node');
     writeFileSync(leaseNode, `#!/bin/bash
 if [[ "$1" == */bin/merge-lease.mjs ]]; then
   echo '{"holder":{"leaseId":"test-lease","holderPr":${pr},"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}'
+elif [[ "$1" == */bin/hammer-api-publish.mjs ]]; then
+  exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(faultLoader)} "$@"
 else
   exec ${JSON.stringify(process.execPath)} "$@"
 fi
@@ -320,19 +361,64 @@ fi
     writeFileSync(env.HAM_AUDIT_DETAILS_FILE, `**Findings addressed**\n- **Fix feature** (blocking): ${filename} repair\nDoc-currency: stale wording\n`);
     const script = join(root, 'publish.sh');
     writeFileSync(script, renderHammerProcedure('hammer-publish', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
+    const pushAttempts = join(root, 'push-attempts');
     // The local remote needs no auth; enforce the actual publication child's
     // credential and inline helper through Git's ordinary pre-push hook.
     writeFileSync(join(work, '.git', 'hooks', 'pre-push'), `#!/bin/sh
+printf 'push\\n' >> ${JSON.stringify(pushAttempts)}
 [ "$GH_TOKEN" = synthetic-token ] || exit 71
 [ "$GITHUB_TOKEN" = synthetic-token ] || exit 72
 [ "$GIT_CONFIG_VALUE_1" = '!gh auth git-credential' ] || exit 73
 `, { mode: 0o755 });
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
-    await run('/bin/bash', ['-c', 'source "$1"', '_', script], { env: { ...env, HAM_COMMIT_PUBLICATION_ONLY: '1' } });
+    const publication = await run('/bin/bash', ['-c', `
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+HAM_MERGE_LEASE_HELD=1
+if source "$1"; then rc=0; else rc=$?; fi
+printf '\\nSTATE=%s|%s|%s|%s|%s|%s\\n' "$rc" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_HELD" "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD" "\${HAM_API_PUBLISH_FALLBACK:-0}"
+printf 'NOTE=%s\\n' "$HAM_NO_MERGE_NOTE"
+exit "$rc"
+`, '_', script], { env: { ...env, HAM_COMMIT_PUBLICATION_ONLY: '1' } }).catch(error => {
+      if (!stops) throw error;
+      assert.equal(error.code, 1);
+      return error;
+    });
+    const scratch = readFileSync(scratchCalls, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    if (stops) {
+      const remoteHead = await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker');
+      assert.notEqual(remoteHead, local);
+      assert.equal(await git('rev-parse', 'HEAD'), local, 'failed scratch adoption must leave local HEAD distinct');
+      assert.equal(await git('rev-parse', `${remoteHead}^{tree}`), localTree);
+      const result = JSON.parse(publication.stdout.split('\n')[0]);
+      assert.equal(result.route, 're-review');
+      assert.equal(result.previousHead, reviewed);
+      assert.equal(result.pushedHead, remoteHead);
+      assert.equal(result.fallbackHead, remoteHead);
+      assert.ok(result.reason.length <= 512);
+      assert.doesNotMatch(result.reason, /Maximum call stack|repeated finding/);
+      assert.match(result.reason, route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
+      assert.match(publication.stdout, new RegExp(`STATE=1\\|published-head-sync-failed\\|0\\|${reviewed}\\|${remoteHead}\\|0`));
+      assert.match(publication.stdout, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}\nHAM-CI-Validated: false`));
+      assert.ok(publication.stdout.length < 2500, publication.stdout);
+      assert.doesNotMatch(publication.stderr, /repeated finding|Maximum call stack/);
+      assert.ok(publication.stderr.length < 1024, publication.stderr);
+      const comments = JSON.parse(readFileSync(commentsPath, 'utf8'));
+      assert.equal(comments.length, 1, 'only publication provenance is posted');
+      assert.match(comments[0].body, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}`));
+      assert.doesNotMatch(comments[0].body, /HAM-Validated-Head:/);
+      assert.equal(existsSync(pushAttempts), false, 'no fallback force push may run');
+      const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
+      assert.equal(calls.filter(args => args[1] === 'graphql' && args.includes('--input')).length, 1);
+      assert.ok(!calls.some(args => args.includes('merge') || args.includes('review') || args.some(arg => /\/reviews(?:\?|$)/.test(arg))));
+      assert.equal(scratch.filter(args => args[0] === 'fetch' && args[2] === remoteHead).length, route === 'api-timeout' ? 3 : 1);
+      assert.equal(scratch.filter(args => args[0] === 'reset').length, route === 'api-reset' ? 1 : 0);
+      return;
+    }
+    if (route === 'api-recover') assert.equal(scratch.filter(args => args[0] === 'fetch' && args[2] !== reviewed).length, 2);
     const published = await git('rev-parse', 'HEAD');
     assert.equal(await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker'), published);
     assert.equal(await git('rev-parse', 'HEAD^{tree}'), localTree);
-    assert.equal(published === local, route !== 'api');
+    assert.equal(published === local, !apiRoute);
     await run('/bin/bash', ['-c', `set -e
 HAM_MERGE_LEASE_HELD=1
 HAM_MERGE_LEASE_ID=test-lease
@@ -343,8 +429,8 @@ source "$1"
 `, '_', script]);
     const get = async path => JSON.parse((await run('gh', ['api', path])).stdout);
     const rawCommit = await get(`repos/fixture/repo/commits/${published}`);
-    assert.equal(rawCommit.commit.verification.verified, route === 'api');
-    assert.equal(rawCommit.committer.login, route === 'api' ? 'web-flow' : 'hammer-worker');
+    assert.equal(rawCommit.commit.verification.verified, apiRoute);
+    assert.equal(rawCommit.committer.login, apiRoute ? 'web-flow' : 'hammer-worker');
     const primary = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: Number(pr), headSha: published,
       get, rootDir: root }, { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }) });
     const snapshot = await fetchHammerPr('fixture/repo', pr, { read: get });

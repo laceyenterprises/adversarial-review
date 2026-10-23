@@ -4936,8 +4936,11 @@ non-hammer Git execution remains outside this opt-in credential path.
 A `merged` build-completion row proves merge only when its `head_sha` equals
 the reviewed head or, after advancement, the target head. The shared closer
 reader applies this rule to dispatch, lease reconciliation, and terminal-retry
-recovery. Missing or foreign heads follow the absent-signal path, including
-normal producer-evidence checks; they cannot establish successful merge.
+recovery. Head comparisons trim whitespace and normalize hexadecimal casing.
+Dispatch checks an advanced target first; a matching target signal skips the
+obsolete reviewed-head probe and its mismatch diagnostic. Missing or foreign
+heads follow the absent-signal path, including normal producer-evidence checks;
+they cannot establish successful merge.
 Mismatches log `ama_closer.merged_signal_head_mismatch` once per repository,
 pull request and expected head per process, with completion identity fields.
 Authoritative live merged state and terminal audit evidence retain their

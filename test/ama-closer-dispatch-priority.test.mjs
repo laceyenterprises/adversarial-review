@@ -2777,6 +2777,7 @@ for (const advanced of [false, true]) {
       const target = advanced ? 'b'.repeat(40) : HEAD;
       const producer = signalHead === 'matching' ? target : signalHead === 'reviewed' ? HEAD : signalHead === 'foreign' ? 'c'.repeat(40) : signalHead;
       const logs = [];
+      let signalReads = 0;
       const deps = testDeps();
       const result = await maybeDispatchAmaCloser({
         ...cleanValidateAndClickArgs(rootDir, {
@@ -2793,13 +2794,20 @@ for (const advanced of [false, true]) {
         readBuildCompletionProducerEvidenceImpl: () => signalHead === 'reviewed'
           ? { ok: false, reason: 'missing-build-completion-producer-evidence' }
           : { ok: true, row: { producer_class: 'synthetic-producer' } },
-        readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
-          head_sha: producer, completion_id: 'synthetic-completion', signal_kind: 'merged',
-        } }),
+        readBuildCompletionSignalForPrImpl: () => {
+          signalReads += 1;
+          return { ok: true, row: {
+            head_sha: producer, completion_id: 'synthetic-completion', signal_kind: 'merged',
+          } };
+        },
       });
       if (signalHead === 'matching' || signalHead === 'reviewed') {
         assert.equal(result.reason, 'merged-signal-present');
         assert.equal(result.dispatched, false);
+        if (signalHead === 'matching') {
+          assert.equal(signalReads, 1, 'matching target needs no obsolete reviewed-head probe');
+          assert.equal(logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch').length, 0);
+        }
       } else {
         assert.notEqual(result.reason, 'merged-signal-present');
         assert.equal(result.dispatched, true, JSON.stringify(result));
@@ -2833,10 +2841,63 @@ test('MERGESIGNAL-01: foreign signal does not settle lease and logs once for its
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
   const mismatches = logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch');
   assert.equal(mismatches.length, 1);
-  assert.equal(mismatches[0].producerHeadSha, 'shaN');
+  assert.equal(mismatches[0].producerHeadSha, 'shan');
   assert.equal(mismatches[0].completionId, 'synthetic-completion');
   const advanced = 'b'.repeat(40);
   rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: HEAD, toHeadSha: advanced, now });
   assert.equal(reconcileAmaCloserLease({ ...args, headSha: advanced }), false);
   assert.equal(logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch').length, 2);
+});
+
+for (const length of [40, 64]) {
+  for (const uppercaseExpected of [false, true]) {
+    test(`MERGESIGNAL-01: ${length}-digit mixed-case signal matches uppercaseExpected=${uppercaseExpected}`, t => {
+      const rootDir = mkdtempSync(join(tmpdir(), 'merge-signal-case-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const headSha = 'abcdef12'.repeat(length / 8);
+      const identity = { repo: 'example/synthetic-case', prNumber: 52,
+        headSha: uppercaseExpected ? headSha.toUpperCase() : headSha };
+      const now = '2026-07-20T12:00:00Z';
+      acquireAmaCloserLease({ rootDir, ...identity, now });
+      updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_synthetic', now });
+      const logs = [];
+      assert.equal(reconcileAmaCloserLease({
+        rootDir, ...identity, now,
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+        readPullRequestStateImpl: () => assert.fail('matching merge signal supplies success evidence'),
+        readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
+          head_sha: `  ${'aBcDeF12'.repeat(length / 8)}  `, signal_kind: 'merged',
+        } }),
+        readBuildCompletionProducerEvidenceImpl: () => assert.fail('matching signal needs no absence evidence'),
+        logger: { info: line => logs.push(JSON.parse(line)) },
+      }), true);
+      assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+      assert.equal(logs.filter(row => row.event === 'ama_closer.merged_signal_head_mismatch').length, 0);
+    });
+  }
+}
+
+test('MERGESIGNAL-01: null logger preserves foreign-signal absence fallback', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'merge-signal-null-logger-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/synthetic-null-logger', prNumber: 53, headSha: HEAD };
+  const now = '2026-07-20T12:00:00Z';
+  acquireAmaCloserLease({ rootDir, ...identity, now });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_synthetic', now });
+  const before = readAmaCloserLease(rootDir, identity);
+  let producerReads = 0;
+  assert.equal(reconcileAmaCloserLease({
+    rootDir, ...identity, now, logger: null,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readPullRequestStateImpl: () => null,
+    readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
+      head_sha: 'b'.repeat(40), signal_kind: 'merged',
+    } }),
+    readBuildCompletionProducerEvidenceImpl: () => {
+      producerReads += 1;
+      return { ok: true, row: {} };
+    },
+  }), false);
+  assert.equal(producerReads, 1, 'null logging must not interrupt absence evidence');
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
 });

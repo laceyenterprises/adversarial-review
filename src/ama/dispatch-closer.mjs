@@ -3952,9 +3952,9 @@ function* readMergedBuildCompletionSignalSteps({
   });
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
   if (result.ok) {
-    const producerHeadSha = String(result.row?.head_sha || '').trim() || null;
-    const reviewedHeadSha = String(headSha || '').trim() || null;
-    if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(producerHeadSha || '')
+    const producerHeadSha = String(result.row?.head_sha || '').trim().toLowerCase() || null;
+    const reviewedHeadSha = String(headSha || '').trim().toLowerCase() || null;
+    if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(producerHeadSha || '')
       && producerHeadSha === reviewedHeadSha) return {
       ...result,
       producerHeadSha,
@@ -3963,7 +3963,7 @@ function* readMergedBuildCompletionSignalSteps({
     };
     const key = `merged-signal-head-mismatch:${repo}#${prNumber}:${reviewedHeadSha}`;
     if (dispatchCloserLogGate.note(key, 'ignored').changed) {
-      logger.info?.(JSON.stringify({
+      logger?.info?.(JSON.stringify({
         event: 'ama_closer.merged_signal_head_mismatch', repo, prNumber,
         reviewedHeadSha, producerHeadSha,
         completionId: result.row?.completion_id ?? null,
@@ -5705,17 +5705,6 @@ async function maybeDispatchAmaCloserAttempt({
       existingLease: terminalizedLease,
     });
   }
-  const reviewedHeadMergedSignal = await readMergedBuildCompletionSignalAsync({
-    repo,
-    prNumber,
-    headSha: reviewedSha,
-    logger,
-    hqRoot,
-    rootDir,
-    env: process.env,
-    readBuildCompletionProducerEvidenceImpl,
-    readBuildCompletionSignalForPrImpl,
-  });
   const targetHeadMergedSignal = headAdvancedDuringDispatch
     ? await readMergedBuildCompletionSignalAsync({
         repo,
@@ -5729,6 +5718,21 @@ async function maybeDispatchAmaCloserAttempt({
         readBuildCompletionSignalForPrImpl,
       })
     : null;
+  // The PR-scoped row normally names the current target after advancement.
+  // Accept it before probing the obsolete reviewed head and logging a mismatch.
+  const reviewedHeadMergedSignal = targetHeadMergedSignal?.ok
+    ? null
+    : await readMergedBuildCompletionSignalAsync({
+        repo,
+        prNumber,
+        headSha: reviewedSha,
+        logger,
+        hqRoot,
+        rootDir,
+        env: process.env,
+        readBuildCompletionProducerEvidenceImpl,
+        readBuildCompletionSignalForPrImpl,
+      });
   const mergedSignal = reviewedHeadMergedSignal?.ok
     ? reviewedHeadMergedSignal
     : targetHeadMergedSignal && !isCleanMissingMergedSignal(targetHeadMergedSignal)

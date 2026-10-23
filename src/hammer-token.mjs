@@ -8,8 +8,56 @@ function credentialRejected(error) {
     || /\bbad credentials\b|\bHTTP(?:\/\S+)?\s+401\b|\b401\s+Unauthorized\b|\bauthentication (?:failed|required)\b|could not read (?:Username|Password)|\brequires authentication\b|\btoken (?:has )?expired\b|\bunauthorized\b[^\n]*\b401\b/i.test(detail);
 }
 
-// Launch commands are trusted environment inputs, never PR content. Refresh on
-// every call: each shell phase may resume after an arbitrarily long CI wait.
+// Launch refresh commands (`hq github-token refresh`) print one
+// `export NAME=VALUE` line per variable, each VALUE quoted as Python's
+// shlex.quote does: bare safe characters, or single-quoted runs joined by "'".
+// A single bare token line remains accepted. Anything else is rejected, and the
+// output never reaches an error: it holds every minted value.
+const TOKEN_SHAPE = /^[\w.~+/-]+$/;
+const EXPORT_LINE = /^export ([A-Za-z_][A-Za-z0-9_]*)=((?:[\w@%+=:,./-]+|'[^']*'|"'")+)$/;
+function shellValue(quoted) {
+  return quoted.replace(/'([^']*)'|"'"/g, (_match, single) => single ?? "'");
+}
+function parseRefreshOutput(output, names) {
+  const text = output.trim();
+  if (TOKEN_SHAPE.test(text)) return { token: text, values: [text] };
+  const exports = new Map();
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    const match = EXPORT_LINE.exec(line.replace(/\r$/, ''));
+    if (!match) return null;
+    exports.set(match[1], shellValue(match[2]));
+  }
+  const name = names.find(key => exports.has(key));
+  const token = name && exports.get(name);
+  if (!TOKEN_SHAPE.test(token || '')) return null;
+  const values = [...exports].filter(([key, value]) => value && !key.endsWith('_EXPIRES_AT')).map(([, value]) => value);
+  return { token, values, expiresAt: exports.get(`${name}_EXPIRES_AT`) || exports.get('GH_TOKEN_EXPIRES_AT') };
+}
+
+// A proactive refresh may be skipped while the held token's known expiry is
+// comfortably ahead; a rejected call still forces one refresh.
+const EXPIRY_MARGIN_MS = 10 * 60 * 1000;
+function expiresLater(expiresAt, now = Date.now()) {
+  const at = /^\d{4}-\d{2}-\d{2}T/.test(expiresAt || '') ? Date.parse(expiresAt) : NaN;
+  return Number.isFinite(at) && at - now > EXPIRY_MARGIN_MS;
+}
+
+let warnedProactiveFailure = false;
+// Retain the latest successful refresh across per-call sessions without
+// changing ambient process credentials. Never share it across environments or
+// a changed launch identity, refresh command, token or expiry.
+const refreshedCredentials = new WeakMap();
+function warnProactiveFailure(outcome) {
+  if (warnedProactiveFailure) return;
+  warnedProactiveFailure = true;
+  process.stderr.write(`hammer-token: warning: proactive entitled token refresh ${outcome}; continuing with the held token\n`);
+}
+
+// Launch commands are trusted environment inputs, never PR content. Refresh
+// before each call unless the held token is known to outlive it: each shell
+// phase may resume after an arbitrarily long CI wait. A failed proactive
+// refresh keeps a held token; only the refresh after a rejection must succeed.
 function tokenContext(options) {
   const { credentialEnv = options.env || process.env, hammerToken = false, ...childOptions } = options;
   const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
@@ -38,13 +86,24 @@ export function hammerGitOptions(options) {
 
 export function hammerTokenSession(options = {}) {
   const { credentialEnv, childOptions, variable, command, managed } = tokenContext(options);
+  const launchToken = variable && credentialEnv[variable];
+  const launchExpiry = variable && credentialEnv[`${variable}_EXPIRES_AT`];
+  const cached = refreshedCredentials.get(credentialEnv);
+  const current = cached && cached.variable === variable && cached.command === command
+    && cached.launchToken === launchToken && cached.launchExpiry === launchExpiry ? cached : null;
   const secrets = new Set(['GH_TOKEN', 'GITHUB_TOKEN', ...ENTITLED_VARS]
-    .map(key => credentialEnv[key]).filter(Boolean));
-  let token = variable && credentialEnv[variable];
+    .map(key => credentialEnv[key]).filter(Boolean).concat(current?.values || []));
+  let token = current ? current.token : launchToken;
+  // Only an entitled variable or a completed refresh holds the closer identity;
+  // an ambient GH_TOKEN is always replaced, never kept or trusted to expire late.
+  let held = Boolean(current || (token && ENTITLED_VARS.includes(variable)));
+  let expiresAt = current ? current.expiresAt : held ? launchExpiry : undefined;
   let retried = false;
+  let forced = false;
 
   function failure(outcome) {
     const error = new Error(`GitHub credential rejected or unavailable; entitled token refresh ${outcome}`);
+    error.refreshOutcome = outcome;
     error.hammerAuthHandled = true;
     error.authOutage = true;
     error.stderr = error.message;
@@ -62,10 +121,14 @@ export function hammerTokenSession(options = {}) {
       // Command text, stdout, stderr and child error messages can hold secrets.
       throw failure(error.signal || error.code === 'ETIMEDOUT' ? 'failed (timeout or signal)' : 'failed (command error)');
     }
-    const fresh = output.trim();
-    if (!fresh || /\s/.test(fresh)) throw failure('failed (empty or invalid output)');
-    token = fresh;
-    secrets.add(token);
+    const parsed = parseRefreshOutput(output, [variable, 'GH_TOKEN'].filter(Boolean));
+    if (!parsed) throw failure('failed (empty or invalid output)');
+    for (const value of parsed.values) secrets.add(value);
+    token = parsed.token;
+    held = true;
+    expiresAt = parsed.expiresAt;
+    refreshedCredentials.set(credentialEnv, { ...parsed, variable, command, launchToken, launchExpiry });
+    warnedProactiveFailure = false;
   }
   function redact(value) {
     if (Buffer.isBuffer(value)) {
@@ -101,7 +164,15 @@ export function hammerTokenSession(options = {}) {
     managed,
     prepare() {
       if (!managed) return childOptions;
-      refresh();
+      if (forced) {
+        forced = false;
+        refresh();
+      } else if (!held || !expiresLater(expiresAt)) {
+        try { refresh(); } catch (error) {
+          if (!held) throw error;
+          warnProactiveFailure(error.refreshOutcome);
+        }
+      }
       return { ...childOptions, env: { ...(childOptions.env || process.env), GH_TOKEN: token, GITHUB_TOKEN: token } };
     },
     retry(error) {
@@ -110,6 +181,7 @@ export function hammerTokenSession(options = {}) {
       if (retried) throw failure('succeeded, but GitHub rejected the retried call');
       if (!command) throw failure('unavailable (no launch refresh command)');
       retried = true;
+      forced = true;
       // prepare() performs the one forced refresh immediately before retry.
     },
     redact: value => managed ? redact(value) : value,

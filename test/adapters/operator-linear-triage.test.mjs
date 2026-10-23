@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runInNewContext } from 'node:vm';
 
 import {
+  __test__,
   buildCriticalFlagComment,
   createLinearTriageAdapter,
   extractLinearTicketId,
@@ -65,13 +65,7 @@ function adapterRoot() {
 }
 
 test('internal state helpers tolerate omitted terminal aliases without losing typed incident protection', async () => {
-  // Exercise private helpers without adding them to the adapter's public API.
-  const source = readFileSync(new URL('../../src/adapters/operator/linear-triage/index.mjs', import.meta.url), 'utf8');
-  const { terminalState, setLinearState } = runInNewContext(
-    source.slice(source.indexOf('async function incidentIssueReason('), source.indexOf('function criticalWordsInSummary('))
-      + '\n({ terminalState, setLinearState })',
-    { IncidentIdentityUnavailableError: class extends Error {} },
-  );
+  const { terminalState, setLinearState } = __test__;
   assert.equal(terminalState({ name: 'In Progress', type: 'started' }), false);
   assert.equal(terminalState(undefined), false);
   assert.equal(terminalState({ type: 'completed' }), true);
@@ -93,6 +87,36 @@ test('internal state helpers tolerate omitted terminal aliases without losing ty
   await setLinearState({ ...options, targetStateName: 'In Review' });
   assert.equal(updates.length, 1, 'omitted aliases cannot authorize incident closure or reopening');
   assert.deepEqual(errors, [], 'omitted aliases must not silently discard a state update');
+});
+
+test('already-matched terminal sync skips unreadable labels without retrying or writing', async () => {
+  for (const title of ['Improve review routing', 'SEV3: incident response']) {
+    const { linear, issue, updates, states } = makeLinearFixture({ currentState: 'Done', title });
+    states.find((state) => state.name === 'Done').type = 'completed';
+    issue.state = { name: 'Done', type: 'completed' };
+    let labelReads = 0;
+    issue.labels = async () => {
+      labelReads += 1;
+      throw new Error('Linear unavailable');
+    };
+    await __test__.setLinearState({
+      linearClientProvider: async () => linear,
+      logger: {},
+      ticketId: 'LAC-486',
+      targetStateName: 'Done',
+    });
+    assert.equal(labelReads, 0);
+    assert.deepEqual(updates, []);
+    const reopen = __test__.setLinearState({
+      linearClientProvider: async () => linear,
+      logger: {},
+      ticketId: 'LAC-486',
+      targetStateName: 'In Review',
+    });
+    if (title.startsWith('SEV')) await reopen;
+    else await assert.rejects(reopen, /incident identity unavailable/);
+    assert.deepEqual(updates, [], 'a real terminal transition still requires incident protection');
+  }
 });
 
 test('routePR returns builder class and Linear ticket id for representative titles', () => {

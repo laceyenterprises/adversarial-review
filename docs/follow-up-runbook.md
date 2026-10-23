@@ -611,7 +611,9 @@ configured Done/Cancelled aliases are suppressed. A terminal incident also
 resists stale progress/review updates. Nonterminal progress updates, critical
 finding comments, ordinary feature-ticket synchronization and the review /
 remediation / AMA loop retain their existing behavior. Each terminal write
-attempt reads live issue identity again; unreadable or incomplete labels log a
+attempt reads live issue identity again. An already-matched target is a no-op
+and skips the incident label read; label outages do not enqueue retries for
+that completed sync. For actual transitions, unreadable or incomplete labels log a
 failure and propagate to the existing owed-work retry instead of dropping the
 obligation. A deliberate incident-owner hold is a completed
 sync obligation, so a merged PR's pending triage record drains normally without

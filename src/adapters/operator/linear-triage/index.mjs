@@ -249,16 +249,16 @@ async function setLinearState({
     }
 
     const currentState = await issue.state;
+    if (normalizedTargets.includes(currentState?.name?.toLowerCase())) {
+      logger.log?.(`[linear-triage] Linear ${ticketId} already in "${currentState.name}" - skipping`);
+      return;
+    }
     if (terminalState(targetState, terminalStateNames) || terminalState(currentState, terminalStateNames)) {
       const incidentReason = await incidentIssueReason(issue);
       if (incidentReason) {
         logger.log?.(`[linear-triage] Linear ${ticketId} incident acceptance owned externally (${incidentReason}) - skipping "${targetState.name}"`);
         return;
       }
-    }
-    if (normalizedTargets.includes(currentState?.name?.toLowerCase())) {
-      logger.log?.(`[linear-triage] Linear ${ticketId} already in "${currentState.name}" - skipping`);
-      return;
     }
 
     await linear.updateIssue(issue.id, { stateId: targetState.id });
@@ -462,7 +462,10 @@ function createLinearTriageAdapter({
   };
 }
 
+const __test__ = Object.freeze({ terminalState, setLinearState });
+
 export {
+  __test__,
   DEFAULT_CRITICAL_WORDS,
   TICKET_PIPELINE_PAUSED_LABEL,
   buildCriticalFlagComment,

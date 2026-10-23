@@ -34,7 +34,8 @@ Linear incident acceptance is outside this review/remediation state machine.
 LAC-2092 guards the shared Linear writer using live incident/severity labels
 and the legacy leading SEV title. Review completion and PR merge cannot move an
 incident into a terminal state; a terminal incident cannot be reopened by stale
-pipeline progress. Ordinary ticket sync and the durable terminal-PR triage drain
+pipeline progress. Already-matched state sync completes without a label read or
+state write. Ordinary ticket sync and the durable terminal-PR triage drain
 remain in place. See the [operator contract](follow-up-runbook.md#comment-only-to-merge-example).
 
 ```text

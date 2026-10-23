@@ -1113,7 +1113,8 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 [state-machines.json](state-machines.json) maps the six owned lifecycle objects.
 LAC-2092 keeps Linear incident acceptance with its external owner: live
 incident/severity labels and legacy leading SEV issue titles suppress terminal
-pipeline sync and stale reopening. Ordinary ticket synchronization and all six
+pipeline sync and stale reopening. Already-matched state sync skips label reads
+without writing or retrying. Ordinary ticket synchronization and all six
 review/closure lifecycles retain their behavior. The deterministic
 `operator-incident-acceptance` fixture verifies the LAC-2089 chronology offline;
 deployment and behavioral acceptance follow the

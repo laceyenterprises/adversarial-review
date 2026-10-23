@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
-import { hammerTokenSession } from '../src/hammer-token.mjs';
+import { hammerTokenSession, withHammerTokenSync } from '../src/hammer-token.mjs';
 import { githubCredential, githubBudgetKey, markGitHubRateLimited, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 const expired = 'synthetic-expired-token';
@@ -881,4 +881,50 @@ catch (error) { process.stderr.write(error.stderr || error.message); process.exi
   assert.match(result.stderr, /refresh succeeded, but GitHub rejected/);
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
   assert.equal(f.count(), 2);
+});
+
+// Node's execFileSync makes a spawn-level failure its own `.error`.
+for (const [name, file, args, code] of [
+  ['a timed-out child', '/bin/sh', ['-c', 'printf %s "$GH_TOKEN" >&2; exec sleep 3'], 'ETIMEDOUT'],
+  ['a missing binary', 'hammer-token-missing-binary', [], 'ENOENT'],
+]) {
+  test(`${name} is redacted and rethrown as itself, not as a stack overflow`, t => {
+    const f = fixture(t);
+    let thrown;
+    assert.throws(() => withHammerTokenSync(active => {
+      try {
+        return execFileSync(file, args, { ...active, env: { ...active.env, PATH: `${f.dir}:/bin:/usr/bin` }, stdio: 'pipe', timeout: 100 });
+      } catch (error) { thrown = error; throw error; }
+    }, { env: f.env }), actual => {
+      assert.equal(actual, thrown);
+      assert.equal(actual.error, actual);
+      assert.equal(actual.code, code);
+      if (code === 'ETIMEDOUT') {
+        assert.equal(actual.signal, 'SIGTERM');
+        assert.equal(String(actual.stderr), '[redacted]');
+        assert.equal(String(actual.output[2]), '[redacted]');
+      }
+      assert.doesNotMatch(`${actual.message}${actual.stack}${actual.stdout}${actual.stderr}`, new RegExp(`${expired}|${fresh}`));
+      return true;
+    });
+    assert.equal(f.count(), 1);
+  });
+}
+
+test('a non-zero child exit is redacted and rethrown unchanged', t => {
+  const f = fixture(t);
+  let thrown;
+  assert.throws(() => withHammerTokenSync(active => {
+    try {
+      return execFileSync('/bin/sh', ['-c', 'printf %s "$GH_TOKEN" >&2; exit 3'], { ...active, stdio: 'pipe' });
+    } catch (error) { thrown = error; throw error; }
+  }, { env: f.env }), actual => {
+    assert.equal(actual, thrown);
+    assert.equal(actual.error, undefined);
+    assert.equal(actual.status, 3);
+    assert.equal(actual.code, undefined);
+    assert.equal(String(actual.stderr), '[redacted]');
+    return true;
+  });
+  assert.equal(f.count(), 1);
 });

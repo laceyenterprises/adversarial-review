@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
+import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
 import { fleetCommitIdentityMatches, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 const apiCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/api.json', import.meta.url)));
 const gitCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/git.json', import.meta.url)));
@@ -40,4 +44,22 @@ test('file modes, symlinks and submodules fall back without calling API', async 
     const result = await publishHammerTree({ ...options, changes: [{ path: 'file', mode }], api: () => assert.fail('API called') });
     assert.equal(result.route, 're-review');
   }
+});
+test('a timed-out post-publication git fetch under a managed token is retried as transient', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-api-network-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { PATH: '/bin:/usr/bin', HOME: dir, HAM_ROOT_DIR: dir, HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer-token',
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') };
+  const calls = [], pauses = [];
+  const result = await hammerNetworkCall('git', ['fetch', 'origin', 'published'], undefined, { env,
+    sleep: async ms => { pauses.push(ms); },
+    execFileImpl: (command, args, options) => {
+      calls.push([command, ...args]);
+      // The first attempt is a genuine child timeout: Node makes it its own `.error`.
+      if (calls.length === 1) return execFileSync('/bin/sh', ['-c', 'exec sleep 3'], { ...options, timeout: 100 });
+      return Buffer.from('fetched');
+    } });
+  assert.equal(String(result), 'fetched');
+  assert.deepEqual(calls, [['git', 'fetch', 'origin', 'published'], ['git', 'fetch', 'origin', 'published']]);
+  assert.deepEqual(pauses, [500]);
 });

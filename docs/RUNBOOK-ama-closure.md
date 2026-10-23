@@ -4846,6 +4846,8 @@ explicitly enables hammer credentials for its Git fetches. Each child receives
 fresh `GH_TOKEN` and `GITHUB_TOKEN` plus an inline `!gh auth git-credential`
 helper, after resetting inherited credential helpers and preserving other
 inline Git configuration. Authentication rejection refreshes and retries once
-with the original Git arguments, including the exact-head push lease. Tokens
-never enter persistent shell assignments, Git argv or Git configuration. Ordinary
+with the original Git arguments, including the exact-head push lease. Any other
+failure is rethrown as the same error with secrets redacted, keeping its `code`,
+`signal` and `status`, so a child timeout or missing binary keeps the kind that
+retry routing reads (HAMREDACT-01). Tokens never enter persistent shell assignments, Git argv or Git configuration. Ordinary
 non-hammer Git execution remains outside this opt-in credential path.

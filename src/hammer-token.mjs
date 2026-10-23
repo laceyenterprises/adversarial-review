@@ -130,7 +130,11 @@ export function hammerTokenSession(options = {}) {
     refreshedCredentials.set(credentialEnv, { ...parsed, variable, command, launchToken, launchExpiry });
     warnedProactiveFailure = false;
   }
-  function redact(value) {
+  // Redaction returns the same object, minus secrets: callers route retries and
+  // failures from its code, signal and status. A spawn-level child error (a
+  // timeout or missing binary) is its own `.error`, so visited objects are
+  // never walked twice.
+  function redact(value, seen = new WeakSet()) {
     if (Buffer.isBuffer(value)) {
       let clean = value;
       for (const secret of secrets) {
@@ -151,12 +155,13 @@ export function hammerTokenSession(options = {}) {
       for (const secret of secrets) clean = clean.replaceAll(secret, '[redacted]');
       return clean;
     }
-    if (value && typeof value === 'object') {
+    if (value && typeof value === 'object' && !seen.has(value)) {
+      seen.add(value);
       for (const key of ['stdout', 'stderr', 'message', 'stack']) {
-        if (value[key] !== undefined) value[key] = redact(value[key]);
+        if (value[key] !== undefined) value[key] = redact(value[key], seen);
       }
-      if (value.error) redact(value.error);
-      if (Array.isArray(value.output)) value.output = value.output.map(redact);
+      if (value.error) redact(value.error, seen);
+      if (Array.isArray(value.output)) value.output = value.output.map(item => redact(item, seen));
     }
     return value;
   }

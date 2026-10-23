@@ -1142,6 +1142,7 @@ test('refusal attribution bounds snapshot reads and preserves the refusal when a
     if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: history.mergeBase } };
     if (path.includes('/reviews?')) return [];
     if (path.endsWith(`${history.mergeBase}...${head}`)) return { merge_base_commit: { sha: history.mergeBase } };
+    if (path.includes('/contents/package.json?')) return { encoding: 'base64', content: Buffer.from('{}').toString('base64') };
     snapshotReads.push(path);
     // The reversal occurs outside the lookup window. Diagnostics must report
     // incompleteness while the independently evaluated final diff still refuses.
@@ -1175,6 +1176,7 @@ async function storedRefusal(t) {
     if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: history.mergeBase } };
     if (path.includes('/reviews?')) return [];
     if (path.endsWith(`${history.mergeBase}...${head}`)) return { merge_base_commit: { sha: history.mergeBase } };
+    if (path.includes('/contents/package.json?')) return { encoding: 'base64', content: Buffer.from('{}').toString('base64') };
     throw new Error(`unexpected shared read: ${path}`);
   };
   return { history, reads, args: { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head,
@@ -1188,7 +1190,7 @@ test('repeated refused merge-gate evaluations perform zero diagnostic reads', as
     assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
     assert.equal(evidence.revertedRegionDiagnostics, undefined);
   }
-  assert.equal(reads.length, 6, 'only live PR, merge-base metadata and reviews per evaluation');
+  assert.equal(reads.length, 8, 'live PR, merge-base metadata, reviews and optional manifest per evaluation');
 });
 
 test('operator diagnostics reject capped snapshots instead of attributing a disappearance', async t => {

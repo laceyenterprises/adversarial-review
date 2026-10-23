@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { constants } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
+import { constants, existsSync } from 'node:fs';
 import { cp, mkdtemp, mkdir, writeFile, readFile, rm, realpath, lstat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+import { loadDomainConfig } from '../domain-config.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_BYTES = 128 * 1024 * 1024;
@@ -220,4 +222,207 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
     return proofs;
   } catch { return []; }
   finally { if (scratch) await rm(scratch, { recursive: true, force: true }); }
+}
+
+const exec = promisify(execFile);
+const BLOCK_SHA = /^[0-9a-f]{40}$/i;
+const LIMIT = 2 * 1024 * 1024;
+
+function safeBlockPath(path) {
+  return typeof path === 'string' && path.length > 0 && !isAbsolute(path)
+    && !path.split(/[\\/]/).includes('..') && !path.includes('\0');
+}
+
+// Deliberately small path glob vocabulary, available on every supported Node.
+function matchesPath(path, glob) {
+  let pattern = '^';
+  for (let index = 0; index < glob.length; index++) {
+    const char = glob[index];
+    if (char === '*' && glob[index + 1] === '*') {
+      index++;
+      if (glob[index + 1] === '/') { pattern += '(?:.*/)?'; index++; }
+      else pattern += '.*';
+    } else if (char === '*') pattern += '[^/]*';
+    else if (char === '?') pattern += '[^/]';
+    else pattern += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(pattern + '$').test(path);
+}
+
+// Declarations live in the application's existing manifest, not host config.
+export function declaredGeneratedBlocks(manifest) {
+  const entries = manifest?.generatedArtifacts;
+  if (!Array.isArray(entries) || entries.length > 32) return [];
+  return entries.filter(entry => safeBlockPath(entry?.path) && safeBlockPath(entry.cwd)
+    && typeof entry.start === 'string' && entry.start.trim() === entry.start && entry.start.length > 0
+    && typeof entry.end === 'string' && entry.end.trim() === entry.end && entry.end.length > 0
+    && entry.start !== entry.end && !/[\r\n]/.test(entry.start + entry.end)
+    && Array.isArray(entry.command) && entry.command.length > 0 && entry.command.length <= 64
+    && entry.command.every(arg => typeof arg === 'string' && !arg.includes('\0'))
+    && entry.command[0].length > 0);
+}
+
+// Marker lines are never derived. Ambiguous/duplicate markers fail closed.
+export function generatedBlock(bytes, declaration) {
+  const lines = bytes.toString('utf8').split('\n');
+  const starts = [], ends = [];
+  lines.forEach((line, index) => {
+    if (line.replace(/\r$/, '') === declaration.start) starts.push(index);
+    if (line.replace(/\r$/, '') === declaration.end) ends.push(index);
+  });
+  if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) throw new Error('ambiguous generated block');
+  const startOffset = lines.slice(0, starts[0] + 1).join('\n').length + 1;
+  const endOffset = lines.slice(0, ends[0]).join('\n').length + 1;
+  return { start: starts[0] + 2, end: ends[0] + 1,
+    startOffset, endOffset, content: bytes.subarray(Buffer.byteLength(bytes.toString('utf8').slice(0, startOffset)),
+      Buffer.byteLength(bytes.toString('utf8').slice(0, endOffset))) };
+}
+
+async function regularFile(root, path) {
+  if (!safeBlockPath(path)) throw new Error('invalid artifact path');
+  const target = join(root, path);
+  const inside = relative(await realpath(root), await realpath(target));
+  if (inside.startsWith('..') || isAbsolute(inside) || !(await lstat(target)).isFile()) throw new Error('artifact escaped scratch tree');
+  const bytes = await readFile(target);
+  if (bytes.length > LIMIT || !Buffer.from(bytes.toString('utf8')).equals(bytes)) throw new Error('unsupported artifact text');
+  return bytes;
+}
+
+// Kill the whole process group on timeout/abort, including generator children.
+export async function runDerivedGenerator({ scratch, cwd, command, signal, timeoutMs = 10000 }) {
+  const root = await realpath(scratch);
+  const work = await realpath(join(root, cwd));
+  if (relative(root, work).startsWith('..')) throw new Error('generator cwd escaped scratch tree');
+  const home = join(root, 'home');
+  await mkdir(home, { recursive: true });
+  let executable, args;
+  if (process.platform === 'darwin') {
+    // Read system runtimes and this scratch tree only; deny network and writes
+    // outside scratch. No host HOME, auth environment or Git config is passed.
+    const quote = value => JSON.stringify(value);
+    const profile = `(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach-lookup)
+      (allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin")
+        (subpath "/Library/Frameworks") (subpath "/Library/Developer")
+        (subpath "/opt") (subpath "/dev")
+        (subpath ${quote(root)}))
+      (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))`;
+    executable = '/usr/bin/sandbox-exec';
+    args = ['-p', profile, ...command];
+  } else if (process.platform === 'linux') {
+    executable = 'bwrap';
+    args = ['--unshare-all', '--die-with-parent', '--new-session'];
+    for (const path of ['/usr', '/bin', '/lib', '/lib64', '/opt']) {
+      if (existsSync(path)) args.push('--ro-bind', path, path);
+    }
+    args.push('--proc', '/proc', '--dev', '/dev', '--bind', root, root, '--chdir', work, '--', ...command);
+  } else throw new Error('network-denied generator sandbox unavailable');
+  signal?.throwIfAborted();
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn(executable, args, { cwd: work, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
+      env: { PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', HOME: home, TMPDIR: home,
+        LANG: 'C.UTF-8', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+    let failure;
+    const kill = error => {
+      failure = error;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* Child already exited. */ }
+    };
+    const abort = () => kill(signal.reason);
+    const timer = setTimeout(() => kill(new Error('generator timed out')), timeoutMs);
+    let stderr = '';
+    child.stderr.on('data', bytes => {
+      stderr += bytes.toString('utf8');
+      if (stderr.length > 4096) kill(new Error('generator output limit exceeded'));
+    });
+    signal?.addEventListener('abort', abort, { once: true });
+    child.once('error', error => { failure = error; });
+    child.once('close', code => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      // Also retire descendants left behind by an otherwise successful parent.
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* No descendants. */ }
+      if (failure || code !== 0) reject(failure || new Error(`generator failed: ${stderr.slice(0, 4096)}`));
+      else resolvePromise();
+    });
+    if (signal?.aborted) abort();
+  });
+}
+
+// Shared checkout seam for reproducible derived output (blocks or opaque files).
+// Scratch owns all Git metadata: generators cannot mutate a host worktree/index.
+export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, signal, localRepository }, operation) {
+  if (!BLOCK_SHA.test(headSha) || !BLOCK_SHA.test(mergeBase) || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid derived checkout identity');
+  const scratch = await mkdtemp(join(tmpdir(), 'primary-derived-'));
+  const git = (...args) => exec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
+    { cwd: scratch, encoding: 'utf8', timeout: 15000, maxBuffer: LIMIT, signal,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  try {
+    await git('init', '--bare', '-q', 'objects.git');
+    let source = localRepository;
+    if (!source && rootDir) {
+      try { source = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo]; } catch { /* Optional reference. */ }
+      if (!source) {
+        try {
+          const origin = await exec('git', ['-C', rootDir, 'remote', 'get-url', 'origin'], { encoding: 'utf8', timeout: 5000, signal });
+          if (origin.stdout.trim().replace(/\.git$/, '').endsWith(`/${repo}`)
+            || origin.stdout.trim().replace(/\.git$/, '').endsWith(`:${repo}`)) source = rootDir;
+        } catch { /* No local checkout for this subject. */ }
+      }
+    }
+    const fetch = source => git('--git-dir=objects.git', 'fetch', '--no-tags', '--depth=1', source, headSha, mergeBase);
+    if (source) {
+      try { await fetch(source); } catch { await fetch(`https://github.com/${repo}.git`); }
+    } else await fetch(`https://github.com/${repo}.git`);
+    const tree = join(scratch, 'head');
+    await git('--git-dir=objects.git', 'worktree', 'add', '--detach', tree, headSha);
+    const show = async (ref, path) => (await git('--git-dir=objects.git', 'show', `${ref}:${path}`)).stdout;
+    const reset = async () => {
+      await git('-C', tree, 'reset', '--hard', headSha);
+      await git('-C', tree, 'clean', '-fdx');
+    };
+    return await operation({ tree, scratch, show, reset });
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+}
+
+export async function proveGeneratedBlocks(args, evidence, refusal, {
+  checkoutImpl = withDerivedCheckout, runGeneratorImpl = runDerivedGenerator,
+} = {}) {
+  const regions = refusal.missingEvidence?.regions;
+  if (!regions?.length || refusal.missingEvidence.evidence !== 'reversal-authorization') return [];
+  try {
+    const signal = AbortSignal.any([...(args.signal ? [args.signal] : []), AbortSignal.timeout(30000)]);
+    const data = await args.get(`repos/${args.repo}/contents/package.json?ref=${evidence.mergeBase}`);
+    if (data?.encoding !== 'base64' || typeof data.content !== 'string' || data.truncated) return [];
+    const baseManifest = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
+    const declarations = declaredGeneratedBlocks(baseManifest).filter(entry => matchesPath(refusal.path, entry.path));
+    if (!declarations.length) return [];
+    return await checkoutImpl({ ...args, signal, headSha: evidence.headSha, mergeBase: evidence.mergeBase }, async ({ tree, scratch, show, reset }) => {
+      const headDeclarations = declaredGeneratedBlocks(JSON.parse(await show(evidence.headSha, 'package.json')));
+      const proofs = [];
+      for (const declaration of declarations) {
+        if (!headDeclarations.some(entry => JSON.stringify(entry) === JSON.stringify(declaration))) continue;
+        const baseBytes = Buffer.from(await show(evidence.mergeBase, refusal.path));
+        const base = generatedBlock(baseBytes, declaration);
+        if (!regions.some(region => region.start >= base.start && region.end <= base.end)) continue;
+        await reset();
+        // Refuse renames/deletions, missing markers and output that only survives
+        // because the generator leaves its input untouched. Preserve the markers.
+        const before = await regularFile(tree, refusal.path);
+        const block = generatedBlock(before, declaration);
+        const text = before.toString('utf8');
+        await writeFile(join(tree, refusal.path), text.slice(0, block.startOffset) + text.slice(block.endOffset));
+        await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
+        const after = await regularFile(tree, refusal.path);
+        const regenerated = generatedBlock(after, declaration);
+        if (block.content.equals(regenerated.content)) proofs.push({ path: refusal.path,
+          start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
+        // Each declaration starts from the same final-head artifact.
+        await writeFile(join(tree, refusal.path), before);
+      }
+      return proofs;
+    });
+  } catch {
+    args.signal?.throwIfAborted();
+    // Optional proof failure must retain the independently computed refusal.
+    return [];
+  }
 }

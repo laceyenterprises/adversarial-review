@@ -2550,6 +2550,51 @@ They are collected afresh after history-cache reuse, including under the merge
 lease; an old cached refusal can therefore recover without a cache migration.
 No label or CI status substitutes for this proof.
 
+DERIVEDBLOCK-01: generated block interiors can also prove preservation by
+regeneration. A repository declares them in its checked-in `package.json`
+application manifest, for example:
+
+```json
+{
+  "generatedArtifacts": [
+    {
+      "path": "docs/*.md",
+      "start": "<!-- smv:state-machines:start -->",
+      "end": "<!-- smv:state-machines:end -->",
+      "cwd": ".",
+      "command": ["node", "scripts/render-inventory.mjs"]
+    }
+  ]
+}
+```
+
+`path` is a repository-relative path or glob (`*`, `**`, `?`); `cwd` is relative to
+the repository root and `command` is an executable/argument array, with no shell
+expansion. Declarations must already exist at the merge base and remain identical
+at the final head. Marker lines must be unique, exact, ordered lines in both
+versions; the markers themselves remain protected author content. Only existing
+modified text files qualify; additions, deletions, renames and opaque files keep
+their existing rules.
+
+On a region refusal, shared primary-change collection creates an independent
+scratch Git worktree at the exact head, using the existing local clone reference
+when available and otherwise fetching the immutable commits. Each generator runs
+from a fresh head checkout with the declared block interior cleared. It must
+recreate the final-head block bytes exactly, so a no-op or hand-edited output
+cannot supply proof. Verified base-coordinate interiors are excluded from author
+line preservation; outside regions and other files are still evaluated normally.
+The proof binds the path, head SHA and merge base. It is collected after history
+cache reuse, so cached refusals can recover without purging history.
+
+Generators run with a sanitized environment, scratch HOME, no host credentials,
+network denied and writes confined to scratch, using macOS `sandbox-exec` or
+Linux `bwrap`. Each generator has a ten-second process-group deadline; each
+checkout/proof attempt has a thirty-second deadline. No dependency installation
+or network access is available to generators. Missing sandbox support, unavailable
+commits, generator failures, duplicate/missing markers and byte mismatches retain
+the existing refusal. This supplies evidence to the existing primary-change
+predicate and adds no CI check, status, override label or host config key.
+
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary

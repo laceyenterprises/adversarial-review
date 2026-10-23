@@ -1213,6 +1213,12 @@ Key control points:
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
 - **Primary-change gate (HAMINTENT-02 / LAC-1833).** Both paths preserve changed
   regions from the protected author baseline against the current PR base.
+  DERIVEDBLOCK-01 treats a declared generated block interior as preserved when
+  its unchanged merge-base application-manifest declaration regenerates the exact
+  final-head block in a bounded, network-denied scratch worktree. Marker lines,
+  outside regions and other files remain protected. Unavailable or mismatching
+  regeneration retains the existing refusal and recovery transitions; see the
+  [declaration and sandbox contract](RUNBOOK-ama-closure.md#primary-change-evidence-authorization-and-disputes-hamintent-02--lac-1833).
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict

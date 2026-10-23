@@ -32,7 +32,7 @@ function parseRefreshOutput(output, names) {
   const token = name && exports.get(name);
   if (!TOKEN_SHAPE.test(token || '')) return null;
   const values = [...exports].filter(([key, value]) => value && !key.endsWith('_EXPIRES_AT')).map(([, value]) => value);
-  return { token, values, expiresAt: exports.get(`${name}_EXPIRES_AT`) };
+  return { token, values, expiresAt: exports.get(`${name}_EXPIRES_AT`) || exports.get('GH_TOKEN_EXPIRES_AT') };
 }
 
 // A proactive refresh may be skipped while the held token's known expiry is
@@ -44,6 +44,10 @@ function expiresLater(expiresAt, now = Date.now()) {
 }
 
 let warnedProactiveFailure = false;
+// Retain the latest successful refresh across per-call sessions without
+// changing ambient process credentials. Never share it across environments or
+// a changed launch identity, refresh command, token or expiry.
+const refreshedCredentials = new WeakMap();
 function warnProactiveFailure(outcome) {
   if (warnedProactiveFailure) return;
   warnedProactiveFailure = true;
@@ -82,13 +86,18 @@ export function hammerGitOptions(options) {
 
 export function hammerTokenSession(options = {}) {
   const { credentialEnv, childOptions, variable, command, managed } = tokenContext(options);
+  const launchToken = variable && credentialEnv[variable];
+  const launchExpiry = variable && credentialEnv[`${variable}_EXPIRES_AT`];
+  const cached = refreshedCredentials.get(credentialEnv);
+  const current = cached && cached.variable === variable && cached.command === command
+    && cached.launchToken === launchToken && cached.launchExpiry === launchExpiry ? cached : null;
   const secrets = new Set(['GH_TOKEN', 'GITHUB_TOKEN', ...ENTITLED_VARS]
-    .map(key => credentialEnv[key]).filter(Boolean));
-  let token = variable && credentialEnv[variable];
+    .map(key => credentialEnv[key]).filter(Boolean).concat(current?.values || []));
+  let token = current ? current.token : launchToken;
   // Only an entitled variable or a completed refresh holds the closer identity;
   // an ambient GH_TOKEN is always replaced, never kept or trusted to expire late.
-  let held = Boolean(token && ENTITLED_VARS.includes(variable));
-  let expiresAt = held ? credentialEnv[`${variable}_EXPIRES_AT`] : undefined;
+  let held = Boolean(current || (token && ENTITLED_VARS.includes(variable)));
+  let expiresAt = current ? current.expiresAt : held ? launchExpiry : undefined;
   let retried = false;
   let forced = false;
 
@@ -118,6 +127,8 @@ export function hammerTokenSession(options = {}) {
     token = parsed.token;
     held = true;
     expiresAt = parsed.expiresAt;
+    refreshedCredentials.set(credentialEnv, { ...parsed, variable, command, launchToken, launchExpiry });
+    warnedProactiveFailure = false;
   }
   function redact(value) {
     if (Buffer.isBuffer(value)) {

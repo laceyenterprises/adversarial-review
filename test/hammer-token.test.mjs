@@ -344,13 +344,156 @@ for (const output of [
   });
 }
 
-// Each case runs in a fresh process: the warning is once per process.
+// Each case runs in a fresh process to isolate the warning suppression state.
 function runSessions(env, script) {
   return spawnSync(process.execPath, ['--input-type=module', '-e', `
     import { meteredExecFile } from ${JSON.stringify(new URL('../src/metered-gh.mjs', import.meta.url).href)};
     const expired = ${JSON.stringify(expired)}, fresh = ${JSON.stringify(fresh)};
     ${script}`], { env, encoding: 'utf8', timeout: 10000 });
 }
+
+for (const mode of ['async', 'sync', 'spawn']) {
+  for (const variable of ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'HQ_ENTITLEMENT_GH_TOKEN']) {
+    for (const initialToken of [undefined, expired]) {
+      test(`${mode}: ${variable} retains a refreshed token across calls with ${initialToken ? 'an expired launch token' : 'no launch token'}`, async t => {
+        const f = fixture(t);
+        const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+        delete f.env.HAMMER_LACEY_GH_TOKEN;
+        delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+        // Fail the same command on later calls without changing its identity.
+        f.env[`${variable}_REFRESH_COMMAND`] = `if [ -f ${quote(f.refreshes)} ]; then exit 1; fi; ${command}`;
+        if (initialToken) f.env[variable === 'HQ_ENTITLEMENT_GH_TOKEN' ? 'GH_TOKEN' : variable] = initialToken;
+        const execute = (_command, _args, active) => {
+          assert.equal(active.env.GH_TOKEN, fresh);
+          assert.equal(active.env.GITHUB_TOKEN, fresh);
+          return mode === 'sync' ? fresh : { status: 0, stdout: fresh, stderr: '' };
+        };
+        // Also cover allowlisted child environments rebuilt for every call.
+        const run = () => {
+          const options = { credentialEnv: f.env, env: { PATH: f.dir }, hammerToken: true };
+          return mode === 'async'
+            ? meteredExecFile(async (...args) => execute(...args), 'gh', ['api', 'fixture'], options)
+            : meteredExecFileSync(execute, 'gh', ['api', 'fixture'], options);
+        };
+        for (let call = 0; call < 2; call++) {
+          const result = await run();
+          assert.equal(mode === 'sync' ? result : result.stdout, '[redacted]');
+        }
+        assert.equal(f.count(), 1);
+        assert.notEqual(f.env[variable], fresh, 'do not replace launch credentials');
+      });
+    }
+  }
+
+  for (const expiryVariable of ['HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'GH_TOKEN_EXPIRES_AT']) {
+    test(`${mode}: refreshed ${expiryVariable} skips later calls but a 401 still forces refresh`, async t => {
+      const f = fixture(t);
+      delete f.env.HAMMER_LACEY_GH_TOKEN;
+      const other = "synthetic'other";
+      const output = `export HAMMER_LACEY_GH_TOKEN=${fresh}\nexport GITHUB_TOKEN=${shlexQuote(other)}\nexport ${expiryVariable}=${new Date(Date.now() + 60 * 60_000).toISOString()}\n`;
+      writeFileSync(join(f.dir, 'refresh.cjs'), `const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(f.refreshes)}, 'refresh\\n');
+process.stdout.write(${JSON.stringify(output)});
+`);
+      let rejectNext = false;
+      let calls = 0;
+      const execute = (_command, _args, active) => {
+        calls++;
+        assert.equal(active.env.GH_TOKEN, fresh);
+        if (rejectNext) {
+          rejectNext = false;
+          if (mode === 'spawn') return { status: 1, stderr: 'HTTP 401 Bad credentials' };
+          throw rejected();
+        }
+        return mode === 'sync' ? `${fresh} ${other}` : { status: 0, stdout: `${fresh} ${other}`, stderr: '' };
+      };
+      const run = () => mode === 'async'
+        ? meteredExecFile(async (...args) => execute(...args), 'gh', ['api', 'fixture'], { env: f.env })
+        : meteredExecFileSync(execute, 'gh', ['api', 'fixture'], { env: f.env });
+      for (let call = 0; call < 2; call++) {
+        const result = await run();
+        assert.equal(mode === 'sync' ? result : result.stdout, '[redacted] [redacted]');
+      }
+      assert.equal(f.count(), 1, 'cached expiry skips the second proactive refresh');
+      rejectNext = true;
+      await run();
+      assert.equal(f.count(), 2, '401 forces refresh despite the cached expiry');
+      assert.equal(calls, 4);
+    });
+  }
+}
+
+test('cached refreshed credentials do not cross environments or changed launch identities', t => {
+  const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = `if [ -f ${quote(f.refreshes)} ]; then exit 1; fi; ${command}`;
+  assert.equal(hammerTokenSession({ env: f.env }).prepare().env.GH_TOKEN, fresh);
+  assert.throws(() => hammerTokenSession({ env: { ...f.env } }).prepare(), /refresh failed/);
+  f.env.HAMMER_LACEY_GH_TOKEN = 'synthetic-replacement-token';
+  assert.equal(hammerTokenSession({ env: f.env }).prepare().env.GH_TOKEN, 'synthetic-replacement-token');
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  f.env.MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  delete f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  assert.throws(() => hammerTokenSession({ env: f.env }).prepare(), /refresh failed/);
+});
+
+test('default process credentials retain refresh-only tokens across metered calls', t => {
+  const f = fixture(t);
+  delete f.env.HAMMER_LACEY_GH_TOKEN;
+  const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = `if [ -f ${quote(f.refreshes)} ]; then exit 1; fi; ${command}`;
+  const result = runSessions(f.env, `
+    for (let call = 0; call < 2; call++) {
+      const out = await meteredExecFile(async (_command, _args, active) => {
+        if (active.env.GH_TOKEN !== fresh) throw new Error('wrong credential');
+        return { stdout: active.env.GH_TOKEN };
+      }, 'gh', ['api', 'fixture']);
+      if (out.stdout !== '[redacted]') throw new Error('credential was not redacted');
+      if (process.env.HAMMER_LACEY_GH_TOKEN) throw new Error('launch environment was mutated');
+    }`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.count(), 1);
+  assert.equal(result.stderr.match(/proactive entitled token refresh/g).length, 1);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
+});
+
+test('refresh without expiry does not reuse the launch token expiry across calls', async t => {
+  const f = fixture(t);
+  f.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 60 * 60_000).toISOString();
+  writeFileSync(join(f.dir, 'refresh.cjs'), `const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(f.refreshes)}, 'refresh\\n');
+process.stdout.write(${JSON.stringify(fresh)});
+`);
+  let calls = 0;
+  const execute = async (_command, _args, active) => {
+    if (++calls === 1) throw rejected();
+    assert.equal(active.env.GH_TOKEN, fresh);
+    return { stdout: 'ok' };
+  };
+  await meteredExecFile(execute, 'gh', ['api', 'fixture'], { env: f.env });
+  await meteredExecFile(execute, 'gh', ['api', 'fixture'], { env: f.env });
+  assert.equal(f.count(), 2, 'forced refresh, then proactive refresh without inherited expiry');
+});
+
+test('proactive refresh warnings resume after a successful refresh in the same process', t => {
+  const f = fixture(t);
+  const result = runSessions(f.env, `
+    const command = process.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+    const run = () => meteredExecFile(async () => ({ stdout: 'ok' }), 'gh', ['api', 'fixture'], {});
+    process.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'exit 1';
+    await run();
+    await run();
+    process.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = command;
+    await run();
+    process.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'exit 1';
+    await run();
+    await run();`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr.match(/proactive entitled token refresh/g).length, 2);
+  assert.equal(f.count(), 1);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
+});
 
 for (const command of ['exit 1', `printf %s ${quote(`export GH_TOKEN="${fresh}"`)}`]) {
   test(`a failed proactive refresh with a held token proceeds with it and warns once: ${command}`, t => {

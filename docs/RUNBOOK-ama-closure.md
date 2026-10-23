@@ -4713,15 +4713,28 @@ The launch refresh command (`hq github-token refresh`) prints one
 entitled variable, falling back to `GH_TOKEN`; it also accepts a single bare
 token line. Any other output is rejected as `failed (empty or invalid output)`
 without echoing it, and every exported credential value is redacted.
+Expiry comes from the selected token's `<TOKEN_VAR>_EXPIRES_AT`, falling back
+to `GH_TOKEN_EXPIRES_AT` when the variable-specific expiry is absent.
+
+Successful refreshes retain the latest token, expiry and exported values for
+redaction in a process-local cache keyed by the credential environment object.
+Later Node calls sharing that environment reuse the refreshed credential,
+including refresh-command-only launches. The cache requires the same selected
+variable, refresh command, launch token and launch expiry; changing any of those
+inputs invalidates reuse. It does not mutate launch or ambient credentials,
+share tokens across environment objects, or persist across processes. Separate
+shell CLI invocations therefore refresh independently. A refresh without expiry
+clears the cached expiry rather than inheriting the previous token's timestamp.
 
 The refresh before a call is an optimisation. When it fails and the session
 already holds an entitled token (from `HAMMER_LACEY_GH_TOKEN`,
 `MERGE_AGENT_GH_TOKEN` or an earlier refresh; an ambient `GH_TOKEN` does not
 count), the call proceeds with that token and the process
-writes one warning to stderr, naming only the outcome:
+writes one warning to stderr per failure streak, naming only the outcome:
 `hammer-token: warning: proactive entitled token refresh failed (...); continuing with the held token`.
 That warning means the refresh command is broken while the held token still
-works; repair the launch refresh path before the held token expires. Without a
+works; repair the launch refresh path before the held token expires. A successful
+refresh re-enables the warning for a later failure. Without a
 held token the call still fails before GitHub. When the held token's
 `<TOKEN_VAR>_EXPIRES_AT` (ISO-8601, from the launch environment or the last
 refresh) is more than ten minutes away, the proactive refresh is skipped.

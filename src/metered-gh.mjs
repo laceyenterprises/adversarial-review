@@ -96,7 +96,9 @@ function debugOptions(options = {}) {
   for (const key of ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR']) {
     if (options.env?.[key] === undefined && process.env[key] !== undefined) env[key] = process.env[key];
   }
-  return { ...options, env };
+  // Debug headers need a child-env copy; token sessions must retain the source
+  // environment identity so successful refreshes survive subsequent calls.
+  return { ...options, credentialEnv: options.credentialEnv || options.env || process.env, env };
 }
 
 function responseRateLimited(result, parsed, failed) {

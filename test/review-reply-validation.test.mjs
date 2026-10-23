@@ -15,7 +15,8 @@ import {
   validateReviewerReply,
 } from '../src/kernel/review-reply.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
-import { reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
+import { dispatchReviewerModel, reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
+import { sanitizeCodexReviewPayload } from '../src/kernel/verdict.mjs';
 import { reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -142,6 +143,51 @@ test('REVIEWVALID-01: a duplicated Verdict, or a section after it, is rejected',
   assert.deepEqual(validateReviewerReply('').reasons, ['empty reply']);
 });
 
+test('REVIEWVALID-01: required headings inside fenced examples are not sections', () => {
+  for (const [opening, nested, closing] of [
+    ['```markdown', '## Summary\n## Verdict', '```'],
+    ['~~~markdown', '## Summary\n## Verdict', '~~~'],
+    ['````markdown', '```\n~~~\n## Verdict\n## Summary', '`````'],
+    ['~~~~markdown', '~~~\n```\n## Verdict\n## Summary', '~~~~~'],
+    ['```markdown', '```not-a-close\n## Verdict', '```'],
+  ]) {
+    const reply = VALID_REPLY.replace('## Suggested fixes\n',
+      `## Suggested fixes\n${opening}\n${nested}\n${closing}\n`);
+    assert.deepEqual(validateReviewerReply(reply), { ok: true, reasons: [] }, opening);
+    assert.ok(validateReviewerReply(`${reply}\n## Summary\nReal duplicate.`)
+      .reasons.includes('repeated required sections Summary'));
+  }
+  const unclosed = VALID_REPLY.replace('## Suggested fixes\n', '## Suggested fixes\n```markdown\n');
+  assert.ok(validateReviewerReply(unclosed).reasons.includes('no Verdict section'));
+});
+
+test('REVIEWVALID-01: every unchunked model supplies raw validation evidence', async () => {
+  for (const model of ['claude', 'gemini', 'codex']) {
+    for (const reply of [VALID_REPLY, `${VALID_REPLY}\n## Verdict\nComment only`]) {
+      const dispatch = await dispatchReviewerModel(model, '+synthetic diff', '', {
+        reviewWithClaudeImpl: async () => ({ reviewText: reply }),
+        reviewWithGeminiImpl: async () => ({ reviewText: reply }),
+        reviewWithCodexImpl: async () => ({ reviewText: reply }),
+      });
+      assert.equal(dispatch.rawReviewText, reply, model);
+      const sanitized = dispatch.needsSanitize
+        ? sanitizeCodexReviewPayload(dispatch.rawReviewText) : dispatch.reviewText;
+      assert.equal(validateReviewerReply(sanitized).ok, true);
+      if (reply === VALID_REPLY) {
+        assert.doesNotThrow(() => assertReviewerReply(dispatch.rawReviewText), model);
+      } else {
+        assert.throws(() => assertReviewerReply(dispatch.rawReviewText), ReviewerReplyRejectedError,
+          `${model}: sanitization must not hide duplicate sections from validation`);
+      }
+    }
+  }
+  const legacyClaude = await dispatchReviewerModel('claude', '+synthetic diff', '', {
+    reviewWithClaudeImpl: async () => VALID_REPLY,
+  });
+  assert.equal(legacyClaude.rawReviewText, VALID_REPLY);
+  assert.doesNotThrow(() => assertReviewerReply(legacyClaude.rawReviewText));
+});
+
 test('REVIEWVALID-01: a placeholder only counts as a whole value, not when quoted in prose', () => {
   const quoting = VALID_REPLY.replace(
     'The loop retries forever when the stub keeps failing.',
@@ -177,7 +223,11 @@ test('REVIEWVALID-01: a template-echo chunk is rejected, retried as reviewer-out
   let error = null;
   try {
     await reviewAgyOversizedInChunks(diff, '', {
-      env: {},
+      // Keep this rejection fixture independent of host-load-scaled defaults.
+      env: {
+        AGENT_OS_REVIEWER_TIMEOUT_MS: '1000',
+        AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1000',
+      },
       maxBytes: 60000,
       onRejectedCodexOutput: (value) => rejected.push(value),
       reviewWithGeminiImpl: async () => {
@@ -267,4 +317,44 @@ test('REVIEWVALID-01: rescue classifier and closer do not treat placeholders as 
   });
   assert.equal(real.decision, 'remediation-eligible');
   assert.equal(real.reason, 'addressable-findings');
+});
+
+test('REVIEWVALID-01: known placeholder title and file values remain malformed', () => {
+  for (const token of ['<Title>', '<PATH>', '<range>', '<one paragraph>', '<text>']) {
+    for (const reply of [
+      VALID_REPLY.replace('Retry loop never terminates', token),
+      VALID_REPLY.replace('src/synthetic-retry.mjs', token),
+    ]) {
+      assert.equal(parseReviewFindings(reply).blocking.malformed, 'template-placeholder', token);
+    }
+  }
+});
+
+test('REVIEWVALID-01: component titles and virtual files retain all addressable findings', () => {
+  for (const title of ['<AuthProvider>', '<Modal>', '<Select>']) {
+    const reply = VALID_REPLY.replace('## Non-blocking issues', [
+      `- **${title}**`,
+      '  - **File:** `<stdin>`',
+      '  - **Lines:** 2-4',
+      '  - **Problem:** The component drops required context.',
+      '',
+      '## Non-blocking issues',
+    ].join('\n'));
+    const parsed = parseReviewFindings(reply);
+    assert.equal(validateReviewerReply(reply).ok, true);
+    assert.equal(parsed.blocking.state, 'known');
+    assert.equal(parsed.findingsCount, 2);
+    assert.deepEqual(parsed.blocking.findings.map((finding) => finding.title),
+      ['Retry loop never terminates', title]);
+    assert.equal(parsed.blocking.findings[1].file, '`<stdin>`');
+    assert.deepEqual(classifyBlockingFindings(reply), { count: 2, state: 'known' });
+    assert.equal(classifyMergeAgentRescue({
+      reviewBody: reply, labels: [], mergeable: 'MERGEABLE', statusCheckRollup: [],
+      headSha: 'a'.repeat(40), reviewHeadSha: 'a'.repeat(40),
+    }).decision, 'remediation-eligible');
+    const nonBlocking = reply.replace('## Blocking issues', '## Non-blocking issues')
+      .replace('## Non-blocking issues\n- None.', '## Blocking issues\n- None.');
+    assert.equal(parseReviewFindings(nonBlocking).nonBlocking.count, 2);
+    assert.equal(classifyNonBlockingFindings(nonBlocking).state, 'known');
+  }
 });

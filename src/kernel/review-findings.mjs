@@ -282,12 +282,12 @@ function parseNonBlockingFindingsSection(reviewBody) {
 
 }
 
-// REVIEWVALID-01: a title or file that is a bare angle-bracket token
-// (`<Title>`, `<path>`) is the output template echoed back, not a finding.
-// Inline code such as `<T>` inside a longer title does not match.
+// REVIEWVALID-01: only known whole-value template placeholders are echoes.
+// Component titles (`<AuthProvider>`) and virtual paths (`<stdin>`) are valid.
+const TEMPLATE_PLACEHOLDER_VALUES = new Set(['<title>', '<path>', '<range>', '<one paragraph>', '<text>']);
 function isTemplatePlaceholderFinding(finding) {
   const bare = (value) => String(value ?? '').trim().replace(/^(?:\*\*|__|`)+|(?:\*\*|__|`)+$/g, '').trim();
-  return [finding?.title, finding?.file].some((value) => /^<[^<>\n]+>$/.test(bare(value)));
+  return [finding?.title, finding?.file].some((value) => TEMPLATE_PLACEHOLDER_VALUES.has(bare(value).toLowerCase()));
 }
 
 // One count/identity contract for attestations and merge eligibility. Missing

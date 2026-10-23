@@ -273,16 +273,19 @@ every hosted `agent-os-hq` artifact. It rejects a reply if:
   prompts' `Output requirements:` block);
 - any text other than the optional `## Adversarial Review …` header comes
   before the first required heading;
-- a required heading appears twice;
+- a required heading outside fenced code appears twice;
 - `## Verdict` is not the last section, or anything follows its verdict line.
 
 A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
 on the bounded `reviewer-output` path and records the reason in
 `failure_message`. It is never posted and never stored as a verdict. As
 defence in depth, `parseReviewFindings` reads a section whose finding title or
-file is a bare `<…>` token as `unknown` with `malformed: 'template-placeholder'`.
-The rescue classifier then reports `malformed-review` and the closer refuses,
-so neither treats it as an addressable finding.
+file is a whole-value known placeholder (`<Title>`, `<path>`, `<range>`,
+`<one paragraph>` or `<text>`, case-insensitive) as `unknown` with
+`malformed: 'template-placeholder'`. The rescue classifier then reports
+`malformed-review` and the closer refuses, so neither treats a placeholder as
+an addressable finding. Component titles such as `<AuthProvider>` and virtual
+paths such as `<stdin>` remain addressable findings.
 
 **7a. But refusing is not the same as dropping.** The reviewer is resolved
 from the worker-class prefix in the PR title, and a dependency bot cannot

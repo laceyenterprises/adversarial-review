@@ -18,7 +18,7 @@
 //   - nothing but blank lines and the optional `## Adversarial Review ...`
 //     header (which the Antigravity prompt asks for) may precede the first
 //     required heading;
-//   - no required heading may appear twice;
+//   - no required heading outside fenced code may appear twice;
 //   - `## Verdict` must be the last section, may hold no heading or code
 //     fence, and its last line must be a recognised verdict, so nothing
 //     follows the verdict.
@@ -44,7 +44,7 @@ const REQUIRED_HEADINGS = ['Summary', 'Blocking issues', 'Non-blocking issues', 
 const REQUIRED_HEADING_RE = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/i;
 const REVIEW_HEADER_RE = /^##[ \t]+Adversarial Review\b.*$/;
 const ANY_HEADING_RE = /^#{1,6}[ \t]+\S/;
-const FENCE_RE = /^[ \t]*(?:`{3,}|~{3,})/;
+const FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
 const KNOWN_VERDICTS = new Set(['request-changes', 'comment-only', 'approved']);
 
 class ReviewerReplyRejectedError extends Error {
@@ -127,7 +127,18 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   if (echoed.length > 0) reasons.push(`template placeholders ${echoed.join(', ')}`);
 
   const headings = [];
+  let openFence = null;
   lines.forEach((line, index) => {
+    const fence = line.match(FENCE_RE);
+    if (openFence) {
+      if (fence && fence[1][0] === openFence[0] && fence[1].length >= openFence.length
+        && !line.slice(fence[0].length).trim()) openFence = null;
+      return;
+    }
+    if (fence) {
+      openFence = fence[1];
+      return;
+    }
     const match = line.match(REQUIRED_HEADING_RE);
     if (match) headings.push({ name: REQUIRED_HEADINGS.find((name) => name.toLowerCase() === match[1].toLowerCase()), index });
   });

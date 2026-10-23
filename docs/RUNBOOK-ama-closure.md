@@ -3465,7 +3465,10 @@ forcing `process.exit()` after `stdout.write()` can discard pending pipe bytes
 while reporting success. The finite sibling CLI wrappers use the same lifecycle.
 There is no buffer-size workaround, history truncation, or parse-error suppression.
 
-Command results retain exits 0/64/70/75. An asynchronous output failure such as
+Command results retain exits 0/64/70/75. Unexpected exceptions escaping
+`merge-lease` command handling are diagnosed on stderr and mapped to retryable
+exit 75 at the CLI boundary, allowing the diagnostic to drain.
+An asynchronous output failure such as
 EPIPE produces a nonzero process failure and stderr diagnostic; consumers must
 require both a successful exit and valid JSON. Output completion requires the
 consumer to read: a stalled pipe can apply backpressure. Existing caller

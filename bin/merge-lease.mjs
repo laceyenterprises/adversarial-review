@@ -797,5 +797,10 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   // Pipe writes can still be pending after main returns. Let Node drain stdio
   // and report asynchronous write errors before the process exits.
-  process.exitCode = await main();
+  try {
+    process.exitCode = await main();
+  } catch (err) {
+    process.stderr.write(`error: retryable runtime failure: ${err.message}\n`);
+    process.exitCode = EXIT_TIMEOUT;
+  }
 }

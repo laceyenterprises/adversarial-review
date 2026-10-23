@@ -34,6 +34,9 @@ slow pipes and regular files, including every attempt record; fixture store
 bytes remain unchanged. A closed pipe reports EPIPE/nonzero. A consumer that
 never reads is still killed by its caller deadline. Real child invocations also
 verify usage 64, parked 70, contention 75, and corrupt-input 75 with a diagnostic.
+An injected help-output failure exercises an exception outside the command-level
+catch: the CLI boundary maps it to retryable exit 75 and drains the complete
+512 KB stderr diagnostic.
 The deliberately broken legacy control remains in the suite to establish the
 cause alongside the fixed production entrypoints.
 
@@ -56,8 +59,15 @@ inspected the output/termination paths.
 | Reviewer/watcher/follow-up shutdown, cancellation and fatal-error exits; reviewer deadline/fence helpers | Long-lived worker termination contracts, not finite CLI result completion; changing them could retain processes/leases. |
 | `src/reviewer-token-ledger-worker.mjs` | IPC worker exits from the `process.send` callback, after send completion; not stdout JSON. |
 
-All changed sibling entrypoints also run under bounded child-process help probes
-to detect retained handles. No CI jobs, triggers, gates or runners are added.
+All changed sibling entrypoints also run under bounded child-process help probes.
+Operational probes supplement help: `ama-check` reads synthetic eligibility
+inputs; `ama-audit init` acquires/releases its lock and writes a disposable audit;
+`watcher-wake` writes a disposable wake request; `quota-rearm` opens/reads/closes
+SQLite and refuses a missing row; both retrigger CLIs inspect missing fixture
+state and record refusal audits. `rereview-wake status` has the large-backlog
+probe above. Each must exit naturally before its subprocess deadline. All paths
+use isolated roots and synthetic config, without live mutations or credentials.
+No CI jobs, triggers, gates or runners are added.
 
 ## Contract and acceptance boundary
 

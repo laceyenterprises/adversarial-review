@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { main } from '../bin/merge-lease.mjs';
 import { acquireMergeLease, mergeLeaseAttemptsFilePath } from '../src/ama/merge-lease.mjs';
 import { rereviewWakePendingPath } from '../src/rereview-wake.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const cli = fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url));
 const repo = 'fixture/repo';
@@ -31,19 +32,23 @@ function fixture(t, count = 24000) {
 // Real OS pipes, no exec maxBuffer and no inherited credentials/configuration.
 // The deadline kills and reaps the child even when the consumer never drains.
 async function run(args, { slow = false, file, legacy = false, brokenPipe = false, entry = cli,
-  stalled = false, timeout = 15000 } = {}) {
+  stalled = false, timeout = 15000, preload } = {}) {
   const nodeArgs = legacy
     ? ['--input-type=module', '-e', `import { main } from ${JSON.stringify(new URL('../bin/merge-lease.mjs', import.meta.url).href)}; process.exit(await main(process.argv.slice(1)));`, ...args]
     : [entry, ...args];
   const childHome = mkdtempSync(join(tmpdir(), 'cli-output-home-'));
+  const configPath = join(childHome, 'global.yaml');
+  writeFileSync(configPath, 'version: 1\nroles: {}\n');
   const fd = file ? openSync(file, 'w') : undefined;
   let child;
   try {
-    child = spawn(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', ...nodeArgs], {
+    child = spawn(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main',
+      ...(preload ? ['--import', preload] : []), ...nodeArgs], {
       cwd: dirname(cli),
       env: { PATH: dirname(process.execPath), TMPDIR: tmpdir(), HOME: childHome,
         USERPROFILE: childHome, HQ_ROOT: join(childHome, 'hq'),
-        AGENT_OS_HQ_ROOT: join(childHome, 'hq'), GH_CONFIG_DIR: join(childHome, 'gh') },
+        AGENT_OS_HQ_ROOT: join(childHome, 'hq'), GH_CONFIG_DIR: join(childHome, 'gh'),
+        AGENT_OS_CONFIG_PATH: configPath },
       stdio: ['ignore', fd ?? 'pipe', 'pipe'],
       timeout, killSignal: 'SIGKILL',
     });
@@ -60,6 +65,7 @@ async function run(args, { slow = false, file, legacy = false, brokenPipe = fals
       chunks.push(chunk);
       if (slow) {
         child.stdout.pause();
+        clearTimeout(resumeTimer);
         resumeTimer = setTimeout(() => child.stdout.resume(), 5);
       }
     });
@@ -173,6 +179,63 @@ test('finite sibling entrypoints drain help output and exit without retained han
     assert.equal(result.signal, null, path);
     assert.match(result.stdout, /[Uu]sage:/, path);
   }
+});
+
+test('finite siblings complete operational fixture paths without retained handles', async t => {
+  const { rootDir } = fixture(t, 0);
+  const head = 'a'.repeat(40);
+  const json = (name, value) => {
+    const path = join(rootDir, `${name}.json`);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  };
+  // Missing rows exercise real SQLite open/schema/read/close and refusal paths.
+  const db = openReviewStateDb(rootDir);
+  try { ensureReviewStateSchema(db); } finally { db.close(); }
+  const target = ['--root-dir', rootDir, '--repo', repo, '--pr', '1'];
+  const retrigger = [...target, '--audit-root-dir', rootDir, '--reason', 'offline lifecycle probe'];
+  const probes = [
+    { path: 'bin/ama-check.mjs', args: ['--root-dir', rootDir, '--repo', repo,
+      '--pr', json('pr', { number: 1, headRefOid: head, state: 'OPEN', isDraft: true }),
+      '--reviews', json('reviews', { reviews: [] }), '--protection', json('protection', {}),
+      '--timeline', json('timeline', []), '--reviewed-sha', head,
+      '--reviewer', 'codex', '--risk-class', 'low'], code: 0,
+      check: result => assert.equal(JSON.parse(result.stdout).eligible, false) },
+    // These CLIs have no read-only operation; writes stay in the disposable root.
+    { path: 'bin/ama-audit.mjs', args: ['init', '--hq-root', rootDir, '--repo', repo,
+      '--pr', '1', '--head', head, '--outcome', 'in_progress'], code: 0,
+      check: result => assert.equal(JSON.parse(readFileSync(result.stdout.trim(), 'utf8')).repo, repo) },
+    { path: 'bin/watcher-wake.mjs', args: target, code: 0,
+      check: result => assert.equal(JSON.parse(result.stdout).requested, true) },
+    { path: 'bin/quota-rearm.mjs', args: [...target, '--json'], code: 1,
+      check: result => assert.equal(JSON.parse(result.stdout).reason, 'review-row-missing') },
+    { path: 'src/retrigger-review.mjs', args: retrigger, code: 1,
+      check: result => assert.match(result.stderr, /review-row-missing/) },
+    { path: 'src/retrigger-remediation.mjs', args: retrigger, code: 1,
+      check: result => assert.match(result.stderr, /refused:no-job/) },
+  ];
+  for (const { path, args, code, check } of probes) {
+    await t.test(path, async () => {
+      const result = await run(args, { entry: fileURLToPath(new URL(`../${path}`, import.meta.url)), slow: true });
+      assert.equal(result.signal, null, `${path}: operational path exceeded subprocess deadline`);
+      assert.equal(result.code, code, `${path}: ${result.stderr}`);
+      check(result);
+    });
+  }
+});
+
+test('unexpected main rejection maps to retryable failure and drains its diagnostic', async t => {
+  const { rootDir } = fixture(t, 0);
+  const preload = join(rootDir, 'throw-help.mjs');
+  const message = 'boundary-failure-'.repeat(32000);
+  // Help writes outside main's command-level catch. Inject a synchronous write
+  // failure there to exercise the actual CLI boundary, not a duplicate wrapper.
+  writeFileSync(preload, `process.stdout.write = () => { throw new Error(${JSON.stringify(message)}); };`);
+  const result = await run(['--help'], { preload });
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 75);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, `error: retryable runtime failure: ${message}\n`);
 });
 
 test('real entrypoint preserves usage, parked, contention and corrupt-input exit codes', async t => {

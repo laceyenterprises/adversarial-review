@@ -2580,14 +2580,18 @@ their existing rules.
 On a region refusal, shared primary-change collection creates an independent
 scratch Git worktree at the exact head, using `localRepository`, the domain's
 `remediationCloneReferences[repo]`, or a matching `rootDir` checkout. The local
-clone must contain both immutable commits. Missing/unreadable references or
+clone must contain both immutable commits. Both manifests are read from this local
+object store; proof retries issue no GitHub manifest requests, including when
+the merge base has no generated declarations. Missing/unreadable references or
 commits retain the refusal; there is no public HTTPS or ambient-auth fallback.
 Each generator runs from a fresh head checkout with the declared block interior
 cleared. It must
 recreate the final-head block bytes exactly, so a no-op or hand-edited output
 cannot supply proof. Verified base-coordinate interiors are excluded from author
 line preservation; these match the old-side coordinates of primary diff units,
-even when the author inserts or deletes lines above a block. Outside regions and
+even when the author inserts or deletes lines above a block. An empty merge-base
+interior has a zero-width interval that admits insertions at that boundary,
+without admitting positive-width marker edits. Outside regions and
 other files are still evaluated normally.
 The proof binds the path, head SHA and merge base. It is collected after history
 cache reuse, so cached refusals can recover without purging history.
@@ -2596,7 +2600,8 @@ Generators run with a sanitized environment, scratch HOME, no host credentials,
 network denied and writes confined to scratch, using macOS `sandbox-exec` or
 Linux `bwrap`. macOS permits reading the root directory entry and metadata of
 scratch ancestors for runtime startup, without granting reads of other descendants.
-Linux creates scratch mount parents explicitly and exposes only
+Linux creates every scratch mount ancestor in parent-first order, including
+nested custom temporary directories, and exposes only
 the dynamic loader cache from `/etc`, rather than host configuration. Each
 generator has a ten-second process-group deadline; each checkout/proof attempt has
 a thirty-second deadline. No dependency installation

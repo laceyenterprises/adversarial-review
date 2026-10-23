@@ -328,7 +328,11 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     }
     // Build mount parents explicitly, including hosts with a custom TMPDIR.
     // Only expose the loader cache from /etc, never host configuration/secrets.
-    args.push('--tmpfs', '/tmp', '--dir', dirname(root), '--dir', '/etc');
+    args.push('--tmpfs', '/tmp');
+    const parents = [];
+    for (let parent = dirname(root); parent !== '/'; parent = dirname(parent)) parents.unshift(parent);
+    for (const parent of parents) args.push('--dir', parent);
+    args.push('--dir', '/etc');
     if (existsSync('/etc/ld.so.cache')) args.push('--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache');
     args.push('--proc', '/proc', '--dev', '/dev', '--bind', root, root, '--chdir', work, '--', ...command);
   } else throw new Error('network-denied generator sandbox unavailable');
@@ -408,12 +412,12 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
   if (!regions?.length || refusal.missingEvidence.evidence !== 'reversal-authorization') return [];
   try {
     const signal = AbortSignal.any([...(args.signal ? [args.signal] : []), AbortSignal.timeout(30000)]);
-    const data = await args.get(`repos/${args.repo}/contents/package.json?ref=${evidence.mergeBase}`);
-    if (data?.encoding !== 'base64' || typeof data.content !== 'string' || data.truncated) return [];
-    const baseManifest = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
-    const declarations = declaredGeneratedBlocks(baseManifest).filter(entry => matchesPath(refusal.path, entry.path));
-    if (!declarations.length) return [];
     return await checkoutImpl({ ...args, signal, headSha: evidence.headSha, mergeBase: evidence.mergeBase }, async ({ tree, scratch, show, reset }) => {
+      // Immutable manifests come from the same local object store as artifacts.
+      // Retrying optional proof must never add GitHub reads to refused-head polls.
+      const baseManifest = JSON.parse(await show(evidence.mergeBase, 'package.json'));
+      const declarations = declaredGeneratedBlocks(baseManifest).filter(entry => matchesPath(refusal.path, entry.path));
+      if (!declarations.length) return [];
       const headDeclarations = declaredGeneratedBlocks(JSON.parse(await show(evidence.headSha, 'package.json')));
       const proofs = [];
       for (const declaration of declarations) {

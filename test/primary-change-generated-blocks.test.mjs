@@ -4,7 +4,7 @@ import childProcess, { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { declaredGeneratedBlocks, proveGeneratedBlocks, runDerivedGenerator, withDerivedCheckout } from '../src/ama/derived-artifacts.mjs';
@@ -15,14 +15,14 @@ const declaration = { path: 'docs/*.md', start, end, cwd: '.', command: [process
 
 function fixture(t, { handEdit = false, outside = false, failure = false, noop = false, duplicate = false,
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
-  authorShift = 0, repairedInventory = false, generatorCwd = '.' } = {}) {
+  authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_AUTHOR_NAME: 'Fixture Builder', GIT_AUTHOR_EMAIL: 'builder@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture Builder', GIT_COMMITTER_EMAIL: 'builder@example.invalid' } }).trimEnd();
-  const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows}\n${end}\nTail\n`;
+  const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows ? rows + '\n' : ''}${end}\nTail\n`;
   const baseProse = authorShift < 0 ? 'Base prose\nBase second line\nBase third line' : 'Base prose';
   const authorProse = authorShift > 0 ? 'Base prose\nAuthor introduction\nAuthor details'
     : authorShift < 0 ? 'Base prose' : outside ? 'Author prose' : 'Base prose';
@@ -30,8 +30,8 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
     command: [process.execPath, generatorCwd === '.' ? 'render.mjs' : '../render.mjs'] };
   git('init', '-q');
   mkdirSync(join(root, 'docs'));
-  writeFileSync(join(root, 'package.json'), JSON.stringify({ generatedArtifacts: [entry] }));
-  writeFileSync(join(root, 'inventory.txt'), 'Base row\n');
+  writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: [entry] }));
+  writeFileSync(join(root, 'inventory.txt'), emptyBase ? '' : 'Base row\n');
   writeFileSync(join(root, 'render.mjs'), failure ? 'process.exit(1);' : noop ? '' : `
 import fs from 'node:fs';
 const path = ${JSON.stringify(generatorCwd === '.' ? 'docs/guide.md' : 'guide.md')};
@@ -39,17 +39,18 @@ const text = fs.readFileSync(path, 'utf8');
 fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${start.length}) + '\\n'
   + fs.readFileSync(${JSON.stringify(generatorCwd === '.' ? 'inventory.txt' : '../inventory.txt')}, 'utf8') + text.slice(text.indexOf(${JSON.stringify(end)})));
 `);
-  writeFileSync(join(root, 'docs/guide.md'), document('Base row', baseProse));
+  writeFileSync(join(root, 'docs/guide.md'), document(emptyBase ? '' : 'Base row', baseProse));
   git('add', 'package.json', 'inventory.txt', 'render.mjs', 'docs/guide.md');
   git('commit', '-qm', 'Fixture base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(root, 'docs/guide.md'), document('Author row\nAuthor second row', authorProse));
+  writeFileSync(join(root, 'docs/guide.md'), document('Author row\nAuthor second row', authorProse)
+    .replace(end, authorMarkerEdit ? '<!-- author:end -->' : end));
   git('add', 'docs/guide.md');
   git('commit', '-qm', 'Fixture author change');
   const builder = git('rev-parse', 'HEAD');
   // Keep the inventory input unchanged in this fixture so the documentation is
   // the sole primary change and its final compare entry can disappear entirely.
-  let finalText = document(handEdit ? 'Base row\nHand edited row' : 'Base row', outside ? baseProse : authorProse);
+  let finalText = document(handEdit ? 'Base row\nHand edited row' : emptyBase ? '' : 'Base row', outside ? baseProse : authorProse);
   if (repairedInventory) {
     writeFileSync(join(root, 'inventory.txt'), 'Base row\nDerived row\n');
     finalText = document('Base row\nDerived row');
@@ -76,8 +77,6 @@ fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${
   const evidence = { headSha, mergeBase: base, primaryHead: builder, hasHammerCommits: true,
     ciCost: { headSha, ok: true }, primaryFiles: files(builder), finalFiles: files(headSha) };
   const get = async path => {
-    if (path.endsWith(`/contents/package.json?ref=${base}`)) return { encoding: 'base64',
-      content: Buffer.from(git('show', `${base}:package.json`)).toString('base64') };
     if (path.endsWith('/pulls/1')) return { head: { sha: headSha }, base: { sha: base } };
     if (path.endsWith(`${base}...${headSha}`)) return { files: evidence.finalFiles,
       merge_base_commit: { sha: base }, total_commits: 2, commits: [
@@ -117,6 +116,35 @@ test('regenerated author rows are preserved, including a file absent from the fi
   assert.equal(readFileSync(join(f.root, 'docs/guide.md'), 'utf8').includes('Base row'), true);
 });
 
+test('empty merge-base interiors accept insertion units and protect adjacent marker/prose edits', async t => {
+  const f = fixture(t, { emptyBase: true });
+  const refusal = checkPrimaryChange(f.evidence, f.args.headSha);
+  assert.deepEqual(refusal.missingEvidence.regions.map(({ start, end }) => [start, end]), [[3, 3]]);
+  const result = await prove(f);
+  assert.equal(result.generatedBlockProofs.length, 1);
+  assert.equal(result.generatedBlockProofs[0].start, 3);
+  assert.equal(result.generatedBlockProofs[0].end, 3);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+  for (const options of [{ outside: true }, { authorMarkerEdit: true }]) {
+    const rejected = fixture(t, { emptyBase: true, ...options });
+    const proof = await prove(rejected);
+    assert.equal(proof.generatedBlockProofs.length, options.outside ? 1 : 0);
+    assert.equal(checkPrimaryChange(proof, rejected.args.headSha).reason, 'primary-change-reverted');
+  }
+});
+
+test('empty base block populated by repaired inputs reproduces at the insertion boundary', async t => {
+  const f = fixture(t, { emptyBase: true, repairedInventory: true });
+  // Exercise proof generation explicitly: an in-place populated final block
+  // already preserves the author insertion without needing optional proof.
+  const result = await proveGeneratedBlocks(f.args, f.evidence, {
+    path: 'docs/guide.md', missingEvidence: { evidence: 'reversal-authorization', regions: [{ start: 3, end: 3 }] },
+  }, { runGeneratorImpl: offlineGenerator });
+  assert.equal(result.length, 1);
+  assert.deepEqual([result[0].start, result[0].end], [3, 3]);
+  assert.equal(checkPrimaryChange({ ...f.evidence, generatedBlockProofs: result }, f.args.headSha).ok, true);
+});
+
 test('a repair changing generator inputs proves output at shifted final-head coordinates and declared cwd', async t => {
   const f = fixture(t, { repairedInventory: true, finalShift: true, generatorCwd: 'docs' });
   const result = await prove(f);
@@ -137,10 +165,11 @@ test('shared collection accepts reproduced blocks without a finding on the gener
 test('cached refused history retries reproduction without invalidation or fresh history reads', async t => {
   const f = fixture(t);
   const originalGet = f.args.get;
-  let historyReads = 0, proofAttempts = 0, available = false;
+  let historyReads = 0, manifestReads = 0, proofAttempts = 0, available = false;
   f.args.rootDir = f.root;
   f.args.get = Object.assign(async path => {
     if (path.includes('/compare/')) historyReads++;
+    if (path.includes('/contents/')) manifestReads++;
     return originalGet(path);
   }, { persistPrimaryChange: true, metadata: async () => ({ merge_base_commit: { sha: f.evidence.mergeBase } }) });
   const options = {
@@ -163,7 +192,21 @@ test('cached refused history retries reproduction without invalidation or fresh 
   assert.equal(checkPrimaryChange(recovered, f.args.headSha).ok, true);
   assert.equal(historyReads, reads, 'second collection must reuse the cached history');
   assert.equal(proofAttempts, 2);
+  assert.equal(manifestReads, 0, 'optional proof retries use local immutable manifests');
   assert.equal(readFileSync(join(store, names[0]), 'utf8'), cached, 'proof recovery must not rewrite the history cache');
+});
+
+test('repeated refusals without declarations never request a live manifest or run a generator', async t => {
+  const f = fixture(t, { noDeclarations: true });
+  let liveReads = 0, generatorRuns = 0;
+  f.args.get = () => { liveReads++; throw new Error('unexpected live read'); };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await prove(f, { runGeneratorImpl: () => { generatorRuns++; } });
+    assert.deepEqual(result.generatedBlockProofs, []);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  }
+  assert.equal(liveReads, 0);
+  assert.equal(generatorRuns, 0);
 });
 
 for (const authorShift of [-2, 2]) {
@@ -272,6 +315,8 @@ test('invalid manifest entries grant no derived authority', () => {
 test('Linux sandbox creates mount parents and exposes only the loader cache from /etc', async t => {
   const scratch = mkdtempSync(join(tmpdir(), 'derived-linux-layout-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const nested = join(scratch, 'run', 'user', '123', 'tmp', 'scratch');
+  mkdirSync(nested, { recursive: true });
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   t.after(() => Object.defineProperty(process, 'platform', platform));
@@ -285,13 +330,22 @@ test('Linux sandbox creates mount parents and exposes only the loader cache from
   });
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  await runDerivedGenerator({ scratch, cwd: '.', command: ['node', '-e', 'process.exit(0)'] });
+  await runDerivedGenerator({ scratch: nested, cwd: '.', command: ['node', '-e', 'process.exit(0)'] });
   assert.equal(invocation.executable, 'bwrap');
   const args = invocation.args;
   assert.ok(args.indexOf('--tmpfs') < args.indexOf('--bind'));
   assert.equal(args[args.indexOf('--tmpfs') + 1], '/tmp');
   assert.ok(args.some((arg, index) => arg === '--dir' && args[index + 1] === '/etc'));
-  assert.ok(args.some((arg, index) => arg === '--dir' && args[index + 1] !== '/etc'));
+  // Model an empty sandbox root: each --dir must have an existing parent.
+  // Use the real scratch path because macOS canonicalizes /var to /private/var.
+  const directories = new Set(['/', '/tmp']);
+  for (let index = 0; index < args.indexOf('--bind'); index++) {
+    if (args[index] !== '--dir') continue;
+    const path = args[index + 1];
+    assert.ok(directories.has(dirname(path)), `missing parent for ${path}`);
+    directories.add(path);
+  }
+  assert.ok(directories.has(dirname(args[args.indexOf('--bind') + 1])));
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--ro-bind' && args[index + 1].startsWith('/etc')) {
       assert.equal(args[index + 1], '/etc/ld.so.cache');

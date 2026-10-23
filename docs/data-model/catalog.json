@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "next-action-shadow",
+      "title": "Next Action Shadow Observations",
+      "path": "docs/data-model/next-action-shadow.md",
+      "store": "<watcher root>/data/next-action-shadow/disagreements.jsonl and .jsonl.1",
+      "schemaSurface": "src/pr-next-action-shadow.mjs",
+      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/next-action-disagreements.mjs"],
+      "owner": "NXA-02 closure observation and rollout owner"
+    },
+    {
       "id": "osg-remediator",
       "title": "OSG Remediator Route Observations",
       "path": "docs/data-model/osg-remediator.md",

@@ -105,6 +105,15 @@ function resolveShared({ snapshot, passSnapshot, evidence }) {
   if (evidence) {
     // Copy synchronously: legacy objects may change after the caller resumes.
     const { readLaunches, primaryChangeInput, ...fields } = evidence;
+    // Closure consumers enrich round information without necessarily observing
+    // a job. Keep complete pass evidence (including its owner) unless the
+    // consumer explicitly replaces that field or the whole observation.
+    const remediation = fields.observations?.remediation;
+    const inheritedRemediation = passSnapshot?.observations?.remediation;
+    if (remediation && !Object.hasOwn(remediation, 'state') && inheritedRemediation?.state === 'complete') {
+      fields.observations = { ...fields.observations,
+        remediation: { ...inheritedRemediation.value, ...remediation } };
+    }
     const progress = primaryChangeObservation(primaryChangeInput, fields.observations?.progress);
     const derived = deriveNextActionSnapshot({ base: passSnapshot, ...fields,
       ...(progress ? { observations: { ...fields.observations, progress } } : {}) });

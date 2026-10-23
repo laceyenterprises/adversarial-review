@@ -78,6 +78,15 @@ const TABLE = [
   ['draft is explicit author intent', { pr: { isDraft: true } }, ['operator-hold', 'operator', 'draft']],
   ['disabled merge policy holds', { policy: { autonomousMergeExecutionEnabled: false } },
     ['operator-hold', 'operator', 'merge-execution-disabled']],
+  ...['missing', 'unknown', 'error'].map(state => [`${state} policy cannot select new work`,
+    { states: { policy: state } }, ['wait-for-CI', 'watcher', 'policy-unknown']]),
+  ...[undefined, null, 'true'].map(value => [`non-boolean execution switch (${value}) cannot select new work`,
+    { policy: { autonomousMergeExecutionEnabled: value } }, ['wait-for-CI', 'watcher', 'policy-unknown']]),
+  ['unreadable policy preserves a live remediation owner',
+    { states: { policy: 'error' }, remediation: { job: { status: 'in_progress', headSha: HEAD } } },
+    ['remediate', 'remediator', 'live-owner']],
+  ['unreadable policy cannot dispatch CI repair',
+    { states: { policy: 'error' }, checks: { conclusion: 'FAILURE' } }, ['wait-for-CI', 'watcher', 'policy-unknown']],
   ['a running launch for this head is the live owner',
     { launches: { closer: { status: 'running', headSha: HEAD, launchRequestId: 'lrq-1' } } }, ['hammer', 'hammer', 'live-owner']],
   ['a parked launch retains ownership',
@@ -366,6 +375,7 @@ test('cross-product of all missing/unknown/error/complete source states keeps th
       if (decision.action === 'operator-hold') assert.ok(prKnown && options.pr?.labels?.length, label);
       if (['dispatch', 'daemon'].includes(decision.queue.intent)) {
         assert.ok(prKnown && (states.leases || 'complete') === 'complete', label);
+        assert.equal(states.policy || 'complete', 'complete', label);
       }
       if (decision.action === 'daemon-merge' && decision.actor === 'daemon') {
         for (const name of ['checks', 'reviews']) assert.equal(states[name] || 'complete', 'complete', label);
@@ -415,6 +425,7 @@ test('the collector snapshot from NXA-01 is a valid input, and missing sources s
     pr: source({ headRefOid: HEAD, state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
     checks: source({ rollup: [{ __typename: 'CheckRun', name: 'synthetic', status: 'COMPLETED', conclusion: 'SUCCESS' }] }),
     reviews: source({ review_status: 'posted', reviewer_head_sha: OLD }),
+    policy: source({ autonomousMergeExecutionEnabled: true }),
   } });
   pass.close();
   const decision = nextAction(snapshot);
@@ -427,7 +438,10 @@ test('the collector snapshot from NXA-01 is a valid input, and missing sources s
   assert.equal(enriched.passId, 'pass-c');
   assert.equal(enriched.generation, snapshot.generation);
   assert.ok(Object.isFrozen(enriched.observations.leases));
-  for (const name of SOURCES) assert.ok(name in enriched.observations || name in snapshot.observations || true);
+  for (const name of SOURCES) {
+    assert.ok(Object.hasOwn(enriched.observations, name), name);
+    if (name !== 'leases') assert.deepEqual(enriched.observations[name], snapshot.observations[name], name);
+  }
 });
 
 test('derivation copies consumer evidence: later mutation cannot change the decision', () => {

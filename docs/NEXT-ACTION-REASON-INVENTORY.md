@@ -64,6 +64,7 @@ the ownership reconciliation (`R04`). Unknown evidence is never treated as absen
 | R02 | explicit hold label (human or unknown provenance), draft, `autonomousMergeExecutionEnabled=false` | operator-hold / operator / `hold-label`, `draft`, `merge-execution-disabled` | none |
 | R03 | live owner: non-terminal or parked launch for this head; in-progress remediation job; live reviewer; in-flight lease within its window | hammer\|remediate\|review / owner / `live-owner` | owner's lease/heartbeat deadline |
 | R04 | leases unreadable; launch unreadable while this head's lease references it; unreadable retry descendants; in-flight lease past its window | hammer / closure-recovery / `ownership-unreadable`, `lease-expired` | recovery 5 min |
+| R04→R05 guard | execution policy missing, unreadable or without a boolean execution switch; established owners and ownership reconciliation above retain precedence | wait-for-CI / watcher / `policy-unknown` | refresh 60 s |
 | R05 | empty diff; primary-change reverted/unknown, unreadable or other; deterministic safety refusal | hammer / closure-recovery / `empty-diff-close`, `primary-change-unreadable`, `safety-refusal`; hammer / hammer / `primary-change-repair`; refresh / `structural-restriction-pending` | recovery or admission |
 | R06 | merge receipt for this head while the PR is observed open | daemon-merge\|hammer / closure-recovery / `merge-receipt-unconfirmed` | recovery 5 min |
 | R07 | deterministic automatic stop fingerprint; automation-applied hold label; retry cap exhausted on this head; lifetime cap; hammer's final no-merge on this head | hammer / closure-recovery / `automated-stop`, `retry-exhausted`, `lifetime-exhausted`, `hammer-final-no-merge` | recovery 5 min |
@@ -75,7 +76,7 @@ the ownership reconciliation (`R04`). Unknown evidence is never treated as absen
 | R13 | invalid attestation; closer rereview decision; no current-head verdict without semantic or attested carry; review ceiling | review / reviewer / `attestation-invalid`, `exact-head-review`, `stale-verdict`, `handed-to-review`; hammer / hammer / `review-ceiling` | admission |
 | R14 | findings (or unknown finding state) on the current/carried head | remediate / remediator / `review-findings` (round); hammer / hammer / `review-findings-final` | admission |
 | R15 | clean verdict (strict mode honoured), green, MERGEABLE, attestation not unknown | daemon-merge / daemon / `clean-exact-head`, `carried-clean-head` | admission |
-| R16 | anything else | wait-for-CI / watcher / `snapshot-refresh`, `checks-unknown`, `attestation-unknown`, `reviews-unknown`, `verdict-unknown` | refresh 60 s |
+| R16 | anything else (also used by the policy guard above) | wait-for-CI / watcher / `snapshot-refresh`, `checks-unknown`, `attestation-unknown`, `reviews-unknown`, `verdict-unknown`, `policy-unknown` | refresh 60 s |
 
 Drain and capacity apply **once, after** selection, and only when the decision
 queues a new unowned agent dispatch (`queue.intent: dispatch` with actor
@@ -193,7 +194,16 @@ sink. Records are appended to
 `observedAt`, `source`, `subjectKey`, `passId`, `generation`, `head`, `fields`,
 `legacy`, `next` (with `deadline`, `decisionKey`, `row`, `queue`),
 `evidenceRefs` and `caseKey`. `caseKey` identifies a distinct case: subject,
-head, legacy triple and next triple, independent of source and pass.
+head, legacy triple and next triple, independent of source and pass. Only
+disagreements carry `fields`, `legacy` and `caseKey`; overdue records instead
+carry `ageMs`. The canonical [data-model contract](data-model/next-action-shadow.md)
+defines both variants, retention and failure behavior.
+
+Round enrichment preserves complete remediation evidence from the original
+pass, including an in-progress job, unless a consumer supplies replacement job
+evidence. Confirmed terminal ledger launches on an observed open PR are
+no-merge outcomes regardless of process success or stale lease status; readable
+retry descendants and retry/lifetime caps still determine retry ownership.
 
 Overdue decisions are recorded once per decision per process. They reach the
 existing closure-wait alert path (SQLite debounce, refund on transport failure,

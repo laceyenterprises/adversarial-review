@@ -334,6 +334,10 @@ function selectRow(facts) {
     return reconcile('lease-expired', [leaseRef]);
   }
 
+  // Keep established owners and ownership reconciliation above. New work
+  // requires a readable execution switch; absence is not implicit enablement.
+  if (policy?.autonomousMergeExecutionEnabled !== true) return refresh('policy-unknown');
+
   // R05: existing structural restriction recovery (empty-diff closure and the
   // primary-change preservation gate) and deterministic safety refusals.
   if (progress?.diffEmpty === true) {

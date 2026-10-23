@@ -350,6 +350,15 @@ rotation at 16 MiB) with its generation, source, deadline and evidence
 references. The shadow prints nothing, never throws and never delays a legacy
 effect.
 
+Missing or unreadable execution policy (including an absent boolean execution
+switch) selects `policy-unknown` snapshot refresh before new work; established
+owners and ownership reconciliation retain precedence. Round enrichment keeps
+the original pass's observed remediation job when no replacement is supplied.
+Confirmed terminal launches with readable descendants remain no-merge evidence
+on open PRs even after process failure and before lease finalization; existing
+caps decide retry versus recovery. The persistent record variants, retention and
+failure behavior are registered in the [shadow data model](data-model/next-action-shadow.md).
+
 Overdue decisions are recorded once per decision. They are delivered through
 the existing closure-wait alert path (debounce, refund on transport failure,
 retry next pass) only when the rollout owner sets

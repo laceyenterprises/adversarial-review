@@ -27,7 +27,7 @@ function base({ subjectKey = 'subject-1', observations = {} } = {}) {
       reviews: { verdict: 'approved', headSha: OLD, blockingFindingState: 'known', blockingFindingCount: 0,
         nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
       remediation: { roundsLeft: true }, leases: { closer: null }, launches: { closer: null },
-      policy: { strictMode: true }, progress: {}, controls: {}, ...observations } });
+      policy: { strictMode: true, autonomousMergeExecutionEnabled: true }, progress: {}, controls: {}, ...observations } });
 }
 
 test.afterEach(() => setNextActionShadowSinkForTesting(null));
@@ -113,7 +113,7 @@ test('one decision per pass: later consumers reuse the enriched decision and dra
     legacy: () => { throw new Error('synthetic'); }, env: {} });
   const first = await shadowNextAction({ source: 'closure-orchestration', passSnapshot: pass, env,
     evidence: closureOwnerShadowEvidence({ currentHead: HEAD, lease: null, checks: 'FAILURE', roundsLeft: false,
-      reviewState: { verdict: 'approved', headSha: HEAD } }, { subjectKey: 'subject-9' }),
+      reviewState: { verdict: 'approved', headSha: HEAD } }, { subjectKey: 'subject-9', autonomousMergeExecutionEnabled: true }),
     legacy: { owner: 'hammer', reason: 'required-checks-red' }, now: () => Date.parse(ANCHOR) });
   assert.deepEqual([first.decision.action, first.decision.reason], ['hammer', 'ci-red-final']);
   assert.equal(first.disagreement, null);
@@ -124,13 +124,33 @@ test('one decision per pass: later consumers reuse the enriched decision and dra
   assert.equal(second.notes.length, 0, 'notes are compared once');
 });
 
+test('round enrichment preserves the original pass remediation owner with failed CI', async () => {
+  const pass = base({ observations: { remediation: {
+    job: { status: 'in_progress', headSha: HEAD }, completedRounds: 1, maxRounds: 3,
+  } } });
+  const run = followUpJob => shadowNextAction({ source: 'closure-orchestration', passSnapshot: pass, env,
+    evidence: closureOwnerShadowEvidence({ currentHead: HEAD, lease: null, checks: 'FAILURE', roundsLeft: true,
+      followUpJob }, { autonomousMergeExecutionEnabled: true }), sink: () => {}, now: () => Date.parse(ANCHOR) });
+  const retained = await run(undefined);
+  assert.deepEqual([retained.decision.action, retained.decision.actor, retained.decision.reason, retained.decision.queue.intent],
+    ['remediate', 'remediator', 'live-owner', 'owned']);
+  assert.equal(retained.decision.round, 2, 'inherited round counts are preserved too');
+  const shared = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, sink: () => {} });
+  assert.equal(shared.decision, retained.decision);
+  const replaced = await run({ status: 'completed', headSha: HEAD });
+  assert.deepEqual([replaced.decision.reason, replaced.decision.queue.intent], ['ci-red', 'dispatch'],
+    'explicit new job evidence replaces the inherited owner');
+  assert.equal(pass.observations.remediation.value.job.status, 'in_progress');
+});
+
 test('launch evidence through the ledger seam: terminal exit-zero no-merge retries; unreadable reconciles', async () => {
   const lease = { status: 'dispatched', lrqId: 'lrq-1', headSha: HEAD, updatedAt: ANCHOR };
   const input = { currentHead: HEAD, lease, checks: 'SUCCESS', roundsLeft: true, mergeable: 'MERGEABLE',
     reviewState: { verdict: 'approved', headSha: HEAD, blockingFindingState: 'known', blockingFindingCount: 0,
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } };
   const candidate = { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' };
-  const evidence = readLaunches => ({ ...closureOwnerShadowEvidence(input, { subjectKey: 'subject-2', candidate }), readLaunches });
+  const evidence = readLaunches => ({ ...closureOwnerShadowEvidence(input,
+    { subjectKey: 'subject-2', candidate, autonomousMergeExecutionEnabled: true }), readLaunches });
   const run = readLaunches => shadowNextAction({ source: 'synthetic', evidence: evidence(readLaunches), sink: () => {}, env,
     now: () => Date.parse(ANCHOR) }).then(outcome => outcome.decision);
   const terminal = await run(async () => ({ state: 'complete', provenance: { sourceRef: 'launch-requests' }, value: { closer: {
@@ -140,6 +160,28 @@ test('launch evidence through the ledger seam: terminal exit-zero no-merge retri
   assert.deepEqual([failed.actor, failed.reason], ['closure-recovery', 'ownership-unreadable']);
   const running = await run(async () => ({ state: 'complete', value: { closer: { row: { status: 'running' }, headSha: HEAD } } }));
   assert.deepEqual([running.actor, running.reason], ['hammer', 'live-owner']);
+});
+
+for (const exhausted of [false, true]) test(`failed terminal launch supersedes a dispatched lease (${exhausted ? 'exhausted' : 'retry available'})`, async () => {
+  const lease = { status: 'dispatched', lrqId: 'lrq-failed', headSha: HEAD, updatedAt: ANCHOR };
+  const launches = launchSource({ state: 'complete', value: {
+    launchRequestId: 'lrq-failed', launch: { status: 'failed' }, terminal: true, processSucceeded: false,
+    retryChain: [], retryChainUnreadable: false,
+  } }, lease, { retryExhausted: exhausted, lifetimeExhausted: false });
+  assert.deepEqual([launches.value.closer.outcome, launches.value.closer.retryable], ['no-merge', !exhausted]);
+  const snapshot = base({ observations: { leases: { closer: lease }, launches,
+    reviews: { verdict: 'approved', headSha: HEAD, blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } } });
+  const outcome = await shadowNextAction({ source: 'closure-orchestration', snapshot, env, sink: () => {},
+    now: () => Date.parse(ANCHOR) });
+  assert.deepEqual([outcome.decision.actor, outcome.decision.reason, outcome.decision.queue.intent], exhausted
+    ? ['closure-recovery', 'hammer-final-no-merge', 'reconcile'] : ['hammer', 'retry-no-merge', 'dispatch']);
+  const unreadable = deriveNextActionSnapshot({ base: snapshot, observations: {
+    launches: { ...launches, value: { closer: { ...launches.value.closer, retryChainUnreadable: true } } },
+  } });
+  assert.equal(nextAction(unreadable).reason, 'ownership-unreadable', 'terminal evidence cannot bypass unreadable descendants');
+  const merged = deriveNextActionSnapshot({ base: snapshot, observations: { pr: { state: 'MERGED', headSha: HEAD } } });
+  assert.equal(nextAction(merged).reason, 'merged', 'remote PR state remains authoritative');
 });
 
 test('the NXA-01 ledger observation maps to launch evidence: exit zero on an open PR is a no-merge', () => {

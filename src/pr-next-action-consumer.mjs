@@ -82,29 +82,27 @@ export const handoffWakeLegacy = headSha => fromLegacyClosureOwner({ owner: 'wai
 
 // ── Evidence builders (values the consumer already holds; no reads) ─────────
 export const NEXT_ACTION_SHADOW_LAUNCH_READ_MS = 5_000;
-const NO_MERGE_LEASE_OUTCOMES = new Set(['failed-without-merge', 'deferred', 'superseded',
-  'no-merge:concurrent-writer', 'succeeded']);
 const pick = (value, keys) => (value && typeof value === 'object'
   ? Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null);
 const REVIEW_KEYS = ['verdict', 'headSha', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
   'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation'];
 const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'terminalOutcome', 'deadlineAt'];
 
-// NXA-01's ledger observation as the `launches` source. Process success (exit
-// zero) on an open PR is a no-merge; the PR observation owns merge truth.
+// NXA-01's ledger observation as the `launches` source. Any confirmed terminal
+// launch on an open PR is a no-merge; the PR observation owns merge truth and
+// selects done before inspecting launches. A stale lease cannot erase failure.
 export function launchSource(observation, lease, cap) {
   if (observation?.state !== 'complete' || !observation.value) {
     return { state: observation?.state === 'error' ? 'error' : 'unknown', value: null,
       provenance: { sourceRef: 'launch-requests' } };
   }
   const value = observation.value;
-  const terminalNoMerge = (lease?.status === 'terminal' && NO_MERGE_LEASE_OUTCOMES.has(lease.terminalOutcome))
-    || value.processSucceeded === true;
+  const terminalNoMerge = value.terminal === true;
   return { state: 'complete', provenance: { sourceRef: 'launch-requests' }, value: { closer: {
     row: value.launch, retryChain: value.retryChain ?? undefined, retryChainUnreadable: value.retryChainUnreadable === true,
     launchRequestId: value.liveRetryLaunchRequestId || value.launchRequestId || null, headSha: lease?.headSha ?? null,
-    outcome: value.terminal === true && terminalNoMerge ? 'no-merge' : null,
-    retryable: value.terminal === true && terminalNoMerge ? !(cap.retryExhausted || cap.lifetimeExhausted) : null,
+    outcome: terminalNoMerge ? 'no-merge' : null,
+    retryable: terminalNoMerge ? !(cap.retryExhausted || cap.lifetimeExhausted) : null,
   } } };
 }
 

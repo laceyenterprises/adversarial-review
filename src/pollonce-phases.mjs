@@ -221,7 +221,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { nextReviewerPassAttemptNumber } from './reviewer-pass-tokens.mjs';
-import { computeReviewerLeaseExpiryAt } from './reviewer-lease.mjs';
+import { computeReviewerLeaseExpiryAt, extendReviewerLeaseForPlan } from './reviewer-lease.mjs';
 import {
   persistReviewerPgid,
   settleDurableReviewerRunState,
@@ -3947,6 +3947,11 @@ export async function processReviewSubject(entry, ctx) {
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerRuntimeStarted: () => dispatchCandidate.markAdmissionStarted?.(),
+                onReviewerTimeoutPlan: ({ timeoutMs, sessionUuid }) => {
+                  if (sessionUuid !== reviewerSessionUuid || !extendReviewerLeaseForPlan(db, {
+                    repo: repoPath, prNumber, sessionUuid, timeoutMs,
+                  })) throw new Error('Gemini chunk plan no longer owns the review claim');
+                },
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   dispatchCandidate.markAdmissionStarted?.();
                   dispatchCandidate.markReviewerSpawned?.();

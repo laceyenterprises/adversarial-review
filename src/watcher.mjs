@@ -1031,10 +1031,15 @@ const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
     }
   },
   activeReviewerSpawns,
-  timeoutMs: () => Math.max(
-    resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000,
-    resolveGeminiReviewerProcessTimeoutMs(),
-  ),
+  timeoutMs: record => {
+    const row = stmtGetReviewRow.get(record?.repo, record?.pr ?? record?.prNumber);
+    if (row?.review_status === 'reviewing' && row.reviewer_timeout_ms > 0
+      && (!record?.reviewerSessionUuid || row.reviewer_session_uuid === record.reviewerSessionUuid)) {
+      return row.reviewer_timeout_ms;
+    }
+    return record?.reviewerModel === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs()
+      : resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000;
+  },
   isProcessAlive,
   ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }),
   logger: console,

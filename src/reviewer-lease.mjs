@@ -39,6 +39,25 @@ function computeReviewerLeaseExpiryAt(startedAt, timeoutMs) {
   return new Date(startedAtMs + Math.floor(boundedTimeoutMs)).toISOString();
 }
 
+// Extend only the session that built the plan. A delayed child must never
+// change a replacement claim or a terminal review row.
+function extendReviewerLeaseForPlan(db, { repo, prNumber, sessionUuid, timeoutMs }) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('Invalid reviewer timeout');
+  const row = db.prepare(`SELECT reviewer_started_at, reviewer_timeout_ms FROM reviewed_prs
+    WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ?
+      AND review_status = 'reviewing' AND COALESCE(pr_state, 'open') = 'open'`).get(repo, prNumber, sessionUuid);
+  if (!row) return false;
+  if (row.reviewer_timeout_ms >= timeoutMs) return true;
+  const expiry = computeReviewerLeaseExpiryAt(row.reviewer_started_at, timeoutMs);
+  if (!expiry) throw new Error('Missing reviewer start time for chunk plan');
+  return db.prepare(`UPDATE reviewed_prs SET reviewer_timeout_ms = ?, reviewer_lease_expires_at = ?
+    WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ?
+      AND review_status = 'reviewing' AND COALESCE(pr_state, 'open') = 'open'
+      AND reviewer_started_at = ? AND reviewer_timeout_ms < ?`).run(
+    timeoutMs, expiry, repo, prNumber, sessionUuid, row.reviewer_started_at, timeoutMs,
+  ).changes === 1;
+}
+
 function reviewerLeaseExpiryForRow(row, {
   reviewerTimeoutMs = null,
 } = {}) {
@@ -73,6 +92,7 @@ export {
   DEFAULT_REVIEWER_LEASE_RECOVERY_ENABLED,
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   computeReviewerLeaseExpiryAt,
+  extendReviewerLeaseForPlan,
   isReviewerLeaseExpired,
   resolveReviewerLeaseRecoveryEnabled,
   reviewerLeaseExpiryForRow,

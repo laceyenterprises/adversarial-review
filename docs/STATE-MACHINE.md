@@ -328,6 +328,13 @@ new PR
   The existing max-wait environment overrides
   can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
+- GEMTIMEOUT-01: Gemini claims persist a single-call process timeout plus
+  preparation/posting slack. A validated chunk plan extends only the matching
+  active, open session's timeout and lease, before its parent timer is extended.
+  Deadlines measure total time from process start, are scaled once through the
+  per-call budgets, and cannot exceed the unscaled chunk cap or timer limit.
+  Orphan reconciliation and detached reservation expiry read the persisted plan
+  budget; no lifecycle state or recovery cap changes.
 - A reviewer size preflight refusal exits with reserved CLI code 76 and settles
   as terminal `reviewer-prompt-too-large` on that head, without lease recovery.
   Only the typed preflight error selects this exit code and queues the

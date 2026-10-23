@@ -2136,3 +2136,24 @@ test('SEATIDLE-03: saturation hooks obey a candidate-specific credential cap aft
   assert.equal(result.deferred, 1);
   assert.equal(result.maxObservedConcurrency, 0);
 });
+
+
+test('GEMTIMEOUT-01: detached reservations follow the current plan budget per review', async () => {
+  let nowMs = 0;
+  const budgets = new Map([[1, 25 * 60_000], [2, 25 * 60_000]]);
+  const pending = [];
+  const tracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(),
+    now: () => nowMs, graceMs: 0, timeoutMs: record => budgets.get(record.prNumber),
+    logger: { warn() {} },
+  });
+  for (const prNumber of [1, 2]) {
+    const promise = new Promise(resolve => pending.push(resolve));
+    tracker.track({ candidate: { repoPath: 'example/project', prNumber, reviewerModel: 'gemini' }, promise });
+  }
+  budgets.set(2, 65 * 60_000);
+  nowMs = 26 * 60_000;
+  assert.deepEqual(tracker.liveEntries().map(row => row.pr), [2]);
+  nowMs = 66 * 60_000;
+  assert.deepEqual(tracker.liveEntries(), []);
+  pending.forEach(resolve => resolve());
+});

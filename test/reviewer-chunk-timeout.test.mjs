@@ -171,7 +171,7 @@ test('CHUNKTIME-01: prompt bytes include context and repeated context increases 
 });
 
 
-test('CHUNKTIME-01: the outer Gemini runtime defaults to the cap and honors an explicit bound', async () => {
+test('CHUNKTIME-01: the outer Gemini runtime defaults to one call and honors an explicit bound', async () => {
   const { createCliDirectReviewerRuntimeAdapter } = await import('../src/adapters/reviewer-runtime/cli-direct/index.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'chunk-runtime-'));
   const seen = [];
@@ -190,4 +190,68 @@ test('CHUNKTIME-01: the outer Gemini runtime defaults to the cap and honors an e
     assert.equal(seen[0], timeouts.resolveGeminiReviewerProcessTimeoutMs());
     assert.equal(seen[1], 100);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('GEMTIMEOUT-01: parent timer and persisted lease receive the actual plan without rescaling', async () => {
+  const { createCliDirectReviewerRuntimeAdapter } = await import('../src/adapters/reviewer-runtime/cli-direct/index.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'plan-runtime-'));
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
+  const updates = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir,
+      preflightImpl: async () => ({ ok: true }),
+      spawnCapturedImpl: async (_command, _args, options) => {
+        assert.equal(options.timeout, timeouts.resolveGeminiReviewerProcessTimeoutMs());
+        assert.equal(options.onMessage({ type: 'unrelated' }), undefined);
+        assert.equal(options.onMessage({ type: 'gemini-chunk-plan', plan }),
+          timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan }));
+        assert.equal(updates.length, 1, 'lease is persisted before timer extension');
+        assert.equal(options.onMessage({ type: 'gemini-chunk-plan', plan }), undefined);
+        assert.throws(() => options.onMessage({ type: 'gemini-chunk-plan', plan: { chunkCount: 0 } }), /Invalid/);
+        return { stdout: '', stderr: '' };
+      },
+    });
+    await adapter.spawnReviewer({ model: 'gemini', sessionUuid: 'synthetic-plan', prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'example/project', prNumber: 1 },
+      onReviewerTimeoutPlan: update => updates.push(update),
+    });
+    assert.deepEqual(updates, [{ sessionUuid: 'synthetic-plan', timeoutMs: plan.timeoutMs + timeouts.REVIEWER_PROCESS_SLACK_MS }]);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('GEMTIMEOUT-01: plan extension updates orphan expiry and fences replacement or terminal rows', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const { extendReviewerLeaseForPlan, computeReviewerLeaseExpiryAt } = await import('../src/reviewer-lease.mjs');
+  const { shouldReconcileStaleReviewerSession } = await import('../src/reviewer-orphan-reconcile.mjs');
+  const db = new Database(':memory:');
+  const startedAt = '2026-01-01T00:00:00.000Z';
+  const initialMs = timeouts.resolveGeminiReviewerProcessTimeoutMs({});
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
+  const timeoutMs = timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan });
+  try {
+    db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, reviewer_session_uuid TEXT,
+      review_status TEXT, pr_state TEXT, reviewer_started_at TEXT, reviewer_timeout_ms INTEGER,
+      reviewer_lease_expires_at TEXT)`);
+    db.prepare('INSERT INTO reviewed_prs VALUES (?, 1, ?, ?, ?, ?, ?, ?)').run(
+      'example/project', 'synthetic-session', 'reviewing', 'open', startedAt, initialMs,
+      computeReviewerLeaseExpiryAt(startedAt, initialMs));
+    const update = { repo: 'example/project', prNumber: 1, sessionUuid: 'synthetic-session', timeoutMs };
+    assert.equal(extendReviewerLeaseForPlan(db, { ...update, sessionUuid: 'stale-session' }), false);
+    assert.equal(extendReviewerLeaseForPlan(db, update), true);
+    const row = db.prepare('SELECT * FROM reviewed_prs').get();
+    assert.equal(row.reviewer_timeout_ms, timeoutMs);
+    assert.equal(row.reviewer_lease_expires_at, computeReviewerLeaseExpiryAt(startedAt, timeoutMs));
+    const options = { leaseRecoveryEnabled: true, probeGroupAliveImpl: () => true };
+    row.reviewer_pgid = 12345;
+    assert.equal(shouldReconcileStaleReviewerSession(row, new Date(Date.parse(startedAt) + initialMs), options), false);
+    assert.equal(shouldReconcileStaleReviewerSession(row, new Date(Date.parse(startedAt) + timeoutMs), options), true);
+    assert.equal(extendReviewerLeaseForPlan(db, { ...update, timeoutMs: initialMs }), true);
+    assert.equal(db.prepare('SELECT reviewer_timeout_ms FROM reviewed_prs').get().reviewer_timeout_ms, timeoutMs);
+    for (const change of ["review_status = 'posted'", "review_status = 'reviewing', pr_state = 'merged'", "pr_state = 'closed'"]) {
+      db.exec(`UPDATE reviewed_prs SET ${change}`);
+      assert.equal(extendReviewerLeaseForPlan(db, update), false);
+    }
+  } finally { db.close(); }
 });

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
+import { timerDelayMs } from './load-aware-timeout.mjs';
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
 import { PROGRESS_TIMEOUT_REASON_PREFIX, FIRST_OUTPUT_TIMEOUT_REASON_PREFIX } from './reviewer-timeout-reason.mjs';
 
@@ -17,6 +18,7 @@ const SUPPORTED_OPTIONS = new Set([
   'killGraceMs',
   'maxBuffer',
   'onSpawn',
+  'onMessage',
   'onStdoutData',
   'progressTimeout',
   'progressOnStdoutOnly',
@@ -140,6 +142,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     killGraceMs = DEFAULT_KILL_GRACE_MS,
     maxBuffer = 10 * 1024 * 1024,
     onSpawn,
+    onMessage,
     onStdoutData,
     signal,
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
@@ -169,9 +172,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         input === null ? 'ignore' : 'pipe',
         stdoutFd === null ? 'pipe' : stdoutFd,
         stderrFd === null ? 'pipe' : stderrFd,
+        ...(onMessage ? ['ipc'] : []),
       ],
     });
 
+    const startedAt = Date.now();
+    let wallTimeoutMs = timeout;
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;
@@ -321,11 +327,27 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
     }
 
-    if (timeout > 0) {
+    const armWallTimer = () => {
+      if (wallTimer) clearTimeout(wallTimer);
       wallTimer = setTimeout(() => {
-        requestKill(`timed out after ${timeout}ms`);
-      }, timeout);
-    }
+        requestKill(`timed out after ${wallTimeoutMs}ms`);
+      }, timerDelayMs(startedAt + wallTimeoutMs - Date.now()));
+    };
+    if (onMessage) child.on('message', message => {
+      if (settled || timeoutReason) return;
+      try {
+        // The owner validates the plan and persists its lease before extending
+        // the timer. Budgets are total elapsed time, never relative renewals.
+        const nextMs = onMessage(message);
+        if (Number.isFinite(nextMs) && nextMs > wallTimeoutMs && wallTimeoutMs > 0) {
+          wallTimeoutMs = timerDelayMs(nextMs);
+          armWallTimer();
+        }
+      } catch (err) {
+        requestKill(`onMessage callback failed: ${err?.message || err}`);
+      }
+    });
+    if (timeout > 0) armWallTimer();
     armProgressTimer();
     armFirstOutputTimer();
     // Only poll side-channel sizes when there's a reason to: either we need

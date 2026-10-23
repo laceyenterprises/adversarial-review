@@ -36,6 +36,7 @@ test('WATCHERTIMER-01: process deadline clamps initial and extended chunk budget
   const clock = fakeClock();
   const scheduled = [];
   const deadline = createGeminiReviewerProcessDeadline({
+    env: { ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(MAX_TIMER_DELAY_MS) },
     initialMs: MAX_TIMER_DELAY_MS + 300_000,
     ...clock,
     setTimeoutImpl(fn, ms) {
@@ -48,8 +49,8 @@ test('WATCHERTIMER-01: process deadline clamps initial and extended chunk budget
   assert.equal(armed.deadlineAt, clock.now() + MAX_TIMER_DELAY_MS);
   clock.advance(1000);
   deadline.extendForPlan({ timeoutMs: MAX_TIMER_DELAY_MS });
-  assert.equal(armed.deadlineAt, clock.now() + MAX_TIMER_DELAY_MS);
-  assert.deepEqual(scheduled, [MAX_TIMER_DELAY_MS, MAX_TIMER_DELAY_MS]);
+  assert.equal(armed.deadlineAt, clock.now() - 1000 + MAX_TIMER_DELAY_MS);
+  assert.deepEqual(scheduled, [MAX_TIMER_DELAY_MS]);
   armed.dispose();
 });
 
@@ -132,4 +133,21 @@ test('CHUNKTIME-01 follow-up: the reviewer wiring arms once and extends to the c
   wiring.dispose();
   clock.advance(10 * 60 * 60_000);
   assert.equal(wiring.signal.aborted, false);
+});
+
+
+test('GEMTIMEOUT-01: plan extension reports the same bounded budget to the parent', () => {
+  const clock = fakeClock();
+  const plans = [];
+  const wiring = createGeminiReviewerProcessDeadline({ ...clock, log: quietLog, reportPlan: plan => plans.push(plan) });
+  const armed = wiring.arm();
+  const startedAt = clock.now();
+  clock.advance(60_000);
+  const plan = { timeoutMs: 4 * 60 * 60_000 };
+  wiring.extendForPlan(plan);
+  assert.deepEqual(plans, [plan]);
+  assert.equal(armed.deadlineAt, startedAt + plan.timeoutMs + 300_000);
+  wiring.extendForPlan({ timeoutMs: 100 * 60 * 60_000 });
+  assert.equal(armed.deadlineAt, startedAt + 6 * 60 * 60_000);
+  wiring.dispose();
 });

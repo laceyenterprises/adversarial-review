@@ -908,7 +908,7 @@ function createDetachedReviewerDispatchTracker({
 } = {}) {
   const detachedReviewerDispatches = new Map();
   // A function defers config resolution until startup validation has run.
-  const expiryMs = () => Math.max(0, Number(typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs) || resolveReviewerTimeoutMs())
+  const expiryMs = record => Math.max(0, Number(typeof timeoutMs === 'function' ? timeoutMs(record) : timeoutMs) || resolveReviewerTimeoutMs())
     + Math.max(0, Number(graceMs) || 0);
 
   function knownPid(record) {
@@ -922,7 +922,7 @@ function createDetachedReviewerDispatchTracker({
     const live = [];
     for (const [token, record] of detachedReviewerDispatches.entries()) {
       const pid = knownPid(record);
-      const expired = nowMs - record.startedAt > expiryMs();
+      const expired = nowMs - record.startedAt > expiryMs(record);
       const processGone = pid !== null && typeof isProcessAlive === 'function' && !isProcessAlive(pid);
       if (expired || processGone) {
         detachedReviewerDispatches.delete(token);
@@ -975,7 +975,7 @@ function createDetachedReviewerDispatchTracker({
       const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
       if (!key || skipPrKeys.has(key)) continue;
       const spawnedAtMs = Date.parse(record?.spawnedAt);
-      if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs()) continue;
+      if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs(record)) continue;
       let live = true;
       try {
         live = typeof isPersistedSpawnLive === 'function' ? isPersistedSpawnLive(record) !== false : true;
@@ -1018,7 +1018,7 @@ function createDetachedReviewerDispatchTracker({
       return [...records.values()].filter((record) => {
         if (!reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr })) return false;
         const spawnedAtMs = Date.parse(record?.spawnedAt);
-        if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs()) return false;
+        if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs(record)) return false;
         try {
           return typeof isPersistedSpawnLive === 'function' && isPersistedSpawnLive(record) !== false;
         } catch {

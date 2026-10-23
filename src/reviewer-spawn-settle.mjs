@@ -50,7 +50,7 @@ import {
   CODEX_BUILDER_REVIEW_REFUSAL, reviewerRefusesBuilder, isCrossModelReviewWaived, normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
 import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
-import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
+import { loadRoleConfig } from './role-config.mjs';
 import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   getAgyReviewerIdentityPool,
@@ -816,7 +816,7 @@ async function spawnReviewerOnceWithAccount({
   maxRemediationRounds,
   advisoryFindings = [],
   reviewerSessionUuid,
-  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
+  reviewerTimeoutMs = null,
   workspacePath = null,
   rootDir = ROOT,
   crossModelReviewWaived = false,
@@ -827,6 +827,7 @@ async function spawnReviewerOnceWithAccount({
   reviewerAccountReceipt = null,
   reviewerArm = null,
   onReviewerPgid = () => {},
+  onReviewerTimeoutPlan = () => {},
   onReviewerRuntimeStarted = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
@@ -1010,12 +1011,9 @@ async function spawnReviewerOnceWithAccount({
     // isolation, failure classification. The `forbiddenFallbacks` arg is
     // additive opt-in beyond the canonical 8-env set the adapter always
     // strips when `oauthStripEnforced: true`.
-    const effectiveReviewerTimeoutMs = (
-      String(reviewerModel || '').toLowerCase() === 'gemini' &&
-      resolveGeminiRuntime({ env: process.env }) === 'antigravity'
-    )
-      ? Math.max(reviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs())
-      : reviewerTimeoutMs;
+    const effectiveReviewerTimeoutMs = normalizeReviewerModel(reviewerModel) === 'gemini'
+      ? reviewerTimeoutMs ?? resolveGeminiReviewerProcessTimeoutMs()
+      : reviewerTimeoutMs ?? resolveReviewerTimeoutMs();
 
     // CCX-08: a Gemini review leases one agy reviewer identity for its whole
     // run; with one identity (the HQ owner) this calls straight through.
@@ -1068,6 +1066,7 @@ async function spawnReviewerOnceWithAccount({
         sessionUuid: reviewerSessionUuid,
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
+        onReviewerTimeoutPlan,
       });
       if (reviewerAccountReceipt && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         try { recordReviewerAccountQuotaFailure(rootDir, reviewerAccountReceipt, { env: quotaCheckEnv,

@@ -157,6 +157,17 @@ test('proofs are bound to the exact head and merge base', async t => {
   }
 });
 
+test('exact block comparison includes marker line endings', async t => {
+  const f = fixture(t);
+  const result = await prove(f, { runGeneratorImpl: async args => {
+    await offlineGenerator(args);
+    const path = join(args.scratch, args.cwd, 'docs/guide.md');
+    writeFileSync(path, readFileSync(path, 'utf8').replace(`${start}\n`, `${start}\r\n`));
+  } });
+  assert.deepEqual(result.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+});
+
 test('shared collection consumes the proof and continues to other primary files', async t => {
   const f = fixture(t);
   // A second author file still reverted must keep the PR refused.

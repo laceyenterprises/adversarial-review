@@ -273,9 +273,10 @@ export function generatedBlock(bytes, declaration) {
   if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) throw new Error('ambiguous generated block');
   const startOffset = lines.slice(0, starts[0] + 1).join('\n').length + 1;
   const endOffset = lines.slice(0, ends[0]).join('\n').length + 1;
+  const first = lines.slice(0, starts[0]).join('\n').length + (starts[0] ? 1 : 0);
+  const last = endOffset + lines[ends[0]].length + (ends[0] < lines.length - 1 ? 1 : 0);
   return { start: starts[0] + 2, end: ends[0] + 1,
-    startOffset, endOffset, content: bytes.subarray(Buffer.byteLength(bytes.toString('utf8').slice(0, startOffset)),
-      Buffer.byteLength(bytes.toString('utf8').slice(0, endOffset))) };
+    startOffset, endOffset, bytes: Buffer.from(bytes.toString('utf8').slice(first, last)) };
 }
 
 async function regularFile(root, path) {
@@ -413,7 +414,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
         await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
         const after = await regularFile(tree, refusal.path);
         const regenerated = generatedBlock(after, declaration);
-        if (block.content.equals(regenerated.content)) proofs.push({ path: refusal.path,
+        if (block.bytes.equals(regenerated.bytes)) proofs.push({ path: refusal.path,
           start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
         // Each declaration starts from the same final-head artifact.
         await writeFile(join(tree, refusal.path), before);

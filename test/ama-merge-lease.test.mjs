@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -9,7 +10,8 @@ import { join } from 'node:path';
 import {
   acquireMergeLease,
   acquireDaemonMergeLease,
-  DAEMON_MERGE_RESERVATION_SECONDS,
+  daemonMergeReservationSeconds,
+  withDaemonMergeReservation,
   deriveLeaseKey,
   inspectMergeLease,
   mergeLeaseAttemptsFilePath,
@@ -27,6 +29,8 @@ import {
   renewMergeLease,
   upsertMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
+import { MAX_TIMER_DELAY_MS, timerDelayMs } from '../src/load-aware-timeout.mjs';
+import { createWatcherWakeSource } from '../src/watcher-wake.mjs';
 
 function freshRoot() {
   return mkdtempSync(join(tmpdir(), 'ama-merge-lease-'));
@@ -49,6 +53,126 @@ function acquire(rootDir, overrides = {}) {
     ...overrides,
   });
 }
+
+test('LEASEFAIR-04 a 300s poll reservation survives closer cycling until the next tick', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  const held = acquire(rootDir);
+  const request = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'daemon-head',
+    holderPid: process.pid, holderHost: hostname(), now: at(0), pollIntervalMs: 300_000 };
+  const reserved = acquireDaemonMergeLease(request);
+  assert.equal(reserved.waiter.deadlineSeconds, 600);
+  releaseMergeLease({ rootDir, ...held.lease, now: at(200) });
+  for (const seconds of [200, 299]) {
+    const closer = acquire(rootDir, { holderPr: 103, registerWaiter: true, waiterId: 'closer',
+      now: at(seconds), pidAliveFn: () => true });
+    assert.equal(closer.acquired, false);
+    assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY)[0].waiterId, reserved.waiter.waiterId);
+  }
+  assert.equal(acquireDaemonMergeLease({ ...request, now: at(300) }).acquired, true);
+});
+
+test('LEASEFAIR-04 sizing applies the maximum configured load multiplier once and caps timers', () => {
+  const load = { loadAvg1m: 100, cpuCount: 1, cpuBusyPercent: 100, enabled: true, maxMultiplier: 20 };
+  assert.equal(daemonMergeReservationSeconds(300_000, load), 600 * 20);
+  assert.equal(daemonMergeReservationSeconds(900_000, load), 1800 * 20);
+  const seconds = daemonMergeReservationSeconds(MAX_TIMER_DELAY_MS, load);
+  assert.equal(seconds, Math.floor(MAX_TIMER_DELAY_MS / 1000));
+  assert.ok(seconds * 1000 <= MAX_TIMER_DELAY_MS);
+  assert.ok(timerDelayMs(seconds * 1000) <= MAX_TIMER_DELAY_MS);
+});
+
+for (const release of [releaseMergeLease, releaseMergeLeaseForRetryableAbort]) {
+  test(`LEASEFAIR-04 ${release.name} wakes exactly the first daemon at its reserved head`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquire(rootDir);
+    const request = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'reserved-head',
+      now: held.lease.acquiredAt, holderPid: process.pid, holderHost: hostname() };
+    acquireDaemonMergeLease(request);
+    acquireDaemonMergeLease({ ...request, holderPr: 103, holderHead: 'second-head' });
+    const wakes = [];
+    const args = { rootDir, ...held.lease, now: request.now, requestWatcherWakeImpl: wake => wakes.push(wake) };
+    assert.equal(release({ ...args, leaseId: 'wrong-fence' }).released, false);
+    assert.equal(release(args).released, true);
+    assert.equal(release(args).released, false);
+    assert.deepEqual(wakes, [{ rootDir, repo: IDENTITY.repo, prNumber: 102,
+      headSha: 'reserved-head', reason: 'daemon-merge-lease-released' }]);
+  });
+}
+
+test('LEASEFAIR-04 release wake delivery obeys the existing watcher per-head cap', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const source = createWatcherWakeSource({ rootDir, consumeExistingOnStart: true,
+    loadConfigImpl: () => ({ getHandoffConfig: () => ({ maxPerPrHead: 1 }) }), logger: { warn() {} } });
+  t.after(() => source.close());
+  const request = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'reserved-head', holderPid: process.pid, holderHost: hostname() };
+  const held = acquireMergeLease({ ...request, holderPr: 101 });
+  acquireDaemonMergeLease(request);
+  releaseMergeLease({ rootDir, ...held.lease });
+  const wake = source.consumeCurrent();
+  assert.equal(wake.pr_number, 102);
+  assert.equal(wake.head_sha, 'reserved-head');
+  const daemon = acquireDaemonMergeLease(request);
+  acquireDaemonMergeLease(request);
+  releaseMergeLease({ rootDir, ...daemon.lease });
+  assert.equal(source.consumeCurrent(), null, 'second wake for the same head is capped');
+});
+
+test('LEASEFAIR-04 expired and ordinary waiters do not wake; a wake failure cannot undo release', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const holder = acquire(rootDir);
+  const request = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'abandoned',
+    holderPid: process.pid, holderHost: hostname(), now: holder.lease.acquiredAt };
+  const reserved = acquireDaemonMergeLease(request);
+  const afterExpiry = new Date(Date.parse(request.now) + reserved.waiter.deadlineSeconds * 1000).toISOString();
+  let wakes = 0;
+  const wake = () => wakes++;
+  assert.equal(releaseMergeLease({ rootDir, ...holder.lease, now: afterExpiry,
+    requestWatcherWakeImpl: wake }).released, true);
+  assert.equal(wakes, 0);
+  const next = acquire(rootDir, { now: afterExpiry });
+  acquire(rootDir, { holderPr: 103, registerWaiter: true, now: afterExpiry,
+    holderPid: process.pid, holderHost: hostname() });
+  assert.equal(releaseMergeLease({ rootDir, ...next.lease, now: afterExpiry,
+    requestWatcherWakeImpl: wake }).released, true);
+  assert.equal(wakes, 0);
+  const daemon = acquireDaemonMergeLease({ ...request, now: afterExpiry });
+  acquireDaemonMergeLease({ ...request, holderPr: 104, now: afterExpiry });
+  assert.equal(releaseMergeLease({ rootDir, ...daemon.lease, now: afterExpiry,
+    requestWatcherWakeImpl: () => { throw new Error('synthetic wake failure'); } }).released, true);
+  assert.equal(existsSync(daemon.leasePath), false);
+  assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY)[0].pr, 104);
+});
+
+test('LEASEFAIR-04 only contention retains a reservation; head moves and ineligibility drop it immediately', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquire(rootDir);
+  const identity = { rootDir, ...IDENTITY, pr: 102, head: 'old' };
+  const reserve = head => acquireDaemonMergeLease({ rootDir, ...IDENTITY,
+    holderPr: 102, holderHead: head, holderPid: process.pid, holderHost: hostname(), now: '2026-06-20T18:00:00Z' });
+  reserve('old');
+  await withDaemonMergeReservation({ ...identity, head: 'new' }, async () => {
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), [], 'old head gone before gates run');
+    reserve('new');
+    return { reason: 'lease-contended' };
+  });
+  assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY)[0].head, 'new');
+  for (const reason of ['not-eligible', 'head-moved', 'already-merged', 'merged']) {
+    reserve('new');
+    await withDaemonMergeReservation({ ...identity, head: 'new' }, async () => ({ reason }));
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), [], reason);
+  }
+  reserve('new');
+  await assert.rejects(withDaemonMergeReservation({ ...identity, head: 'new' }, async () => {
+    throw new Error('synthetic failure');
+  }), /synthetic failure/);
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+});
 
 test('served daemon reservation is removed before another mutation lock can intervene', t => {
   const rootDir = freshRoot();
@@ -163,7 +287,7 @@ test('LEASEFAIR-01 daemon reservation wins the next acquisition over repeated cl
   assert.equal(deferred.acquired, false);
   assert.equal(deferred.queuePosition, 1);
   assert.equal(deferred.existingLease.leaseId, closer.lease.leaseId, 'never preempt the current holder');
-  assert.equal(releaseMergeLease({ rootDir, ...closer.lease }).released, true);
+  assert.equal(releaseMergeLease({ rootDir, ...closer.lease, now: '2026-06-20T18:00:02Z' }).released, true);
   for (let i = 0; i < 8; i++) {
     assert.equal(acquire(rootDir, { holderPr: 200 + i, waiterId: `closer-${i}`, registerWaiter: true,
       holderPid: process.pid, holderHost: hostname(), now: '2026-06-20T18:00:02Z' }).acquired, false);
@@ -183,7 +307,7 @@ test('LEASEFAIR-01 daemon FIFO survives watcher restart and renews without losin
   acquireDaemonMergeLease({ ...request, holderPr: 103, now: '2026-06-20T18:00:01Z' });
   const first = readMergeLeaseWaiters(rootDir, IDENTITY)[0];
   acquireDaemonMergeLease({ ...request, holderPid: 6002, now: '2026-06-20T18:01:30Z' });
-  assert.equal(releaseMergeLease({ rootDir, ...closer.lease }).released, true);
+  assert.equal(releaseMergeLease({ rootDir, ...closer.lease, now: '2026-06-20T18:01:31Z' }).released, true);
   const next = acquireDaemonMergeLease({ ...request, holderPr: 103, now: '2026-06-20T18:02:30Z',
     pidAliveFn: () => false });
   assert.equal(next.acquired, false, 'dead watcher PID does not discard the first reservation');
@@ -200,8 +324,8 @@ test('LEASEFAIR-01 an abandoned daemon reservation expires, letting closers proc
   const closer = acquire(rootDir);
   acquireDaemonMergeLease({ rootDir, ...IDENTITY, holderPr: 102, holderHead: 'abandoned',
     holderPid: 6001, holderHost: 'test-host', now: '2026-06-20T18:00:00Z', pidAliveFn: () => true });
-  releaseMergeLease({ rootDir, ...closer.lease });
-  const later = new Date(Date.parse('2026-06-20T18:00:00Z') + DAEMON_MERGE_RESERVATION_SECONDS * 1000).toISOString();
+  releaseMergeLease({ rootDir, ...closer.lease, now: '2026-06-20T18:00:00Z' });
+  const later = new Date(Date.parse('2026-06-20T18:00:00Z') + daemonMergeReservationSeconds() * 1000).toISOString();
   const result = acquire(rootDir, { now: later, pidAliveFn: () => true });
   assert.equal(result.acquired, true);
   assert.equal(result.prunedWaiters[0].staleReason, 'expired-waiter');
@@ -213,8 +337,8 @@ test('LEASEFAIR-01 an expired request rejoins after equal-timestamp live request
   const request = { rootDir, ...IDENTITY, head: 'head', holderPid: process.pid,
     holderHost: hostname(), priority: 'daemon' };
   upsertMergeLeaseWaiter({ ...request, pr: 1, waiterId: 'old', arrivedAt: '2026-06-20T18:00:00Z' });
-  upsertMergeLeaseWaiter({ ...request, pr: 2, waiterId: 'live', arrivedAt: '2026-06-20T18:02:00Z' });
-  upsertMergeLeaseWaiter({ ...request, pr: 1, waiterId: 'old', arrivedAt: '2026-06-20T18:02:00Z' });
+  upsertMergeLeaseWaiter({ ...request, pr: 2, waiterId: 'live', arrivedAt: '2026-06-20T18:10:00Z' });
+  upsertMergeLeaseWaiter({ ...request, pr: 1, waiterId: 'old', arrivedAt: '2026-06-20T18:10:00Z' });
   assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId), ['live', 'old']);
 });
 

@@ -917,7 +917,12 @@ guards still apply, and an already captured prompt path must remain unchanged.
 
 LEASEFAIR-01 changes lease scheduling within these existing states. A daemon
 deferral retains a durable priority request for its PR/head, served before the
-next closer acquisition and FIFO among daemon requests. No holder is preempted.
+next closer acquisition and FIFO among daemon requests. LEASEFAIR-04 retains
+that reservation for twice the configured watcher poll interval, load-scaled
+once with a timer-safe ceiling. Ineligibility, head movement and merge completion
+remove it immediately; an absent daemon expires. A holder release (including a
+retryable abort) wakes the first surviving daemon PR at its reserved head through
+the existing capped watcher wake path. No holder is preempted.
 The closer releases before its first remote-CI wait, including UNKNOWN/read
 retry waits, and reacquires before merge. At that boundary, the entire current base
 must be contained in the exact CI-validated head; even disjoint base advancement

@@ -392,7 +392,7 @@ test('merge lease fairness retains load-scaled holders and closer waits with fix
   assert.equal(closer.waiter.deadlineSeconds, 540);
   const daemon = acquireDaemonMergeLease({ ...request, holderPr: 103 });
   assert.equal(daemon.acquired, false);
-  assert.equal(daemon.waiter.deadlineSeconds, 120);
+  assert.equal(daemon.waiter.deadlineSeconds, 3600, 'twice the 300s poll, scaled once at 6x load');
   assert.equal(daemon.queuePosition, 1);
   assert.equal(releaseMergeLease({ rootDir, ...holder.lease }).released, true);
   const resumed = acquireDaemonMergeLease({ ...request, holderPr: 103 });

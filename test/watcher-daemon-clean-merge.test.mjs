@@ -1,3 +1,4 @@
+import { acquireMergeLease, acquireDaemonMergeLease, readMergeLeaseWaiters } from '../src/ama/merge-lease.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
@@ -2532,6 +2533,7 @@ test('LEASEFAIR-01 production daemon wiring registers a stable priority reservat
   const optionsSeen = [];
   const result = await runDaemonCleanMergeAttempt({
     ...realRollupHelpers({ rootDir, prNumber: 700, head: 'clean-head' }),
+    pollIntervalMs: 900_000,
     fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'clean-head', labels: [],
       checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
     acquireMergeLeaseImpl: options => {
@@ -2546,6 +2548,7 @@ test('LEASEFAIR-01 production daemon wiring registers a stable priority reservat
   for (const options of optionsSeen) {
     assert.equal(options.registerWaiter, true);
     assert.equal(options.waiterPriority, 'daemon');
+    assert.equal(options.waiterDeadlineSeconds, 1800);
     assert.equal(options.waiterId, 'daemon_700_clean-head');
   }
 });
@@ -4340,4 +4343,36 @@ test('DRAINDEFER-01: disabled AMA orchestration retires a fresh drain hint witho
     for (let i = 0; i < 6; i++) await gate.record(handler);
     assert.equal(gate.evaluate(handler).run, false);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('LEASEFAIR-04 production attempt removes reservations before declining an unclean head', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = realRollupHelpers({ rootDir });
+  const leaseArgs = { rootDir, repo: args.repoPath, base: 'main', holderPr: 700, holderHead: 'clean-head', holderPid: process.pid };
+  acquireMergeLease({ ...leaseArgs, holderPr: 701 });
+  acquireDaemonMergeLease(leaseArgs);
+  const result = await runDaemonCleanMergeAttempt({ ...args,
+    reviewState: { ...args.reviewState, blockingFindingCount: 1 },
+    fetchRollupImpl: () => assert.fail('unclean head declines before live gate reads'),
+  });
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, leaseArgs), []);
+});
+
+test('LEASEFAIR-04 disabled watcher authority drops its reservation without invoking a daemon attempt', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = baseArgs(rootDir);
+  const identity = { rootDir, repo: args.repoPath, base: args.candidate.baseBranch,
+    holderPr: args.prNumber, holderHead: args.candidate.headSha, holderPid: process.pid };
+  acquireMergeLease({ ...identity, holderPr: 999 });
+  acquireDaemonMergeLease(identity);
+  const result = await maybeDispatchAmaClosureFor({ ...args,
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: false }), getOrchestrationMode: () => 'native' }),
+    runDaemonCleanMergeAttemptImpl: () => assert.fail('disabled authority must not attempt a merge'),
+  });
+  assert.equal(result.reason, 'ama-disabled');
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, identity), []);
 });

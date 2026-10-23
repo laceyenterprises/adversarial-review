@@ -570,6 +570,12 @@ two in-run retries and then next-pass recovery without failure charges. The
 per-base JSONL history retains 4096 lease events; the clean smoke verifies grants
 and releases for both roles, including the retry CI hold. See the
 [history contract](docs/data-model/merge-lease-history.md).
+LEASEFAIR-04 keeps daemon reservations through twice the configured watcher poll
+interval, scaled once for host load and capped below the timer limit. Ineligible,
+moved or merged heads release their reservation immediately. Holder release
+wakes the first daemon PR at its reserved head through the existing per-head cap.
+The clean offline smoke verifies service at 299 seconds and an exact-head release
+wake; no deployment configuration or migration is needed.
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
 
 When the hammer closes a PR (the common MSM path),

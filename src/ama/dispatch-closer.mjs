@@ -148,7 +148,7 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation } from './merge-lease.mjs';
 export { formatHamGateAttemptCapClosingStatus } from './merge-lease.mjs';
 import {
   hasMergedDependentProtectingPr,
@@ -6170,7 +6170,9 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
-          sameHeadHamMerge = await attemptDaemonCleanMergeImpl({
+          sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
+            base: baseBranch, pr: prNumber, head: mergeHead,
+          }, () => attemptDaemonCleanMergeImpl({
             receiptProducerClass: 'closer-hammer',
             repo,
             prNumber,
@@ -6316,7 +6318,7 @@ async function maybeDispatchAmaCloserAttempt({
             },
             now: () => dispatchContext.dispatchedAt || new Date().toISOString(),
             logger,
-          });
+          }));
           sameHeadHamMergeReason = sameHeadHamMerge?.reason || null;
         }
         if (sameHeadHamMerge?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {

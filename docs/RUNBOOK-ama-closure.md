@@ -3805,8 +3805,14 @@ closer acquisitions add no delay. This assumes a running watcher and a holder
 that makes progress: a live same-host holder is never forcibly preempted on age.
 Existing bounded closure-wait paging still reports a stuck holder, with
 "waiting for the merge lease, position N", rather than a safety-hold remedy.
-Reservations expire after 120 seconds without a fresh eligible attempt, so an
-abandoned or newly ineligible head cannot indefinitely block closers. See the
+LEASEFAIR-04 sizes reservations from twice the configured watcher poll interval
+(default 300 seconds), applying load-aware scaling once and capping the stored
+whole-second deadline below the JavaScript timer limit. A missed watcher tick
+must not abandon a reservation. Ineligibility, head movement and merge completion
+remove the reservation immediately; a vanished daemon expires at its stored
+deadline. Ordinary and retryable-abort holder releases request one watcher wake
+for the first surviving daemon waiter's PR and exact head. The existing per-head
+wake cap applies; a failed wake write falls back to the next poll. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 
 Progress polling reparses the bounded history only when its file identity or

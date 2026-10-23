@@ -110,7 +110,8 @@ if (scenario === 'clean') {
   assert.equal(decideClosureOwner({ ...closureInput,
     closerAuthoredStale: { ...closerAuthoredStale, currentHead: base } }).owner, 'hammer');
   const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, readMergeLeaseHistory } = await import('../../src/ama/merge-lease.mjs');
-  const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main',
+  const atLeaseSecond = seconds => new Date(Date.now() + seconds * 1000).toISOString();
+  const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main', now: atLeaseSecond(0),
     holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
   const holder = acquireMergeLease({ ...leaseArgs, holderPr: 1, holderHead: 'closer' });
   assert.equal(holder.acquired, true);
@@ -121,8 +122,17 @@ if (scenario === 'clean') {
   assert.equal(deferred.acquired, false);
   assert.equal(deferred.queuePosition, 1);
   assert.equal(deferred.existingLease.leaseId, holder.lease.leaseId);
-  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...holder.lease }).released, true);
+  // LEASEFAIR-04: the reservation survives a full watcher interval and release
+  // requests exactly the reserved PR/head through the existing wake path.
+  const leaseWakes = [];
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...holder.lease,
+    now: atLeaseSecond(200), requestWatcherWakeImpl: wake => leaseWakes.push(wake) }).released, true);
+  assert.equal(leaseWakes.length, 1);
+  assert.equal(leaseWakes[0].prNumber, daemonRequest.holderPr);
+  assert.equal(leaseWakes[0].headSha, daemonRequest.holderHead);
+  closerRequest.now = atLeaseSecond(299);
   assert.equal(acquireMergeLease(closerRequest).acquired, false);
+  daemonRequest.now = atLeaseSecond(300);
   const served = acquireDaemonMergeLease(daemonRequest);
   assert.equal(served.acquired, true);
   assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...served.lease }).released, true);

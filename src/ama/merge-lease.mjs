@@ -1,5 +1,7 @@
 import { loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
+import { WATCHER_POLL_INTERVAL_MS } from '../watcher-poll-interval.mjs';
+import { requestWatcherWake } from '../watcher-wake.mjs';
 /**
  * AMG-01 — durable merge lease keyed by `(repo, base)`.
  *
@@ -43,19 +45,58 @@ const MUTATION_LOCK_STALE_MS = 5000;
 const FULL_SHA_RE = /^[0-9a-f]{40}$/iu;
 // A missed watcher tick must not abandon a reservation, but a disappeared or
 // newly ineligible daemon must not block the lane indefinitely either.
-export const DAEMON_MERGE_RESERVATION_SECONDS = 120;
+export function daemonMergeReservationSeconds(pollIntervalMs = WATCHER_POLL_INTERVAL_MS, loadOptions = {}) {
+  return loadAwareTimeoutSeconds(2 * pollIntervalMs / 1000, { ...loadOptions, maxSeconds: Infinity });
+}
 
 export function daemonMergeWaiterId(pr, head) {
   return `daemon_${normalizeHolderPr(pr, 'pr')}_${head}`;
 }
 
-export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLease, ...options }) {
+export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLease, pollIntervalMs, ...options }) {
   return acquireMergeLeaseImpl({
     ...options,
     registerWaiter: true,
     waiterPriority: 'daemon',
+    waiterDeadlineSeconds: daemonMergeReservationSeconds(pollIntervalMs),
     waiterId: daemonMergeWaiterId(options.holderPr, options.holderHead),
   });
+}
+
+// Drop obsolete heads before attempting any gates, and retain a reservation
+// only while the eligible exact head is actually waiting for the merge lane.
+export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head }, attempt) {
+  if (!rootDir || !repo || !base || !pr) return attempt();
+  const prune = (keepHead) => {
+    const obsolete = w => w.priority === 'daemon' && Number(w.pr) === Number(pr) && w.head !== keepHead;
+    if (!readMergeLeaseWaiters(rootDir, { repo, base }).some(obsolete)) return;
+    withWaiterMutationLock({ rootDir, repo, base }, () => {
+      const path = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+      const doc = readWaiterDoc(path);
+      writeJsonFile(path, waiterFileDoc(doc.waiters.filter(w => !obsolete(w)), isoNow()));
+    });
+  };
+  prune(head);
+  let result;
+  try {
+    result = await attempt();
+    return result;
+  } finally {
+    const reason = result?.daemonCleanMerge?.reason || result?.reason;
+    prune(reason === 'lease-contended' ? head : null);
+  }
+}
+
+function wakeDaemonWaiter({ rootDir, repo, base, now, requestWatcherWakeImpl }) {
+  // Wake delivery is best-effort. A failed write cannot undo a fenced release;
+  // the reservation still lasts through the next ordinary watcher pass.
+  try {
+    const { waiters } = pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base,
+      now, pidAliveFn: pidIsLive });
+    const first = waiters[0];
+    if (first?.priority === 'daemon') requestWatcherWakeImpl({ rootDir, repo,
+      prNumber: first.pr, headSha: first.head, reason: 'daemon-merge-lease-released' });
+  } catch { /* Ordinary polling remains the recovery path. */ }
 }
 
 // Hammer helpers and the lease CLI use the same gate-failure decision. An
@@ -818,7 +859,7 @@ export function upsertMergeLeaseWaiter({
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
-      deadlineSeconds: priority === 'daemon' ? DAEMON_MERGE_RESERVATION_SECONDS
+      deadlineSeconds: priority === 'daemon' ? effectiveDeadlineSeconds ?? daemonMergeReservationSeconds()
         : effectiveDeadlineSeconds ?? loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
     };
     const waiters = existing
@@ -1042,6 +1083,7 @@ export function releaseMergeLease({
   now,
   historyEvent = 'release',
   reason = 'holder-release',
+  requestWatcherWakeImpl = requestWatcherWake,
   _afterFenceRead,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
@@ -1066,6 +1108,7 @@ export function releaseMergeLease({
     }
     appendLeaseHistory(rootDir, currentLease, historyEvent, now || isoNow(), reason);
     rmSync(leasePath, { force: true });
+    wakeDaemonWaiter({ rootDir, repo, base, now: now || isoNow(), requestWatcherWakeImpl });
     return { released: true, leasePath, lease: currentLease };
   });
   if (!locked.acquired) {
@@ -1083,6 +1126,7 @@ export function releaseMergeLeaseForRetryableAbort({
   holderHead,
   acquiredAt,
   retryableAbortReason = 'retryable-abort',
+  requestWatcherWakeImpl = requestWatcherWake,
   now,
   _afterFenceRead,
 } = {}) {
@@ -1123,6 +1167,7 @@ export function releaseMergeLeaseForRetryableAbort({
     }
     appendLeaseHistory(rootDir, currentLease, 'release', now || isoNow(), retryableAbortReason);
     rmSync(leasePath, { force: true });
+    wakeDaemonWaiter({ rootDir, repo, base, now: now || isoNow(), requestWatcherWakeImpl });
     return {
       released: true,
       leasePath,

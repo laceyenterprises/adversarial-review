@@ -66,7 +66,7 @@ export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLe
 // Drop obsolete heads before attempting any gates, and retain a reservation
 // only while the eligible exact head is actually waiting for the merge lane.
 export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head }, attempt) {
-  if (!rootDir || !repo || !base || !pr) return attempt();
+  if (!rootDir || !repo || !base || !pr || !head) return attempt();
   const prune = (keepHead) => {
     const obsolete = w => w.priority === 'daemon' && Number(w.pr) === Number(pr) && w.head !== keepHead;
     if (!readMergeLeaseWaiters(rootDir, { repo, base }).some(obsolete)) return;
@@ -88,6 +88,7 @@ export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head
 }
 
 function wakeDaemonWaiter({ rootDir, repo, base, now, requestWatcherWakeImpl }) {
+  // Both release callers hold the same per-base mutation lock as waiter writes.
   // Wake delivery is best-effort. A failed write cannot undo a fenced release;
   // the reservation still lasts through the next ordinary watcher pass.
   try {
@@ -859,8 +860,9 @@ export function upsertMergeLeaseWaiter({
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
-      deadlineSeconds: priority === 'daemon' ? effectiveDeadlineSeconds ?? daemonMergeReservationSeconds()
-        : effectiveDeadlineSeconds ?? loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity }),
+      deadlineSeconds: effectiveDeadlineSeconds ?? (priority === 'daemon' && deadlineSeconds == null
+        ? daemonMergeReservationSeconds()
+        : loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity })),
     };
     const waiters = existing
       ? doc.waiters.map((w) => w.waiterId === waiterId ? nextWaiter : w)

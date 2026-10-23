@@ -84,6 +84,49 @@ test('LEASEFAIR-04 sizing applies the maximum configured load multiplier once an
 });
 
 for (const release of [releaseMergeLease, releaseMergeLeaseForRetryableAbort]) {
+  test(`${release.name} fences waiter registration during release-wake pruning`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquire(rootDir);
+    const request = { rootDir, ...IDENTITY, pr: 102, head: 'expired',
+      holderPid: process.pid, holderHost: hostname(), priority: 'daemon',
+      arrivedAt: held.lease.acquiredAt, effectiveDeadlineSeconds: 10 };
+    upsertMergeLeaseWaiter({ ...request, waiterId: 'expired' });
+    const now = new Date(Date.parse(held.lease.acquiredAt) + 20_000).toISOString();
+    upsertMergeLeaseWaiter({ ...request, pr: 103, head: 'live', waiterId: 'live', arrivedAt: now });
+    const waitersPath = mergeLeaseWaitersFilePath(rootDir, IDENTITY);
+    const contender = { ...request, pr: 104, head: 'contender', waiterId: 'contender', arrivedAt: now };
+    const read = fs.readFileSync;
+    let inspected = false;
+    let registrationError;
+    const mocked = t.mock.method(fs, 'readFileSync', (path, ...args) => {
+      const snapshot = read(path, ...args);
+      if (path === waitersPath && !inspected) {
+        inspected = true;
+        // Interleave registration after the release reads its waiter snapshot,
+        // before pruning persists it. Both writers must use the same lock.
+        try { upsertMergeLeaseWaiter(contender); } catch (error) { registrationError = error; }
+      }
+      return snapshot;
+    });
+    syncBuiltinESMExports();
+    const wakes = [];
+    try {
+      assert.equal(release({ rootDir, ...held.lease, now,
+        requestWatcherWakeImpl: wake => wakes.push(wake) }).released, true);
+    } finally {
+      mocked.mock.restore();
+      syncBuiltinESMExports();
+    }
+    assert.equal(inspected, true, 'release inspected the waiter store');
+    assert.match(registrationError?.message || '', /mutation lock busy while updating waiters/);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId), ['live']);
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].headSha, 'live');
+    upsertMergeLeaseWaiter(contender);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId), ['live', 'contender']);
+  });
+
   test(`LEASEFAIR-04 ${release.name} wakes exactly the first daemon at its reserved head`, t => {
     const rootDir = freshRoot();
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -172,6 +215,36 @@ test('LEASEFAIR-04 only contention retains a reservation; head moves and ineligi
     throw new Error('synthetic failure');
   }), /synthetic failure/);
   assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+});
+
+test('daemon waiter deadlines honor explicit and already-scaled overrides', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, ...IDENTITY, pr: 102, head: 'reserved',
+    holderPid: process.pid, priority: 'daemon', waiterId: 'daemon' };
+  assert.equal(upsertMergeLeaseWaiter({ ...request, deadlineSeconds: 42 }).waiter.deadlineSeconds, 42);
+  assert.equal(upsertMergeLeaseWaiter({ ...request, deadlineSeconds: 42,
+    effectiveDeadlineSeconds: 84 }).waiter.deadlineSeconds, 84);
+  assert.equal(upsertMergeLeaseWaiter(request).waiter.deadlineSeconds, daemonMergeReservationSeconds());
+});
+
+test('reservation cleanup without a resolved head preserves existing exact-head waiters', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, ...IDENTITY, pr: 102, head: 'reserved',
+    holderPid: process.pid, priority: 'daemon', waiterId: 'daemon' };
+  upsertMergeLeaseWaiter(request);
+  const before = fs.readFileSync(mergeLeaseWaitersFilePath(rootDir, IDENTITY), 'utf8');
+  for (const head of [undefined, null, '']) {
+    let attempted = false;
+    const result = await withDaemonMergeReservation({ ...request, head }, async () => {
+      attempted = true;
+      return { reason: 'head-unresolved' };
+    });
+    assert.equal(attempted, true);
+    assert.equal(result.reason, 'head-unresolved');
+    assert.equal(fs.readFileSync(mergeLeaseWaitersFilePath(rootDir, IDENTITY), 'utf8'), before);
+  }
 });
 
 test('served daemon reservation is removed before another mutation lock can intervene', t => {

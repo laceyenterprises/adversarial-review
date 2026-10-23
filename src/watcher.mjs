@@ -1667,7 +1667,7 @@ async function main() {
     // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
     authProvider: () => process.env.GITHUB_TOKEN,
   });
-  const intervalMs = WATCHER_POLL_INTERVAL_MS;
+  const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   const configuredDeadlineMs = config.pollDeadlineMs;
   // Always resolve a stable heartbeat path (env override → HQ_ROOT →
   // rootDir default) so the file is written every poll and the external

@@ -18,7 +18,7 @@ import { readPipelineGithub } from '../src/pipeline-health-github.mjs';
 import { resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
 import { resolveReviewPipelineHealthConfig, summarizeFirstPassCiOrphans } from '../src/review-pipeline-health.mjs';
 import { createSlackThreadCommsAdapter } from '../src/adapters/comms/slack-thread/index.mjs';
-import { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, upsertMergeLeaseWaiter } from '../src/ama/merge-lease.mjs';
 
 
 function busyHost(t) {
@@ -398,4 +398,15 @@ test('merge lease fairness retains load-scaled holders and closer waits with fix
   const resumed = acquireDaemonMergeLease({ ...request, holderPr: 103 });
   assert.equal(resumed.acquired, true);
   assert.equal(resumed.lease.deadlineSeconds, 540);
+});
+
+test('explicit daemon waiter deadlines scale once while effective deadlines stay fixed', t => {
+  busyHost(t);
+  const rootDir = mkdtempSync(join(os.tmpdir(), 'daemon-deadline-load-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const request = { rootDir, repo: 'owner/name', base: 'main', pr: 101,
+    head: 'daemon-head', holderPid: process.pid, priority: 'daemon', waiterId: 'daemon' };
+  assert.equal(upsertMergeLeaseWaiter({ ...request, deadlineSeconds: 90 }).waiter.deadlineSeconds, 540);
+  assert.equal(upsertMergeLeaseWaiter({ ...request, deadlineSeconds: 90,
+    effectiveDeadlineSeconds: 180 }).waiter.deadlineSeconds, 180);
 });

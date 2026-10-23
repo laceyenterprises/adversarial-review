@@ -3807,9 +3807,13 @@ Existing bounded closure-wait paging still reports a stuck holder, with
 "waiting for the merge lease, position N", rather than a safety-hold remedy.
 LEASEFAIR-04 sizes reservations from twice the configured watcher poll interval
 (default 300 seconds), applying load-aware scaling once and capping the stored
-whole-second deadline below the JavaScript timer limit. A missed watcher tick
-must not abandon a reservation. Ineligibility, head movement and merge completion
-remove the reservation immediately; a vanished daemon expires at its stored
+whole-second deadline below the JavaScript timer limit. The watcher loop honors
+its resolved runtime `pollIntervalMs` before the shared startup-file fallback.
+The shared module uses a 300-second poll interval when its config file cannot
+be read or parsed; watcher startup retains its existing config validation. A
+missed watcher tick must not abandon a reservation. Ineligibility, head movement
+and merge completion remove the reservation immediately; a vanished daemon
+expires at its stored
 deadline. Ordinary and retryable-abort holder releases request one watcher wake
 for the first surviving daemon waiter's PR and exact head. The existing per-head
 wake cap applies; a failed wake write falls back to the next poll. See the

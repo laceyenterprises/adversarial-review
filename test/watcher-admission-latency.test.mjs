@@ -176,7 +176,7 @@ for (const evidence of ['merged', 'unreadable', 'replacement-owner', 'replacemen
       readBuildCompletionSignalForPrImpl: async () => {
         queried = true; await gate;
         return evidence === 'unreadable' ? { ok: false, reason: 'ledger-read-failed' }
-          : { ok: true, row: { head_sha: 'b'.repeat(40) } };
+          : { ok: true, row: { head_sha: identity.headSha } };
       },
       readPullRequestStateImpl: async () => null,
     });

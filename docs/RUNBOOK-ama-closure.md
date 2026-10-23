@@ -4930,3 +4930,21 @@ failure is rethrown as the same error with secrets redacted, keeping its `code`,
 `signal` and `status`, so a child timeout or missing binary keeps the kind that
 retry routing reads (HAMREDACT-01). Tokens never enter persistent shell assignments, Git argv or Git configuration. Ordinary
 non-hammer Git execution remains outside this opt-in credential path.
+
+## Merged completion head identity (MERGESIGNAL-01)
+
+A `merged` build-completion row proves merge only when its `head_sha` equals
+the reviewed head before advancement, or only the target head after advancement.
+The shared closer reader applies this rule to dispatch, lease reconciliation, and terminal-retry
+recovery. Head comparisons trim whitespace and normalize hexadecimal casing.
+Dispatch probes only the active target after advancement; an obsolete
+reviewed-head signal is disregarded and cannot finalize the lease as succeeded
+or suppress hammer dispatch for the target. There is no reviewed-head fallback.
+Missing or foreign heads follow the absent-signal path, including normal producer-evidence checks;
+they cannot establish successful merge.
+Mismatches log `ama_closer.merged_signal_head_mismatch` once per repository,
+pull request and expected head per process, with completion identity fields.
+The `expectedHeadSha` diagnostic field names the active comparison head: the
+reviewed head before advancement and the target remediation head afterwards.
+Authoritative live merged state and terminal audit evidence retain their
+existing behavior.

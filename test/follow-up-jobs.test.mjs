@@ -5374,7 +5374,7 @@ for (const scenario of [
     const rootDir = makeTempRoot(t);
     const created = createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir), repo: 'example/repo', prNumber: 42 });
     const job = readFollowUpJob(created.jobPath);
-    const identity = { rootDir, repo: job.repo, prNumber: job.prNumber, headSha: 'synthetic-head' };
+    const identity = { rootDir, repo: job.repo, prNumber: job.prNumber, headSha: 'a'.repeat(40) };
     const now = '2026-04-21T10:00:00.000Z';
     const acquiredAt = scenario.old ? '2026-04-21T09:00:00.000Z' : '2026-04-21T09:59:00.000Z';
     acquireAmaCloserLease({ ...identity, now: acquiredAt, host: 'synthetic', watcherPid: 123 });
@@ -5388,8 +5388,8 @@ for (const scenario of [
     }
     if (scenario.rekeyed) {
       rekeyAmaCloserLease({ ...identity, fromHeadSha: identity.headSha,
-        toHeadSha: 'synthetic-new-head', now });
-      identity.headSha = 'synthetic-new-head';
+        toHeadSha: 'b'.repeat(40), now });
+      identity.headSha = 'b'.repeat(40);
     }
     let reads = 0;
     let prReads = 0;
@@ -5410,7 +5410,7 @@ for (const scenario of [
         readBuildCompletionSignalForPrImpl: args => {
           assert.equal(args.headSha, undefined, 'merged signals are scoped to PRs, not lease heads');
           return scenario.merged
-            ? { ok: true, row: { head_sha: 'synthetic-head' } }
+            ? { ok: true, row: { head_sha: identity.headSha } }
             : { ok: false, reason: scenario.mergeUnreadable ? 'ledger-read-failed' : 'missing-build-completion-signal' };
         },
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
@@ -5429,7 +5429,7 @@ for (const scenario of [
     const lease = readAmaCloserLease(rootDir, identity);
     if (scenario.outcome === 'superseded') {
       assert.equal(lease, null, 'supersession releases the matching rekeyed lease');
-      const record = readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: 'synthetic-head' });
+      const record = readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: 'a'.repeat(40) });
       assert.equal(record.state, 'launch-terminal');
       assert.equal(record.outcome, 'superseded', 'the original dispatch retains the terminal outcome');
     } else {

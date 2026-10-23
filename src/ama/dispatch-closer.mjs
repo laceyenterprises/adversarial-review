@@ -1784,10 +1784,9 @@ function* reconcileAmaCloserLeaseSteps({
     if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
     const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
-    // Merged completion rows are PR-scoped (their SHA may be the merge commit),
-    // so this also observes completion from a lease's original dispatch head.
+    // A merged completion proves success only for this lease head.
     const mergedSignal = yield readMergedSignalImpl({
-      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env, signal,
+      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env, signal, logger,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
     throwIfAborted(signal);
@@ -3937,10 +3936,11 @@ function* readMergedBuildCompletionSignalSteps({
   ledgerDbPath = null,
   env = process.env,
   signal = null,
+  logger = console,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
-  const result = yield readBuildCompletionSignalForPrImpl({
+  let result = yield readBuildCompletionSignalForPrImpl({
     repo,
     prNumber,
     signalKind: 'merged',
@@ -3952,14 +3952,29 @@ function* readMergedBuildCompletionSignalSteps({
   });
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
   if (result.ok) {
-    const producerHeadSha = String(result.row?.head_sha || '').trim() || null;
-    const reviewedHeadSha = String(headSha || '').trim() || null;
-    return {
+    const producerHeadSha = String(result.row?.head_sha || '').trim().toLowerCase() || null;
+    const expectedHeadSha = String(headSha || '').trim().toLowerCase() || null;
+    if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(producerHeadSha || '')
+      && producerHeadSha === expectedHeadSha) return {
       ...result,
       producerHeadSha,
-      reviewedHeadSha,
-      headShaMatchesReviewed: producerHeadSha && reviewedHeadSha ? producerHeadSha === reviewedHeadSha : null,
+      reviewedHeadSha: expectedHeadSha,
+      headShaMatchesReviewed: true,
     };
+    const key = `merged-signal-head-mismatch:${repo}#${prNumber}:${expectedHeadSha}`;
+    if (dispatchCloserLogGate.note(key, 'ignored').changed) {
+      logger?.info?.(JSON.stringify({
+        event: 'ama_closer.merged_signal_head_mismatch', repo, prNumber,
+        expectedHeadSha, producerHeadSha,
+        completionId: result.row?.completion_id ?? null,
+        ticketId: result.row?.ticket_id ?? null,
+        launchRequestId: result.row?.launch_request_id ?? null,
+        signalKind: result.row?.signal_kind ?? null,
+        recordedAt: result.row?.recorded_at ?? null,
+      }));
+    }
+    // Ignore the foreign claim and use the normal absent-signal path.
+    result = { ok: false, reason: 'missing-build-completion-signal' };
   }
   if (isCleanMissingMergedSignal(result)) {
     const producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
@@ -5559,7 +5574,7 @@ async function maybeDispatchAmaCloserAttempt({
           hqRoot, repo, prNumber, headSha: live.headRefOid, fetchPullRequestRollupImpl, execFileImpl,
         }) : null;
       const merged = await readMergedBuildCompletionSignalAsync({
-        repo, prNumber, headSha: existingRecord.headSha, hqRoot, rootDir, env: process.env,
+        repo, prNumber, headSha: existingRecord.headSha, hqRoot, rootDir, env: process.env, logger,
         readBuildCompletionProducerEvidenceImpl, readBuildCompletionSignalForPrImpl,
       });
       throwIfAborted(signal);
@@ -5690,31 +5705,18 @@ async function maybeDispatchAmaCloserAttempt({
       existingLease: terminalizedLease,
     });
   }
-  const reviewedHeadMergedSignal = await readMergedBuildCompletionSignalAsync({
+  // After advancement, the obsolete reviewed head cannot prove target completion.
+  const mergedSignal = await readMergedBuildCompletionSignalAsync({
     repo,
     prNumber,
-    headSha: reviewedSha,
+    headSha: headAdvancedDuringDispatch ? targetRemediationSha : reviewedSha,
+    logger,
     hqRoot,
     rootDir,
     env: process.env,
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
-  const targetHeadMergedSignal = headAdvancedDuringDispatch
-    ? await readMergedBuildCompletionSignalAsync({
-        repo,
-        prNumber,
-        headSha: targetRemediationSha,
-        hqRoot,
-        rootDir,
-        env: process.env,
-        readBuildCompletionProducerEvidenceImpl,
-        readBuildCompletionSignalForPrImpl,
-      })
-    : null;
-  const mergedSignal = targetHeadMergedSignal && !isCleanMissingMergedSignal(targetHeadMergedSignal)
-    ? targetHeadMergedSignal
-    : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       finalizeAmaCloserLeaseBestEffort({

@@ -1879,7 +1879,7 @@ test('fresh succeeded current-head hammer trusts live open state over stale merg
   assert.equal(currentRecord.lastError, null);
 });
 
-test('fresh succeeded hammer accepts a producer-realistic merge-commit signal for its PR', async (t) => {
+test('fresh succeeded hammer accepts a merged signal for its target head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-success-direct-signal-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq-root');
@@ -1944,10 +1944,10 @@ test('fresh succeeded hammer accepts a producer-realistic merge-commit signal fo
         assert.equal(args.repo, REPO);
         assert.equal(args.prNumber, PR_NUMBER);
         assert.equal(args.signalKind, 'merged');
-        assert.equal(args.headSha, undefined, 'merge rows store merge commits, not reviewed PR heads');
+        assert.equal(args.headSha, undefined, 'read PR-scoped rows so mismatches can be logged');
         return {
           ok: true,
-          row: { repo: REPO, pr_number: PR_NUMBER, signal_kind: 'merged', head_sha: MERGE_COMMIT },
+          row: { repo: REPO, pr_number: PR_NUMBER, signal_kind: 'merged', head_sha: ADVANCED_HEAD },
           target: { repo: REPO, prNumber: PR_NUMBER },
         };
       },
@@ -1960,8 +1960,8 @@ test('fresh succeeded hammer accepts a producer-realistic merge-commit signal fo
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'merged-signal-present');
-  assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
-  assert.equal(result.mergedSignalProducerHeadSha, MERGE_COMMIT);
+  assert.equal(result.mergedSignalHeadShaMatchesReviewed, true);
+  assert.equal(result.mergedSignalProducerHeadSha, ADVANCED_HEAD);
   assert.equal(result.dispatchId, 'dispatch_current_head');
   assert.equal(result.launchRequestId, 'lrq_current_head');
   assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 0);

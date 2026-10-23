@@ -162,6 +162,30 @@ test('shared collection accepts reproduced blocks without a finding on the gener
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
 });
 
+test('shared collection retains opaque artifact proofs while collecting generated block proofs', async t => {
+  const f = fixture(t);
+  const path = 'sdk/output.tgz';
+  const primaryBlob = 'a'.repeat(40), blob = 'b'.repeat(40);
+  f.evidence.primaryFiles.unshift({ filename: path, status: 'added', sha: primaryBlob });
+  f.evidence.finalFiles.unshift({ filename: path, status: 'added', sha: blob });
+  const artifactProof = { path, primaryBlob, blob, headSha: f.args.headSha,
+    primaryHead: f.evidence.primaryHead, comparison: 'git-blob-sha1' };
+  assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-unknown');
+  const result = await fetchPrimaryChange(f.args, {
+    fetchCiCostImpl: async () => f.evidence.ciCost,
+    proveDerivedArtifactsImpl: async () => [artifactProof],
+    proveGeneratedBlocksImpl: (args, evidence, refusal) => {
+      assert.deepEqual(evidence.derivedArtifacts, [artifactProof]);
+      return proveGeneratedBlocks(args, evidence, refusal, { runGeneratorImpl: offlineGenerator });
+    },
+  });
+  assert.deepEqual(result.derivedArtifacts, [artifactProof]);
+  assert.equal(result.generatedBlockProofs.length, 1);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+  assert.equal(checkPrimaryChange({ ...result, derivedArtifacts: [] }, f.args.headSha).reason, 'primary-change-unknown');
+  assert.equal(checkPrimaryChange({ ...result, generatedBlockProofs: [] }, f.args.headSha).reason, 'primary-change-reverted');
+});
+
 test('cached refused history retries reproduction without invalidation or fresh history reads', async t => {
   const f = fixture(t);
   const originalGet = f.args.get;

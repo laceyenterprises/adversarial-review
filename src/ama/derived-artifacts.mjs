@@ -262,6 +262,12 @@ export function declaredGeneratedBlocks(manifest) {
     && entry.command[0].length > 0);
 }
 
+function sameDeclaration(left, right) {
+  return ['path', 'cwd', 'start', 'end'].every(field => left[field] === right[field])
+    && left.command.length === right.command.length
+    && left.command.every((arg, index) => arg === right.command[index]);
+}
+
 // Marker lines are never derived. Ambiguous/duplicate markers fail closed.
 export function generatedBlock(bytes, declaration) {
   const lines = bytes.toString('utf8').split('\n');
@@ -301,11 +307,16 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     // Read system runtimes and this scratch tree only; deny network and writes
     // outside scratch. No host HOME, auth environment or Git config is passed.
     const quote = value => JSON.stringify(value);
+    const ancestors = [];
+    for (let parent = dirname(root); parent !== '/'; parent = dirname(parent)) {
+      ancestors.push(`(literal ${quote(parent)})`);
+    }
     const profile = `(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach-lookup)
-      (allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin")
+      (allow file-read* (literal "/") (subpath "/System") (subpath "/usr") (subpath "/bin")
         (subpath "/Library/Frameworks") (subpath "/Library/Developer")
         (subpath "/opt") (subpath "/dev")
         (subpath ${quote(root)}))
+      ${ancestors.length ? `(allow file-read-metadata ${ancestors.join(' ')})` : ''}
       (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))`;
     executable = '/usr/bin/sandbox-exec';
     args = ['-p', profile, ...command];
@@ -315,6 +326,10 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     for (const path of ['/usr', '/bin', '/lib', '/lib64', '/opt']) {
       if (existsSync(path)) args.push('--ro-bind', path, path);
     }
+    // Build mount parents explicitly, including hosts with a custom TMPDIR.
+    // Only expose the loader cache from /etc, never host configuration/secrets.
+    args.push('--tmpfs', '/tmp', '--dir', dirname(root), '--dir', '/etc');
+    if (existsSync('/etc/ld.so.cache')) args.push('--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache');
     args.push('--proc', '/proc', '--dev', '/dev', '--bind', root, root, '--chdir', work, '--', ...command);
   } else throw new Error('network-denied generator sandbox unavailable');
   signal?.throwIfAborted();
@@ -369,10 +384,12 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, s
         } catch { /* No local checkout for this subject. */ }
       }
     }
-    const fetch = source => git('--git-dir=objects.git', 'fetch', '--no-tags', '--depth=1', source, headSha, mergeBase);
-    if (source) {
-      try { await fetch(source); } catch { await fetch(`https://github.com/${repo}.git`); }
-    } else await fetch(`https://github.com/${repo}.git`);
+    // Proof collection is optional and must not depend on ambient GitHub auth.
+    // The daemon/operator supplies a local clone containing both immutable refs.
+    if (!source) throw new Error('derived checkout requires a local clone reference');
+    source = await realpath(source);
+    if (!(await lstat(source)).isDirectory()) throw new Error('derived clone reference is not a directory');
+    await git('--git-dir=objects.git', 'fetch', '--no-tags', '--depth=1', source, headSha, mergeBase);
     const tree = join(scratch, 'head');
     await git('--git-dir=objects.git', 'worktree', 'add', '--detach', tree, headSha);
     const show = async (ref, path) => (await git('--git-dir=objects.git', 'show', `${ref}:${path}`)).stdout;
@@ -400,7 +417,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
       const headDeclarations = declaredGeneratedBlocks(JSON.parse(await show(evidence.headSha, 'package.json')));
       const proofs = [];
       for (const declaration of declarations) {
-        if (!headDeclarations.some(entry => JSON.stringify(entry) === JSON.stringify(declaration))) continue;
+        if (!headDeclarations.some(entry => sameDeclaration(entry, declaration))) continue;
         const baseBytes = Buffer.from(await show(evidence.mergeBase, refusal.path));
         const base = generatedBlock(baseBytes, declaration);
         if (!regions.some(region => region.start >= base.start && region.end <= base.end)) continue;

@@ -1,18 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import childProcess, { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
-import { declaredGeneratedBlocks, proveGeneratedBlocks, runDerivedGenerator } from '../src/ama/derived-artifacts.mjs';
+import { declaredGeneratedBlocks, proveGeneratedBlocks, runDerivedGenerator, withDerivedCheckout } from '../src/ama/derived-artifacts.mjs';
 
 const start = '<!-- smv:state-machines:start -->';
 const end = '<!-- smv:state-machines:end -->';
 const declaration = { path: 'docs/*.md', start, end, cwd: '.', command: [process.execPath, 'render.mjs'] };
 
 function fixture(t, { handEdit = false, outside = false, failure = false, noop = false, duplicate = false,
-  headDeclaration = false, markerEdit = false, finalShift = false, repairedInventory = false, generatorCwd = '.' } = {}) {
+  headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
+  authorShift = 0, repairedInventory = false, generatorCwd = '.' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
@@ -20,6 +23,9 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
       GIT_AUTHOR_NAME: 'Fixture Builder', GIT_AUTHOR_EMAIL: 'builder@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture Builder', GIT_COMMITTER_EMAIL: 'builder@example.invalid' } }).trimEnd();
   const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows}\n${end}\nTail\n`;
+  const baseProse = authorShift < 0 ? 'Base prose\nBase second line\nBase third line' : 'Base prose';
+  const authorProse = authorShift > 0 ? 'Base prose\nAuthor introduction\nAuthor details'
+    : authorShift < 0 ? 'Base prose' : outside ? 'Author prose' : 'Base prose';
   const entry = { ...declaration, cwd: generatorCwd,
     command: [process.execPath, generatorCwd === '.' ? 'render.mjs' : '../render.mjs'] };
   git('init', '-q');
@@ -33,17 +39,17 @@ const text = fs.readFileSync(path, 'utf8');
 fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${start.length}) + '\\n'
   + fs.readFileSync(${JSON.stringify(generatorCwd === '.' ? 'inventory.txt' : '../inventory.txt')}, 'utf8') + text.slice(text.indexOf(${JSON.stringify(end)})));
 `);
-  writeFileSync(join(root, 'docs/guide.md'), document('Base row'));
+  writeFileSync(join(root, 'docs/guide.md'), document('Base row', baseProse));
   git('add', 'package.json', 'inventory.txt', 'render.mjs', 'docs/guide.md');
   git('commit', '-qm', 'Fixture base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(root, 'docs/guide.md'), document('Author row\nAuthor second row', outside ? 'Author prose' : 'Base prose'));
+  writeFileSync(join(root, 'docs/guide.md'), document('Author row\nAuthor second row', authorProse));
   git('add', 'docs/guide.md');
   git('commit', '-qm', 'Fixture author change');
   const builder = git('rev-parse', 'HEAD');
   // Keep the inventory input unchanged in this fixture so the documentation is
   // the sole primary change and its final compare entry can disappear entirely.
-  let finalText = document(handEdit ? 'Base row\nHand edited row' : 'Base row');
+  let finalText = document(handEdit ? 'Base row\nHand edited row' : 'Base row', outside ? baseProse : authorProse);
   if (repairedInventory) {
     writeFileSync(join(root, 'inventory.txt'), 'Base row\nDerived row\n');
     finalText = document('Base row\nDerived row');
@@ -52,6 +58,9 @@ fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${
   if (markerEdit) finalText = finalText.replace(start, '<!-- another:start -->');
   if (duplicate) finalText += `${start}\nDuplicate\n${end}\n`;
   if (headDeclaration) writeFileSync(join(root, 'package.json'), JSON.stringify({ generatedArtifacts: [{ ...declaration, cwd: 'docs' }] }));
+  if (reorderDeclaration) writeFileSync(join(root, 'package.json'), JSON.stringify({ generatedArtifacts: [
+    Object.fromEntries(Object.entries(entry).reverse()),
+  ] }));
   writeFileSync(join(root, 'docs/guide.md'), finalText);
   git('add', 'docs/guide.md', 'package.json', 'inventory.txt');
   git('commit', '-qm', 'Fixture repair\n\nWorker-Class: hammer');
@@ -125,6 +134,78 @@ test('shared collection accepts reproduced blocks without a finding on the gener
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
 });
 
+test('cached refused history retries reproduction without invalidation or fresh history reads', async t => {
+  const f = fixture(t);
+  const originalGet = f.args.get;
+  let historyReads = 0, proofAttempts = 0, available = false;
+  f.args.rootDir = f.root;
+  f.args.get = Object.assign(async path => {
+    if (path.includes('/compare/')) historyReads++;
+    return originalGet(path);
+  }, { persistPrimaryChange: true, metadata: async () => ({ merge_base_commit: { sha: f.evidence.mergeBase } }) });
+  const options = {
+    fetchCiCostImpl: async () => f.evidence.ciCost,
+    proveGeneratedBlocksImpl: async (args, evidence, refusal) => {
+      proofAttempts++;
+      return available ? proveGeneratedBlocks(args, evidence, refusal, { runGeneratorImpl: offlineGenerator }) : [];
+    },
+  };
+  assert.equal(checkPrimaryChange(await fetchPrimaryChange(f.args, options), f.args.headSha).reason, 'primary-change-reverted');
+  const reads = historyReads;
+  assert.ok(reads > 0);
+  const store = join(f.root, 'data', 'primary-change-history');
+  const names = readdirSync(store);
+  assert.equal(names.length, 1);
+  const cached = readFileSync(join(store, names[0]), 'utf8');
+  available = true;
+  const recovered = await fetchPrimaryChange(f.args, options);
+  assert.equal(recovered.generatedBlockProofs.length, 1);
+  assert.equal(checkPrimaryChange(recovered, f.args.headSha).ok, true);
+  assert.equal(historyReads, reads, 'second collection must reuse the cached history');
+  assert.equal(proofAttempts, 2);
+  assert.equal(readFileSync(join(store, names[0]), 'utf8'), cached, 'proof recovery must not rewrite the history cache');
+});
+
+for (const authorShift of [-2, 2]) {
+  test(`author line shift ${authorShift} above the block preserves base-coordinate proof and outside intent`, async t => {
+    const f = fixture(t, { authorShift });
+    const result = await prove(f);
+    assert.equal(result.generatedBlockProofs.length, 1);
+    assert.equal(result.generatedBlockProofs[0].start, authorShift < 0 ? 5 : 3);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+    // Reverting the introduction/deletion above the block must still refuse,
+    // even where author-head block coordinates would overlap those base units.
+    const reverted = fixture(t, { authorShift, outside: true });
+    const refused = await prove(reverted);
+    assert.equal(refused.generatedBlockProofs.length, 1);
+    const verdict = checkPrimaryChange(refused, reverted.args.headSha);
+    assert.equal(verdict.reason, 'primary-change-reverted');
+    assert.ok(verdict.missingEvidence.regions.some(region => region.start < refused.generatedBlockProofs[0].start));
+  });
+}
+
+test('manifest declaration key order does not change generated authority', async t => {
+  const f = fixture(t, { reorderDeclaration: true });
+  const result = await prove(f);
+  assert.equal(result.generatedBlockProofs.length, 1);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+});
+
+test('missing or incomplete local clone references fail closed without a network fallback', async t => {
+  const f = fixture(t);
+  const identity = { ...f.args, mergeBase: f.evidence.mergeBase, rootDir: undefined };
+  await assert.rejects(withDerivedCheckout({ ...identity, localRepository: undefined },
+    () => assert.fail('missing source must not run operation')), /requires a local clone reference/);
+  await assert.rejects(withDerivedCheckout({ ...identity, headSha: 'f'.repeat(40) },
+    () => assert.fail('missing commit must not run operation')), error => {
+    assert.ok(!error.message.includes('https://github.com/'));
+    assert.ok(error.message.includes(f.root));
+    return true;
+  });
+  assert.deepEqual((await prove(f, { checkoutImpl: (args, operation) =>
+    withDerivedCheckout({ ...args, rootDir: undefined, localRepository: undefined }, operation) })).generatedBlockProofs, []);
+});
+
 for (const [name, options] of Object.entries({
   'hand edit': { handEdit: true }, 'generator failure': { failure: true }, 'no-op generator': { noop: true },
   'changed declaration': { headDeclaration: true }, 'marker edit': { markerEdit: true },
@@ -188,6 +269,39 @@ test('invalid manifest entries grant no derived authority', () => {
   }
 });
 
+test('Linux sandbox creates mount parents and exposes only the loader cache from /etc', async t => {
+  const scratch = mkdtempSync(join(tmpdir(), 'derived-linux-layout-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  let invocation;
+  t.mock.method(childProcess, 'spawn', (executable, args, options) => {
+    invocation = { executable, args, options };
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    queueMicrotask(() => child.emit('close', 0));
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await runDerivedGenerator({ scratch, cwd: '.', command: ['node', '-e', 'process.exit(0)'] });
+  assert.equal(invocation.executable, 'bwrap');
+  const args = invocation.args;
+  assert.ok(args.indexOf('--tmpfs') < args.indexOf('--bind'));
+  assert.equal(args[args.indexOf('--tmpfs') + 1], '/tmp');
+  assert.ok(args.some((arg, index) => arg === '--dir' && args[index + 1] === '/etc'));
+  assert.ok(args.some((arg, index) => arg === '--dir' && args[index + 1] !== '/etc'));
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--ro-bind' && args[index + 1].startsWith('/etc')) {
+      assert.equal(args[index + 1], '/etc/ld.so.cache');
+      assert.equal(args[index + 2], '/etc/ld.so.cache');
+    }
+  }
+  assert.ok(args.includes('--unshare-all'));
+  assert.equal(invocation.options.env.GITHUB_TOKEN, undefined);
+});
+
 test('real generator sandbox denies network and outside writes; bounds hung generators', {
   skip: !['darwin', 'linux'].includes(process.platform),
 }, async t => {
@@ -199,7 +313,7 @@ test('real generator sandbox denies network and outside writes; bounds hung gene
   // Restricted hosts can forbid even the OS sandbox control invocation.
   try { await runDerivedGenerator({ scratch, cwd: '.', command: command('process.exit(0)') }); }
   catch (error) {
-    if (process.platform === 'linux' || /sandbox_apply: Operation not permitted/.test(error.message)) {
+    if (/sandbox_apply: Operation not permitted|spawn bwrap ENOENT|No permissions to create new namespace|Creating new namespace failed: Operation not permitted/.test(error.message)) {
       const f = fixture(t);
       assert.deepEqual((await prove(f, { runGeneratorImpl: runDerivedGenerator })).generatedBlockProofs, []);
       return t.skip(`sandbox unavailable; verified fail-closed behavior: ${error.message}`);
@@ -208,11 +322,22 @@ test('real generator sandbox denies network and outside writes; bounds hung gene
   }
   await assert.rejects(runDerivedGenerator({ scratch, cwd: '.',
     command: command(`require('node:fs').writeFileSync(${JSON.stringify(join(outside, 'sentinel'))}, 'denied')`) }));
+  writeFileSync(join(outside, 'sentinel'), 'private host content');
+  await assert.rejects(runDerivedGenerator({ scratch, cwd: '.',
+    command: command(`require('node:fs').readFileSync(${JSON.stringify(join(outside, 'sentinel'))})`) }));
   // Binding a loopback socket proves network denial without live traffic.
   await assert.rejects(runDerivedGenerator({ scratch, cwd: '.',
     command: command("require('node:net').createServer().on('error', () => process.exit(1)).listen(0, '127.0.0.1')") }));
   await assert.rejects(runDerivedGenerator({ scratch, cwd: '.', timeoutMs: 100,
     command: command('setInterval(() => {}, 1000)') }), /timed out/);
   const f = fixture(t);
-  assert.equal(checkPrimaryChange(await prove(f, { runGeneratorImpl: runDerivedGenerator }), f.args.headSha).ok, true);
+  let generatorFailure;
+  const result = await prove(f, { runGeneratorImpl: async args => {
+    // Surface a real sandbox startup/generation regression rather than letting
+    // the optional proof collector swallow the useful failure diagnostic.
+    try { await runDerivedGenerator(args); }
+    catch (error) { generatorFailure = error; throw error; }
+  } });
+  assert.ifError(generatorFailure);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
 });

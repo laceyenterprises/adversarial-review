@@ -2570,26 +2570,36 @@ application manifest, for example:
 
 `path` is a repository-relative path or glob (`*`, `**`, `?`); `cwd` is relative to
 the repository root and `command` is an executable/argument array, with no shell
-expansion. Declarations must already exist at the merge base and remain identical
-at the final head. Marker lines must be unique, exact, ordered lines in both
+expansion. Declarations must already exist at the merge base and retain the same
+path, cwd, markers and ordered command arguments at the final head; manifest key
+ordering is immaterial. Marker lines must be unique, exact, ordered lines in both
 versions; the markers themselves remain protected author content. Only existing
 modified text files qualify; additions, deletions, renames and opaque files keep
 their existing rules.
 
 On a region refusal, shared primary-change collection creates an independent
-scratch Git worktree at the exact head, using the existing local clone reference
-when available and otherwise fetching the immutable commits. Each generator runs
-from a fresh head checkout with the declared block interior cleared. It must
+scratch Git worktree at the exact head, using `localRepository`, the domain's
+`remediationCloneReferences[repo]`, or a matching `rootDir` checkout. The local
+clone must contain both immutable commits. Missing/unreadable references or
+commits retain the refusal; there is no public HTTPS or ambient-auth fallback.
+Each generator runs from a fresh head checkout with the declared block interior
+cleared. It must
 recreate the final-head block bytes exactly, so a no-op or hand-edited output
 cannot supply proof. Verified base-coordinate interiors are excluded from author
-line preservation; outside regions and other files are still evaluated normally.
+line preservation; these match the old-side coordinates of primary diff units,
+even when the author inserts or deletes lines above a block. Outside regions and
+other files are still evaluated normally.
 The proof binds the path, head SHA and merge base. It is collected after history
 cache reuse, so cached refusals can recover without purging history.
 
 Generators run with a sanitized environment, scratch HOME, no host credentials,
 network denied and writes confined to scratch, using macOS `sandbox-exec` or
-Linux `bwrap`. Each generator has a ten-second process-group deadline; each
-checkout/proof attempt has a thirty-second deadline. No dependency installation
+Linux `bwrap`. macOS permits reading the root directory entry and metadata of
+scratch ancestors for runtime startup, without granting reads of other descendants.
+Linux creates scratch mount parents explicitly and exposes only
+the dynamic loader cache from `/etc`, rather than host configuration. Each
+generator has a ten-second process-group deadline; each checkout/proof attempt has
+a thirty-second deadline. No dependency installation
 or network access is available to generators. Missing sandbox support, unavailable
 commits, generator failures, duplicate/missing markers and byte mismatches retain
 the existing refusal. This supplies evidence to the existing primary-change

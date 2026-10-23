@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { reconcileBuilderClass, resolveBuilderProvenanceRouting } from '../src/builder-provenance-routing.mjs';
@@ -341,4 +341,51 @@ test('operator reroute passes root-dir to ledger lookup and exact-head retrigger
   assert.deepEqual(reads, Array(2).fill({ repo: 'org/repo', prNumber: 12, headSha, rootDir }));
   assert.equal(retriggers.length, 1);
   assert.equal(retriggers[0][retriggers[0].indexOf('--root-dir') + 1], rootDir);
+});
+
+test('CLOSERINTENT-01: thrown ledger read detail is retained and repeated findings are quiet', async t => {
+  const { resolveBuilderProvenanceRoutingAsync } = await import('../src/builder-provenance-routing.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'routing-failure-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const warnings = [];
+  t.mock.method(console, 'warn', text => warnings.push(text));
+  const subject = { builderClass: 'codex', headSha };
+  const options = { rootDir, repo: 'fixture/repo', prNumber: 8,
+    readProvenance: () => { throw Error('synthetic spawn failure'); } };
+  for (const resolve of [resolveBuilderProvenanceRouting, resolveBuilderProvenanceRoutingAsync]) {
+    const result = await resolve(subject, options);
+    assert.equal(result.finding.detail, 'synthetic spawn failure');
+    assert.equal(result.deferClaim, true);
+  }
+  assert.equal(warnings.length, 1);
+  await resolveBuilderProvenanceRoutingAsync(subject, { ...options,
+    readProvenance: () => ({ ok: false, reason: 'ledger-read-failed', detail: 'changed synthetic failure' }) });
+  assert.equal(warnings.length, 2);
+  const auditPath = join(rootDir, 'data', 'builder-routing', `fixture%2Frepo-8-${headSha}.json`);
+  assert.equal(JSON.parse(readFileSync(auditPath)).detail, 'changed synthetic failure');
+  await resolveBuilderProvenanceRoutingAsync(subject, { ...options, readProvenance: () => ({ ok: true, actualHarness: 'codex' }) });
+  await resolveBuilderProvenanceRoutingAsync(subject, options);
+  assert.equal(warnings.length, 3, 'a recovered reader can report a new failure episode');
+});
+
+test('unchanged on-disk finding warms the shared routing cache', async t => {
+  const { resolveBuilderProvenanceRoutingAsync } = await import('../src/builder-provenance-routing.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'routing-cold-cache-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const warnings = [];
+  t.mock.method(console, 'warn', text => warnings.push(text));
+  const subject = { builderClass: 'codex', headSha };
+  const provenance = { ok: false, reason: 'ledger-read-failed', detail: 'synthetic failure' };
+  const options = { rootDir, repo: 'fixture/repo', prNumber: 8, readProvenance: () => provenance };
+  const expected = reconcileBuilderClass(subject, provenance);
+  const auditPath = join(rootDir, 'data', 'builder-routing', `fixture%2Frepo-8-${headSha}.json`);
+  mkdirSync(dirname(auditPath), { recursive: true });
+  writeFileSync(auditPath, JSON.stringify({ repo: options.repo, prNumber: options.prNumber,
+    headSha, ...expected.finding }, null, 2));
+  assert.deepEqual(resolveBuilderProvenanceRouting(subject, options), expected);
+  rmSync(auditPath);
+  // A second disk read would observe absence, recreate the audit and warn.
+  assert.deepEqual(await resolveBuilderProvenanceRoutingAsync(subject, options), expected);
+  assert.equal(existsSync(auditPath), false);
+  assert.deepEqual(warnings, []);
 });

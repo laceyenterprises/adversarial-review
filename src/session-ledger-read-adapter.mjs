@@ -650,7 +650,7 @@ function describePostgresSpawnFailure(result) {
 
 function queryPostgresRows(...args) { return runLedgerStepsSync(queryPostgresRowsSteps(...args)); }
 
-function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
+function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false, timeoutMs = null } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -707,7 +707,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
+        timeout: timeoutMs ?? loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
         input: script,
@@ -717,7 +717,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
       result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
-        timeout: loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
+        timeout: timeoutMs ?? loadAwareTimeoutMs(PSQL_TIMEOUT_MS),
         killSignal: PSQL_TIMEOUT_SIGNAL,
         maxBuffer: PSQL_MAX_BUFFER_BYTES,
       } };
@@ -870,6 +870,12 @@ const postgresLaunchColumns = `
     CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
       AND attname = 'ticket_ref' AND NOT attisdropped)
       THEN 'request.ticket_ref' ELSE 'NULL::text' END AS launch_ticket,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'target_repo' AND NOT attisdropped)
+      THEN 'request.target_repo' ELSE 'NULL::text' END AS launch_repo,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'head_sha' AND NOT attisdropped)
+      THEN 'request.head_sha' ELSE 'NULL::text' END AS launch_head,
     EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
       AND attname = 'metadata_json' AND NOT attisdropped) AS retry_has_metadata,
     EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
@@ -881,7 +887,8 @@ const postgresLaunchProjection = `json_build_object(
   'launch_request_id', request.launch_request_id, 'status', request.status,
   'updated_at', request.updated_at, 'terminal_at', request.terminal_at,
   'failure_class', request.failure_class,
-  'failure_detail', :launch_detail, 'ticket_ref', :launch_ticket`;
+  'failure_detail', :launch_detail, 'ticket_ref', :launch_ticket,
+  'target_repo', :launch_repo, 'head_sha', :launch_head`;
 
 // Only text on pre-16 needs the historical application-side fallback. Native
 // jsonb always joins the indexed expression directly, on every server version.
@@ -905,7 +912,8 @@ function postgresRetryReadSql({ snapshot = false } = {}) {
     FROM retry_chain chain
     JOIN LATERAL (
       SELECT launch_request_id, status, updated_at, terminal_at, failure_class,
-        :launch_detail AS failure_detail, :launch_ticket AS ticket_ref${snapshot ? ', metadata_json' : ''}
+        :launch_detail AS failure_detail, :launch_ticket AS ticket_ref,
+        :launch_repo AS target_repo, :launch_head AS head_sha${snapshot ? ', metadata_json' : ''}
       FROM launch_requests request WHERE request.launch_request_id = chain.launch_request_id
       LIMIT 1
     ) request ON true
@@ -938,19 +946,28 @@ export function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
   return runLedgerStepsAsync(readLaunchRequestSnapshotSteps(args), args);
 }
 
-// A missing row is only an observation, never proof that a submitted CLI cannot
-// still enqueue. Callers must independently prove that submission never began.
+// Empty key reads prove absence only after the caller fences the intent and
+// establishes that its dispatch deadline has expired.
 export function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
   return runLedgerStepsAsync(readLaunchRequestByIdempotencyKeySteps(args), args);
 }
 
 function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget, ledgerDbPath,
-  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
+  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
   if (!normalizeText(idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
   const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
     rootDir, hqRoot, requiredTables: ['launch_requests'] });
   if (!resolution.ok) return resolution;
-  const columns = 'launch_request_id, idempotency_key, ticket_ref, target_repo, status, requested_at';
+  let columns = 'launch_request_id, idempotency_key, status, requested_at';
+  if (resolution.target.backend === 'sqlite') {
+    for (const column of ['ticket_ref', 'target_repo', 'head_sha']) {
+      const probe = sqliteTableHasColumn(resolution.target, 'launch_requests', column);
+      if (!probe.ok) return probe;
+      columns += probe.exists ? `, ${column}` : `, NULL AS ${column}`;
+    }
+  } else {
+    columns += ', :launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha';
+  }
   if (resolution.target.backend === 'sqlite') {
     return querySqliteRows(resolution.target,
       `SELECT ${columns} FROM launch_requests WHERE idempotency_key = @key LIMIT 2`,
@@ -958,9 +975,10 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
   }
   if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
   return yield* queryPostgresRowsSteps(resolution.target,
-    `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
+    `${postgresLaunchColumns}
+     SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests request
        WHERE idempotency_key = :'intent_key' LIMIT 2) receipt`,
-    { spawnSyncImpl, readOnly: true, psqlVars: [['intent_key', idempotencyKey]] });
+    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['intent_key', idempotencyKey]] });
 }
 
 // Legacy intents lack an admission key. Query the whole ticket, without a repo
@@ -971,7 +989,7 @@ export function readLaunchRequestsForTicketSinceAsync(args = {}) {
 
 function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
   ledgerTarget, ledgerDbPath, env = process.env, rootDir = process.cwd(), hqRoot,
-  spawnSyncImpl = spawnSync } = {}) {
+  spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
   if (!normalizeText(ticketRef) || typeof requestedAtOrAfter !== 'string'
     || !Number.isFinite(Date.parse(requestedAtOrAfter))) {
     return { ok: false, reason: 'invalid-ticket-attempt-query' };
@@ -992,7 +1010,7 @@ function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
     `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
        WHERE ticket_ref = :'ticket_ref'
          AND (requested_at >= :'since'::timestamptz OR requested_at IS NULL) LIMIT 1) receipt`,
-    { spawnSyncImpl, readOnly: true, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
+    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
 }
 
 function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,
@@ -1095,7 +1113,13 @@ function* readLaunchRequestStatusFromLedgerSteps({
     const ticketColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'ticket_ref');
     if (!ticketColumn.ok) return ticketColumn;
     const ticketSelect = ticketColumn.exists ? 'ticket_ref' : 'NULL AS ticket_ref';
-    sqliteLaunchProjection = `launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}`;
+    const identityColumns = [];
+    for (const column of ['target_repo', 'head_sha']) {
+      const probe = sqliteTableHasColumn(resolution.target, 'launch_requests', column);
+      if (!probe.ok) return probe;
+      if (probe.exists) identityColumns.push(column);
+    }
+    sqliteLaunchProjection = `launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}${identityColumns.length ? ', ' + identityColumns.join(', ') : ''}`;
     queried = querySqliteRows(
       resolution.target,
       `SELECT ${sqliteLaunchProjection}

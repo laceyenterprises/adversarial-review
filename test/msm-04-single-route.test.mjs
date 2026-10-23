@@ -110,7 +110,7 @@ function testDeps({ execDelay = null } = {}) {
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       if (waitForRelease) await waitForRelease;
-      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
     },
     guardStackedBaseImpl: async () => null,
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',

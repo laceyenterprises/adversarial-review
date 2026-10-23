@@ -351,11 +351,32 @@ if (scenario === 'clean') {
       readDispatchDrainStatusImpl: async () => ({ isDraining, epoch: 7 }),
       execFileImpl: async (_command, args) => { assert.ok(args.includes('dispatch'));
         if (isDraining) throw Object.assign(new Error('synthetic deploy'), { code: 6, stderr: '[hq] dispatch refused: drain in effect (epoch=7)' });
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`, dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
       readTemplateImpl: () => 'Synthetic hammer <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>', writeFileImpl() {},
       resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
       readBuildCompletionSignalForPrImpl: () => ({ ok: false }), readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }), logger: quiet,
     };
+    // CLOSERINTENT-01: explicit foreign output ends this attempt immediately.
+    const foreignRoot = join(rootDir, 'foreign-receipt');
+    let foreign = true;
+    const foreignArgs = { ...closerArgs,
+      dispatchContext: { ...closerArgs.dispatchContext, rootDir: foreignRoot,
+        hqRoot: join(foreignRoot, 'hq'), closerTokenRollupPollDelaysMs: [] },
+      readLaunchRequestStatusImpl: () => ({ ok: false }),
+      execFileImpl: async () => ({ stdout: JSON.stringify({
+        ticketRef: foreign ? `CONFLICT-REBASE-${prNumber}` : `AMA-PR-${prNumber}`,
+        launchRequestId: foreign ? 'synthetic-foreign' : 'synthetic-own',
+      }) }),
+    };
+    assert.equal((await maybeDispatchAmaCloser(foreignArgs)).reason, 'non-hammer-launch-not-adopted');
+    const refused = readAmaCloserDispatchRecord(foreignRoot, identity());
+    assert.equal(refused.state, 'no-dispatch');
+    assert.equal(refused.retryCount, 0);
+    assert.equal(refused.launchRequestId, null);
+    assert.equal(readAmaCloserLease(foreignRoot, identity()).terminalOutcome, 'superseded');
+    assert.equal(existsSync(refused.scratchDir), false);
+    foreign = false;
+    assert.equal((await maybeDispatchAmaCloser(foreignArgs)).dispatched, true);
     // TERMLEASE-01: terminal no-merge ownership ends without an ownerless delay.
     for (const outcome of ['superseded', 'failed-without-merge', 'deferred']) {
       const terminalRoot = join(rootDir, `terminal-lease-${outcome}`);
@@ -370,7 +391,7 @@ if (scenario === 'clean') {
         readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
         execFileImpl: async (_cmd, args) => {
           assert.ok(args.includes('dispatch')); launches++;
-          return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-fresh' }) };
+          return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`, launchRequestId: 'synthetic-fresh' }) };
         },
       });
       assert.equal(result.dispatched, true, JSON.stringify(result));
@@ -757,13 +778,16 @@ if (scenario === 'clean') {
   await reconcilePreReceiptIntent(rootDir, identity(), {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }), now: recoveryNow, deliverAlertImpl: refuse });
   updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
-    dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-smoke-prepared' }));
+    dispatchPhase: 'submitting', dispatchIdempotencyKey: 'ama-closer-smoke-expired', dispatchTimeoutMs: 600_000 }));
   const noLaunch = await reconcilePreReceiptIntent(rootDir, identity(), {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     now: recoveryNow, readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic dead owner'), { code: 'ESRCH' }); },
   });
   assert.equal(noLaunch.status, 'no-launch');
+  assert.equal(noLaunch.record.reason, 'keyed-no-launch-proven');
+  assert.equal(noLaunch.evidence.ok, true);
+  assert.equal(noLaunch.evidence.rowCount, 0);
   assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'deferred');
   const legacyIdentity = { ...identity(), prNumber: prNumber + 2 };
   updateAmaCloserDispatchRecord(rootDir, legacyIdentity, () => ({ ...legacyIdentity,
@@ -814,7 +838,7 @@ if (scenario === 'clean') {
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
-    nativeFinalHammerWake: true, terminalIntentRetiredWithoutPage: true, inspectionPagedOnce: true, unresolvedIntentHoldsNoFleetCapacity: true,
+    nativeFinalHammerWake: true, terminalIntentRetiredWithoutPage: true, inspectionPagedOnce: true, expiredKeyedIntentSettled: true, unresolvedIntentHoldsNoFleetCapacity: true,
     repairConclusions, generatedPromptSettled: true,
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };

@@ -137,7 +137,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
         },
         execFileImpl: async (cmd, argv) => {
           execCalls.push({ cmd, argv });
-          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer_7313' }), stderr: '' };
+          return { stdout: JSON.stringify({ ticketRef: argv[argv.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer_7313' }), stderr: '' };
         },
         readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
         writeFileImpl: () => {},

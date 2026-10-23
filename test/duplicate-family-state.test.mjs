@@ -1696,3 +1696,23 @@ test('DUPTERM-01: Postgres provenance keeps terminal PR authority in local revie
       [{ pr_state: 'merged' }, { pr_state: 'merged' }]);
   } finally { db.close(); }
 });
+
+test('CLOSERINTENT-01: census keeps adapter detail and logs each failure change once', async () => {
+  const db = memoryDb();
+  const errors = [];
+  const options = { db, subjectEntries: [subject(481)], repoPath: 'fixture/census',
+    rootDir: '/synthetic/closerintent-census', env: {}, log: { log() {}, error: (...args) => errors.push(args.join(' ')) } };
+  try {
+    let detail = 'psql timed out after 9000ms';
+    const readBuildCompletionSignalForPrImpl = async () => ({ ok: false, reason: 'ledger-read-failed', detail });
+    for (let i = 0; i < 2; i++) {
+      const result = await runDuplicateFamilyCensusForWatcher({ ...options, readBuildCompletionSignalForPrImpl });
+      assert.ok(result.error.message.includes(detail));
+    }
+    assert.equal(errors.length, 1);
+    detail = 'synthetic spawn failure';
+    await runDuplicateFamilyCensusForWatcher({ ...options, readBuildCompletionSignalForPrImpl });
+    assert.equal(errors.length, 2);
+    assert.ok(errors[1].includes(detail));
+  } finally { db.close(); }
+});

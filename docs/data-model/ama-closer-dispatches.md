@@ -7,9 +7,63 @@
 
 ## Interrupted dispatch intents (LAC-2081)
 
+CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output
+and live-retry adoption must name the exact `AMA-PR-<number>` closer ticket;
+foreign tickets, repositories or heads are refused and logged. An unverified
+response stays fenced and unreceipted for exact-key recovery. The attempt key
+binds that recovery to its dispatch head; an explicit different ledger head
+cannot be adopted.
+Ledger repository metadata may be absent or null in older schemas; when present,
+it must match the full repository name or its basename. The exact closer ticket
+is always required, and an explicit head mismatch still refuses adoption.
+Exact-key reads project missing identity columns as null on SQLite and Postgres.
+
+An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
+reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
+prior retry count, and remove its unused scratch/prompt. Missing ticket evidence
+still stays fenced for exact-key recovery. After a live logical-job refusal,
+unreadable or mismatched retry evidence ends the new attempt as `dispatch-failed`
+and releases its pending lease. Preserve the predecessor LRQ and artifacts on
+their original head for the next probe; charge the existing bounded failure
+budget and suppress fallback while that evidence is unresolved.
+
+Unverified dispatch receipts log `ama_closer.launch_receipt_unverified`; explicit
+identity conflicts log `ama_closer.launch_identity_mismatch`. A foreign lease skips
+the receipt lookup and records query reason `lookup-skipped-foreign-lease` with
+no query attempts.
+
+Receipt lookups use the ledger's load-aware 30-second nominal budget with at
+most three attempts and 100/200ms backoff for adapter-marked transient failures.
+`preReceiptReconciliation.query` records key or ticket query, timeout, bounded
+attempt results, adapter reason and detail, backend/source, row count and launch
+IDs. Failure diagnostics log when the evidence changes. Census and builder
+routing retain ledger failure details and suppress unchanged repeated failures.
+
+After the persisted dispatch deadline, a successful empty idempotency-key query
+settles a fenced keyed intent as `no-dispatch`, reason `keyed-no-launch-proven`.
+Before the deadline, a submitting intent remains held. Replaced or foreign-host
+leases and leases with launch receipts cannot be cleared by empty-key evidence.
+Settlement defers a matching pending lease and rolls back the intent retry
+increment once; retry ledgers and merge eligibility remain authoritative.
+
+`bin/settle-legacy-closer-intent.mjs` also supports expired keyed intents. For
+keyed recovery it additionally queries the entire closer ticket at or after
+`lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
+proves absence even if a recorded predecessor ID names another worker or the
+key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
+that window refuses this ticket-based recovery. Dry-run remains the default;
+apply requires the directory owner's UID, an operator reason, and a durable
+`settlement-authorized` audit before lease/intent mutation, followed by the
+completion audit. Audit evidence includes the recorded ID and both queries.
+A promoted lease can be removed only if the same successful key query proves
+its exact recorded ID belongs to a foreign ticket and the ticket query proves
+closer absence; removal compares the unchanged lease under its mutation lock.
+Source changes authorize no live recovery action.
+
+
 CLOSERGATE-01: an unresolved `dispatching` record holds only its own PR/head.
 Pre-receipt records never appear as global active launches or consume concurrent
-launch capacity. Keyed intents retain their own exclusion regardless of age;
+launch capacity. Keyed intents retain their own exclusion until proven absent or receipted;
 keyless legacy records retain stale/orphan escapes in active-record listings.
 Authoritative merged/closed PR metadata bypasses intent holds. No age escape
 fabricates a no-launch outcome or cancels a keyed intent. Age, a dead watcher,
@@ -49,8 +103,8 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
   as `deferred`. The intent's retry increment rolls back once. A crash after
   terminalization resumes this transition. The original owner may also settle
   its own prepared intent on a pre-submit return while still holding the fence.
-- Keyed submitted attempts without a receipt, ambiguous, missing or unreadable
-  evidence stay explicitly unknown. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
+- Keyed submitting attempts before their deadline, ambiguous or unreadable
+  evidence stay explicitly unknown. Successful empty-key reads after expiry settle absence. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
   `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
   deadline is the original dispatch timeout (30 minutes from first observation
   if unavailable). On expiry status becomes `inspection-required`; ownership
@@ -59,7 +113,7 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
   (legacy fallback: original attempt timestamp), so enqueue retries after a
   crash cannot duplicate a page. `alertedAt` records successful enqueue; failures
   log and retry without releasing ownership. Dry-run never enqueues. Repeated
-  diagnostics write at most once per minute and log only status changes. No accumulating history or launch-timestamp refresh is added.
+  diagnostics write at most once per minute and log changes in status, reason or query evidence. No accumulating history or launch-timestamp refresh is added.
 
 ### Legacy ticket/time evidence (LEGACYINTENT-01)
 
@@ -80,7 +134,7 @@ Missing leases are preserved; replaced owners or leases with launch receipts rem
 held. A matching pending legacy lease can settle even if its original watcher
 PID is still alive: the canonical ledger query supplies the proof.
 The next ordinary closer admission can proceed under the existing eligibility
-and retry rules. Keyed attempts retain their stricter prepared/submitting proof.
+and retry rules. Keyed attempts also permit successful empty-key proof after their dispatch deadline.
 
 `preReceiptReconciliation.query` records the bounded query kind, ticket,
 inclusive attempt-time lower bound, limit (one row is sufficient to refuse),
@@ -152,7 +206,9 @@ An unproven refusal, including one without a predecessor LRQ, follows the charge
 suppress merge-agent fallback by claiming fleet ownership. If the refusal-time
 retry probe is itself unreadable, charge the failure but retain the predecessor
 LRQ and artifacts on its original identity as `dispatch-failed`, reason
-`dispatch-retry-chain-unreadable`; suppress fallback until a readable probe can
+`dispatch-retry-chain-unreadable` (or `dispatch-retry-identity-mismatch` for a
+foreign descendant); release the new pending lease and remove its unused artifacts.
+Suppress fallback until a readable probe can
 resolve ownership. No dispatched lease is fabricated. Retry-query failures retain
 the successfully read base status with `retryChainUnreadable: true`; that status alone cannot authorize lease settlement, scratch cleanup or
 re-dispatch. Malformed unrelated JSON metadata is skipped by both ledger backends.
@@ -274,11 +330,12 @@ assertion that the PR or branch was deleted.
 A later CI-blocked wake refusal does not retire an earlier `dispatching` intent.
 The LAC-2081 reconciliation contract above supersedes dead-owner/age rollback.
 
-- A newly returned launch receipt retains `state: dispatched`, its launch IDs,
-  and its active lease when ticket evidence is unavailable. It is charged
-  conservatively until reconciliation; authoritative foreign-ticket evidence
-  retires the record and refunds that charge once. Missing ticket evidence
-  cannot create a `no-dispatch` record or authorize another spawn.
+- New output without ticket evidence retains an unreceipted `dispatching` intent
+  and pending lease for exact-key recovery. An explicit foreign identity settles
+  only the new attempt as `no-dispatch`, with a superseded lease and prior retry
+  count. Legacy receipted records retain their conservative charge until
+  authoritative foreign-ticket evidence retires them and refunds that charge
+  once. Missing ticket evidence cannot authorize another spawn.
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
   from follow-up consumption until native proof settles the intent; receipted
   records retain their established status/observation window.

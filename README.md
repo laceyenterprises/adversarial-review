@@ -1136,7 +1136,7 @@ failed external checks on the candidate head, restricted to configured required
 contexts when present, carrying those names into its prompt. Ownership and wake admission
 exclude the pipeline's adversarial-gate status; an empty same-head verdict
 alone cannot establish an unreviewed CI-repair head. LAC-2081 supersedes wake-refusal cleanup. Unknown `dispatching` intents retain
-same-PR/head exclusion regardless of age. CLOSERGATE-01 excludes all pre-receipt
+same-PR/head exclusion until receipt or successful absence proof. CLOSERGATE-01 excludes all pre-receipt
 intents from global launch admission and capacity; keyless legacy records retain
 stale/orphan active-record escapes, and terminal PR metadata bypasses holds.
 Native per-PR snapshots and bounded live directory/CLI PR reads retire confirmed
@@ -1151,7 +1151,17 @@ prepared/submitting boundary let native reconciliation recover an exact receipt
 or settle proven no-submission. LEGACYINTENT-01 also settles a legacy no-key
 intent when the canonical ticket ledger has no rows at or after its attempt
 time. The audited single-PR command defaults to dry-run and shares automatic
-reconciliation; any row or unreadable evidence retains the hold. Unprovable absence reaches a fixed diagnostic
+reconciliation. CLOSERINTENT-01 also settles keyed intents after their dispatch deadline
+on successful empty-key evidence, or through audited empty closer-ticket evidence.
+New attempts never inherit predecessor receipt IDs; adoption requires the closer ticket
+and matching supplied repository/head context. Absent or null ledger repository
+metadata supports older schemas; a missing closer ticket or explicit identity mismatch
+still refuses adoption. Explicit foreign receipts settle only the new attempt as
+`no-dispatch`, supersede its pending lease, refund its retry increment and clean
+unused artifacts. Live-claim retry probe failures settle `dispatch-failed`, release
+the new pending lease and preserve predecessor evidence on its original head;
+the existing bounded failure charge remains. Load-aware ledger reads retry transient failures
+and preserve reason/detail evidence; unchanged failures log once. Unprovable absence reaches a fixed diagnostic
 inspection deadline and retains ownership; no lease, budget or merge gate is
 waived. See [the owner runbook](docs/follow-up-runbook.md#interrupted-dispatch-intents-lac-2081).
 Hammer launch ownership includes all transitive dispatcher retries. A live
@@ -1336,7 +1346,11 @@ prepared no-submission settlement, fixed unknown inspection diagnostics and
 idempotent retry accounting (`test/ama-pre-receipt-intent.test.mjs`). LEGACYINTENT-01
 extends the smoke with legacy unreadable-evidence holds and empty ticket/time
 settlement to a deferred lease; unit fixtures cover in-range evidence and audited
-operator dry-run/apply. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
+operator dry-run/apply. CLOSERINTENT-01 additionally tests deadline-bound keyed absence,
+foreign receipt refusal and immediate next-poll readmission in the smoke, plus
+same/moved-head refusal-time retry probe settlement and predecessor preservation,
+missing/null repository compatibility in exact-key and live-retry unit fixtures, scaled timeouts, transient retries, failure detail/deduplication
+and audited keyed settlement. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
 ownership agree for `FAILURE`, `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`,
 `ACTION_REQUIRED` and `ERROR`.
 The smoke also verifies foreign-host pending ownership waits without a local PID
@@ -1597,21 +1611,21 @@ stateDiagram-v2
     state "no-dispatch" as s9
     state "completed" as s10
     s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
-    s0 --> s9: hammer-dispatch.30 fenced prepared attempt with dead matching owner and absent key, or legacy empty successful ticket/time ledger query, proves no submission; defer lease and refund intent retry once
+    s0 --> s9: hammer-dispatch.30 fenced prepared attempt with dead matching owner and absent key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
     s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
     s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission
     s4 --> s9: hammer-dispatch.27 retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled
     s3 --> s3: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
-    [*] --> s0: hammer-dispatch.01 persist launch intent
+    [*] --> s0: hammer-dispatch.01 persist launch intent with empty receipt IDs; adopt only own closer ticket and matching repo/head context
     s0 --> s1: hammer-dispatch.02 launch result: dispatched
     s0 --> s4: hammer-dispatch.03 transient launch refusal or unknown live head branch within fork horizon: release pending lease and preserve budget
     s0 --> s9: hammer-dispatch.28 unidentified fork still unresolved after six hours: release pending lease, preserve budget, stop same-head probes for operator inspection
     s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
     s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
-    s0 --> s7: hammer-dispatch.06 explicit launch failure; later wake refusal cannot settle an earlier interrupted intent
-    s0 --> s9: hammer-dispatch.07 launch result: no-dispatch
+    s0 --> s7: hammer-dispatch.06 explicit launch failure, including unreadable/mismatched refusal-time retry probe: release new pending lease, charge bounded failure, preserve predecessor receipt/artifacts on original head; later wake refusal cannot settle an earlier interrupted intent
+    s0 --> s9: hammer-dispatch.07 explicit foreign receipt: supersede new pending lease, refund attempt and clean unused artifacts without adopting foreign launch
     s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
     s1 --> s7: hammer-dispatch.10 failed outcome reconciled

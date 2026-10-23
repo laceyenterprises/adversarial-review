@@ -64,7 +64,7 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
       const result = await maybeDispatchAmaCloser({ ...args,
         dispatchContext: { ...args.dispatchContext, hqRoot: join(f.rootDir, 'hq'),
           hqOwnerUser: userInfo().username, currentUser: userInfo().username },
-        execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM',
+        execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: `AMA-PR-${prNumber}`,
           dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-launch' }) }),
         readTemplateImpl: () => 'fixture hammer <<PR_URL>> <<AMA_TRAILERS>>',
         writeFileImpl() {},

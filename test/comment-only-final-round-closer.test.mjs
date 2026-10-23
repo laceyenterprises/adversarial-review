@@ -201,7 +201,7 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
       },
       execFileImpl: async (cmd, args) => {
         execCalls.push({ cmd, args });
-        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
       },
       readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
       writeFileImpl: () => {},

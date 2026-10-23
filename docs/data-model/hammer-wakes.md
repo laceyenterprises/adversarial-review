@@ -7,18 +7,14 @@
 
 ## Purpose
 
-`data/hammer-wakes/` records event-driven watcher wake attempts for PR heads
-that have cleared the AMA merge-eligibility snapshot or native final-hammer
-dispatch admission for exhausted CI repair, or whose only miss is `stale-head`
-and whose exact head is recorded as `workerPushedHeadSha` by the suppressed
-comment-only final round for the reviewed head. That handoff uses the same
-terminal job lookup as re-review suppression; another unreviewed head remains
-stale. The hammer performs terminal validation before merge.
-CEILINGPUSH-01 also admits a ceiling-routed moved head whose only merge misses
-are `stale-head` and/or `verdict-not-eligible`, with no active remediation.
-Its reason is `review-ceiling-terminal-remediation`; the older review's findings
-remain terminal-remediation input. This changes wake admission only: the merge
-verdict allowlist and exact-head checks remain authoritative.
+NXA-03 routes the closure caller from the shared immutable snapshot and
+`nextAction(snapshot)` decision. A new hammer dispatch intent or daemon merge
+intent wakes the watcher; live owners, reconciliation, review/remediation,
+holds and deferred dispatches keep their named owners without a hammer wake.
+Red CI (including runner-less failure), conflict, final findings and a proven
+suppressed push can request repair. Wake admission grants no merge permission.
+Other caller routing remains legacy with observational shadow. The legacy
+eligibility adapter remains available for a source revert of this caller.
 The files are a reservation and audit trail for a latency optimization only: they do not grant
 merge authority, bypass the watcher, or replace the normal poll path.
 
@@ -32,8 +28,8 @@ Directory: `data/hammer-wakes/`
 
 | File | Shape | Contract |
 |---|---|---|
-| `<sha256>.json` | Current wake audit | One current reservation per `(repo, PR, head SHA, eligibility reason)`. The filename is the SHA-256 digest of `<repo>#<pr>@<head>:<eligibilityReason>`. |
-| `<sha256>.retry-<12hex>.json` | Archived retry hand-off audit | A failed current record, a delivered wake for a reconciled no-merge attempt, or a `reserved` record abandoned for more than 10 minutes, moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. Older `.failed-<12hex>.json` archives remain under retention. |
+| `<sha256>.json` | Current wake audit | One current reservation per `(repo, PR, head SHA, eligibility reason, wake attempt)`. The digest input is `<repo>#<pr>@<head>:<eligibilityReason>:attempt:<wakeAttemptKey>` for shared routing. Legacy records omit the attempt suffix. |
+| `<sha256>.retry-<12hex>.json` | Archived retry hand-off audit | A failed current record or a `reserved` record abandoned for more than 10 minutes (also delivered no-merge wakes under the retained legacy adapter), moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. Older `.failed-<12hex>.json` archives remain under retention. |
 
 ## Wake Audit Record
 
@@ -44,12 +40,14 @@ Directory: `data/hammer-wakes/`
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. Invalid, zero, fractional, boolean, null, or blank values are rejected before reservation. |
 | `headSha` | string | Live PR head SHA admitted for the wake. |
-| `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`; exhausted native CI repair uses `exhausted-final-hammer-ci-repair`; ceiling handoffs use `review-ceiling-terminal-remediation`. |
+| `eligibilityReason` | string | `shared-next-action` for the adopted caller; retained legacy reasons continue to identify older records. |
+| `wakeAttemptKey` | optional string | Shared routing uses `initial`, or the completed launch receipt ID for a retryable no-merge decision (numeric decision attempt when no receipt ID is available); completed retry descendant IDs add a stable set digest because fleet retries reuse ancestor receipts. Independent of reason/deadline changes. |
+| `nextAction` | optional object | Shared action, actor, original reason, deadline, head, decision key, evidence references, queue intent/deferral, pass ID and generation. No raw evidence. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
 | `route` | string | Current value is `watcher-ama-merge-authority`, because the wake targets the existing watcher AMA route. |
 | `requestId` | string or null | Watcher wake request ID after a successful transport confirmation. |
-| `retryOfLaunchRequestId` | optional string | Terminal no-merge lease LRQ consumed by this wake. Prevents repeated wakes for that same finished attempt; the next distinct failed attempt may wake again. |
+| `retryOfLaunchRequestId` | optional string | Completed no-merge LRQ consumed by this wake; the retained receipt can outlive its lease. Prevents repeated wakes for that same finished attempt; the next distinct failed attempt may wake again. |
 | `requestedAt` | string | Watcher wake timestamp after a successful transport confirmation. |
 | `reason` | string | Failure or duplicate reason on returned events and failed audit records. |
 | `error` | string | Best-effort diagnostic message for failed audit records. |
@@ -57,15 +55,15 @@ Directory: `data/hammer-wakes/`
 
 ## Operational Contract
 
-- Native exhausted CI repair shares `ciBlockedHammerReasonsCovered` with the
-  closer. Failed required checks and a stale verdict on the unreviewed head
-  are hammer work. A current-head blocking verdict, pending-only CI, active
-  remediation and other eligibility gates retain their refusals. The daemon
-  and hammer's actual merge predicates still require green CI and exact-head
-  validation. Non-native wake admission is unchanged.
-- CI-repair latency events carry `reason: exhausted-final-hammer-ci-repair`.
-  They remain in telemetry but are excluded from `clean_verdict_to_hammer_wake`;
-  repair admission does not assert a fresh clean verdict.
+- The caller resolves one shared snapshot/decision pair before waking and
+  passes that exact pair to the observational shadow. Enrichment preserves
+  runner-less checks, drain/capacity, durable anchors and semantic rebase proof.
+  Retained dispatch receipts supply launch evidence even after lease removal;
+  retry descendants are read through the existing bounded ledger reader.
+  Sticky succeeded receipts select remote receipt reconciliation, not retry.
+- Shared latency events carry the original decision reason and `nextAction`
+  projection. Only daemon-merge wakes end `clean_verdict_to_hammer_wake`;
+  repair wakes remain in telemetry. Older events retain their existing filter.
 - Writes are best-effort and synchronous. Audit directory, audit write, latency
   telemetry, and diagnostic logging failures must not abort AMA closure.
 - The success boundary is the watcher wake transport. Once the watcher confirms
@@ -73,14 +71,14 @@ Directory: `data/hammer-wakes/`
   latency-event failures are annotations and do not make the wake retryable.
 - Reservation creation uses atomic exclusive create. Readers should not observe
   partially written JSON at the final reservation path.
-- A current `requested` record suppresses duplicate wakes for the same
-  `(repo, PR, head SHA, eligibility reason)` while its hammer runs or after a
-  successful merge. A terminal lease with a reclaimable no-merge outcome permits
-  one new wake per distinct LRQ after the matching dispatch record observes
-  terminal launch status, using the ordinary retry election. A worker audit
-  written before process exit cannot re-arm the wake. Wakes grant
-  no additional retry budget; closer admission still enforces all caps. Retry
-  latency-event keys include that LRQ so each delivered attempt is observable.
+- A current `requested` record suppresses duplicates for the same attempt.
+  A reconciled retryable no-merge decision gets a new attempt key from the
+  completed LRQ and completed retry descendant IDs, even on the same head
+  and after terminal lease removal. Row order and timestamp changes do not rearm.
+  Live descendants or unreadable retry chains never rearm it. Transport does
+  not re-read launch state or final-push proof for shared routing. The retained
+  legacy adapter still uses terminal lease/dispatch evidence to rearm.
+  Wakes grant no retry budget; closer admission enforces all existing caps.
   A current `failed` record may be
   archived and retried by a bounded retry election. A `reserved` record whose
   `observedAt` is more than 10 minutes old takes the same path; if that field

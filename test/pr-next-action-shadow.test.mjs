@@ -128,7 +128,7 @@ test('round enrichment preserves the original pass remediation owner with failed
   const pass = base({ observations: { remediation: {
     job: { status: 'in_progress', headSha: HEAD }, completedRounds: 1, maxRounds: 3,
   } } });
-  const run = followUpJob => shadowNextAction({ source: 'closure-orchestration', passSnapshot: pass, env,
+  const run = (followUpJob, passSnapshot = pass) => shadowNextAction({ source: 'closure-orchestration', passSnapshot, env,
     evidence: closureOwnerShadowEvidence({ currentHead: HEAD, lease: null, checks: 'FAILURE', roundsLeft: true,
       followUpJob }, { autonomousMergeExecutionEnabled: true }), sink: () => {}, now: () => Date.parse(ANCHOR) });
   const retained = await run(undefined);
@@ -137,7 +137,9 @@ test('round enrichment preserves the original pass remediation owner with failed
   assert.equal(retained.decision.round, 2, 'inherited round counts are preserved too');
   const shared = await shadowNextAction({ source: 'posted-review', passSnapshot: pass, env, sink: () => {} });
   assert.equal(shared.decision, retained.decision);
-  const replaced = await run({ status: 'completed', headSha: HEAD });
+  const samePass = await run({ status: 'completed', headSha: HEAD });
+  assert.equal(samePass.decision, retained.decision, 'new facts cannot overwrite a resolved generation');
+  const replaced = await run({ status: 'completed', headSha: HEAD }, base());
   assert.deepEqual([replaced.decision.reason, replaced.decision.queue.intent], ['ci-red', 'dispatch'],
     'explicit new job evidence replaces the inherited owner');
   assert.equal(pass.observations.remediation.value.job.status, 'in_progress');
@@ -314,6 +316,7 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
     const rootDir = mkdtempSync(join(tmpdir(), 'nxa-closure-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const effects = [];
+    let wakeShared;
     const pass = deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head, observedAt: ANCHOR });
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber, currentRevisionRef: head, logger: quiet,
       passSnapshot: pass, now: () => Date.parse(ANCHOR),
@@ -342,13 +345,16 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
       probeClosureOwnershipImpl: async () => ({ owned: false, uncertain: false }),
       observeClosureWaitImpl: async () => ({}),
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible' }),
-      requestEligibleHammerWakeImpl: payload => { effects.push(['wake', payload.headSha ?? null]); return { outcome: 'skipped' }; },
+      requestEligibleHammerWakeImpl: payload => {
+        wakeShared = payload.shared;
+        effects.push(['wake', payload.headSha ?? null]); return { outcome: 'skipped' };
+      },
       maybeDispatchAmaCloserImpl: async payload => {
         effects.push(['closer', payload.dispatchContext?.dispatchReason ?? null]);
         return { dispatched: false, skipMergeAgent: true, reason: 'synthetic-probe' };
       },
     });
-    return { result, effects, pass };
+    return { result, effects, pass, wakeShared };
   };
   const plain = await runOnce();
   setNextActionShadowSinkForTesting(() => { throw new Error('synthetic sink failure'); });
@@ -365,6 +371,7 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
   assert.ok(plain.result.closureOwner, JSON.stringify(plain.result));
   // The orchestration registered its enriched decision for this pass.
   const shared = await shadowNextAction({ source: 'posted-review', passSnapshot: recorded.pass, env, now: () => Date.parse(ANCHOR) });
+  assert.equal(shared.decision, recorded.wakeShared.decision, 'wake and shadow share the decision object');
   assert.equal(shared.decision.passId, null);
   assert.equal(shared.decision.head, HEAD);
   assert.notEqual(shared.decision.reason, 'pr-unknown', 'the enriched decision, not the bare pass, reached posted-review');

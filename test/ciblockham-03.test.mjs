@@ -130,11 +130,12 @@ test('CEILINGPUSH-01: moved green head dispatches one terminal hammer with the o
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(launches.length, 1);
   assert.equal(wakes[0].outcome, 'requested');
-  assert.equal(wakes[0].eligibilityReason, 'review-ceiling-terminal-remediation');
+  assert.equal(wakes[0].nextAction.reason, 'review-ceiling');
   assert.equal(readAmaCloserLease(args.rootDir, { repo, prNumber, headSha: head }).status, 'dispatched');
   await maybeDispatchAmaClosureFor(args);
   assert.equal(launches.length, 1, 'a live lease prevents duplicate hammers');
-  assert.equal(wakes[1].outcome, 'duplicate');
+  assert.equal(wakes[1].outcome, 'skipped');
+  assert.ok(['live-owner', 'ownership-unreadable'].includes(wakes[1].nextAction.reason));
   const merge = evaluateMergeEligibility({ verdict: 'request-changes',
     requiredChecks: args.candidate.statusCheckRollup, candidateHead: head, validatedHead: reviewed,
     mergeable: 'MERGEABLE', labels: [], leaseHeld: true, branchProtectionRequired: false });
@@ -239,8 +240,8 @@ for (const mode of ['native', 'agentos']) {
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'synthetic-launch');
     assert.equal(launches.length, 1);
-    assert.equal(wakes[0].outcome, mode === 'native' ? 'requested' : 'skipped');
-    if (mode === 'native') assert.equal(wakes[0].eligibilityReason, 'exhausted-final-hammer-ci-repair');
+    assert.equal(wakes[0].outcome, 'requested');
+    assert.equal(wakes[0].nextAction.reason, 'ci-red-final');
     const record = readAmaCloserDispatchRecord(args.rootDir, { repo, prNumber, headSha: head });
     assert.equal(record.state, 'dispatched');
     assert.equal(record.dispatchReason, 'exhausted-final-hammer');
@@ -306,7 +307,8 @@ for (const parkedHead of [reviewed, head]) test('rescue requires a stale reviewe
   };
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.closureOwner.owner, parkedHead === reviewed ? 'hammer' : 'page', JSON.stringify(result));
-  assert.equal(wakes[0].outcome, parkedHead === reviewed ? 'requested' : 'skipped');
+  assert.equal(wakes[0].outcome, 'requested');
+  assert.equal(wakes[0].nextAction.reason, 'ci-red-final');
   const rescue = classifyRescue({ closureOwner: result.closureOwner, reviewHeadSha: reviewed, headSha: head });
   if (parkedHead === reviewed) {
     assert.equal(rescue.decision, 'hammer-eligible');
@@ -317,12 +319,13 @@ for (const parkedHead of [reviewed, head]) test('rescue requires a stale reviewe
   }
 });
 
-test('a parked row without a proven stale reviewed head retains ordinary wake admission', async t => {
+test('a parked current head wakes for CI repair while launch admission stays legacy', async t => {
   const { args, wakes, launches } = fixture(t);
   args.reviewStateRow.reviewer_head_sha = head;
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(wakes[0].outcome, 'skipped');
+  assert.equal(wakes[0].outcome, 'requested');
+  assert.equal(wakes[0].nextAction.reason, 'ci-red-final');
   assert.equal(launches.length, 1);
 });
 

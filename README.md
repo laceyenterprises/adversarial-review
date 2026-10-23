@@ -1128,9 +1128,9 @@ terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
-successor to `decideClosureOwner`. It runs in **shadow only** at the current
-closure consumers; legacy owners keep authority and effects. Disagreements and
-overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
+successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing; other
+closure consumers retain legacy authority and observational shadow.
+Disagreements and overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
 path only with `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`. The
 [shadow runbook](docs/RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02) and
 [reason inventory](docs/NEXT-ACTION-REASON-INVENTORY.md) describe rows, sources
@@ -1138,6 +1138,20 @@ and rollout acceptance. `node test/run-tests.mjs test/pr-next-action.test.mjs
 test/pr-next-action-shadow.test.mjs test/next-action-disagreements.test.mjs`
 verifies them with synthetic I/O. No lifecycle state, transition, state
 projection or smoke promise changes.
+
+NXA-03: the closure wake consumes the shared immutable snapshot/decision pair.
+Repair intent may wake on failed required CI, conflict or proven final push;
+execution still enforces existing launch and merge safety. Attempt keys rearm
+one wake per reconciled retryable no-merge launch on the same head, including
+after lease removal. Live owners and unreadable retry chains keep ownership.
+The handoff smoke verifies shared routing and attempt rearming. Offline coverage:
+`node test/run-tests.mjs test/hammer-wake-next-action.test.mjs
+ test/event-driven-hammer-wake.test.mjs test/wake-closeout.test.mjs`.
+Live acceptance remains pending: separately approved classification of 20 live
+shadow disagreements and the first eligible hammer through its terminal audit,
+remote outcome and next watcher pass. Workers do not perform this watch or deploy.
+Rollback is a source revert of the wake caller to its retained legacy adapter.
+No launch or merge authority, lifecycle state, CI cadence or runner change.
 
 LEASEDEADPID-01: ownership ignores pending leases whose local watcher is dead or
 whose pending reclaim window expired, using the same predicates as closer dispatch.
@@ -1215,8 +1229,9 @@ retain the refusal after packaging reasons are stripped.
 Legacy infrastructure cleanup without a current stop returns `none` after
 marking release, preserving ordinary admission. Release write failures log and
 retain the current decision; no dispatch statuses or lifecycle edges are added.
-Native exhausted CI repair wakes under the closer's shared dispatch rule,
-including the stale verdict on the unreviewed head. Rescue projects a
+NXA-03 exhausted CI repair wakes under the shared next-action decision,
+including the stale verdict on the unreviewed head and current-head final
+adjudication. Rescue projects a
 `[ci-regression-stopped]` or `[ci-regression-hammer-owned]` row with exhausted
 remediation or recorded final-round evidence to the final hammer only with live
 failed external checks on the candidate head, restricted to configured required

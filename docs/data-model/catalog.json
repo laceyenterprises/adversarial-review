@@ -612,12 +612,12 @@
     },
     {
       "id": "hammer-wakes",
-      "retryIdentity": "retryOfLaunchRequestId consumes one re-wake per reconciled terminal no-merge attempt.",
+      "retryIdentity": "Shared wakeAttemptKey binds initial or completed LRQ identity; retryOfLaunchRequestId records one re-wake per reconciled retryable no-merge attempt.",
       "title": "Hammer Wakes",
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",
       "schemaSurface": "src/hammer-wake.mjs",
-      "relatedSchemaSurfaces": ["src/ama/review-cycle-cap-route.mjs", "src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/ama-closure-orchestration.mjs"],
       "owner": "AMA event-driven hammer wake diagnostics"
     },
     {

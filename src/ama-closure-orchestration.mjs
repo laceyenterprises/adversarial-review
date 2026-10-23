@@ -82,9 +82,8 @@ import {
   readAmaCloserLease,
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
-import { hammerWakeEligibility, requestEligibleHammerWake } from './hammer-wake.mjs';
+import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import {
-  CLOSER_AUTHORED_STALE_WAKE_REASON,
   closerAuthoredStaleEligible,
   proveCloserAuthoredStaleHead,
   writeCloserAuthoredStaleAudit,
@@ -929,7 +928,8 @@ async function maybeDispatchAmaClosureForInner({
     const candidate = options.candidate || {};
     void shadowNextActionLater({ source: 'closure-orchestration', legacy: result.closureOwner,
       passSnapshot: options.passSnapshot || null, repo: options.repoPath, prNumber: options.prNumber,
-      rootDir: options.rootDir || ROOT, evidence: () => closureOwnerShadowEvidence(input, {
+      rootDir: options.rootDir || ROOT, shared: closureOwnerSink.shared || null,
+      evidence: () => closureOwnerShadowEvidence(input, {
         subjectKey: `${options.repoPath}#${options.prNumber}`, autonomousMergeExecutionEnabled,
         rootDir: options.rootDir || ROOT, observedAt: new Date(options.now ? options.now() : Date.now()).toISOString(),
         checksRollup: candidate.statusCheckRollup, candidate, labels: options.labelNames }) });
@@ -959,6 +959,7 @@ function closureWaitProgress(result, startedAt) {
 
 async function dispatchAmaClosureFor({
   hammerWakeSink = null,
+  passSnapshot = null,
   finalRoundDispatchOnly = null,
   finalRoundSink = null,
   closerAuthoredStaleSink = null,
@@ -1642,6 +1643,7 @@ async function dispatchAmaClosureFor({
     blockingFindingCount: Number(gateSnapshot.settledReview?.blockingFindingCount ?? 0),
     blockingFindingState: String(gateSnapshot.settledReview?.blockingFindingState || 'unknown').trim().toLowerCase(),
     nonBlockingFindingCount: Number(gateSnapshot.settledReview?.nonBlockingFindingCount ?? 0),
+    commentOnlyFinalRoundPush: gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true,
     nonBlockingFindingState: String(gateSnapshot.settledReview?.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
     // Per-finding non-blocking identities (normalized titles) from the same
     // authoritative body the verdict/counts came from. Drives the HAM
@@ -1726,6 +1728,8 @@ async function dispatchAmaClosureFor({
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
     lease: handoffLease,
+    launchRecord: amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, { repo: repoPath, prNumber,
+      headSha: handoffLease?.rekeyedFromHeadSha || currentPrHeadSha }),
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
     checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
     roundsLeft: !reviewCycleExhausted, ciBlockedHammerOwner,
@@ -1897,12 +1901,19 @@ async function dispatchAmaClosureFor({
     });
   }
   try {
-    const eligibility = orchestrationMode === 'native' ? hammerWakeEligibility(disabledEligibility, {
-      dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
-      reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure',
-      ciBlockedHammerOwner, reviewState, headSha: currentPrHeadSha,
-      checksConclusion: closureOwnerInput.checks,
-    }) : disabledEligibility;
+    // NXA-03: resolve once before waking, then pass this exact immutable pair
+    // to shadow consumers. No merge eligibility exceptions are wake policy.
+    const { resolveSharedNextAction } = await import('./pr-next-action-shadow.mjs');
+    const shared = await resolveSharedNextAction({ passSnapshot,
+      evidence: closureOwnerShadowEvidence(closureOwnerInput, {
+        subjectKey: `${repoPath}#${prNumber}`, autonomousMergeExecutionEnabled,
+        rootDir, observedAt: new Date(now()).toISOString(),
+        anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null,
+          finalRoundCompletedAt },
+        checksRollup: candidate?.statusCheckRollup,
+        candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels }) });
+    if (closureOwnerSink) closureOwnerSink.shared = shared;
+    throwIfAborted(signal);
     let identity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
     let intent = ciBlockedHammerOwner
       ? amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, identity) : null;
@@ -1918,11 +1929,7 @@ async function dispatchAmaClosureFor({
       prNumber,
       headSha: currentPrHeadSha || candidate?.headSha || '',
       reviewedHeadSha: reviewState.headSha,
-      ...(closerAuthoredStale.eligible
-        ? { eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON, eligibility: { eligible: true, reasons: [] } }
-        : { eligibility, ...(eligibility !== disabledEligibility
-          ? { eligibilityReason: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
-            ? 'review-ceiling-terminal-remediation' : 'exhausted-final-hammer-ci-repair' } : {}) }),
+      shared,
       log: logger,
     });
     if (hammerWakeSink && ciBlockedHammerOwner && orchestrationMode === 'native') {

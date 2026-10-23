@@ -42,7 +42,7 @@ function fixture(t, overrides = {}, status = 'completed') {
 }
 
 test('suppressed final-round push waits for CI, then wakes and reaches the hammer on the next pass', async t => {
-  const f = fixture(t), dispatches = [], wakeResults = [];
+  const f = fixture(t), dispatches = [], wakeResults = [], sharedWakes = [];
   const args = { rootDir: f.rootDir, repoPath: repo, prNumber, currentRevisionRef: pushedHead,
     labelNames: [], logger: silent,
     reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
@@ -59,7 +59,7 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
     proveCommentOnlyFinalRoundHeadImpl: args => proveCommentOnlyFinalRoundHead({
       ...args, execFileImpl: async () => ({ stdout: 'ahead' }),
     }),
-    requestEligibleHammerWakeImpl: args => { wakeResults.push(f.wake(args)); },
+    requestEligibleHammerWakeImpl: args => { sharedWakes.push(args.shared); wakeResults.push(f.wake(args)); },
     maybeDispatchAmaCloserImpl: async args => {
       const result = await maybeDispatchAmaCloser({ ...args,
         dispatchContext: { ...args.dispatchContext, hqRoot: join(f.rootDir, 'hq'),
@@ -81,7 +81,7 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
     prAuthor: 'fixture-builder', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
   await maybeDispatchAmaClosureFor({ ...args, candidate: { ...candidate,
     statusCheckRollup: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] } });
-  assert.equal(wakeResults[0].reason, 'ci-not-green');
+  assert.equal(wakeResults[0].reason, 'checks-pending');
   assert.equal(f.wakes.length, 0);
   assert.equal(dispatches.length, 0);
   const result = await maybeDispatchAmaClosureFor({ ...args, candidate: { ...candidate,
@@ -96,7 +96,8 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
   assert.equal(requestReviewRereview({ rootDir: f.rootDir, repo, prNumber,
     targetRevisionRef: pushedHead, reason: 'auto-refresh: PR head moved' }).reason,
   'comment-only-final-round-completed');
-  assert.equal(f.wake().outcome, 'duplicate', 'one wake per recorded head');
+  assert.equal(f.wake({ shared: sharedWakes[1] }).outcome, 'duplicate',
+  'one wake per recorded head');
 });
 
 test('a suppressed round with no push keeps the current-head wake and unrelated-head refusal', t => {

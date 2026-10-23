@@ -9,7 +9,8 @@
 
 The shadow appends diagnostic comparisons between legacy ownership and the
 shared next-action decision. These records grant no dispatch or merge authority;
-legacy consumers retain their effects. The watcher and closure consumers write
+NXA-03 consumes the shared decision for hammer wake routing only. Other
+consumers retain legacy effects. The shadow log itself grants no authority. The watcher and closure consumers write
 under their configured root. The rollout owner classifies the evidence through
 the read-only report CLI, with optional dispositions in a separate private file.
 

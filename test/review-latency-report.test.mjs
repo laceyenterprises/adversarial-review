@@ -578,3 +578,23 @@ test('CI-repair wakes stay in telemetry but do not end the clean-verdict latency
   assert.equal(stage.sampleCount, 1);
   assert.equal(stage.p50Ms, 5 * 60 * 1000);
 });
+
+test('shared repair wakes do not end clean-verdict latency; daemon wakes do', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    recordReviewLatencyEvent(db, { repo: 'subject-03', prNumber: 3, eventType: 'clean_verdict',
+      at: '2026-01-01T00:00:00Z', source: 'synthetic', idempotencyKey: 'clean-03' });
+    for (const [action, minute] of [['hammer', '01'], ['daemon-merge', '05']]) {
+      recordReviewLatencyEvent(db, { repo: 'subject-03', prNumber: 3, eventType: 'hammer_wake',
+        at: `2026-01-01T00:${minute}:00Z`, source: 'synthetic', idempotencyKey: `wake-${action}`,
+        payload: { nextAction: { action } } });
+    }
+  } finally { db.close(); }
+  const report = collectReviewLatencyReport({ rootDir, since: '24h',
+    now: () => new Date('2026-01-01T01:00:00Z') });
+  assert.equal(report.surfaces.explicitEvents, 3);
+  const stage = report.stages.find(stage => stage.key === 'clean_verdict_to_hammer_wake');
+  assert.equal(stage.sampleCount, 1);
+  assert.equal(stage.p50Ms, 5 * 60 * 1000);
+});

@@ -333,9 +333,9 @@ change or new check is required.
 `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the single successor
 policy for "who acts next on this open PR". It is pure and total. It reads one
 NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
-round?, evidenceRefs, decisionKey}`. It is **shadow only**: `decideClosureOwner`
-and every consumer keep their legacy decisions and effects, and no caller is
-switched. The decision grants no merge authority. The exact-head, provenance,
+round?, evidenceRefs, decisionKey}`. NXA-03 adopts this decision for hammer wake
+routing only; `decideClosureOwner` and other caller routes keep their legacy
+effects. The decision grants no merge authority. The exact-head, provenance,
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
@@ -347,8 +347,9 @@ watcher handoff wake. All consumers in one pass share one decision. Every
 action/actor/reason disagreement is appended to
 `data/next-action-shadow/disagreements.jsonl` under the watcher root (one
 rotation at 16 MiB) with its generation, source, deadline and evidence
-references. The shadow prints nothing, never throws and never delays a legacy
-effect.
+references. The shadow prints nothing and never throws into a caller.
+The adopted wake awaits bounded snapshot resolution independently of shadow
+sinks and alert delivery; those observations never gate execution.
 
 Missing or unreadable execution policy (including an absent boolean execution
 switch) selects `policy-unknown` snapshot refresh before new work; established
@@ -378,6 +379,30 @@ acceptance procedure are in
 a caller needs at least 20 distinct classified live cases, including candidate
 mistakes and expected corrections. That acceptance is human rollout acceptance,
 not a gate, and it is not authorized by NXA-02.
+
+### Hammer wake adoption (NXA-03)
+
+The closure caller resolves one immutable snapshot/decision pair before the
+wake and shares it with subsequent shadow consumers. Hammer dispatch intent
+and daemon merge intent may wake the watcher. Reconciliation, live ownership,
+review/remediation and drain/capacity deferral retain their original action,
+actor, reason and deadline without speculative hammer work. Transport keeps its
+exclusive reservation, bounded failure/stale retry and watcher wake delivery.
+Retryable no-merge uses the completed launch ID in its attempt identity; a
+per-head delivered wake cannot suppress the next reconciled attempt. Succeeded
+merge receipts reconcile against remote state. Existing exact-head, HCP,
+provenance, arming, CI/protection, identity and lease predicates remain required
+by execution. No new switch, label or refusal is introduced.
+
+Deployment/adoption acceptance is pending separate operator approval and
+classification of 20 distinct live shadow disagreements. The operator/SRE
+observes the first naturally eligible hammer from decision deadline through
+wake, admission, launch, terminal audit, remote merge/no-merge and the next
+complete watcher pass. Record actual timings, no-merge reason, capacity release
+and dedupe identity privately; publish only synthetic or aggregate evidence.
+If that case has not happened, acceptance remains pending. Workers do no live
+watch or deployment. Rollback is a source revert of this caller to the retained
+legacy eligibility adapter, with no new override label or fail-closed switch.
 
 ## Stacked-base reads (STACKEDBASE-01)
 

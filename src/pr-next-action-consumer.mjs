@@ -130,12 +130,18 @@ function boundedLaunchRead(rootDir, lease, cap) {
  * evaluated by the shadow with the shared pure helper, never here.
  */
 export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, candidate = null, labels, checksRollup,
-  autonomousMergeExecutionEnabled, rootDir = null, observedAt = null } = {}) {
+  autonomousMergeExecutionEnabled, rootDir = null, observedAt = null, anchors = null } = {}) {
   const pr = candidate ? { headSha: candidate.headSha ?? null, state: candidate.prState ?? null,
     isDraft: candidate.isDraft === true, mergeable: candidate.mergeable ?? null,
     mergeStateStatus: candidate.mergeStateStatus ?? null, labels: Array.isArray(labels) ? labels : candidate.labels } : null;
   const head = input.currentHead || pr?.headSha || null;
   const lease = pick(input.lease, LEASE_KEYS);
+  const launchRecord = input.launchRecord;
+  const launchOwner = lease?.status === 'handed-to-review' ? null
+    : lease?.lrqId && ['pending', 'dispatched', 'terminal'].includes(lease.status) ? lease
+      : launchRecord?.launchRequestId ? { lrqId: launchRecord.launchRequestId, headSha: head } : null;
+  const mergedReceipt = lease?.terminalOutcome === 'succeeded'
+    || launchRecord?.terminalOutcome === 'succeeded' || launchRecord?.outcome === 'succeeded';
   const cap = { headSha: head, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true };
   const closerAuthoredStale = input.attested === true && input.reviewState?.headSha
     ? { decision: 'carry-forward', carryForward: true, reviewedHead: input.reviewState.headSha, currentHead: head }
@@ -145,20 +151,27 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     remediation: { roundsLeft: typeof input.roundsLeft === 'boolean' ? input.roundsLeft : null,
       ...(input.followUpJob ? { job: pick(input.followUpJob, ['status', 'clean', 'headSha']) } : {}) },
     leases: input.lease === undefined ? undefined : { closer: lease },
+    // A readable receipt proves a launch reference even when its lease is gone.
+    // Until the ledger resolves it, descendant liveness is explicitly unknown.
+    launches: launchOwner && rootDir ? { state: 'complete', value: { closer: {
+      launchRequestId: launchOwner.lrqId, headSha: head, retryChainUnreadable: true,
+    } }, provenance: { sourceRef: lease === launchOwner ? 'closer-lease' : 'closer-dispatch-receipt' } } : undefined,
     checks: input.checks === undefined && checksRollup === undefined ? undefined
       : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
       reviewCeilingReached: input.reviewCeilingReached === true, hammerCap: cap,
       ...(typeof autonomousMergeExecutionEnabled === 'boolean' ? { autonomousMergeExecutionEnabled } : {}) },
-    progress: { diffEmpty: input.diffEmpty === true, ...(closerAuthoredStale ? { closerAuthoredStale } : {}) },
+    progress: { diffEmpty: input.diffEmpty === true, ...(closerAuthoredStale ? { closerAuthoredStale } : {}),
+      ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
     ...(pr ? { pr: { ...pr, headSha: head, mergeable: input.mergeable ?? pr.mergeable } } : {}),
   };
-  // Only leases that reference a launch need the ledger (as in nextAction R04).
-  const readLaunches = lease?.lrqId && rootDir && ['pending', 'dispatched', 'terminal'].includes(lease.status)
-    ? boundedLaunchRead(rootDir, lease, cap) : null;
+  // A retained receipt can outlive its lease. Explicit review handoff stays
+  // with review; historical hammer receipts cannot take it back.
+  const readLaunches = launchOwner && rootDir
+    ? boundedLaunchRead(rootDir, launchOwner, cap) : null;
   const primaryChangeInput = input.primaryChange ? { evidence: input.primaryChange, head,
     strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false } : null;
-  return { subjectKey, head, observedAt, observations, readLaunches, primaryChangeInput };
+  return { subjectKey, head, observedAt, anchors, observations, readLaunches, primaryChangeInput };
 }
 
 // The handoff wake: a non-terminal subject, its handoff lease and the raw

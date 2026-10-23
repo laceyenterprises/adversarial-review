@@ -99,7 +99,9 @@ const STAGE_DEFINITIONS = Object.freeze([
     owner: 'merge',
     from: ['clean_verdict'],
     to: ['hammer_wake'],
-    acceptTo: event => event.reason !== 'exhausted-final-hammer-ci-repair',
+    acceptTo: event => event.payload?.nextAction
+      ? event.payload.nextAction.action === 'daemon-merge'
+      : event.reason !== 'exhausted-final-hammer-ci-repair',
   },
   {
     key: 'merge_to_deploy_observed',

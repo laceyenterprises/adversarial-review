@@ -2550,6 +2550,8 @@ They are collected afresh after history-cache reuse, including under the merge
 lease; an old cached refusal can therefore recover without a cache migration.
 No label or CI status substitutes for this proof.
 
+<a id="derivedblock-01"></a>
+
 DERIVEDBLOCK-01: generated block interiors can also prove preservation by
 regeneration. A repository declares them in its checked-in `package.json`
 application manifest, for example:
@@ -2576,6 +2578,11 @@ ordering is immaterial. Marker lines must be unique, exact, ordered lines in bot
 versions; the markers themselves remain protected author content. Only existing
 modified text files qualify; additions, deletions, renames and opaque files keep
 their existing rules.
+Each matching declaration is evaluated independently: missing or ambiguous markers
+and generator failures skip that candidate without discarding other proofs.
+Skipped candidates emit bounded diagnostics naming the artifact path, declared
+working directory and failure; missing or non-directory working directories are
+reported explicitly. A failed candidate never supplies preservation evidence.
 
 On a region refusal, shared primary-change collection creates an independent
 scratch Git worktree at the exact head, using `localRepository`, the domain's

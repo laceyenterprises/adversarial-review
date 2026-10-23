@@ -15,7 +15,8 @@ const declaration = { path: 'docs/*.md', start, end, cwd: '.', command: [process
 
 function fixture(t, { handEdit = false, outside = false, failure = false, noop = false, duplicate = false,
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
-  authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false } = {}) {
+  authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false,
+  additionalDeclarations = [], declarationLast = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
@@ -30,7 +31,8 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
     command: [process.execPath, generatorCwd === '.' ? 'render.mjs' : '../render.mjs'] };
   git('init', '-q');
   mkdirSync(join(root, 'docs'));
-  writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: [entry] }));
+  const entries = declarationLast ? [...additionalDeclarations, entry] : [entry, ...additionalDeclarations];
+  writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: entries }));
   writeFileSync(join(root, 'inventory.txt'), emptyBase ? '' : 'Base row\n');
   writeFileSync(join(root, 'render.mjs'), failure ? 'process.exit(1);' : noop ? '' : `
 import fs from 'node:fs';
@@ -114,6 +116,49 @@ test('regenerated author rows are preserved, including a file absent from the fi
   assert.equal(result.generatedBlockProofs.length, 1);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
   assert.equal(readFileSync(join(f.root, 'docs/guide.md'), 'utf8').includes('Base row'), true);
+});
+
+test('shared globs skip missing or ambiguous markers before and after valid declarations', async t => {
+  t.mock.method(console, 'warn', () => {});
+  for (const markers of [
+    { start: '<!-- other:start -->', end: '<!-- other:end -->' },
+    { start: end, end: start },
+  ]) {
+    for (const declarationLast of [false, true]) {
+      const f = fixture(t, { declarationLast, additionalDeclarations: [{ ...declaration, ...markers }] });
+      const result = await prove(f);
+      assert.equal(result.generatedBlockProofs.length, 1);
+      assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+    }
+  }
+});
+
+test('missing and non-directory generator cwd report actionable errors without starting a process', async t => {
+  const scratch = mkdtempSync(join(tmpdir(), 'derived-cwd-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  writeFileSync(join(scratch, 'file'), 'not a directory');
+  for (const cwd of ['missing', 'file']) {
+    await assert.rejects(runDerivedGenerator({ scratch, cwd, command: ['unused-generator'] }),
+      error => error.message.includes(`generator cwd unavailable: ${cwd}:`)
+        && (cwd === 'missing' ? error.cause.code === 'ENOENT' : /not a directory/.test(error.message)));
+  }
+});
+
+test('cwd failures retain refusal and diagnostics while later declarations start from a fresh head', async t => {
+  const diagnostics = [];
+  t.mock.method(console, 'warn', message => diagnostics.push(message));
+  const f = fixture(t, { declarationLast: true,
+    additionalDeclarations: [{ ...declaration, cwd: 'missing' }] });
+  const result = await prove(f, { runGeneratorImpl: args => args.cwd.endsWith('/missing')
+    ? runDerivedGenerator(args) : offlineGenerator(args) });
+  assert.equal(result.generatedBlockProofs.length, 1);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+  assert.ok(diagnostics.some(message => message.includes('docs/guide.md')
+    && message.includes('generator cwd unavailable:') && message.includes('missing') && message.includes('ENOENT')));
+  const missing = fixture(t, { generatorCwd: 'missing' });
+  const refused = await prove(missing, { runGeneratorImpl: runDerivedGenerator });
+  assert.deepEqual(refused.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(refused, missing.args.headSha).reason, 'primary-change-reverted');
 });
 
 test('empty merge-base interiors accept insertion units and protect adjacent marker/prose edits', async t => {

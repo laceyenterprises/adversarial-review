@@ -298,7 +298,13 @@ async function regularFile(root, path) {
 // Kill the whole process group on timeout/abort, including generator children.
 export async function runDerivedGenerator({ scratch, cwd, command, signal, timeoutMs = 10000 }) {
   const root = await realpath(scratch);
-  const work = await realpath(join(root, cwd));
+  let work;
+  try {
+    work = await realpath(join(root, cwd));
+    if (!(await lstat(work)).isDirectory()) throw new Error('not a directory');
+  } catch (error) {
+    throw new Error(`generator cwd unavailable: ${cwd}: ${error.message}`, { cause: error });
+  }
   if (relative(root, work).startsWith('..')) throw new Error('generator cwd escaped scratch tree');
   const home = join(root, 'home');
   await mkdir(home, { recursive: true });
@@ -422,23 +428,32 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
       const proofs = [];
       for (const declaration of declarations) {
         if (!headDeclarations.some(entry => sameDeclaration(entry, declaration))) continue;
-        const baseBytes = Buffer.from(await show(evidence.mergeBase, refusal.path));
-        const base = generatedBlock(baseBytes, declaration);
-        if (!regions.some(region => region.start >= base.start && region.end <= base.end)) continue;
-        await reset();
-        // Refuse renames/deletions, missing markers and output that only survives
-        // because the generator leaves its input untouched. Preserve the markers.
-        const before = await regularFile(tree, refusal.path);
-        const block = generatedBlock(before, declaration);
-        const text = before.toString('utf8');
-        await writeFile(join(tree, refusal.path), text.slice(0, block.startOffset) + text.slice(block.endOffset));
-        await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
-        const after = await regularFile(tree, refusal.path);
-        const regenerated = generatedBlock(after, declaration);
-        if (block.bytes.equals(regenerated.bytes)) proofs.push({ path: refusal.path,
-          start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
-        // Each declaration starts from the same final-head artifact.
-        await writeFile(join(tree, refusal.path), before);
+        try {
+          const baseBytes = Buffer.from(await show(evidence.mergeBase, refusal.path));
+          const base = generatedBlock(baseBytes, declaration);
+          if (!regions.some(region => region.start >= base.start && region.end <= base.end)) continue;
+          await reset();
+          // Refuse renames/deletions, missing markers and output that only survives
+          // because the generator leaves its input untouched. Preserve the markers.
+          const before = await regularFile(tree, refusal.path);
+          const block = generatedBlock(before, declaration);
+          const text = before.toString('utf8');
+          await writeFile(join(tree, refusal.path), text.slice(0, block.startOffset) + text.slice(block.endOffset));
+          await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
+          const after = await regularFile(tree, refusal.path);
+          const regenerated = generatedBlock(after, declaration);
+          if (block.bytes.equals(regenerated.bytes)) proofs.push({ path: refusal.path,
+            start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
+          // Each declaration starts from the same final-head artifact.
+          await writeFile(join(tree, refusal.path), before);
+        } catch (error) {
+          signal.throwIfAborted();
+          // A glob can match files belonging to other declarations. A failed
+          // candidate supplies no proof and must not discard successful ones.
+          console.warn('[derived-block] proof skipped: ' + JSON.stringify({
+            path: refusal.path, cwd: declaration.cwd, error: String(error.message).slice(0, 500),
+          }));
+        }
       }
       return proofs;
     });

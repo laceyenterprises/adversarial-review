@@ -1218,7 +1218,7 @@ Key control points:
   final-head block in a bounded, network-denied scratch worktree. Marker lines,
   outside regions and other files remain protected. Unavailable or mismatching
   regeneration retains the existing refusal and recovery transitions; see the
-  [declaration and sandbox contract](RUNBOOK-ama-closure.md#primary-change-evidence-authorization-and-disputes-hamintent-02--lac-1833).
+  [declaration and sandbox contract](RUNBOOK-ama-closure.md#derivedblock-01).
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict

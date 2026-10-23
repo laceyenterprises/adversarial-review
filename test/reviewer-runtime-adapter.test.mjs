@@ -844,6 +844,105 @@ test('agent-os-hq validates missing and malformed artifacts', async () => {
   }
 });
 
+test('REVIEWVALID-01: agent-os-hq refuses a template-echo artifact as reviewer-output', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const artifactPath = readFileSync(promptPath, 'utf8').match(/^Artifact path: (.+)$/m)?.[1];
+          writeFileSync(artifactPath, [
+            '## Summary', '<text>', '', '## Blocking issues', '- **<Title>**', '  - **File:** `<path>`',
+            '  - **Lines:** `<range>`', '  - **Problem:** <one paragraph>', '', '## Non-blocking issues', '- None.',
+            '', '## Suggested fixes', '<text>', '', '## Verdict', 'Request changes', '',
+          ].join('\n'));
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_template_echo' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const echoed = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 16, linearTicketId: 'LAC-568' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-template-echo',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(echoed.ok, false);
+    assert.equal(echoed.reviewBody ?? null, null);
+    assert.equal(echoed.failureClass, 'reviewer-output');
+    assert.match(echoed.stderrTail, /reviewer reply rejected: template placeholders/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('REVIEWVALID-01: agent-os-hq normalizes wrappers without hiding invalid review bodies', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot();
+  let artifact;
+  let stdoutFallback = false;
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir, hqBin: '/bin/hq', env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          const promptPath = args[args.indexOf('--prompt') + 1];
+          const artifactPath = readFileSync(promptPath, 'utf8').match(/^Artifact path: (.+)$/m)?.[1];
+          if (stdoutFallback) {
+            const stdoutPath = join(hqRoot, 'dispatch', 'lrq_wrapped', 'stdout.log');
+            mkdirSync(dirname(stdoutPath), { recursive: true });
+            writeFileSync(stdoutPath, artifact);
+          } else {
+            writeFileSync(artifactPath, artifact);
+          }
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_wrapped' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+    const body = validReviewBody().trim();
+    const echo = body.replace('The reviewed change is acceptable.', '<text>');
+    const cases = [
+      [body, true],
+      [`Here is the review.\n\n${body}`, true],
+      [`\`\`\`markdown\n${body}\n\`\`\``, true],
+      [`Here is the review.\n~~~~md\n${body}\n~~~~~`, true],
+      [`\`\`\`markdown\n## Adversarial Review — Codex\n\n${body}\n\`\`\``, true],
+      [`\`\`\`markdown\n${echo}\n\`\`\``, false],
+      [`\`\`\`markdown\n${body}\n## Verdict\nApproved\n\`\`\``, false],
+      [`${body}\n## Summary\nDuplicate.`, false],
+      [`${body}\nUnexpected epilogue.`, false],
+      [`\`\`\`markdown\n${body}`, false],
+    ];
+    for (const fallback of [false, true]) {
+      stdoutFallback = fallback;
+      for (const [index, [markdown, ok]] of cases.entries()) {
+        artifact = markdown;
+        const result = await adapter.spawnReviewer({
+          model: 'codex', prompt: '',
+          subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 16, linearTicketId: 'LAC-568' },
+          timeoutMs: 100, sessionUuid: `agent-hq-wrapped-${fallback}-${index}`,
+          forbiddenFallbacks: ['api-key'],
+        });
+        assert.equal(result.ok, ok, `${fallback}:${index}: ${result.stderrTail}`);
+        if (ok) assert.equal(result.reviewBody, body);
+        else assert.equal(result.failureClass, 'reviewer-output');
+      }
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq enforces timeoutMs and cancels the dispatch on expiry', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

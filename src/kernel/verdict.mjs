@@ -1,3 +1,4 @@
+import { mapUnfencedReviewLines, maskReviewFences } from './review-markdown.mjs';
 import { parseReviewFindings } from './review-findings.mjs';
 /**
  * @typedef {import('./contracts.js').ReviewVerdictKind} ReviewVerdictKind
@@ -30,7 +31,7 @@ function canonicalReviewSectionHeading(value) {
 }
 
 function promoteCanonicalReviewSectionHeadings(text) {
-  return String(text ?? '')
+  return mapUnfencedReviewLines(text, (line) => line
     .replace(
       /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:[ \t]*(\S.*)$/gim,
       (_, heading, inlineBody) => `## ${canonicalReviewSectionHeading(heading)}\n${String(inlineBody).trim()}`,
@@ -38,20 +39,20 @@ function promoteCanonicalReviewSectionHeadings(text) {
     .replace(
       /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:?[ \t]*\r?$/gim,
       (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
-    );
+    ));
 }
 
 const CANONICAL_REVIEW_SECTION_PATTERN = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/gim;
 const TOP_LEVEL_REVIEW_SECTION_PATTERN = /^##[ \t]+\S.*$/gim;
 
 function canonicalReviewSectionMatches(text) {
-  return [...String(text ?? '').matchAll(CANONICAL_REVIEW_SECTION_PATTERN)];
+  return [...maskReviewFences(text).matchAll(CANONICAL_REVIEW_SECTION_PATTERN)];
 }
 
 function nextTopLevelReviewSectionIndex(text, afterIndex) {
   const sectionPattern = new RegExp(TOP_LEVEL_REVIEW_SECTION_PATTERN);
   sectionPattern.lastIndex = afterIndex;
-  const match = sectionPattern.exec(text);
+  const match = sectionPattern.exec(maskReviewFences(text));
   return match ? match.index : text.length;
 }
 
@@ -164,7 +165,7 @@ function sanitizeReviewPayloadBestEffort(reviewText) {
 // verdict keyword...' and 'keeps blocking negation over trailing permissive
 // prose').
 function extractReviewVerdict(reviewBody) {
-  const text = String(reviewBody ?? '');
+  const text = maskReviewFences(reviewBody);
   const heading = text.match(/^##\s+Verdict\s*$/im);
   if (!heading) return null;
 
@@ -203,51 +204,15 @@ function extractMarkdownSection(markdown, heading) {
   const text = String(markdown ?? '').replace(/\r\n/g, '\n');
   const escapedHeading = String(heading ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^##\\s+${escapedHeading}\\s*$`, 'i');
-  const lines = text.split('\n');
-  let fenceMarker = null;
+  const visible = maskReviewFences(text).split('\n');
   let offset = 0;
   let start = null;
-
-  for (const line of lines) {
-    const trimmed = line.trimStart();
-    fenceMarker = updateMarkdownFenceMarker(fenceMarker, trimmed);
-    if (!fenceMarker && pattern.test(line)) {
-      start = offset + line.length;
-      break;
-    }
+  for (const line of visible) {
+    if (start !== null && /^##\s+/.test(line)) return text.slice(start, offset);
+    if (start === null && pattern.test(line)) start = offset + line.length;
     offset += line.length + 1;
   }
-  if (start == null) return null;
-
-  fenceMarker = null;
-  offset = 0;
-  for (const line of lines) {
-    const lineStart = offset;
-    const trimmed = line.trimStart();
-    if (lineStart > start && !fenceMarker && /^##\s+/.test(line)) {
-      return text.slice(start, lineStart);
-    }
-    fenceMarker = updateMarkdownFenceMarker(fenceMarker, trimmed);
-    offset += line.length + 1;
-  }
-  return text.slice(start);
-}
-
-function updateMarkdownFenceMarker(openMarker, trimmedLine) {
-  const match = trimmedLine.match(/^(`{3,}|~{3,})/);
-  if (!match) return openMarker;
-
-  const marker = match[1];
-  if (!openMarker) return marker;
-
-  if (
-    marker[0] === openMarker[0]
-    && marker.length >= openMarker.length
-  ) {
-    return null;
-  }
-
-  return openMarker;
+  return start === null ? null : text.slice(start);
 }
 
 function classifyStructuredBlockingIssues(reviewBody) {
@@ -346,14 +311,17 @@ function normalizeReviewVerdict(verdict) {
 }
 
 // normalizeWhitespace is used directly by reviewer.mjs, so it is exported here
-// rather than duplicated inline.
+// rather than duplicated inline. The heading promotion and verdict-line
+// normalizer are shared with the strict reply check in review-reply.mjs.
 export {
   classifyStructuredBlockingIssues,
   extractReviewVerdict,
   looksLikeRuntimeJunk,
   normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
+  normalizeVerdictSectionLine,
   normalizeWhitespace,
+  promoteCanonicalReviewSectionHeadings,
   sanitizeCodexReviewPayload,
   sanitizeReviewPayloadBestEffort,
 };

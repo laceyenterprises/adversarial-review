@@ -263,6 +263,39 @@ output that lacks a `## Verdict` section throws, not warns. The
 philosophy is that the cost of a missed quality gate is higher than the
 cost of an explicit, recoverable failure.
 
+A reply that echoes the output template is not a review either
+(REVIEWVALID-01). Before anything is posted, `src/kernel/review-reply.mjs`
+checks the raw reply of every direct reviewer model and every oversized-diff
+chunk. Hosted `agent-os-hq` artifacts first shed their model preamble and an
+optional whole-reply Markdown fence. Validation still precedes lossy section
+trimming, so normalization cannot hide duplicate sections or trailing text. The
+final posting body is validated too. Validation, sanitization and finding parsing
+share fence handling: headings and finding cards inside examples are not review
+sections or actionable findings, and examples remain intact in the posted body.
+It rejects a reply if:
+
+- at least two fields of a finding card are whole-value template placeholders
+  (`<Title>`, `<path>`, `<range>`, `<one paragraph>`, `<text>`; the list is
+  derived from the prompts' `Output requirements:` block), or an entire Summary
+  or Suggested fixes body is `<text>`. Fenced code and arbitrary prose labels
+  are excluded from placeholder detection;
+- any text other than the optional `## Adversarial Review …` header comes
+  before the first required heading;
+- a required heading outside fenced code appears twice;
+- `## Verdict` is not the last section, or anything follows its verdict line.
+
+A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
+on the bounded `reviewer-output` path and records the reason in
+`failure_message`. It is never posted and never stored as a verdict. As
+defence in depth, `parseReviewFindings` uses the same corroboration rule: a
+section with at least two whole-value known placeholders in one finding card
+(title, file, lines, problem, impact or fix; case-insensitive) reads as `unknown` with
+`malformed: 'template-placeholder'`. The rescue classifier then reports
+`malformed-review` and the closer refuses, so neither treats a placeholder as
+an addressable finding. Markup titles such as `<path>`, `<text>` and
+`<AuthProvider>`, and virtual paths such as `<stdin>`, remain addressable
+findings when they lack corroborating placeholder fields.
+
 **7a. But refusing is not the same as dropping.** The reviewer is resolved
 from the worker-class prefix in the PR title, and a dependency bot cannot
 produce one — so for a while those PRs were written to a *terminal*

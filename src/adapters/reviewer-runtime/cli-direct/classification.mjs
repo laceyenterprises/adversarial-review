@@ -23,6 +23,7 @@ const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
 );
 const REVIEWER_EMPTY_OUTPUT_RE = /\b(?:returned|produced)\s+empty output\b/;
+const REVIEWER_REPLY_REJECTED_RE = /\[reviewer-output\] reviewer reply rejected:/;
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|could not switch to audit session|input\/output error|not privileged to set domain/;
 const GEMINI_CREDENTIAL_POOL_BUSY_RE =
@@ -74,6 +75,9 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   }
   if (exitCode === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE) return 'reviewer-prompt-too-large';
   if (parseReviewerModelUnavailable(text)) return 'reviewer-model-unavailable';
+  // REVIEWVALID-01: the reviewer ran and its reply broke the posting contract
+  // (kernel/review-reply.mjs). Retry it on the bounded reviewer-output path.
+  if (REVIEWER_REPLY_REJECTED_RE.test(text)) return 'reviewer-output';
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout =

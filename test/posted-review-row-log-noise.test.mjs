@@ -80,6 +80,24 @@ function baseArgs(overrides = {}) {
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test('posted-review rejects malformed attempt identifiers before entering collaborators', async () => {
+  let calls = 0;
+  const { args } = baseArgs({ projectGateStatusSafe: async () => { calls++; } });
+  for (const repoPath of [undefined, null, '', 'repo', 'owner/repo/extra', 'owner /repo', {}]) {
+    await assert.rejects(handlePostedReviewRow({ ...args, repoPath }), /requires repoPath/);
+  }
+  for (const prNumber of [undefined, null, '', ' ', 0, -1, 1.5, NaN, Infinity,
+    Number.MAX_SAFE_INTEGER + 1, '1e3', true, {}]) {
+    await assert.rejects(handlePostedReviewRow({ ...args, prNumber }), /requires a positive safe-integer prNumber/);
+  }
+  await assert.rejects(handlePostedReviewRow(), /requires repoPath/);
+  assert.equal(calls, 0);
+  // A rejected invocation must leave no lock behind, and numeric API strings work.
+  await handlePostedReviewRow({ ...args, prNumber: String(args.prNumber) });
+  await handlePostedReviewRow(args);
+  assert.equal(calls, 2);
+});
+
 for (const outcome of ['ama-pending', 'await-operator']) {
   for (const reason of ['ama-closer-dispatch-backgrounded', 'in-flight:synthetic-closer',
     'ama-closer-dispatch-overrun: elapsed_ms=900001 bound_ms=900000']) {

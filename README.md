@@ -618,6 +618,8 @@ caller deadline even on terminal/stacked-base exits before closure dispatch or
 rejection; eventual eligible contention retains its reservation.
 An in-process guard excludes overlapping passes for the same review root/repo/PR,
 including changed heads, until the handler and concrete operation both settle.
+The handler rejects malformed owner/repo identifiers and nonpositive or unsafe PR
+numbers before acquiring that guard; decimal PR number strings remain accepted.
 Other PRs continue; a later poll resumes after settlement. Late failures are
 logged and observed by the step's existing promise race. Cleanup uses the stored
 review base when candidate base metadata is missing. The clean smoke verifies

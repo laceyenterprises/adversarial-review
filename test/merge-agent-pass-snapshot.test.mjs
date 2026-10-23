@@ -377,7 +377,7 @@ for (const postedAt of ['2026-01-01T00:00:00Z', undefined]) {
   test(`posted handler shares its snapshot and preserves wait with posted anchor ${postedAt}`, async () => {
     let builtSnapshot, closureSnapshot;
     const row = { review_status: 'posted', reviewer_head_sha: head, posted_at: postedAt };
-    const result = await handlePostedReviewRow({ repoPath: subjectKey, prNumber: 1, currentRevisionRef: head,
+    const result = await handlePostedReviewRow({ repoPath: 'owner/repo', prNumber: 1, currentRevisionRef: head,
       now: () => clock, currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
       latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
       fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),

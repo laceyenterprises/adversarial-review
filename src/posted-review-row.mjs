@@ -343,6 +343,14 @@ export async function timePostedReviewStep(
 const postedReviewAttempts = new Map();
 
 export async function handlePostedReviewRow(options = {}) {
+  if (typeof options.repoPath !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repoPath)) {
+    throw new TypeError('handlePostedReviewRow requires repoPath in owner/repo form');
+  }
+  if (!['number', 'string'].includes(typeof options.prNumber)
+    || !/^\d+$/.test(String(options.prNumber))
+    || !Number.isSafeInteger(Number(options.prNumber)) || Number(options.prNumber) <= 0) {
+    throw new TypeError('handlePostedReviewRow requires a positive safe-integer prNumber');
+  }
   const key = JSON.stringify([resolve(options.rootDir || ROOT), options.repoPath, Number(options.prNumber)]);
   if (postedReviewAttempts.has(key)) {
     return { handled: true, outcome: 'posted-review-in-flight' };
@@ -709,6 +717,9 @@ async function handlePostedReviewRowWithinReadCache({
           attempt.coexistenceActive = true;
           // This scope follows the concrete promise past a soft deadline,
           // including terminal/stacked exits that never enter closure dispatch.
+          // Keep this inner boundary even though the candidate scope also prunes:
+          // the outer scope can exit at its soft deadline while this work lives on.
+          // Each scope must independently settle its reservation ownership.
           try { return await withDaemonMergeReservation({ rootDir, repo: repoPath,
             base: reservationBase, pr: prNumber,
             head: candidate?.headSha || currentRevisionRef,

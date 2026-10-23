@@ -4150,6 +4150,10 @@ posted-review passes, including moved heads, until both the handler and its
 concrete coexistence operation settle. A competing poll returns
 `posted-review-in-flight` without reading candidates or mutating reservations;
 other PRs remain eligible. The next poll can enter after success or rejection.
+Malformed owner/repo identifiers and nonpositive or unsafe PR numbers fail before
+guard acquisition; decimal PR number strings are accepted. The nested candidate
+and concrete-operation reservation scopes are intentional: the latter must own
+cleanup even after a soft deadline has released the former.
 `timePostedReviewStep` logs post-deadline failures, and its `Promise.race` keeps
 the work promise's rejection observed after the caller returns. Cleanup falls
 back to the review row's `base_ref` or `baseBranch` when the candidate lacks a base.

@@ -25,6 +25,8 @@ const DEFAULT_ROOT = join(__dirname, '..', '..', '..', '..');
 const extractLinearTicketId = extractGitHubPRLinearTicketId;
 const routePR = routeGitHubPR;
 
+class IncidentIdentityUnavailableError extends Error {}
+
 function resolveLinearTicketId(subjectRef) {
   return subjectRef?.linearTicketId || null;
 }
@@ -189,11 +191,39 @@ function normalizeStatusName(status, stateNames) {
     : status;
 }
 
+// Read the operator's issue, not the PR title/labels or review text. Manually
+// filed SEVs (including LAC-2089) predate incident labels. This adapter has no
+// incident-acceptance authority, even after a source merge.
+async function incidentIssueReason(issue) {
+  if (/^\s*SEV(?:[- ]?[0-4])?(?=[:\s]|$)/i.test(issue.title || '')) {
+    return 'legacy-sev-title';
+  }
+  try {
+    if (typeof issue.title !== 'string') throw new Error('incident title unreadable');
+    const labels = await issue.labels({ first: 250 });
+    if (!Array.isArray(labels?.nodes)) throw new Error('incident labels unreadable');
+    if (labels.nodes.some((label) => /^(?:incident|sev(?:[- ]?[0-4])?)$/i.test(label.name?.trim() || ''))) {
+      return 'incident-label';
+    }
+    // An incomplete read cannot prove this is an ordinary feature ticket.
+    if (labels.pageInfo?.hasNextPage) throw new Error('incident labels incomplete');
+    return null;
+  } catch (cause) {
+    throw new IncidentIdentityUnavailableError(`incident identity unavailable: ${cause.message}`, { cause });
+  }
+}
+
+function terminalState(state, terminalStateNames) {
+  return ['completed', 'canceled'].includes(state?.type)
+    || terminalStateNames.includes(String(state?.name || '').toLowerCase());
+}
+
 async function setLinearState({
   linearClientProvider,
   logger,
   ticketId,
   targetStateName,
+  terminalStateNames,
 }) {
   if (!ticketId || !targetStateName) return;
   const targetStateNames = Array.isArray(targetStateName)
@@ -219,6 +249,13 @@ async function setLinearState({
     }
 
     const currentState = await issue.state;
+    if (terminalState(targetState, terminalStateNames) || terminalState(currentState, terminalStateNames)) {
+      const incidentReason = await incidentIssueReason(issue);
+      if (incidentReason) {
+        logger.log?.(`[linear-triage] Linear ${ticketId} incident acceptance owned externally (${incidentReason}) - skipping "${targetState.name}"`);
+        return;
+      }
+    }
     if (normalizedTargets.includes(currentState?.name?.toLowerCase())) {
       logger.log?.(`[linear-triage] Linear ${ticketId} already in "${currentState.name}" - skipping`);
       return;
@@ -231,6 +268,9 @@ async function setLinearState({
       `[linear-triage] Linear update failed for ${ticketId} (-> ${targetStateNames[0]}):`,
       err?.message || err
     );
+    // New identity-read failures must retain the durable triage obligation.
+    // The reviewer already catches this failure without losing its posted review.
+    if (err instanceof IncidentIdentityUnavailableError) throw err;
   }
 }
 
@@ -286,6 +326,8 @@ function createLinearTriageAdapter({
     done: stateNames.done || ['Done', 'Review Complete'],
     cancelled: stateNames.cancelled || 'Cancelled',
   };
+  const terminalStateNames = [resolvedStateNames.done, resolvedStateNames.cancelled]
+    .flat().map((name) => String(name).toLowerCase());
   let linearClient = undefined;
   let linearClientLoadPromise = null;
 
@@ -326,6 +368,7 @@ function createLinearTriageAdapter({
       logger,
       ticketId,
       targetStateName,
+      terminalStateNames,
     });
   }
 
@@ -355,7 +398,13 @@ function createLinearTriageAdapter({
     const ticketId = resolveLinearTicketId(subjectRef);
     if (!ticketId) return;
 
-    await syncTriageStatus(subjectRef, 'done');
+    try {
+      await syncTriageStatus(subjectRef, 'done');
+    } catch (err) {
+      // State identity failed closed and was logged. Critical flag delivery is
+      // independent; the posted review must still surface its findings.
+      if (!(err instanceof IncidentIdentityUnavailableError)) throw err;
+    }
 
     const criticality = String(reviewBody || '').trim()
       ? classifyFollowUpCriticality(reviewBody)

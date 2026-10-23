@@ -22,7 +22,7 @@ const ALWAYS_ON_ROUTE_OPTIONS = {
   geminiReviewerMode: 'always-on',
 };
 
-function makeLinearFixture({ currentState = 'Todo' } = {}) {
+function makeLinearFixture({ currentState = 'Todo', title = 'Improve review routing', labels = [] } = {}) {
   const updates = [];
   const comments = [];
   const states = [
@@ -32,6 +32,8 @@ function makeLinearFixture({ currentState = 'Todo' } = {}) {
   ];
   const issue = {
     id: 'issue-1',
+    title,
+    labels: async () => ({ nodes: labels.map((name) => ({ name })) }),
     team: Promise.resolve({
       states: async () => ({ nodes: states }),
     }),
@@ -45,7 +47,7 @@ function makeLinearFixture({ currentState = 'Todo' } = {}) {
     updateIssue: async (issueId, payload) => updates.push({ issueId, payload }),
     createComment: async (payload) => comments.push(payload),
   };
-  return { linear, updates, comments };
+  return { linear, issue, updates, comments, states };
 }
 
 function subjectRef() {
@@ -451,4 +453,5 @@ test('installed @linear/sdk still exposes the surface the triage adapter drives'
 
   // `await team.states()` supplies the workflow states the adapter matches by name.
   assert.equal(typeof Team.prototype.states, 'function');
+  assert.equal(typeof Issue.prototype.labels, 'function');
 });

@@ -594,6 +594,37 @@ Watcher-owned same-head re-dispatch is bounded and status-scoped. Autonomous ret
 
 `ticket-pipeline-paused` is the PR-level Linear-ticket pipeline pause. Apply it with `npm run ticket-pipeline:pause -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and the watcher/reviewer skip Linear state changes and critical-flag comments while the label is present. Remove it with the same command plus `--resume`; release is idempotent if the label was already absent. For repo-wide outages, use `npm run ticket-pipeline:pause -- --repo <owner/repo> --scope repo --confirm-live-root "<reason>"`. The durable pause file resolves to `ADVERSARIAL_TICKET_PIPELINE_ROOT` when set, otherwise `HQ_ROOT/adversarial-review` when `HQ_ROOT` is set, otherwise the selected checkout root (overrideable with `--root <path>`). The live Linear triage adapter persists its resolved pause root to `data/ticket-pipeline-pauses/daemon-root-status.json`; repo-scope writes compare against that status and refuse if the operator shell resolves a different pause root. Corrupt repo-pause records fail closed and also write an alert receipt under `data/ticket-pipeline-pauses/alerts/` so the stall is visible outside a single log line.
 
+LAC-2092: the Linear adapter leaves incident acceptance to the incident owner.
+Live Linear labels `incident`, `sev`, or `sev0` through `sev4` (also `sev-3`
+and `sev 3`, case insensitive) identify incidents. Legacy manually filed issues
+with a leading `SEV`, `SEV3:`, `SEV-3`, or `SEV 3` title are also protected;
+LAC-2089 had no labels. Before removing a legacy SEV title, the incident owner
+should retain an incident/severity label; an unlabeled, unprefixed issue has no
+incident binding exposed to this adapter. PR titles, PR labels and review prose do not establish
+incident identity. This adapter has no existing authoritative native-incident
+binding or acceptance receipt, so it never infers acceptance from publication,
+dispatch completion, review approval, remediation or source merge. The native
+incident closure owner and operator remain responsible for their evidence.
+
+For those incidents, transitions into completed/canceled workflow types or the
+configured Done/Cancelled aliases are suppressed. A terminal incident also
+resists stale progress/review updates. Nonterminal progress updates, critical
+finding comments, ordinary feature-ticket synchronization and the review /
+remediation / AMA loop retain their existing behavior. Each terminal write
+attempt reads live issue identity again; unreadable or incomplete labels log a
+failure and propagate to the existing owed-work retry instead of dropping the
+obligation. A deliberate incident-owner hold is a completed
+sync obligation, so a merged PR's pending triage record drains normally without
+changing incident state. No config or durable store shape changes are required.
+
+After normal deployment, the operator should confirm the running reviewer and
+watcher have adopted this source, inspect the `incident acceptance owned
+externally` log on the next naturally occurring incident sync, and verify the
+incident stays open while ordinary ticket sync still works. Preserve separate
+source, deploy and behavioral acceptance evidence. Do not dispatch a synthetic
+live incident, restart services, or close an incident merely to verify this fix.
+See the [producer evidence](INCIDENT-2026-10-23-premature-linear-incident-completion.md).
+
 Legacy in-flight jobs keep their persisted `maxRounds` cap. Fresh jobs re-derive from risk class unless the latest PR cap is higher than the current tier, in which case the elevated cap is preserved as the in-flight/operator migration guard. Do not retroactively rewrite existing queue records.
 
 REMWASTE-01 adds `roles.adversarial.remediation.non_blocking` to the module

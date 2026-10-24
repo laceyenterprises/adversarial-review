@@ -339,7 +339,11 @@ export async function emitDocsFastPathAttestation({ repo, prNumber, headSha, hqR
     parent_head_sha: null, kind: 'docs-fast-path', producer_identity: null,
     verdict: null, findings_count: null, payload: { policy: 'DOCSFASTPATH-01' }, ts: new Date().toISOString() };
   // Record re-verifies the MAC even when reusing a stored row.
-  const signed = existing || await signReviewedAttestation({ payload, hqPath, execFileImpl, env });
+  const signed = existing ? { ...existing } : await signReviewedAttestation({ payload, hqPath, execFileImpl, env });
+  // Chain reads include storage metadata. Replay only the signed envelope:
+  // supplying the old primary key bypasses Postgres's identity-conflict path.
+  delete signed.attestation_id;
+  delete signed.recorded_at;
   const recorded = await recordSignedReviewedAttestation({ signed, hqPath, execFileImpl, env });
   if (!recorded?.attestation_id || recorded.kind !== payload.kind || recorded.head_sha !== headSha
     || recorded.repo !== repo || recorded.pr_number !== prNumber) {

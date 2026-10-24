@@ -130,6 +130,8 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   await emitDocsFastPathAttestation({ repo: repoPath, prNumber, headSha: head, execFileImpl,
     readChainImpl: async () => [{ ...signed, attestation_id: 'example-attestation', recorded_at: signed.ts }] });
   assert.equal(signCalls, 1, 'restart reuses and re-verifies the already recorded head');
+  assert.equal('attestation_id' in recorded, false);
+  assert.equal('recorded_at' in recorded, false);
   cfg.autonomousMergeExecutionEnabled = false;
   assert.equal(await run(), true);
   assert.equal(merged, 1);

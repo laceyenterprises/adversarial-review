@@ -26,8 +26,9 @@ function fixture(t) {
   return { root, get store() { return store; }, now: () => clock, clock: n => { clock = time(n); },
     reopen() { store.close(); store = openFinalizationQueueStore({ rootDir: root }); } };
 }
-async function submit(f, kind = 'clean', pr = 102) {
+async function submit(f, kind = 'clean', pr = 102, reviewId) {
   const { h, e } = (kind === 'clean' ? queueCleanFixture : queueHandoffFixture)(pr);
+  if (reviewId !== undefined) { h.sourceReview.id = reviewId; e.review.id = reviewId; }
   const service = (kind === 'clean' ? createCleanReviewService : createQueueHandoffService)({ store: f.store,
     now: f.now, load: idle, evidenceAdapter: { read: async () => e } });
   const ack = await service.submit(h);
@@ -135,6 +136,74 @@ test('shared structural policy retains branch rules, primary change and duplicat
   assert.equal((await service.reconcile({ fence, entryId: a.entry.entryId })).reason, 'branch-protection-missing-gate');
   a.live.eligibility.branchProtectionRequired = false; delete a.live.eligibility.primaryChange;
   assert.equal((await service.reconcile({ fence, entryId: a.entry.entryId })).reason, 'primary-change-unknown');
+});
+
+for (const [cost, reason] of [
+  [null, 'ci-cost-read-failed'], [{ failedCheck: true }, 'ci-cost-check-failed'],
+  [{ ok: false }, 'ci-cost-unauthorized'],
+]) test(`conflict returns its own diagnostic despite preceding ${reason}`, async t => {
+  const previous = process.env.AMA_CI_COST_MODE;
+  process.env.AMA_CI_COST_MODE = 'blocking';
+  t.after(() => { if (previous === undefined) delete process.env.AMA_CI_COST_MODE; else process.env.AMA_CI_COST_MODE = previous; });
+  const f = fixture(t), a = await submit(f), fence = await owner(f);
+  a.live.eligibility.primaryChange.ciCost = cost && { headSha: a.h.head, ...cost };
+  a.live.eligibility.branchProtectionRequired = true;
+  const service = admission(f, async () => a.live);
+  const parked = await service.reconcile({ fence, entryId: a.entry.entryId });
+  assert.equal(parked.phase, 'parked-infrastructure'); assert.equal(parked.reason, reason);
+  a.live.eligibility.mergeable = 'CONFLICTING';
+  const result = await service.reconcile({ fence, entryId: a.entry.entryId });
+  assert.equal(result.phase, 'returned-to-closer'); assert.equal(result.reason, 'pr-not-mergeable');
+  f.reopen();
+  assert.deepEqual(f.store.readEntry(result.entryId), result);
+  assert.deepEqual(foldQueue(f.store.readEvents(lane)).entries[result.entryId], result);
+});
+
+test('primary reversion retains its diagnostic alongside conflict and missing branch rules', async t => {
+  const f = fixture(t), a = await submit(f), fence = await owner(f);
+  Object.assign(a.live.eligibility, { branchProtectionRequired: true, mergeable: 'CONFLICTING', primaryChange: {
+    headSha: a.h.head, hasHammerCommits: true, primaryHead: 'a'.repeat(40), mergeBase: 'c'.repeat(40),
+    ciCost: { headSha: a.h.head, ok: true },
+    primaryFiles: [{ filename: 'src/feature.mjs', status: 'added', additions: 1, deletions: 0,
+      patch: '@@ -0,0 +1 @@\n+feature();' }], finalFiles: [],
+  } });
+  const result = await admission(f, async () => a.live).reconcile({ fence, entryId: a.entry.entryId });
+  assert.equal(result.phase, 'returned-to-closer'); assert.equal(result.reason, 'primary-change-reverted');
+});
+
+for (const labels of [['duplicate-family-hold'], [{ name: 'duplicate-family-hold' }]]) {
+  test(`duplicate-family hold remains enforced for ${JSON.stringify(labels)}`, async t => {
+    const f = fixture(t), a = await submit(f), fence = await owner(f);
+    a.live.subject.labels = labels;
+    const result = await admission(f, async () => a.live).reconcile({ fence, entryId: a.entry.entryId });
+    assert.equal(result.phase, 'parked-infrastructure'); assert.equal(result.reason, 'duplicate-family-unresolved');
+  });
+}
+
+for (const uppercase of ['subject', 'review', 'primaryChange']) {
+  test(`equivalent ${uppercase} SHA casing and numeric review ID admit the same clean head`, async t => {
+    const f = fixture(t), a = await submit(f, 'clean', 102, '12345'), fence = await owner(f);
+    a.live.currentReview.id = 12345;
+    if (uppercase === 'subject') a.live.subject.head = a.h.head.toUpperCase();
+    if (uppercase === 'review') a.live.currentReview.commitId = a.h.head.toUpperCase();
+    if (uppercase === 'primaryChange') a.live.eligibility.primaryChange.headSha = a.h.head.toUpperCase();
+    const before = structuredClone(a.live);
+    const result = await admission(f, async () => a.live).reconcile({ fence, entryId: a.entry.entryId });
+    assert.equal(result.phase, 'ready'); assert.deepEqual(a.live, before, 'trusted evidence remains unchanged');
+  });
+}
+
+for (const [field, value, reason] of [
+  ['id', 'foreign-review', 'current-head-review-not-clean'],
+  ['commitId', 'f'.repeat(40), 'current-head-review-not-clean'],
+  ['commitId', null, 'current-head-review-not-clean'],
+  ['primaryHead', 'f'.repeat(40), 'primary-change-read-failed'],
+]) test(`identity normalization still refuses ${field}=${value}`, async t => {
+  const f = fixture(t), a = await submit(f), fence = await owner(f);
+  if (field === 'primaryHead') a.live.eligibility.primaryChange.headSha = value;
+  else a.live.currentReview[field] = value;
+  const result = await admission(f, async () => a.live).reconcile({ fence, entryId: a.entry.entryId });
+  assert.equal(result.reason, reason); assert.notEqual(result.phase, 'ready');
 });
 
 test('20 ABA recovery trials refuse late observations and preserve deadline/order across restart', async t => {

@@ -139,8 +139,10 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
         if (!Number.isSafeInteger(progressVersion)) throw new Error('queue progress version exhausted');
         const update = { ...patch, phase, updatedAt: at, progressVersion };
         if (readmit) update.readinessSeq = database.prepare('UPDATE finalization_queue_lane SET readiness_seq=readiness_seq+1 WHERE repository=? AND base=? RETURNING readiness_seq').get(...laneArgs(fence.lane)).readiness_seq;
+        const priorPhase = entry.phase;
         Object.assign(entry, update); writeEntry(entry);
         append('progress', fence.lane, { at, entryId, patch: update, generation: fence.generation, routeGeneration: fence.routeGeneration,
+          priorPhase,
           ...(recoveryObservation ? { observation: recoveryObservation } : {}) });
         return entry;
       });

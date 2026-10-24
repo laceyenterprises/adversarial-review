@@ -12,6 +12,7 @@ import { readQueueEvidence } from './queue-read.mjs';
 
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
+const sameSha = (a, b) => sha(a) && sha(b) && a.toLowerCase() === b.toLowerCase();
 const terminal = phase => ['merged', 'closed-observed', 'returned-to-closer'].includes(phase);
 const parked = phase => phase.startsWith('parked-');
 const disposition = (phase, reason) => ({ phase, reason });
@@ -24,16 +25,17 @@ export function classifyQueueAdmission(entry, receipt, live) {
   // Lifecycle reconciliation needs no review, labels, closer, or merge call.
   if (['closed', 'merged'].includes(s.state)) return disposition('closed-observed', `live-${s.state}`);
   if (s.state !== 'open' || !sha(s.head) || !sha(s.baseSha)) return disposition('parked-infrastructure', 'subject-unavailable');
-  if (s.head !== entry.head) return disposition('returned-to-closer', 'external-head-change');
+  if (!sameSha(s.head, entry.head)) return disposition('returned-to-closer', 'external-head-change');
   if (!Array.isArray(s.labels) || s.labels.some(l => !text(typeof l === 'string' ? l : l?.name))) {
     return disposition('parked-hold', 'labels-unavailable');
   }
-  if (isOperatorHeld(s.labels)) return disposition('parked-hold', 'operator-hold');
+  const labels = s.labels.map(l => typeof l === 'string' ? l : l.name);
+  if (isOperatorHeld(labels)) return disposition('parked-hold', 'operator-hold');
   if (!receipt) return disposition('parked-infrastructure', 'admission-receipt-unavailable');
   if (receipt.kind === 'clean' || receipt.handoff.dispositions.length === 0) {
     const review = live.currentReview;
     if (review?.complete !== true || !text(review.sourceRef)) return disposition('parked-infrastructure', 'current-head-review-unavailable');
-    if (review.id !== (receipt.input ?? receipt.handoff).sourceReview.id || review.commitId !== s.head
+    if (String(review.id) !== String((receipt.input ?? receipt.handoff).sourceReview.id) || !sameSha(review.commitId, s.head)
       || review.verdict !== 'settled-success' || !Array.isArray(review.findings) || review.findings.length) {
       return disposition('returned-to-closer', 'current-head-review-not-clean');
     }
@@ -42,18 +44,23 @@ export function classifyQueueAdmission(entry, receipt, live) {
   if (!text(live.permission?.sourceRef) || typeof live.permission.canPush !== 'boolean') return disposition('parked-permission', 'write-permission-unavailable');
   if (!live.permission.canPush) return disposition('parked-permission', 'write-permission-denied');
   if (!text(live.structuralSourceRef) || !live.eligibility) return disposition('parked-infrastructure', 'structural-eligibility-unavailable');
+  // Retain the primary-change evidence's exact spelling for the shared predicate
+  // only when it names this same head. Never rewrite signed/nested evidence.
+  const primaryHead = live.eligibility.primaryChange?.headSha;
+  const candidateHead = sameSha(primaryHead, s.head) ? primaryHead : s.head;
   const eligibility = evaluateMergeEligibility({ ...live.eligibility,
     // Ordering uses the real owner fence in the caller. Checks and BEHIND are
     // execution-stage inputs; they are retained below, never turned green.
-    leaseHeld: true, labels: s.labels, prState: 'OPEN', candidateHead: s.head,
-    validatedHead: entry.head, requirePrimaryChange: true,
+    leaseHeld: true, labels, prState: 'OPEN', candidateHead,
+    validatedHead: candidateHead, requirePrimaryChange: true,
     verdict: receipt.kind === 'clean' ? 'settled-success' : 'ham_terminal_remediation_validated',
   });
   const reasons = eligibility.reasons.filter(reason => reason !== 'ci-not-green'
     && !(reason === 'pr-not-mergeable' && live.eligibility.mergeable === 'MERGEABLE'
       && live.eligibility.mergeStateStatus === 'BEHIND'));
-  if (reasons.includes('primary-change-reverted') || (reasons.includes('pr-not-mergeable')
-    && live.eligibility.mergeable === 'CONFLICTING')) return disposition('returned-to-closer', reasons[0]);
+  const closerReason = reasons.find(reason => reason === 'primary-change-reverted'
+    || (reason === 'pr-not-mergeable' && live.eligibility.mergeable === 'CONFLICTING'));
+  if (closerReason) return disposition('returned-to-closer', closerReason);
   if (reasons.length) return disposition('parked-infrastructure', reasons[0]);
   return { phase: 'ready', reason: 'admission-validated', eligibility };
 }

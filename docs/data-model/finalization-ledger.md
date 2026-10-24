@@ -4,6 +4,7 @@
 **Store:** `data/reviews.db`
 **Schema surface:** `migrations/20260717_finalization_ledger.sql`
 **Runtime surface:** `src/finalization/ledger-store.mjs`
+**Source of truth:** `src/finalization/ledger-store.mjs`, `src/finalization/queue-store.mjs`, `src/finalization/queue-admission.mjs`
 
 ## Purpose
 
@@ -287,11 +288,21 @@ observations become `closed-observed` with their live-state reason, without a
 closer or an assertion that this queue merged the PR. A foreign head returns for
 fresh adjudication. Execution phases remain owned by later executor recovery.
 
+Terminal structural returns retain the matching `primary-change-reverted` or
+conflicting `pr-not-mergeable` reason, even alongside an earlier infrastructure
+failure. Infrastructure-only failures still park. Admission compares valid SHA
+identities case-insensitively and review IDs as strings; shared structural checks
+use the equivalent primary-change head spelling without rewriting evidence.
+Labels are normalized to names after complete-label validation.
+
 Every progress event increments retained `progressVersion` (older entries begin
 at zero), fencing even identical observations within the same timestamp.
 Entry JSON gains `admission`: kind, observation timestamp, live subject,
 structural reference/classifier result, current review where applicable,
 identity and permission observations. Progress events retain this history.
+New progress events also retain `priorPhase`, captured before applying
+`patch.phase`. Older events may omit it and continue to replay from their patch;
+no historical events are rewritten.
 The writer compares the complete pre-read entry snapshot after each await;
 superseded reads cannot overwrite newer holds/recovery even after a phase cycle.
 The owner fence and original deadline are checked again inside the transaction.

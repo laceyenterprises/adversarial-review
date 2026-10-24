@@ -2561,12 +2561,18 @@ reconcile without dispatch. External author changes return for fresh adjudicatio
 Parked recovery and repairs join the tail with fresh evidence, retaining history;
 duplicate wakes and restarts preserve position and the original absolute deadline.
 Snapshot comparison prevents late recovery reads from overwriting a newer hold.
+Terminal structural returns record the matching reversion/conflict reason even
+when infrastructure also fails. Progress events retain the phase before mutation;
+legacy events remain replayable. Live SHA casing and numeric/string review IDs
+do not change identity, and complete labels are passed as names to shared policy.
 
 The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
 returned-to-closer, or closed-observed. These seams remain uncomposed until lane
 routing; readiness alone grants no merge authority. Focused offline
 `finalization-queue-admission.test.mjs` exercises mixed-source process contention,
 read/recovery races, holds, current-head reads, bounded waits and probe immutability.
+Regressions also cover mixed infrastructure/conflict diagnostics, equivalent head
+and review identities, label objects and durable prior-phase audit/replay.
 Existing smoke promises gain no new live action, CI check or promotion gate.
 
 After normal source deployment and all three queue migrations, the operator runs

@@ -14,7 +14,10 @@ import subprocess
 import sys
 
 if len(sys.argv) != 2:
-    print("Usage: python3 scripts/contracts/refresh.py <path-to-agent-os>", file=sys.stderr)
+    print(
+        "Usage: python3 scripts/contracts/refresh.py <path-to-agent-os>",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 source = Path(sys.argv[1]).resolve()
@@ -30,6 +33,15 @@ files = {
     "publication": fixtures + "publication-receipts",
 }
 records = {}
+# Keep the separately refreshed public SDK recordings and their stale-report pins.
+previous = (
+    json.loads((dest / "provenance.json").read_text())
+    if (dest / "provenance.json").exists()
+    else {}
+)
+recorded = {
+    key: previous[key] for key in ("producerHashes", "recorded") if key in previous
+}
 for name, path in files.items():
     target = dest / name
     target.mkdir(parents=True, exist_ok=True)
@@ -142,6 +154,7 @@ revision = subprocess.check_output(
 (dest / "provenance.json").write_text(
     json.dumps(
         {
+            **recorded,
             "repository": "agent-os",
             "revision": revision,
             "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

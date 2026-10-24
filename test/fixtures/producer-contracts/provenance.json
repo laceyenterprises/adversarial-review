@@ -197,6 +197,65 @@
       "source": "modules/worker-pool/lib/python/tests/fixtures/quota_reserve/repaired-unavailable.json"
     }
   },
+  "producerHashes": {
+    "fleet-quota-status": "f69bd30f161fbc028f5459729a4a6912d86d6d8f7f24ad752e7cab99deba7142",
+    "github-token-refresh": "b14d32a034980cd4f0eec280b04d1a684f19fcd26d46e418288a51363452cf77",
+    "launch-request-row": "7e77337083dce6638f1345ec82a23ed2463bd62e2b926ea8aed24fc900dae7fa",
+    "worker-class-show": "fcd64b8362aa08358b6c01608745fae51ace99801ff9c706ec2b6c8cd5062839"
+  },
+  "recorded": {
+    "producers": {
+      "fleet-quota-status": {
+        "contentHash": "f69bd30f161fbc028f5459729a4a6912d86d6d8f7f24ad752e7cab99deba7142",
+        "contractVersion": "1.7",
+        "file": "fleet-quota-status.v1.json",
+        "producerCommand": "hq fleet quota status --json",
+        "recipe": "disposable-producer-boundary-v1",
+        "sha256": "f69bd30f161fbc028f5459729a4a6912d86d6d8f7f24ad752e7cab99deba7142",
+        "shapeHash": "c3952121a1b5ca552de790ae0fd18446382a19fc32f58c156e5ce812b8c9175b",
+        "sourceRevision": "e34e27425c45137ce843d6800d29a66b7507b143"
+      },
+      "github-token-refresh": {
+        "contentHash": "b14d32a034980cd4f0eec280b04d1a684f19fcd26d46e418288a51363452cf77",
+        "contractVersion": "1.6",
+        "file": "github-token-refresh.v1.txt",
+        "producerCommand": "hq github-token refresh",
+        "recipe": "disposable-producer-boundary-v1",
+        "sha256": "e38e1c188f697cc6b2d30afa701052779bc5654af91fb5755a7e8193cfb2917c",
+        "shapeHash": "b14d32a034980cd4f0eec280b04d1a684f19fcd26d46e418288a51363452cf77",
+        "sourceRevision": "e34e27425c45137ce843d6800d29a66b7507b143"
+      },
+      "launch-request-row": {
+        "contentHash": "7e77337083dce6638f1345ec82a23ed2463bd62e2b926ea8aed24fc900dae7fa",
+        "contractVersion": "1.7",
+        "file": "launch-request-row.v1.json",
+        "producerCommand": "LedgerDatabase.enqueue_launch_request / fetch_launch_request",
+        "recipe": "disposable-producer-boundary-v1",
+        "sha256": "7e77337083dce6638f1345ec82a23ed2463bd62e2b926ea8aed24fc900dae7fa",
+        "shapeHash": "667f8ec56f648ae60ffedd5cad73590c2ef03ff482cc05a327915c2ba07ec55f",
+        "sourceRevision": "e34e27425c45137ce843d6800d29a66b7507b143"
+      },
+      "worker-class-show": {
+        "contentHash": "fcd64b8362aa08358b6c01608745fae51ace99801ff9c706ec2b6c8cd5062839",
+        "contractVersion": "1.7",
+        "file": "worker-class-show.v1.json",
+        "producerCommand": "hq worker-class show <class>",
+        "recipe": "disposable-producer-boundary-v1",
+        "sha256": "fcd64b8362aa08358b6c01608745fae51ace99801ff9c706ec2b6c8cd5062839",
+        "shapeHash": "0295247ebdc37be707b12bb39a4c754a0c43a2a72962f0dcb868c7dd41dc7849",
+        "sourceRevision": "e34e27425c45137ce843d6800d29a66b7507b143"
+      }
+    },
+    "refresh": "python3 scripts/contracts/refresh-recorded.py <vendored-sdk.tgz> <release-revision>",
+    "sdk": {
+      "contractVersion": "1.7",
+      "file": "vendor/agent-os-app-sdk-0.4.0.tgz",
+      "releaseRevision": "1c60bb0f82e2924f5df7c11003a3d523917f3cc8",
+      "sha256": "5509f65066fb6cec00aacc89fb6a2c561a32219784db3ff45538afd3ddbfa2e5",
+      "snapshotSha256": "d3c4fa95dc6be4990a955f6c3bd98d5c636c96a7c13bd7453e1738d2172634f7",
+      "version": "0.4.0"
+    }
+  },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",
   "repository": "agent-os",
   "revision": "f54169eb71c6f0b55b51d3025dd435c88652277e"

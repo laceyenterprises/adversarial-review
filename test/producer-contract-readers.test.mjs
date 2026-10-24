@@ -207,6 +207,7 @@ test('refresh removes deleted managed artifacts and preserves separately pinned 
     mkdirSync(join(consumer, 'src/producer-contracts'), { recursive: true });
     const fixtures = join(consumer, 'test/fixtures/producer-contracts');
     const provenance = capture('provenance');
+    put(join(fixtures, 'provenance.json'), JSON.stringify(provenance));
     for (const [artifact, record] of Object.entries(provenance.files)) {
       put(join(source, record.source), readFileSync(new URL(`./fixtures/producer-contracts/${artifact}`, import.meta.url)));
     }
@@ -236,6 +237,8 @@ test('refresh removes deleted managed artifacts and preserves separately pinned 
     assert.equal(readFileSync(join(fixtures, 'quota/fleet-released.json'), 'utf8'), 'separately pinned');
     assert.deepEqual(readFileSync(join(fixtures, 'reserve-floors.json')), publicExport);
     const refreshed = JSON.parse(readFileSync(join(fixtures, 'provenance.json')));
+    assert.deepEqual(refreshed.recorded, provenance.recorded);
+    assert.deepEqual(refreshed.producerHashes, provenance.producerHashes);
     for (const [artifact, record] of Object.entries(refreshed.files)) {
       assert.equal(createHash('sha256').update(readFileSync(join(fixtures, artifact))).digest('hex'), record.sha256);
     }

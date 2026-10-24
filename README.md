@@ -2508,3 +2508,10 @@ The caller owns pinned diff extraction, authorized read-only execution, budget
 reservations, quota measurement and score evidence. This bridge does not launch
 reviewers or change any live routing configuration. Synthetic tests exercise
 parsing/routing with network, process execution and publication writes forbidden.
+
+The strict OSG schema recognizes `osg.router.mode` as `off`, `shadow` or `apply`,
+defaulting to `off`. Router subtree nulls are rejected in every configuration layer,
+matching the shared Python/shell acceptance vectors. This reader-only addition
+performs no routing or artifact access, grants no activation approval, and changes
+no review/merge authority or service lifecycle. Allocation and offline evaluation
+belong to the companion worker-pool owner; activation follows its config-writer runbook.

@@ -15,6 +15,7 @@ for (const vector of vectors.cases) {
       if (vector.valid) {
         const cfg = loadConfig({ topPath, env: {} });
         assert.equal(cfg.get('osg.mode'), vector.config.mode ?? 'off');
+        assert.equal(cfg.get('osg.router.mode'), vector.config.router?.mode ?? 'off');
         assert.equal(cfg.get('osg.sample_rate'), vector.config.sample_rate ?? 0.5);
         assert.equal(cfg.get('osg.policy.enabled'), vector.config.policy?.enabled ?? false);
       } else {
@@ -28,6 +29,7 @@ test('OSG-01 defaults are inert', () => {
   try {
     const cfg = loadConfig({ topPath: join(dir, 'config.yaml'), env: {} });
     assert.equal(cfg.get('osg.mode'), 'off');
+    assert.equal(cfg.get('osg.router.mode'), 'off');
     assert.equal(cfg.get('osg.sample_rate'), 0.5);
     assert.deepEqual(cfg.get('osg.arms'), []);
     assert.equal(cfg.get('osg.policy.enabled'), false);
@@ -39,14 +41,14 @@ test('OSG-01 defaults are inert', () => {
 });
 
 for (const layer of ['module', 'local']) {
-  for (const subtree of ['osg', 'osg.policy']) {
+  for (const subtree of ['osg', 'osg.policy', 'osg.router']) {
   test(`OSG null ${subtree} subtree rejected in ${layer} layer`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'osg-layer-'));
     try {
       const topPath = join(dir, 'config.yaml');
       const overlay = join(dir, layer === 'module' ? 'module.yaml' : 'config.local.yaml');
       writeFileSync(topPath, JSON.stringify({ version: 1 }));
-      writeFileSync(overlay, JSON.stringify({ osg: subtree === 'osg' ? null : { policy: null } }));
+      writeFileSync(overlay, JSON.stringify({ osg: subtree === 'osg' ? null : { [subtree.split('.')[1]]: null } }));
       assert.throws(() => loadConfig({ topPath, modulePaths: layer === 'module' ? [overlay] : [], env: {} }), error => error.message.includes(`${subtree}: expected mapping`));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

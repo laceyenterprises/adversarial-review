@@ -140,6 +140,21 @@
       "__min": 0,
       "__max": 1,
       "__enforce_max": true
+    },
+    "router": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "mode": {
+          "__type": "string",
+          "__enum": [
+            "off",
+            "shadow",
+            "apply"
+          ],
+          "__default": "off"
+        }
+      }
     }
   }
 }

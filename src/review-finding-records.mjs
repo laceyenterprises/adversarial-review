@@ -110,15 +110,17 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
       artifact?.path ?? null, payload ? JSON.stringify(payload) : null, start ?? null, published ?? null);
     for (const f of findings) {
       const fields = f.blocking ? ['addressed', 'pushback', 'blockers'] : ['nonBlocking', 'addressed'];
+      const matchesFinding = (entry, finding, field) => entry
+        && normalizeCoverageTitle(entry.title || entry.finding) === normalizeCoverageTitle(finding.title)
+        && (!entry.files?.length || entry.files.some(file => findingPath(file) === findingPath(finding.file)))
+        && (field !== 'pushback' || !entry.evidence
+          || disputeEvidenceForFinding(entry, JSON.parse(finding.finding_json), job.revisionRef));
       const matches = fields.flatMap(field => (Array.isArray(payload?.[field]) ? payload[field] : [])
         .map((entry, ordinal) => ({ field, ordinal, entry }))
-        .filter(({ entry }) => entry && normalizeCoverageTitle(entry.title || entry.finding)
-          === normalizeCoverageTitle(f.title)
-          && (!entry.files?.length || entry.files.some(file => findingPath(file) === findingPath(f.file)))));
+        .filter(({ entry }) => matchesFinding(entry, f, field)));
       const match = matches.length === 1 ? matches[0] : null;
       const ambiguous = match && findings.some(other => other.pass_id === f.pass_id
-        && other.finding_id !== f.finding_id && normalizeCoverageTitle(other.title) === normalizeCoverageTitle(f.title)
-        && (!match.entry.files?.length || match.entry.files.some(file => findingPath(file) === findingPath(other.file))));
+        && other.finding_id !== f.finding_id && matchesFinding(match.entry, other, match.field));
       const overlap = attribution.get(f.finding_id);
       const addressed = match && !ambiguous && ['addressed', 'nonBlocking'].includes(match.field);
       const disputed = validated && job.status === 'completed' && round.state === 'completed'

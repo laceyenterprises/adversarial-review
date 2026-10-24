@@ -12,6 +12,9 @@ bodies retain their original interpretation; the corpus does not fetch files.
 Missing repository metadata or an absent/malformed head SHA preserves the
 original blockers and verdict. Grounding retains raw card Markdown and fenced
 reproductions rather than rebuilding cards from parsed fields.
+Failed file reads and exhausted file budgets preserve blockers and verdicts;
+only confirmed absence or invalid citation/behaviour evidence permits demotion.
+Hosted result verdicts follow the grounded body before settlement.
 
 Completed, validated replies retain optional `pushback[].evidence` with the
 reviewed `headSha`, original `citation`, and either `code`, `reproduction`,
@@ -24,6 +27,9 @@ while other findings still require repair.
 Evidence citations accept comma- and semicolon-separated line ranges, such as
 `src/worker.mjs:10-15; 20-25, 30`, and must match the original path and complete
 ordered range list. This changes no persistent schema or payload fields.
+The complete citation disambiguates identical titles during both completion and
+withdrawal admission. Known non-blocking acknowledgements in `addressed` can
+accompany evidence-only completion; claimed blocker repairs cannot.
 
 The same completion transaction caches admitted evidence in the existing
 withdrawal table, keyed by repository, PR and finding identity. It binds the

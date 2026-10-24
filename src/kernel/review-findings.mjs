@@ -339,7 +339,8 @@ async function blockingEvidenceReason(finding, headContent) {
   if (!location) return 'missing-location';
   if (!hasFailingBehaviour(finding?.problem)) return 'missing-behaviour';
   const head = await headContent(location.path);
-  if (!head.ok) return head.reason;
+  // An unavailable read is not evidence that the finding is unsupported.
+  if (!head.ok) return head.reason === 'missing-at-head' ? head.reason : null;
   const count = head.content ? head.content.replace(/\n$/, '').split('\n').length : 0;
   return location.ranges.some(r => r.end > count) ? 'lines-beyond-head' : null;
 }

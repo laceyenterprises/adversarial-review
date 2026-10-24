@@ -10,6 +10,9 @@ If every blocker has that evidence, the reconciler independently observes the
 same open live head and completes the existing round with re-review suppressed
 (`blocking-findings-disputed-with-evidence`), even if the worker requested it.
 A watcher wake projects closure; the merge gates still decide whether to land.
+Known non-blocking acknowledgements in `addressed` do not prevent this path;
+claimed blocker repairs do. Complete evidence citations disambiguate duplicate
+titles during completion and withdrawal admission.
 Ordinary pushback, unreadable or moved heads, partial coverage and unresolved
 blockers keep their existing handling. The comment-delivery result does not
 reopen an evidenced dispute. No new queue status, retry or config key is added.

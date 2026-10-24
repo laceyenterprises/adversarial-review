@@ -90,6 +90,7 @@ export function loadArgusReviewPromptTemplate(rootDir = ROOT) {
 }
 
 export async function groundArgusReviewEvidence(review, options) {
+  if (!review || !Array.isArray(review.findings)) return review;
   if (!String(options?.repo || '').trim() || !/^[a-f0-9]{40}$/i.test(options?.headSha || '')) return review;
   const read = createHeadContentReader(options);
   for (const finding of review.findings) {

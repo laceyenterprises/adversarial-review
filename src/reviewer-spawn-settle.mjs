@@ -1,4 +1,5 @@
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
+import { extractReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
 import { buildReviewerAttribution } from './reviewer-attribution.mjs';
 import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
@@ -1142,9 +1143,10 @@ async function spawnReviewerOnceWithAccount({
             ? Number(reviewDbAttemptNumber)
             : Number(reviewAttemptNumber);
           const grounded = await groundBlockingFindingsAtHead(result.reviewBody, {
-            repo, headSha: reviewerHeadSha, checkoutDir: rootDir, requireEvidence: true, log: console,
+            repo, headSha: reviewerHeadSha, requireEvidence: true, log: console,
           });
-          result = { ...result, reviewBody: grounded.reviewText };
+          result = { ...result, reviewBody: grounded.reviewText,
+            verdict: normalizeReviewVerdict(extractReviewVerdict(grounded.reviewText)) };
           persistReviewGroundingMetadata({ rootDir, repo, prNumber, reviewDbAttemptNumber: captureAttemptNumber,
             reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, headGrounding: grounded.grounding });
           await postGitHubReviewWithCaptureImpl({

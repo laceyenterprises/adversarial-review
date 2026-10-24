@@ -244,11 +244,21 @@ export function disputeEvidenceForFinding(entry, finding, headSha) {
 
 export function allBlockingDisputed(job, reply, headSha) {
   if (!reply || reply.outcome !== 'completed' || headSha !== job?.revisionRef
-    || reply.blockers?.length || reply.operationalBlockers?.length || reply.addressed?.length) return false;
+    || reply.blockers?.length || reply.operationalBlockers?.length) return false;
   const findings = parseBlockingFindingsSection(job.reviewBody);
+  // Only acknowledgements of known non-blocking findings can accompany an
+  // evidence-only completion. Repairs of blockers still require a new review.
+  const nonBlocking = parseNonBlockingFindingsSection(job.reviewBody) || [];
+  if ((reply.addressed || []).some(entry => {
+    const title = normalizeCoverageTitle(entry.title || entry.finding);
+    return findings?.some(f => normalizeCoverageTitle(f.title) === title)
+      || !nonBlocking.some(f => normalizeCoverageTitle(f.title) === title);
+  })) return false;
   return findings?.length > 0 && findings.every(f => {
-    const matches = (reply.pushback || []).filter(e => normalizeCoverageTitle(e.title || e.finding) === normalizeCoverageTitle(f.title));
-    return matches.length === 1 && disputeEvidenceForFinding(matches[0], f, headSha);
+    const matches = (reply.pushback || []).filter(e =>
+      normalizeCoverageTitle(e.title || e.finding) === normalizeCoverageTitle(f.title)
+      && disputeEvidenceForFinding(e, f, headSha));
+    return matches.length === 1;
   });
 }
 

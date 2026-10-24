@@ -4,8 +4,11 @@
 
 Blocking PR findings require a resolvable head file/line and explicit input or
 state plus wrong outcome. The existing head-grounding pass caches file reads,
-tries local Git objects first, and bounds unique files at 25. Missing, unreadable
-or over-budget evidence demotes the finding with a recorded reason. The shared
+tries local Git objects when a subject checkout is available, and bounds unique
+files at 25. Confirmed missing files or invalid citations/behaviour demote the
+finding with a recorded reason. Failed reads and exhausted file budgets preserve
+blockers and verdicts. Hosted caller-post reviews use the exact-ref API reader
+and synchronize their result verdict with the grounded body. The shared
 prompt fragment covers all reviewer families and stages, including Argus model
 findings; the deterministic security rubric keeps its separate existing policy.
 Absent repository metadata or an absent/malformed 40-character head SHA skips
@@ -24,6 +27,9 @@ open head complete without another review. Ordinary pushback does not do so.
 The citation can include comma- or semicolon-separated ranges, for example
 `src/worker.mjs:10-15; 20-25, 30`; its path and complete ordered range list must
 match the original finding.
+Complete citations disambiguate identical titles in both completion and stored
+admission. Acknowledging known non-blocking advice in `addressed` does not prevent
+evidence-only completion; entries claiming blocker repairs still do.
 The existing withdrawal table caches completion admission, and the shared gate,
 closer and review-dismissal paths consume it with exact-head and body checks.
 There is no new polling path, CI gate, config key or merge permission.

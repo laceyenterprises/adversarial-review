@@ -12,6 +12,11 @@ missing admission blocks closure, and another head cannot borrow it. Required
 checks, leases, strict remediation policy and both merge paths remain enforced.
 There is no new queue/review lifecycle state. See the closure runbook for SRE's
 20-review sample and audit reclassification after deployment.
+Known non-blocking acknowledgements may accompany evidence-only completion;
+claimed blocker repairs cannot. Complete citations disambiguate repeated titles
+in completion and durable admission. Grounding read failures and file-budget
+exhaustion preserve blockers and verdicts; hosted result verdicts follow the
+grounded body before settlement.
 
 
 Quick reference for the two durable state machines in this module.

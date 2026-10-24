@@ -116,6 +116,33 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
 });
 
+test('spawnReviewer settles the verdict from the grounded caller-post body', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'spawn-settle-grounding-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const head = 'a'.repeat(40);
+  const posted = [];
+  const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+    rootDir: root, repo: 'fixture-owner/demo', prNumber: 14, reviewerModel: 'gemini',
+    reviewerHeadSha: head, reviewAttemptNumber: 1, reviewDbAttemptNumber: 1,
+    passKind: 'first-pass', reviewerSessionUuid: 'spawn-settle-grounded-verdict',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return { ok: true, verdict: 'request-changes', reviewBodyDelivery: 'caller-post',
+          reviewBody: '## Blocking issues\n- **Unsupported claim**\n  - **Problem:** A concern.\n\n## Verdict\nRequest changes' };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async payload => posted.push(payload),
+    fetchPullRequestHeadAndStateImpl: currentHead(head),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.verdict, 'comment-only');
+  assert.equal(posted.length, 1);
+  assert.equal(result.reviewBody, posted[0].reviewBody);
+  assert.match(posted[0].reviewBody, /## Verdict\nComment only/);
+  assert.match(posted[0].reviewBody, /Evidence downgrade:/);
+});
+
 test('spawnReviewer does not fail a posted pass when post-operation callback throws', async () => {
   const settled = [];
   const warnings = [];

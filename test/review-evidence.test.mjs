@@ -147,7 +147,7 @@ import { readHammerWithdrawals, resolveHammerAdjudication, blockingFindingIdenti
 import * as remediationKernel from '../src/kernel/remediation-reply.mjs';
 import { dismissWithdrawnReviews } from '../src/ama/withdrawn-review-dismissal.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
-import { readReviewFindings } from '../src/review-finding-records.mjs';
+import { readReviewFindings, linkFindingRemediation } from '../src/review-finding-records.mjs';
 
 test('REVIEWEVIDENCE-01: factual disputes require matching complete multi-range citations', () => {
   const head = 'a'.repeat(40);
@@ -183,6 +183,68 @@ test('REVIEWEVIDENCE-01: Argus retains real blockers and verification holds afte
   assert.equal(advisory.verdict, 'approve');
   assert.equal(argusReview.composeArgusVerdict({ modelReview: advisory, rubricFindings: [valid] }).verdict, 'block');
   assert.equal(argusReview.composeArgusVerdict({ modelReview: advisory, verification: { required: true, satisfied: false } }).verdict, 'needs_verification');
+});
+
+test('grounding preserves blockers when exact-head reads fail or exceed the budget', async () => {
+  for (const options of [
+    { fetchFileAtRefImpl: async () => { throw new Error('rate limited'); } },
+    { maxFiles: 0, fetchFileAtRefImpl: async () => assert.fail('budget exhausted') },
+    { maxFiles: 1, fetchFileAtRefImpl: async () => 'code\n' },
+  ]) {
+    const config = { repo: 'synthetic/project', headSha: 'a'.repeat(40), requireEvidence: true, ...options };
+    const body = review([card('First', 'first.mjs'), card('Second', 'second.mjs')].join('\n'));
+    const result = await groundBlockingFindingsAtHead(body, config);
+    assert.equal(result.reviewText, body);
+    assert.deepEqual(result.grounding.demoted, []);
+    const argus = { verdict: 'block', findings: ['first.mjs', 'second.mjs'].map(path => ({
+      severity: 'high', path: `${path}:1`, detail: 'Input or state: empty input; Wrong outcome: a throw.',
+    })) };
+    await argusReview.groundArgusReviewEvidence(argus, config);
+    assert.equal(argus.verdict, 'block');
+    assert.deepEqual(argus.findings.map(f => f.severity), ['high', 'high']);
+  }
+});
+
+test('Argus grounding preserves malformed review payloads for caller error handling', async () => {
+  const options = { repo: 'synthetic/project', headSha: 'a'.repeat(40) };
+  for (const review of [null, undefined, {}, { findings: null }, { findings: {} }]) {
+    assert.equal(await argusReview.groundArgusReviewEvidence(review, options), review);
+  }
+});
+
+test('evidence-only completion allows acknowledged advice and disambiguates duplicate titles by citation', t => {
+  const head = 'a'.repeat(40);
+  const body = review([card('Same title', 'first.mjs'), card('Same title', 'second.mjs')].join('\n'))
+    .replace('## Non-blocking issues\n- None.', '## Non-blocking issues\n' + card('Advice', 'advice.mjs'));
+  const job = { revisionRef: head, reviewBody: body };
+  const pushback = ['first.mjs', 'second.mjs'].map(path => ({ title: 'Same title', finding: 'Same title',
+    reasoning: 'The exact-head reproduction passes.',
+    evidence: { headSha: head, citation: `${path}:1`, test: 'node --test input.test.mjs', output: 'pass' } }));
+  const reply = { outcome: 'completed', addressed: [{ title: 'Advice', finding: 'Advice',
+    action: 'Acknowledged the existing behaviour.', files: ['advice.mjs'] }], pushback };
+  assert.equal(remediationKernel.allBlockingDisputed(job, reply, head), true);
+  for (const addressed of [[{ title: 'Same title' }], [{ title: 'Unknown' }]]) {
+    assert.equal(remediationKernel.allBlockingDisputed(job, { ...reply, addressed }, head), false);
+  }
+  for (const entries of [pushback.slice(0, 1), [pushback[0], pushback[0]], [...pushback, pushback[0]],
+    pushback.map(e => ({ ...e, evidence: { ...e.evidence, citation: 'first.mjs:2' } }))]) {
+    assert.equal(remediationKernel.allBlockingDisputed(job, { ...reply, pushback: entries }, head), false);
+  }
+  const { root } = gitFixture(t);
+  const key = { repo: 'synthetic/project', prNumber: 7, attemptNumber: 1, passKind: 'first-pass' };
+  beginReviewerPass(root, { ...key, reviewerClass: 'codex', headSha: head });
+  updateReviewerPassBodyCapture(root, { ...key, bodyMd: body, verdict: 'request-changes' });
+  const fullJob = { ...job, ...key, jobId: 'duplicate-citations', status: 'completed', completedAt: new Date().toISOString() };
+  const payload = buildRemediationReply({ job: fullJob, summary: 'Both cited reproductions pass.',
+    validation: ['Both exact-head checks pass.'], addressed: reply.addressed, pushback });
+  assert.doesNotThrow(() => remediationKernel.validateRemediationReply(payload, { expectedJob: fullJob }));
+  fullJob.remediationPlan = { currentRound: 1, rounds: [{ round: 1, state: 'completed',
+    startHeadSha: head, publishedHeadSha: head, remediationReply: { payload } }] };
+  const db = openReviewStateDb(root); ensureReviewStateSchema(db); t.after(() => db.close());
+  linkFindingRemediation(db, { job: fullJob, attribute: () => new Map() });
+  assert.deepEqual(db.prepare('SELECT reason FROM review_finding_remediations ORDER BY rowid').all().map(r => r.reason),
+    ['disputed-with-evidence', 'disputed-with-evidence', 'missing-history']);
+  assert.equal(readHammerWithdrawals({ rootDir: root, ...key }).length, 2);
 });
 
 test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head without re-review', async t => {

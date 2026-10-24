@@ -42,7 +42,7 @@ test('OSG-01 defaults are inert', () => {
 });
 
 for (const layer of ['module', 'local']) {
-  for (const subtree of ['osg', 'osg.policy', 'osg.double_blind']) {
+  for (const subtree of ['osg', 'osg.policy', 'osg.double_blind', 'osg.router']) {
   test(`OSG null ${subtree} subtree rejected in ${layer} layer`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'osg-layer-'));
     try {

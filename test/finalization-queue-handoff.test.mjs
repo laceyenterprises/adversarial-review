@@ -7,12 +7,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
-import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
+import { createQueueHandoffService, resolveQueueHandoffStore } from '../src/finalization/queue-handoff-store.mjs';
+import { handoffDigest, handoffJson } from '../src/finalization/queue-handoff.mjs';
 import { createCloserQueueHandoffBoundary } from '../src/ama/closer-queue-handoff.mjs';
 import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
 import { foldQueue } from '../src/finalization/ledger-fold.mjs';
 import { probeQueueOwner } from '../src/finalization/queue-probe.mjs';
-import { queueHandoffFixture, handoffTime, handoffHead } from './helpers/queue-handoff-fixture.mjs';
+import { queueHandoffFixture, handoffTime, handoffHead, reviewHead } from './helpers/queue-handoff-fixture.mjs';
 
 function fixture(t, options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mgq-handoff-'));
@@ -25,6 +26,67 @@ function fixture(t, options = {}) {
   return { root, store, service, h, e, reads: () => reads };
 }
 const count = (store, table) => store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+
+function nullPrototypeDictionaries(value) {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) nullPrototypeDictionaries(child);
+    if (!Array.isArray(value)) Object.setPrototypeOf(value, null);
+  }
+  return value;
+}
+
+test('null-prototype dictionaries preserve canonical bytes and replay the same durable receipt', async t => {
+  const f = fixture(t), originalDigest = handoffDigest(f.h);
+  const ordinary = JSON.parse('{"__proto__":{"nested":[true,null,3]},"z":"last"}');
+  const dictionaries = nullPrototypeDictionaries(structuredClone(ordinary));
+  assert.equal(handoffJson(dictionaries), handoffJson(ordinary));
+  assert.deepEqual(JSON.parse(handoffJson(dictionaries)), ordinary, 'own __proto__ key is retained as data');
+  const ack = await f.service.submit(f.h);
+  nullPrototypeDictionaries(f.h);
+  nullPrototypeDictionaries(f.e);
+  assert.equal(handoffDigest(f.h), originalDigest);
+  assert.deepEqual(await f.service.submit(f.h), ack);
+  // Exercise trusted evidence serialization on a new admission as well as replay.
+  f.h.admissionGeneration++;
+  f.h.handoffId += ':null-prototype';
+  assert.equal((await f.service.submit(f.h)).readinessSeq, 2);
+  assert.deepEqual(f.service.readReceipt(f.h).evidence, JSON.parse(JSON.stringify(f.e)));
+  for (const value of [new Date(), new Map(), Object.create({ inherited: true }), undefined, NaN,
+    { nested: undefined }, [undefined]]) assert.throws(() => handoffJson(value), /requires JSON data/);
+});
+
+for (const [name, head, review] of [
+  ['uppercase', handoffHead.toUpperCase(), reviewHead.toUpperCase()],
+  ['mixed-case', 'bB'.repeat(20), 'aA'.repeat(20)],
+]) test(`${name} SHAs retain original evidence and durable replay identity`, async t => {
+  const { h, e } = JSON.parse(JSON.stringify(queueHandoffFixture())
+    .replaceAll(handoffHead, head).replaceAll(reviewHead, review));
+  const f = fixture(t, { evidenceAdapter: { read: async () => e } });
+  const ack = await f.service.submit(h);
+  assert.equal(ack.head, head);
+  const receipt = f.service.readReceipt(h);
+  assert.deepEqual(receipt.handoff, h);
+  assert.deepEqual(receipt.evidence, e, 'signed records are never lowercased');
+  assert.deepEqual(await f.service.submit(h), ack);
+  const changed = structuredClone(h);
+  changed.head = head.toLowerCase();
+  await assert.rejects(f.service.submit(changed), /missing local validation|conflicting/);
+});
+
+test('receipt reads and duplicate replays reuse the prepared entry lookup', async t => {
+  const f = fixture(t), ack = await f.service.submit(f.h), prepared = [];
+  const receipts = resolveQueueHandoffStore({ db: { prepare(sql) {
+    prepared.push(sql);
+    return f.store.db.prepare(sql);
+  } } });
+  const initial = [...prepared];
+  assert.equal(initial.filter(sql => sql.includes('SELECT payload_json FROM finalization_queue_entry')).length, 1);
+  for (let i = 0; i < 20; i++) {
+    assert.deepEqual(receipts.read(f.h).ack, ack);
+    assert.deepEqual(receipts.replay(f.h), ack);
+  }
+  assert.deepEqual(prepared, initial, 'row parsing prepares no additional statements');
+});
 
 test('duplicate and lost acknowledgement return the durable receipt without rereads or readiness changes', async t => {
   const f = fixture(t);
@@ -45,6 +107,9 @@ test('duplicate and lost acknowledgement return the durable receipt without rere
 });
 
 const invalid = [
+  ['non-hex admission head', h => { h.head = 'g'.repeat(40); }],
+  ['short source review commit', h => { h.sourceReview.commitId = 'A'.repeat(39); }],
+  ['non-hex finding commit', (_h, e) => { e.review.findings[0].reviewCommitId = 'Z'.repeat(40); }],
   ['missing non-blocking finding', h => h.dispositions.pop()],
   ['missing blocking finding', h => h.dispositions.shift()],
   ['duplicate finding', h => h.dispositions.push(h.dispositions[0])],

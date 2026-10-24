@@ -3,10 +3,10 @@ import { resolveLaneKey } from './ledger-events.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 
-function parse(row, db) {
+function parse(row, entryStmt) {
   if (!row) return null;
   const result = { handoff: JSON.parse(row.handoff_json), evidence: JSON.parse(row.evidence_json), ack: JSON.parse(row.ack_json) };
-  const entry = db.prepare('SELECT payload_json FROM finalization_queue_entry WHERE entry_id=?').get(row.entry_id);
+  const entry = entryStmt.get(row.entry_id);
   const payload = entry && JSON.parse(entry.payload_json);
   const { ack, handoff } = result;
   if (!payload || ack.status !== 'acknowledged' || ack.entryId !== row.entry_id || ack.handoffId !== row.handoff_id
@@ -27,12 +27,13 @@ export function resolveQueueHandoffStore(store) {
   const select = db.prepare(`SELECT * FROM finalization_queue_handoff
     WHERE repository=? AND base=? AND pr_number=? AND admission_head=? AND admission_generation=?`);
   const byId = db.prepare('SELECT * FROM finalization_queue_handoff WHERE handoff_id=?');
+  const entryStmt = db.prepare('SELECT payload_json FROM finalization_queue_entry WHERE entry_id=?');
   function read(key) {
     const lane = resolveLaneKey(key.lane);
-    return parse(select.get(lane.repository, lane.base, key.prNumber, key.head, key.admissionGeneration), db);
+    return parse(select.get(lane.repository, lane.base, key.prNumber, key.head, key.admissionGeneration), entryStmt);
   }
   function replay(h) {
-    const prior = read(h), named = parse(byId.get(h.handoffId), db);
+    const prior = read(h), named = parse(byId.get(h.handoffId), entryStmt);
     if (!prior && !named) return null;
     if (!prior || !named || prior.ack.ackId !== named.ack.ackId || prior.ack.payloadDigest !== handoffDigest(h)) {
       throw new Error('conflicting handoff acknowledgement');

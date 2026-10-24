@@ -185,6 +185,13 @@ source reference and concrete fenced evidence. `fixed` also requires changed
 paths; `withdrawn` requires an explanation and source path/line locations.
 Acknowledgement and budget exhaustion are never finding dispositions.
 
+Canonical handoff/evidence JSON accepts ordinary and null-prototype dictionaries
+with JSON values; dictionary prototypes and object-key order do not affect the
+digest. Arrays retain their order and non-JSON values remain invalid. Commit SHA
+syntax accepts lowercase, uppercase and mixed-case 40-character hex. Original
+SHA text, signed records and exact evidence/identity comparisons are preserved;
+callers must use consistent SHA spelling across matching references.
+
 The trusted adapter's `read({handoff, timeoutMs, signal})` is supplied by runtime
 composition independently of the submitting closer. It must resolve sanctioned
 live PR/review, identity, signature-verification, publication, primary-change

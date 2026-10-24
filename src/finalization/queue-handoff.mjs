@@ -7,7 +7,7 @@ import { queueId } from './queue-store.mjs';
 import { reviewCurrencyCovers } from '../ama/review-currency.mjs';
 import { hasConcreteExactHeadEvidence } from '../ama/hammer-adjudication.mjs';
 
-const sha = /^[a-f0-9]{40}$/;
+const sha = /^[a-f0-9]{40}$/i;
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const requireFact = (condition, reason) => { if (!condition) throw new Error(`handoff: ${reason}`); };
 
@@ -17,7 +17,8 @@ export function handoffJson(value) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + Array.from(value, handoffJson).join(',') + ']';
-  if (value && Object.getPrototypeOf(value) === Object.prototype) {
+  const proto = value && Object.getPrototypeOf(value);
+  if (value && (proto === Object.prototype || proto === null)) {
     return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + handoffJson(value[key])).join(',') + '}';
   }
   throw new TypeError('handoff requires JSON data');

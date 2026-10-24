@@ -92,7 +92,17 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Exact-key reads project missing identity columns as null on SQLite and Postgres.
+Postgres reads resolve ticket identity from optional launch columns,
+`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
+`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
+and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
+from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
+identity includes the existing target projection, linked logical jobs and
+provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
+over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
+adoption; null projections never override positive canonical evidence. Status,
+retry-chain and bounded snapshot readers use the same identity projection.
+SQLite keyed/status reads retain their optional-column compatibility.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -163,7 +173,14 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. Dry-run remains the default;
+that window refuses this ticket-based recovery. A Postgres launch with no
+readable ticket identity also blocks absence proof; the reader never substitutes
+`NULL = ticket` for a canonical lookup. The query includes the exact attempt
+boundary and null request timestamps and never filters repository, head or
+terminal status. An operator key read returning zero cannot bypass an unreadable
+supplemental ticket query. A returned unidentified, conflicting or same-ticket
+wrong-head receipt remains ambiguous even when terminal; an empty ticket query
+cannot settle it. Dry-run remains the default;
 apply requires the directory owner's UID, an operator reason, and a durable
 `settlement-authorized` audit before lease/intent mutation, followed by the
 completion audit. Audit evidence includes the recorded ID and both queries.
@@ -5428,3 +5445,11 @@ and review requests; the CLI fallback also preserves requested users and teams.
 Incomplete identity retains full review. Branch protection uses the existing six-hour cache. Signing and
 recording occur only after checks are green and a lease is held. No process, timer,
 CI job, per-tick scan or configuration key is added.
+
+### Recovery deployment boundaries
+
+Deployment restores the daemon's automatic reconciliation, including legacy absence settlement with its existing retry refund and lease deferral, and exact-key receipt recovery. The prior missing-column failure prevented those paths. Inspect affected intents before activation; an operator dry-run does not pin or freeze subsequent daemon reconciliation. This source change itself performs no live settlement.
+
+Canonical identity and unidentified-row absence guarantees in LAC-2096 apply to PostgreSQL. The legacy SQLite ticket reader requires projected ticket/head columns: a producer-shaped SQLite ledger without them remains fenced/unsupported for ticket-wide recovery; do not interpret its unreadable result as absence. SQLite ledgers with projected columns do not supply the PostgreSQL unidentified-row guarantee.
+
+Before deploying, verify the configured reader can SELECT launch_requests, launch_request_logical_job_claims and worker_runs, with ticket_ref and launch_request_id on claims and task_key and launch_request_id on worker_runs. Missing privileges fail closed; do not omit existing linked evidence to turn a failed grant into an apparent absence. Required CI discovers native PostgreSQL tools through pg_config --bindir or PATH and fails if unavailable. Each payload and lineage document is expanded once per candidate row into small typed identity fields; the legacy whole-table pre-16 text fallback still scales with row count and remains an explicit operational limit.

@@ -282,7 +282,7 @@ test('real overlap guard retries base changes after the validated head was rebas
   assert.match(result.audit, /^exit:0\n$/);
 });
 
-test('LEASEFAIR-01 even disjoint base advancement during CI requires rebase and fresh CI', t => {
+test('LAC-2097: unresolved protection requires rebase and fresh CI even for disjoint advancement', t => {
   const fixture = rebasedFixture(t, true, true);
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
     greenAfterSleep: true, fixture });
@@ -403,6 +403,7 @@ ham_append_terminal_audit() {
 }
 ${acquire}
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + 900 ))
 HAM_MERGE_LEASE_HELD=0
 acquire_phase() {
 ${phase === 'post-CI' ? reacquire : 'ham_acquire_merge_lease'}

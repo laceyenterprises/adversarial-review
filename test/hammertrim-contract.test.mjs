@@ -23,9 +23,15 @@ function commonJsFixtureDir(prefix) {
   writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}\n');
   return dir;
 }
+function fixtureEnv(env = {}) {
+  // Fake gh fixtures must never inherit a worker's live credentials or refresh commands.
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !key.startsWith('HAM_')
+    && !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
+  return { ...cleanEnv, ...env };
+}
 function run(command, args, env = {}) {
-  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
-  return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: { ...cleanEnv, ...env } });
+  return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: fixtureEnv(env) });
 }
 // Shell behavior fixtures may substitute isolated state roots; location refusal is
 // exercised through the real CLI in hammer-scratch.test.mjs.
@@ -728,6 +734,7 @@ ham_acquire_merge_lease() { ham_lease_pr_view --json headRefOid,statusCheckRollu
 ham_base_touches_pr_files() { return 1; }
 ham_append_terminal_audit() { echo "AUDIT:$*"; }
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + 900 ))
 HAM_MERGE_LEASE_HELD=0
 close() { ${block}
  echo REACQUIRED; }
@@ -1056,7 +1063,7 @@ ham_mark_merge_lease_retryable_abort() { :; }
 close() { ${rendered.stdout.slice(loopStart, loopEnd)} }
 close
 `;
-  const result = spawnSync('/bin/bash', ['-c', script], { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 60_000 });
+  const result = spawnSync('/bin/bash', ['-c', script], { env: fixtureEnv(env), encoding: 'utf8', timeout: 60_000 });
   assert.equal(result.status, 20, result.stderr);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const checks = calls.filter(call => call.args[1].includes('/check-runs?'));
@@ -1170,7 +1177,7 @@ HAM_VERDICT_FILE="$TMPDIR/verdict" HAM_VERDICT_READY_FILE="$TMPDIR/verdict"
 source "$3" || exit $?
 echo COMMON_CLOSE_SUCCEEDED
 `;
-  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 30_000 });
+  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], { env: fixtureEnv(env), encoding: 'utf8', timeout: 30_000 });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /COMMON_CLOSE_SUCCEEDED/);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);

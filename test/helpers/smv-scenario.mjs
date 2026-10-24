@@ -208,6 +208,8 @@ if (scenario === 'clean') {
   for (const exit of ['terminal', 'closed', 'stacked', 'error', 'contended']) {
     await exerciseDaemonWaiterLifecycle(join(rootDir, `detached-daemon-${exit}`), `deadline-${exit}`);
   }
+  const { exerciseValidatedCloserQueue } = await import('./validated-closer-queue.mjs');
+  const validatedQueue = exerciseValidatedCloserQueue(join(rootDir, 'validated-closer-queue'));
   const review = await createFixtureStubReviewerRuntimeAdapter({ rootDir, reviewerBodies: [cleanBody] }).spawnReviewer({ sessionUuid: 'synthetic-review' });
   assert.equal(review.reviewBody, cleanBody); assert.equal(readReviewerRunRecord(rootDir, 'synthetic-review').state, 'completed');
   await tick(); assert.equal(store.merged, true);
@@ -293,7 +295,7 @@ if (scenario === 'clean') {
     assert.equal(recoveryProbeCalls, 1, 'failed release starts recovery without another readiness pass');
   } finally { probeGate.resolve(); await holders.settleProbes(); probeGate = null; }
   assert.equal(holders.readyCount(), 2);
-  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true,
+  evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true, validatedQueue,
     sharedRereviewOwnership: true, carriedCleanOwnership: true, staleDecisionRefused: true,
     leaseRecoveryRetried: true, canonicalGeminiIdentity: first.identity, distinctHolders: 2, thirdHolderLeaseRefused: true,
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,

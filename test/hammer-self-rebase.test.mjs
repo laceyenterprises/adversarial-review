@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { recordPendingAttestation } from '../src/ama/hammer-pending-attestation.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
@@ -12,6 +13,10 @@ const root = resolve(import.meta.dirname, '..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
+
+// The synchronous shell fixtures can otherwise starve the test reporter until
+// the whole file finishes, tripping a bounded runner's no-output deadline.
+test.beforeEach(() => setImmediate());
 
 function fixture(t, scenario) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-self-rebase-'));
@@ -29,7 +34,8 @@ function fixture(t, scenario) {
   const commit = (text, parent, extra = false) => {
     const blob = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text);
     const tests = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], surfaceTest);
-    const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${blob}\tunrelated.txt\n` : ''}`);
+    const extraBlob = extra ? git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], 'unrelated base\n') : '';
+    const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${extraBlob}\tunrelated.txt\n` : ''}`);
     return git(['--git-dir', remote, 'commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Synthetic change\n');
   };
   const ancestor = commit('base-old\nbody\nhammer-old\n');
@@ -37,21 +43,24 @@ function fixture(t, scenario) {
   const base = commit('base-new\nbody\nhammer-old\n', ancestor);
   const rebased = commit('base-new\nbody\nhammer-new\n', base);
   const foreign = commit('foreign\n', rebased);
-  const disjoint = scenario === 'ci-disjoint';
+  const disjoint = scenario.startsWith('ci-disjoint') || scenario === 'ci-old-reply';
   const nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
   const nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
   git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
-  git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', original]);
+  git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', scenario === 'no-op' ? rebased : original]);
   git(['init', '--quiet']);
   git(['remote', 'add', 'origin', remote]);
   // Seed only A and its parent. B must be fetched by the production procedure.
-  const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: original + '\n', timeout: 10000 });
+  const pack = execFileSync(realGit, ['--git-dir', remote, 'pack-objects', '--stdout', '--revs'], { env, input: (scenario === 'no-op' ? rebased : original) + '\n', timeout: 10000 });
   execFileSync(realGit, ['unpack-objects'], { cwd: scratch, env, input: pack, timeout: 10000 });
-  git(['checkout', '--quiet', '--detach', original]);
-  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: original, behind: true }));
+  git(['checkout', '--quiet', '--detach', scenario === 'no-op' ? rebased : original]);
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ original, rebased, base, foreign, nextBase, nextRebased, head: scenario === 'no-op' ? rebased : original, behind: true }));
   writeFileSync(join(dir, 'details'), 'Synthetic surface repaired.\n');
   writeFileSync(join(dir, 'terminal-remediation.json'), JSON.stringify({ active: true,
-    commit: { sha: rebased }, auditComment: { body: 'synthetic', findings: [] } }));
+    commit: { sha: rebased }, auditComment: { body: 'synthetic', findings: [
+      { title: 'Keep source finding', blocking: true, file: 'surface.txt', addressed: true },
+      { title: 'Keep advisory repair', blocking: false, file: 'surface.txt', addressed: true },
+    ] } }));
   writeFileSync(join(dir, 'protection.json'), '{}');
   writeFileSync(join(dir, 'clock'), '1700000000');
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
@@ -71,7 +80,9 @@ case "$1" in
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
   */merge-lease.mjs)
     case "$2" in
-      acquire) touch "$FIXTURE_DIR/lease-held"; echo acquire >> "$FIXTURE_DIR/leases"; echo '{"leaseId":"fixture-lease"}' ;;
+      acquire)
+        if { [ "$SCENARIO" = ci-lease-deadline ] || [ "$SCENARIO" = ci-disjoint-lease-delay ]; } && [ -f "$FIXTURE_DIR/leases" ]; then echo 1700000900 > "$FIXTURE_DIR/clock"; fi
+        touch "$FIXTURE_DIR/lease-held"; echo acquire >> "$FIXTURE_DIR/leases"; echo '{"leaseId":"fixture-lease"}' ;;
       release) rm "$FIXTURE_DIR/lease-held"; echo release >> "$FIXTURE_DIR/leases"; echo '{}' ;;
       status) echo '{"holder":{"leaseId":"fixture-lease","holderPr":42,"pastDeadline":false,"holderPidLive":true,"ageSeconds":1}}' ;;
       needs-revalidation) exec "$REAL_NODE" "$@" ;;
@@ -92,8 +103,8 @@ esac
 `);
   Object.assign(env, { HAM_NODE_BIN: join(bin, 'node-fixture'), HAM_RUN_DIR: dir, HAM_BASE_HEAD: original,
     HAM_VALIDATION_BASE_SHA: scenario === 'disjoint' ? base : ancestor,
-    HAM_AUDIT_DETAILS_FILE: join(dir, 'details'), HAM_AUDIT_REMEDIATED_TOTAL: '0',
-    HAM_AUDIT_REMEDIATED_BLOCKING: '0', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
+    HAM_AUDIT_DETAILS_FILE: join(dir, 'details'), HAM_AUDIT_REMEDIATED_TOTAL: '2',
+    HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '1',
     HAM_DOC_CURRENCY: 'not applicable', HAM_DOC_CURRENCY_REASON: 'synthetic surface only',
     HAM_FAILING_TESTS_FIXED: 'synthetic tests pass', HAMMER_LACEY_GH_TOKEN: 'synthetic-token',
     HAM_AMA_TRAILERS: 'Worker-Class: hammer\nWorker-Ticket: HAMSELFREBASE-01' });
@@ -110,7 +121,7 @@ esac
   if (scenario.includes('recovery')) recordPendingAttestation({ hqRoot: dir, repo: 'fixture/repo', prNumber: 42,
     baseHead: original, validatedHead: rebased, identity: { login: 'hammer-worker', databaseId: 77 },
     range: { verified: true, reviewedHead: original, currentHead: rebased, baseSha: original, commits: [rebased] },
-    counts: { total: 0, blocking: 0, nonBlocking: 0 } });
+    counts: { total: 2, blocking: 1, nonBlocking: 1 } });
   const run = () => spawnSync('/bin/bash', ['-c', `
 ham_fixture_completion() { :; }
 if [ "$SCENARIO" = dirty ]; then echo dirty >> surface.txt; fi
@@ -239,7 +250,7 @@ for (const scenario of ['rebase', 'recovery', 'pending', 'disjoint', 'foreign', 
   });
 }
 
-for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-range-unavailable', 'ci-strict-behind', 'ci-shared-deadline']) {
+for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-disjoint-strict', 'ci-disjoint-lease-delay', 'ci-disjoint-conflict', 'ci-conflict', 'ci-red', 'ci-pending', 'ci-head-moved', 'ci-predicate-refused', 'ci-range-unavailable', 'ci-strict-behind', 'ci-shared-deadline']) {
   test(`LEASEFAIR-02: ${scenario}`, t => {
     const f = fixture(t, scenario);
     if (scenario === 'ci-disjoint') {
@@ -248,9 +259,9 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
     }
     const result = f.run();
     const diagnostics = result.stdout + result.stderr;
-    const succeeds = ['ci-touching', 'ci-disjoint', 'ci-strict-behind'].includes(scenario);
+    const succeeds = ['ci-touching', 'ci-disjoint', 'ci-disjoint-strict', 'ci-disjoint-lease-delay', 'ci-strict-behind'].includes(scenario);
     assert.equal(result.signal, null, diagnostics);
-    assert.equal(result.status, succeeds ? 0 : scenario === 'ci-conflict' ? 21 : 20, diagnostics);
+    assert.equal(result.status, succeeds ? 0 : ['ci-conflict', 'ci-disjoint-conflict'].includes(scenario) ? 21 : 20, diagnostics);
     assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'acquire\nrelease\nacquire\nrelease\n', diagnostics);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
     assert.equal(readFileSync(join(f.dir, 'wait-scales'), 'utf8'), 'scale\n');
@@ -261,7 +272,7 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     const checks = events.filter(e => e.kind === 'checks').map(e => e.value);
     assert.ok(checks.some(c => c.head === f.rebased && c.held === false), 'first wait is lease-free');
-    if (scenario !== 'ci-conflict') {
+    if (!['ci-conflict', 'ci-disjoint-conflict', 'ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario)) {
       const retryChecks = checks.filter(c => c.head === f.nextRebased);
       assert.ok(retryChecks.length >= 1, diagnostics);
       assert.ok(retryChecks.every(c => c.held === true), 'retry never releases while polling');
@@ -269,7 +280,15 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
     const merges = events.filter(e => e.kind === 'gh' && e.value[1] === 'merge');
     assert.equal(merges.length, succeeds ? 1 : 0, diagnostics);
     if (succeeds) {
-      assert.ok(merges[0].value.includes(f.nextRebased));
+      assert.ok(merges[0].value.includes(['ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario) ? f.rebased : f.nextRebased));
+      if (['ci-disjoint', 'ci-disjoint-lease-delay'].includes(scenario)) {
+        assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased, 'unrelated non-strict advance retains the validated head');
+        assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1,
+          'only the mandatory initial rebase; no CI restart');
+        assert.ok(checks.every(c => c.head === f.rebased));
+        assert.equal(events.some(e => e.kind === 'predicate'), false, 'original head-bound authority stays intact');
+        return;
+      }
       assert.equal(f.git(['merge-base', f.nextBase, 'HEAD']), f.nextBase);
       assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'PENDING'));
       assert.ok(checks.some(c => c.head === f.nextRebased && c.conclusion === 'SUCCESS'));
@@ -283,7 +302,7 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
         assert.doesNotMatch(readFileSync(join(f.dir, 'comments'), 'utf8'), new RegExp(f.nextRebased),
           'failed range proof must stop retry audit publication');
         assert.match(diagnostics, /synthetic retry range proof unavailable/);
-      } else assert.match(diagnostics, new RegExp(scenario === 'ci-conflict' ? 'outcome=rebase-conflict' :
+      } else assert.match(diagnostics, new RegExp(['ci-conflict', 'ci-disjoint-conflict'].includes(scenario) ? 'outcome=rebase-conflict' :
         scenario === 'ci-red' ? 'outcome=github-gate-red' : scenario === 'ci-head-moved' ? 'outcome=live-head-moved-before-merge' :
           scenario === 'ci-predicate-refused' ? 'outcome=retry-predicate-not-eligible' : 'outcome=required-checks-pending'));
     }
@@ -297,5 +316,69 @@ for (const scenario of ['ci-touching', 'ci-disjoint', 'ci-conflict', 'ci-red', '
       'publication provenance must precede the first CI check on the rebased head');
     }
     assert.doesNotMatch(diagnostics, /outcome=base-advanced-during-ci-wait/);
+  });
+}
+
+for (const scenario of ['old-reply', 'ci-old-reply', 'snapshot-lag', 'old-reply-foreign', 'old-reply-never']) {
+  test(`LAC-2097: update-branch visibility converges without repeating the CAS: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run(), diagnostics = result.stdout + result.stderr;
+    const refusal = ['old-reply-foreign', 'old-reply-never'].includes(scenario);
+    assert.equal(result.signal, null, diagnostics);
+    assert.equal(result.status, scenario === 'old-reply-foreign' ? 20 : scenario === 'old-reply-never' ? 1 : 0, diagnostics);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false, 'terminal completion/refusal releases ownership');
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length,
+      scenario === 'ci-old-reply' ? 2 : 1, 'one mutation per required rebase, regardless of stale replies');
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value[1] === 'merge').length, refusal ? 0 : 1);
+    if (refusal) {
+      assert.equal(events.some(e => e.kind === 'pushed-edge'), false, 'cannot mint provenance for an unproven candidate');
+      assert.equal(existsSync(join(f.dir, 'comments')), false);
+      assert.match(diagnostics, scenario === 'old-reply-never' ? /outcome=rebase-head-timeout/ : /outcome=rebase-result-unproven/);
+    } else {
+      assert.match(diagnostics, /outcome=merged/);
+      assert.equal(f.git(['rev-parse', 'HEAD']), scenario === 'ci-old-reply' ? f.nextRebased : f.rebased);
+      if (scenario !== 'snapshot-lag') assert.equal(JSON.parse(readFileSync(join(f.dir, 'rebase-result-proof.json'))).proof, 'exact-rebase-tree-replay');
+    }
+  });
+}
+
+for (const scenario of ['ci-canceled', 'ci-closed']) {
+  test(`LAC-2097: live closure refusal before reacquisition leaves no owner: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run(), diagnostics = result.stdout + result.stderr;
+    assert.equal(result.status, 20, diagnostics);
+    assert.match(diagnostics, /merge-lease-admission-refused/);
+    assert.equal(readFileSync(join(f.dir, 'leases'), 'utf8'), 'acquire\nrelease\n');
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
+  });
+}
+
+test('LAC-2097: a strict already-up-to-date no-op keeps its exact head without another mutation', t => {
+  const f = fixture(t, 'no-op');
+  const result = f.run(), diagnostics = result.stdout + result.stderr;
+  assert.equal(result.status, 0, diagnostics);
+  assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
+  const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1);
+  assert.equal(events.some(e => e.kind === 'pushed-edge'), false, 'no invented publication edge for unchanged SHA');
+  assert.equal(existsSync(join(f.dir, 'lease-held')), false);
+});
+
+for (const scenario of ['ci-lease-deadline', 'ci-id-deadline']) {
+  test(`LAC-2097: exhausted CI deadline cannot start a rebase or restart CI: ${scenario}`, t => {
+    const f = fixture(t, scenario);
+    const result = f.run(), diagnostics = result.stdout + result.stderr;
+    assert.equal(result.status, 20, diagnostics);
+    assert.match(diagnostics, /outcome=github-gate-timeout/);
+    assert.equal(f.git(['rev-parse', 'HEAD']), f.rebased);
+    const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))).length, 1,
+      'expired reacquisition preserves the previously validated source head');
+    assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
+    assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
 }

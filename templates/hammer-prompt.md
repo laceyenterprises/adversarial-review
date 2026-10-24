@@ -88,7 +88,8 @@ HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 ```
 
-Keep `HAM_ROOT_DIR` (deployed daemon/round ledger) exported; `HAM_HQ_ROOT` is HQ.
+`HAM_ROOT_DIR` is the deployed daemon checkout and round ledger; keep it exported.
+`HAM_HQ_ROOT` is the HQ root.
 
 Write the complete close-out to `<<RUN_DIR>>/close-controller.sh`, then run in foreground:
 
@@ -112,7 +113,7 @@ docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
-Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. All GitHub
+Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. GitHub
 calls use `ham_gh` or `ham_pr`.
 Never use `--watch` or add polling loops. The helpers refresh before each call and
 refresh and retry once on a credential rejection. Never read or print raw token variables.

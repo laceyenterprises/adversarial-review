@@ -489,7 +489,7 @@ function recordHammerRetryDispatchUnlocked(rootDir, identity, {
     doc.dispatchCharges = { ...existing?.dispatchCharges, [chargeKey]: {
       launchRequestId: normalizeKey(launchRequestId), attempt: 1, consumerVersion: 1, waitBudget,
       targetEpoch: doc.targetChargeEpoch, refundedBudgets: {},
-      jobKey: doc.jobKey, headSha: head, chargedAt: now,
+      jobKey: doc.jobKey, headSha: head, chargedAt: now || new Date().toISOString(),
       transientGrantId: transient?.id || null,
     } };
     if (transient) doc.pendingTransientCharge = null;

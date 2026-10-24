@@ -248,7 +248,10 @@ node "${AGENT_OS_DEPLOY_CHECKOUT:?}/tools/adversarial-review/bin/recovery-status
 Record schema 1, `consumer.active`, `sourceHealthy`, each budget's `refundable`,
 configured values and resolution, observation ages, actual refund counts and
 `waitInventory.missing`. Active requires an organic runtime versioned charge
-within 24 hours; installed source or an empty ledger is not proof. Missing
+within 24 hours; installed source or an empty ledger is not proof. Wait coverage
+uses the latest timestamped versioned charge with a wait snapshot, independently
+fresh within 24 hours; a later recovered charge without a wait snapshot does not
+mask it or refresh its age. The CLI requires exactly one `--json` argument. Missing
 transient refunds remain zero observations; capability coverage comes from the
 observed versioned charge adapter. The probe never repairs state, migrates the
 shared ledger or emits transcripts/credentials. It reads at most 1,000 PR ledgers;

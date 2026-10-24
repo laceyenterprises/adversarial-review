@@ -3988,6 +3988,51 @@ test('RCV-08 activation reports observed adapter adoption, live config, ages and
   assert.equal(JSON.stringify(await recoveryStatus(args)).includes('synthetic secret'), false);
 });
 
+
+test('RCV-08 charge timestamps default to the current time and remain stable on replay', t => {
+  const f = recoveryFixture(t);
+  const before = Date.now();
+  f.charge('omitted', { now: undefined });
+  f.charge('null', { now: null });
+  const after = Date.now();
+  const charges = f.read().dispatchCharges;
+  for (const key of ['omitted', 'null']) {
+    const timestamp = Date.parse(charges[key].chargedAt);
+    assert.ok(timestamp >= before && timestamp <= after);
+    assert.equal(new Date(timestamp).toISOString(), charges[key].chargedAt);
+  }
+  f.charge('omitted', { now: '2026-10-25T00:00:00Z' });
+  assert.equal(f.read().dispatchCharges.omitted.chargedAt, charges.omitted.chargedAt);
+  f.charge('explicit');
+  assert.equal(f.read().dispatchCharges.explicit.chargedAt, '2026-10-24T12:00:00Z');
+});
+
+test('RCV-08 recovered charges retain only fresh timestamped dispatch wait evidence', async t => {
+  const f = recoveryFixture(t);
+  const args = { rootDir: f.rootDir, nowMs: Date.parse('2026-10-24T12:01:00Z'),
+    readVerdictsImpl: async () => ({ ok: true, verdicts: [] }),
+    configImpl: () => ({ get: () => 600_000 }) };
+  const missing = ['runtime-dispatch-wait-observation'];
+  f.charge('recovered-only', { waitBudget: null, now: '2026-10-24T12:00:30Z' });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, missing);
+  // Written later, but observed earlier: timestamp order, not insertion order, wins.
+  f.charge('actual-dispatch');
+  const status = await recoveryStatus(args);
+  assert.equal(status.consumer.observedAt, '2026-10-24T12:00:30Z');
+  assert.equal(status.consumer.ageSeconds, 30);
+  assert.deepEqual(status.waitInventory.observedDispatch,
+    { nominalMs: 600_000, dispatchTimeoutMs: 600_000 });
+  assert.deepEqual(status.waitInventory.missing, []);
+  // The consumer remains fresh at this boundary, but the earlier wait has expired.
+  const staleWait = await recoveryStatus({ ...args, nowMs: Date.parse('2026-10-25T12:00:01Z') });
+  assert.equal(staleWait.consumer.active, true);
+  assert.deepEqual(staleWait.waitInventory.missing, missing);
+  f.charge('invalid-timestamp', { now: 'invalid' });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, []);
+  f.charge('invalid-budget', { now: '2026-10-24T12:00:45Z', waitBudget: { dispatchTimeoutMs: 2 ** 31 } });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, missing);
+});
+
 import { spawnSync as recoverySpawnSync } from 'node:child_process';
 
 test('RCV-08 crash after atomic rename recovers the committed refund and releases its lock', t => {

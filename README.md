@@ -1064,7 +1064,10 @@ remain unchanged. Focused offline `ama-hammer-retry-cap`, `ama-dead-hammer-rearm
 `load-aware-operational-waits` fixtures cover accounting and waits. Existing smoke
 promises remain unchanged. After normal deployment, the owner runs the separate
 [read-only activation probe](docs/RUNBOOK-ama-closure.md#recovery-no-work-accounting-rcv-08);
-missing runtime observations remain pending for RCV-09 operator activation.
+missing runtime observations remain pending for RCV-09 operator activation. Wait
+evidence retains the latest actual dispatch snapshot with its own 24-hour age
+limit when a later recovered charge has no snapshot. This verification promise
+lives in `post-merge-verify.json`; RCV-08 introduces no new state machine.
 
 
 LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.

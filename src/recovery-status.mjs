@@ -54,12 +54,18 @@ export async function recoveryStatus({
     charges.push(...Object.values(doc.dispatchCharges || {}));
     receipts.push(...Object.values(doc.noWorkRefunds || {}));
   }
-  const latest = charges.filter(charge => charge.consumerVersion === 1 && Number.isFinite(Date.parse(charge.chargedAt)))
-    .sort((a, b) => Date.parse(b.chargedAt) - Date.parse(a.chargedAt))[0];
+  const observedCharges = charges.filter(charge => charge.consumerVersion === 1 && Number.isFinite(Date.parse(charge.chargedAt)))
+    .sort((a, b) => Date.parse(b.chargedAt) - Date.parse(a.chargedAt));
+  const latest = observedCharges[0];
+  // Receipt recovery does not observe dispatch waits. Retain the latest actual
+  // wait snapshot, but require its own freshness rather than borrowing a new charge's age.
+  const latestWaitCharge = observedCharges.find(charge => charge.waitBudget != null);
+  const waitAgeSeconds = latestWaitCharge ? Math.max(0, (nowMs - Date.parse(latestWaitCharge.chargedAt)) / 1000) : null;
   const ageSeconds = latest ? Math.max(0, (nowMs - Date.parse(latest.chargedAt)) / 1000) : null;
   const active = ledgerHealthy && ageSeconds !== null && ageSeconds <= 86400;
-  const waitObserved = active && latest.waitBudget?.dispatchTimeoutMs > 0
-    && latest.waitBudget.dispatchTimeoutMs <= MAX_TIMER_DELAY_MS;
+  const waitObserved = active && waitAgeSeconds !== null && waitAgeSeconds <= 86400
+    && latestWaitCharge.waitBudget.dispatchTimeoutMs > 0
+    && latestWaitCharge.waitBudget.dispatchTimeoutMs <= MAX_TIMER_DELAY_MS;
   const budgets = Object.fromEntries(['head', 'pr', 'lifetime', 'transient'].map(budget => [budget, {
     refundable: active && sourceHealthy,
     observedRefunds: receipts.filter(receipt => receipt.budgets?.[budget]).length,
@@ -73,7 +79,7 @@ export async function recoveryStatus({
       freshnessSeconds: 86400, chargesObserved: charges.length, refundsObserved: receipts.length },
     budgets, configuredValues,
     waitInventory: { entries: RECOVERY_WAIT_INVENTORY, ceilingMs: MAX_TIMER_DELAY_MS,
-      observedDispatch: latest?.waitBudget || null,
+      observedDispatch: latestWaitCharge?.waitBudget || null,
       missing: waitObserved && configHealthy ? [] : ['runtime-dispatch-wait-observation'],
       exclusions: ['leases', 'freshness', 'cadence', 'SLO objectives', 'spend ceilings', 'no-progress deadlines'] },
     runtimeEvidence: { adapterModule: fileURLToPath(import.meta.url), source: 'durable hammer charge/refund receipts' },

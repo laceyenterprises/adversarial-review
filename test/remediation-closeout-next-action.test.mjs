@@ -262,9 +262,11 @@ for (const policy of [{ drain: { active: true } }, { capacity: { hammer: { inFli
   });
 }
 
-for (const finalRound of [null, 'comment-only']) {
-  for (const state of (finalRound ? ['pending', 'green', 'failed'] : ['pending', 'green', 'failed', 'head-moved'])) test(`normal completion delegate: ${finalRound || 'blocking'} / ${state}`, async t => {
+for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null, 1]]) {
+  for (const state of (finalRound ? ['pending', 'green', 'failed'] : ['pending', 'green', 'failed', 'head-moved'])) test(`normal completion delegate: ${finalRound || 'blocking'} round ${currentRound} / ${state}`, async t => {
     const f = fixture(t, finalRound);
+    f.job.remediationPlan.currentRound = currentRound;
+    f.job.remediationPlan.rounds[0].round = currentRound;
     const workspace = f.job.workspaceDir;
     const git = (...args) => execFileSync('git', ['-C', workspace, ...args], {
       encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
@@ -303,7 +305,11 @@ for (const finalRound of [null, 'comment-only']) {
       auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
       inspectRemediationCiRegressionImpl: async () => ({ headSha: head, state: state === 'head-moved' ? 'green' : state }),
       requestReviewRereviewImpl: () => { f.effects.push('review'); return { triggered: true, status: 'pending' }; },
-      requestRereviewWakeImpl: () => { f.effects.push('rereview-wake'); return { requested: true }; },
+      requestRereviewWakeImpl: ({ headSha }) => {
+        assert.equal(headSha, state === 'head-moved' ? OTHER : head);
+        f.effects.push('rereview-wake');
+        return { requested: true };
+      },
       requestWatcherWakeImpl: () => { f.effects.push('watcher-wake'); return { requested: true }; },
       postCommentImpl: async () => ({ posted: false, reason: 'synthetic-delivery-retry' }),
       deliverAlertImpl: async () => { throw new Error('unexpected alert'); },
@@ -317,7 +323,8 @@ for (const finalRound of [null, 'comment-only']) {
     });
     assert.equal(result.outcome, 'completed', JSON.stringify(result.job.failure || result.reason));
     const next = result.job.reReview.nextAction;
-    assert.equal(next.action, ['pending', 'head-moved'].includes(state) ? 'wait-for-CI' : 'hammer');
+    assert.equal(next.action, ['pending', 'head-moved'].includes(state) ? 'wait-for-CI'
+      : currentRound === 1 ? state === 'failed' ? 'remediate' : 'review' : 'hammer');
     assert.equal(next.head, state === 'head-moved' ? OTHER : head);
     if (state === 'head-moved') {
       assert.equal(result.job.completion.finalRemediationPush, false);
@@ -325,8 +332,13 @@ for (const finalRound of [null, 'comment-only']) {
         ciGate: { headSha: OTHER, state: 'green' } }).decision.action, 'review');
     }
     assert.equal(result.job.completion.workerPushedHeadSha, head);
-    assert.equal(result.job.remediationPlan.currentRound, 2);
+    assert.equal(result.job.remediationPlan.currentRound, currentRound);
     assert.equal(result.job.remediationPlan.maxRounds, 2);
-    assert.deepEqual(f.effects, ['watcher-wake']);
+    assert.deepEqual(f.effects, currentRound === 1 ? ['review', 'rereview-wake'] : ['watcher-wake']);
+    if (currentRound === 1) {
+      assert.equal(result.job.reReview.wake.requested, true);
+      assert.deepEqual(JSON.parse(readFileSync(result.jobPath, 'utf8')).reReview,
+        JSON.parse(JSON.stringify(result.job.reReview)));
+    }
   });
 }

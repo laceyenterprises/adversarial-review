@@ -1204,9 +1204,11 @@ projection or smoke promise changes.
 NXA-04: normal and recovered remediation closeout use one shared successor.
 `reReview.nextAction` supplies suppression and comments with one owner, reason,
 head and anchored UTC deadline. Pending CI completes the worker round under an
-observer. Non-final rounds register durable re-review intent during closeout;
+observer. Non-final rounds register durable re-review intent during closeout
+and signal the watcher when that request is accepted or already pending;
 the watcher holds admission until green CI or requeues remediation on red CI,
-including recovered publication whose CI is already red.
+including recovered publication whose CI is already red. Proven publications
+delegate failed-CI retries to watcher admission; in-job retries cover unproven heads.
 Final pushed heads retain their existing hammer observer and suppression.
 A proven final push goes to hammer after settlement or as failed-CI repair. Unproven heads retain exact-head review. Verdicts, round/retry budgets,
 delivery claims, authenticated cancellation and execution safety remain intact.

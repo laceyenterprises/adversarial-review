@@ -904,7 +904,7 @@ test('reconcileFollowUpJob wakes watcher when re-review was already pending', as
     reason: 'remediation-to-rereview',
     repo: 'laceyenterprises/clio',
     prNumber: 7,
-    headSha: 'current-pending-head',
+    headSha: 'ci-green-head',
     requestedAt: '2026-04-21T10:05:00.000Z',
   });
   assert.deepEqual(reconciled.job.reReview.wake, {

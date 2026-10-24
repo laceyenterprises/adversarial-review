@@ -258,17 +258,27 @@ test('NXA-04: a blocking final-push handoff retains its shared observer until CI
     deadline: { at: '2026-09-28T23:08:59.717Z', anchoredAt: job.completedAt },
     decisionKey: 'synthetic-decision', evidenceRefs: ['synthetic-publish'] } };
   writeFileSync(path, JSON.stringify(job));
+  const observations = [];
+  const observedNow = Date.parse(job.completedAt) + 60000;
   const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
     candidate: { ...closureArgs(rootDir).candidate, statusCheckRollup: WAITING_ROLLUPS[0].rollup },
     loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, autonomousMergeExecutionEnabled: true }) }),
     fetchLatestHeadReviewBodiesImpl: async () => [REQUEST_CHANGES_BODY],
-    observeClosureWaitImpl: async () => ({ retryAfterMs: 30000, exhausted: true }),
+    now: () => observedNow,
+    observeClosureWaitImpl: async args => { observations.push(args); return { retryAfterMs: 30000, exhausted: true }; },
     maybeDispatchAmaCloserImpl: async () => { throw new Error('pending CI cannot launch the ceiling hammer'); },
   }));
   assert.equal(result.dispatched, false);
   assert.equal(result.recoveryWait, true);
   assert.equal(result.nextAction.action, 'wait-for-CI');
   assert.equal(result.nextAction.actor, 'ci');
+  const closeoutObservations = observations.filter(entry => entry.reason?.startsWith('action=wait-for-CI'));
+  assert.equal(closeoutObservations.length, 1);
+  assert.equal(closeoutObservations[0].now, observedNow);
+  assert.equal(closeoutObservations[0].headSha, PUSHED);
+  assert.equal(closeoutObservations[0].waitClass, 'final-round');
+  assert.equal(closeoutObservations[0].startedAt, Date.parse(job.completedAt));
+  assert.deepEqual(result.boundedWait, { retryAfterMs: 30000, exhausted: true });
   assert.equal(result.needsOperator, undefined, 'an overdue report cannot refuse later work');
 });
 

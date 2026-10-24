@@ -2213,7 +2213,10 @@ async function reconcileFollowUpJob({
             || closeoutCiGate.headSha || lifecycle?.headSha || job.revisionRef,
           workerPushedHeadSha: workerPublishedHead?.headSha, ciGate: closeoutCiGate });
         rereview = closeoutRereview(closeout, reply.reReview.reason);
-        if (closeout.decision.action === 'remediate' && closeoutCiGate.state === 'failed') {
+        // Proven publications complete above and leave failed CI to watcher
+        // admission. Only an unproven current head can retry inside this job.
+        if (workerPublishedHead?.headSha !== closeout.decision.head
+          && closeout.decision.action === 'remediate' && closeoutCiGate.state === 'failed') {
           const ciGate = closeoutCiGate;
           const maxRetries = resolveMaxTransientRemediationRetries();
           const priorRetries = Number(job?.remediationPlan?.transientRetries || 0);
@@ -2451,6 +2454,7 @@ async function reconcileFollowUpJob({
         repo: job.repo,
         prNumber: job.prNumber,
         headSha:
+          closeout?.decision.head ||
           rereview.reviewRow?.revisionRef ||
           rereview.reviewRow?.reviewerHeadSha ||
           job.headSha ||

@@ -40,7 +40,10 @@ descendants refuse validation and cancel the round, including when they closed
 their output pipes. Missing acknowledgement fails closed.
 The standalone bounded runner retains its original isolated-group behavior.
 The controller signals only its witnessed group; after leader exit a member's
-PID and `ps lstart` birth must still match before another group signal. A fresh
+PID and provider birth must still match before another group signal. Darwin
+uses exact libproc seconds/microseconds; other hosts retain `ps lstart`.
+The provider remains fixed for an invocation; no denied probe becomes an empty
+census or a weaker identity match. A fresh
 group census must confirm no live members (zombies excluded) before `quiescent`.
 Unknown or reused identities never authorize a group signal. TERM gets two
 seconds, KILL another second for drain. Unconfirmed cleanup returns 125,

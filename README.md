@@ -1178,6 +1178,18 @@ offline `hammer-controller` tests extend source acceptance; the existing
 `smv-handoff` smoke promise is unchanged. Deployed organic cancellation and
 next-contender progress remain separate runtime-owner acceptance.
 
+LAC-2108 restores the controller's required read-only census inside the macOS
+worker boundary: the packaged stdlib Python helper uses libproc's kernel-filtered
+group enumeration and exact PID/PGID/birth reads, while owner assertion uses
+`getpgid`. Python resolves through the existing `HQ_PYTHON3` / `AGENT_OS_PY` /
+`python3` convention with isolated imports. Both operations retain a two-second
+bound; denied, incomplete or inconsistent evidence fails closed. Other hosts
+retain `ps`. No sandbox or ledger policy changes. Actual-provider offline tests
+cover readiness, exit 7 and complete matching-group drain; [RCA and acceptance](docs/validation/lac-2108.md)
+separate those fixtures from loaded organic worker proof. Existing lifecycle
+states and the `smv-handoff` smoke promise are unchanged.
+
+
 Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
 `statusVocabulary`. Explicit terminal/succeeded false values win independently;
 missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.

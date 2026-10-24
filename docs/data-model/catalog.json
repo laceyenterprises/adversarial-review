@@ -7,7 +7,7 @@
       "path": "docs/data-model/hammer-controllers.md",
       "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
       "schemaSurface": "src/ama/hammer-controller.mjs",
-      "relatedSchemaSurfaces": ["bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
+      "relatedSchemaSurfaces": ["src/controller-process-census.mjs", "src/controller_process_census.py", "bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
       "owner": "versioned closer controller"
     },
     {

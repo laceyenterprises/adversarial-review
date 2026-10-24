@@ -1,6 +1,7 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
+import { nativeControllerIdentity } from './controller-process-census.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,10 +36,12 @@ function currentProcessGroupId({
   }
   let resolved = null;
   try {
-    const stdout = execFileSyncImpl('ps', ['-o', 'pgid=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: loadAwareTimeoutMs(5_000),
-    });
+    const stdout = process.platform === 'darwin' && execFileSyncImpl === execFileSync
+      ? nativeControllerIdentity('pgid', pid)
+      : execFileSyncImpl('ps', ['-o', 'pgid=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: loadAwareTimeoutMs(5_000),
+      });
     const parsed = Number(String(stdout || '').trim());
     resolved = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   } catch {

@@ -5245,10 +5245,12 @@ all exact-head, required-check, lease and execution-switch gates still apply.
 The watcher performs one successful asynchronous sweep per UTC day. A failed
 startup (for example SQLite lock contention) or a fleet-stop interruption retries
 on the next poll without advancing the UTC deadline; claimed batches retain their
-dispatch keys. An in-flight sweep fences overlapping ticks. Per-batch errors remain
-durably recorded and fenced for the next daily sweep. It dispatches one
+dispatch keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
+durably recorded and fenced for the next daily sweep; settlement errors retry hourly. It dispatches one
 normal-priority remediation worker per repository/area, using existing classes
-and the existing `hq dispatch` transport. No cron, CI gate or config key is added.
+and the existing `hq dispatch` transport. No cron, CI gate or config key is added. Hourly settlement-only passes collect worker outcomes and
+observe batch PR merges without claiming new batches or dispatching workers.
+Dropped findings retain no result PR reference.
 Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
 retrying GitHub transport. Applied findings require a merged batch PR with its
 exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers

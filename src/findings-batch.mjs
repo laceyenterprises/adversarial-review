@@ -94,7 +94,7 @@ export function settleFindingBatch(db, batch, result, pr = null) {
       }
     }
     for (const f of result.findings) db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
-      WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), result.prNumber ?? null, batch.batch_id, f.findingId);
+      WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
     db.prepare("UPDATE finding_batches SET completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),error=NULL WHERE batch_id=?")
       .run(batch.batch_id);
     return true;
@@ -110,8 +110,8 @@ export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env }
 }
 
 export async function runFindingBatches({ db, rootDir, env = process.env, day = new Date().toISOString().slice(0, 10),
-  execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, logger = console }) {
-  claimFindingBatches(db, day);
+  execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, logger = console, resolutionOnly = false }) {
+  if (!resolutionOnly) claimFindingBatches(db, day);
   for (const batch of db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL').all()) {
     try {
       if (fleetStopReason({ env, logger })) return { completed: false };
@@ -126,7 +126,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const pr = result.findings?.some(f => f.outcome === 'applied') && Number.isSafeInteger(result.prNumber)
           ? await fetchPr(batch.repo, result.prNumber, { execFileImpl, env, logger }) : null;
         settleFindingBatch(db, batch, result, pr);
-      } else if (!batch.launch_id) {
+      } else if (!resolutionOnly && !batch.launch_id) {
         const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
           b.head_sha AS headSha,b.reviewer_family AS reviewerFamily,f.finding_json FROM finding_backlog b
           JOIN review_findings f USING(finding_id) WHERE b.batch_id=? ORDER BY b.finding_id`).all(batch.batch_id)
@@ -135,7 +135,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         chmodSync(dir, 0o2775);
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath));
-        const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({}, { env }), env });
+        const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
         const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: 60_000, maxBuffer: 1024 * 1024 });
         const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
         if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
@@ -150,18 +150,23 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   return { completed: true };
 }
 
-// One clock comparison per watcher poll. Database work, remote reads and dispatch
-// run once a UTC day after success; startup failures and fleet stops retry next poll.
+// Claims and dispatch run once a UTC day; settlement-only passes run hourly.
+// Startup failures and fleet stops retry next poll.
 // Restarts retain the durable per-area fences.
 export function createFindingBatchTicker(options) {
-  let next = 0;
+  let next = 0, nextResolution = 0;
   let running = false;
   return { async tick(now = Date.now()) {
-    if (now < next || running) return;
+    if (running || (now < next && now < nextResolution)) return;
     running = true;
     try {
-      const { completed } = await runFindingBatches({ ...options, day: new Date(now).toISOString().slice(0, 10) });
-      if (completed) next = (Math.floor(now / 86400000) + 1) * 86400000;
+      const resolutionOnly = now < next;
+      const { completed } = await runFindingBatches({ ...options, resolutionOnly,
+        day: new Date(now).toISOString().slice(0, 10) });
+      if (completed) {
+        if (!resolutionOnly) next = (Math.floor(now / 86400000) + 1) * 86400000;
+        nextResolution = now + 3600000;
+      }
     } finally { running = false; }
   } };
 }

@@ -1035,7 +1035,9 @@ plain, bold or HTML-comment marker lines may include surrounding whitespace.
 A failed sweep startup or fleet-stop interruption retries on the next poll
 without advancing the daily deadline; claimed batches retain their dispatch keys
 and concurrent polls cannot overlap a sweep. Valid batch PR evidence clears any
-prior batch error while outcomes remain pending until merge. No new smoke promise
+prior batch error while outcomes remain pending until merge. Hourly settlement-only passes collect worker outcomes and
+observe batch PR merges without claiming new batches or dispatching workers.
+Dropped findings retain no result PR reference. No new smoke promise
 or CI gate is added; offline behavior cases cover capture, batch, closure and reporting.
 The SRE session verifies three merged captures before
 backing up config, disabling strict mode and bouncing the watcher, then confirms

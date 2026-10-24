@@ -133,13 +133,14 @@ existing review-state migration runner. All storage remains in `data/reviews.db`
 `finding_batches` owns one active batch per repository and area (partial unique
 index), and at most one new batch per UTC date. An immediate SQLite transaction
 assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
-remain visible but cannot dispatch until merged. The watcher checks a cached UTC
-midnight deadline after its ordinary poll; only the daily sweep does database,
-GitHub or dispatch work, asynchronously from review admission. The deadline
+remain visible but cannot dispatch until merged. The watcher checks cached UTC
+midnight and hourly settlement deadlines after its ordinary poll. Only the daily
+sweep claims batches or dispatches workers; hourly settlement-only passes collect
+worker manifests and observe batch PR merges, asynchronously from review admission. The deadline
 advances after successful sweep completion; startup failures and fleet-stop
 interruptions retry on the next poll with the existing claimed batches and dispatch
-keys. An in-flight sweep fences overlapping ticks. Per-batch errors remain
-recorded for the next daily sweep.
+keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
+recorded for the next daily sweep; settlement errors retry on the hourly pass.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
 normal priority. It persists the batch before submission and uses its stable
@@ -156,7 +157,7 @@ GitHub transport. Marker lines accept surrounding whitespace, bold or HTML
 comments, while still requiring the exact batch ID. Normal review may rebase the batch PR;
 completion records the worker outcome and PR merge, without granting merge authority.
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
-`result_pr`. Batch failures retain `error` until valid manifest and batch PR
+`result_pr` (null for dropped findings). Batch failures retain `error` until valid manifest and batch PR
 evidence is confirmed, at which point even an unmerged PR clears the stale error
 without settling findings. Failures never discard findings or launch a second
 worker blindly. Diagnose a missing artifact or failed worker before

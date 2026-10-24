@@ -281,3 +281,44 @@ test('FINDINGSBATCH-01 ticker retries failed startup and fences overlapping poll
   assert.equal(transactions, 3);
   assert.equal(launches, 1);
 });
+
+test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming or dispatching', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  pass(1, body.replace('## Verdict', body.slice(body.indexOf('- **Explain'), body.indexOf('## Verdict'))
+    .replace('Explain the result', 'Explain dropped result') + '## Verdict'));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
+  let launches = 0, reads = 0, merged = false;
+  const ticker = createFindingBatchTicker({ rootDir, db, env: { HQ_ROOT: rootDir },
+    execFileImpl: async () => { launches++; return { stdout: '{"launchRequestId":"fixture-launch"}' }; },
+    fetchPr: async () => {
+      reads++;
+      return { state: merged ? 'MERGED' : 'OPEN', body: `Finding-Batch: ${batch.batch_id}` };
+    } });
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  await ticker.tick(now);
+  const batch = db.prepare('SELECT * FROM finding_batches').get();
+  const rows = db.prepare('SELECT finding_id FROM finding_backlog ORDER BY finding_id').all();
+  const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ batchId: batch.batch_id, prNumber: 8, headSha: head,
+    findings: rows.map((r, i) => ({ findingId: r.finding_id, outcome: i ? 'dropped' : 'applied', reason: 'Checked current main' })) }));
+  await ticker.tick(now + 3600000);
+  assert.equal(reads, 1);
+  assert.equal(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+  merged = true;
+  // A new area must wait for the daily claim, even when hourly settlement runs.
+  pass(2, body.replace('src/result.mjs', 'docs/result.md'));
+  db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  await ticker.tick(now + 3600001);
+  assert.equal(reads, 1);
+  await ticker.tick(now + 7200000);
+  assert.equal(reads, 2);
+  assert.equal(launches, 1);
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_batches').get().n, 1);
+  assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+  const outcomes = db.prepare('SELECT outcome,result_pr FROM finding_backlog WHERE batch_id=? ORDER BY finding_id').all(batch.batch_id);
+  assert.deepEqual(outcomes, [{ outcome: 'applied', result_pr: 8 }, { outcome: 'dropped', result_pr: null }]);
+  await ticker.tick(Date.parse('2026-01-03T00:00:00Z'));
+  assert.equal(launches, 2);
+});

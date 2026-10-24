@@ -7,8 +7,13 @@ import { resetLoadAwareTimeoutCachesForTesting } from '../../src/load-aware-time
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Artifact subprocess integration fixtures need real contention headroom.
+// Keep their config isolation/cache resets without pinning the host to idle.
+// Check the entrypoint in every import (the runner uses symlinked test roots).
+const useHostLoad = process.argv[1]?.endsWith('/derived-artifacts.test.mjs');
+
 // Module-level sizing also needs an idle synthetic host before test imports run.
-if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) {
+if (!useHostLoad && process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) {
   os.loadavg = () => [0, 0, 0];
   syncBuiltinESMExports();
 }
@@ -20,7 +25,7 @@ if (process.env.NODE_TEST_CONTEXT && process.argv[1]?.endsWith('.test.mjs')) bef
   const previousPath = process.env.AGENT_OS_CONFIG_PATH;
   process.env.AGENT_OS_CONFIG_PATH = join(dir, 'config.yaml');
   writeFileSync(process.env.AGENT_OS_CONFIG_PATH, 'version: 1\n');
-  t.mock.method(os, 'loadavg', () => [0, 0, 0]);
+  if (!useHostLoad) t.mock.method(os, 'loadavg', () => [0, 0, 0]);
   t.after(() => {
     resetLoadAwareTimeoutCachesForTesting();
     if (previousPath === undefined) delete process.env.AGENT_OS_CONFIG_PATH;

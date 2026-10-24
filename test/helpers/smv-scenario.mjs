@@ -909,14 +909,14 @@ if (scenario === 'clean') {
     processKillImpl: () => { throw Object.assign(Error('synthetic dead'), { code: 'ESRCH' }); },
     readIntentReceiptImpl: () => ({ ok: true, rows: [] }) };
   assert.equal((await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
-    processExecFileSyncImpl: () => `12346 Thu Oct 22 10:18:18 2026 hq dispatch --idempotency-key ${deadKey}\n`,
+    processExecFileSyncImpl: () => `12346 Thu Oct 22 10:18:18 2026 hq dispatch\n--idempotency-key ${deadKey}\n`,
   })).status, 'unknown');
   assert.equal((await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
     processExecFileSyncImpl: () => { throw Error('synthetic unknown'); },
   })).status, 'unknown');
   assert.equal(readAmaCloserLease(rootDir, deadIdentity).status, 'pending');
   const reclaimed = await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
-    processExecFileSyncImpl: () => '99 Thu Oct 22 10:18:18 2026 synthetic-process\n',
+    processExecFileSyncImpl: () => '99 Thu Oct 22 10:18:18 2026 synthetic-process\nunrelated multiline argument\n',
   });
   assert.equal(reclaimed.status, 'no-launch');
   assert.equal(reclaimed.record.reason, 'dead-submitter-no-launch-proven');

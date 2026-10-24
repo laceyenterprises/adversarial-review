@@ -1334,7 +1334,9 @@ or settle proven no-submission. CLOSERPENDINGDEAD-01 also re-takes a matching
 pending submitting intent on the first poll after restart when its local watcher
 and submitter are proven gone, a bounded process scan finds no dispatch key and
 the subsequent exact-key ledger read is empty. New intents record watcher/child
-PID and start time. Unknown liveness preserves the original deadline. The
+PID and start time; child identity writes preserve missing, replaced or settled
+intents. Process argument continuation lines remain part of dispatch-key
+matching. Unknown liveness preserves the original deadline. The
 existing lease and admission gates still control the new launch; no merge
 permission is added. Focused offline regressions are in
 `test/ama-pre-receipt-intent.test.mjs` and

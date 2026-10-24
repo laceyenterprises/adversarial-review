@@ -66,9 +66,13 @@ PID start time replaced, no surviving recorded submitter, no process carrying
 the dispatch key, and a subsequent successful empty exact-key ledger query.
 A bounded `ps` scan (one second, 4 MiB, untruncated arguments) runs before the
 ledger read so a launch committed while its submitter exits is still observed.
+Embedded argument newlines continue the preceding process command, including
+for dispatch-key matching; a continuation before any process row is unreadable.
 New intents record `dispatchWatcher` and `dispatchSubmitter` as `{ pid,
 startedAt }`; start times are UTC at the operating system's second resolution.
 The background submission records the actual child before awaiting its receipt.
+That identity update requires the same attempt key and `dispatching` state;
+a missing or replaced intent is preserved.
 An interrupted identity write is covered by the key scan. Old keyed intents
 without child identity can recover with the same complete scan and dead-watcher
 proof. A live recorded child holds even if its arguments no longer show the key.

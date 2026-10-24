@@ -931,7 +931,29 @@ for (const reused of [false, true]) test(`CLOSERPENDINGDEAD-01: first poll re-ta
   assert.equal((await f.reconcile()).status, 'unchanged');
 });
 
-for (const mode of ['key-child', 'recorded-child', 'launch', 'watcher-live', 'scan-unreadable', 'scan-malformed', 'scan-empty', 'scan-overflow', 'child-malformed', 'child-start-unreadable', 'watcher-unknown', 'ledger-unreadable']) {
+for (const mode of ['unrelated', 'key-continuation', 'recorded-child']) {
+  test(`CLOSERPENDINGDEAD-01: multiline process arguments preserve ${mode} evidence`, async t => {
+    const f = fixture(t, { dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const output = processRow(mode === 'recorded-child' ? 12346 : 99, 'node -e "first line')
+      + '\n  continuation line\n'
+      + (mode === 'key-continuation' ? `hq dispatch --idempotency-key ${key}\n` : '')
+      + 'last line"\n' + processRow(100);
+    const result = await f.reconcile({ now: firstPoll, processExecFileSyncImpl: processScan(output) });
+    const processes = f.read().preReceiptReconciliation.processes;
+    assert.equal(result.status, mode === 'unrelated' ? 'no-launch' : 'unknown');
+    assert.equal(processes.key.status, mode === 'key-continuation' ? 'live' : 'absent');
+    assert.equal(processes.submitter.status, mode === 'recorded-child' ? 'live' : 'gone');
+    assert.deepEqual(processes.key.pids, mode === 'key-continuation' ? [99] : []);
+    assert.ok(!JSON.stringify(processes).includes('continuation line'), 'command lines stay private');
+    if (mode !== 'unrelated') {
+      assert.equal(f.read().retryCount, 2);
+      assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+    }
+  });
+}
+
+for (const mode of ['key-child', 'recorded-child', 'launch', 'watcher-live', 'scan-unreadable', 'scan-malformed', 'scan-orphan-continuation', 'scan-invalid-timestamp', 'scan-empty', 'scan-overflow', 'child-malformed', 'child-start-unreadable', 'watcher-unknown', 'ledger-unreadable']) {
   test(`CLOSERPENDINGDEAD-01: ${mode} fences early recovery until death and absence are proven`, async t => {
     const f = fixture(t, { dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });
     const extra = { now: firstPoll, processExecFileSyncImpl: processScan() };
@@ -941,6 +963,8 @@ for (const mode of ['key-child', 'recorded-child', 'launch', 'watcher-live', 'sc
     if (mode === 'watcher-live') extra.processKillImpl = () => {};
     if (mode === 'scan-unreadable') extra.processExecFileSyncImpl = () => { throw Object.assign(Error('unavailable'), { code: 'ETIMEDOUT' }); };
     if (mode === 'scan-malformed') extra.processExecFileSyncImpl = processScan('truncated process output');
+    if (mode === 'scan-orphan-continuation') extra.processExecFileSyncImpl = processScan('orphan continuation\n' + processRow(99));
+    if (mode === 'scan-invalid-timestamp') extra.processExecFileSyncImpl = processScan(processRow(99) + processRow(100, 'synthetic-process', 'invalid timestamp value!'));
     if (mode === 'scan-empty') extra.processExecFileSyncImpl = processScan('');
     if (mode === 'scan-overflow') extra.processExecFileSyncImpl = () => { throw Object.assign(Error('buffer limit'), { code: 'ENOBUFS' }); };
     if (mode === 'child-malformed') updateAmaCloserDispatchRecord(f.rootDir, identity, current => ({ ...current, dispatchSubmitter: { pid: '12346' } }));

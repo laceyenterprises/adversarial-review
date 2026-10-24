@@ -2942,6 +2942,40 @@ test('CLOSERPENDINGDEAD-01: background submission persists watcher and child ide
   assert.equal(result.dispatched, true, JSON.stringify(result));
 });
 
+for (const replacement of ['state', 'key', 'missing']) {
+  test(`CLOSERPENDINGDEAD-01: submitter identity preserves ${replacement} intent replacement`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-submitter-replaced-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
+    const path = amaCloserDispatchFilePath(rootDir, identity);
+    let checked = false;
+    const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+      processExecFileSyncImpl: () => 'Thu Oct 22 10:18:18 2026\n',
+      execFileImpl: () => {
+        const original = readFileSync(path, 'utf8');
+        const changed = { ...JSON.parse(original), ...(replacement === 'state'
+          ? { state: 'completed' } : { dispatchIdempotencyKey: 'synthetic-replacement-key' }) };
+        // Model an out-of-band writer that bypasses the held intent fence.
+        if (replacement === 'missing') rmSync(path);
+        else writeFileSync(path, JSON.stringify(changed));
+        const submission = Promise.resolve().then(() => {
+          if (replacement === 'missing') assert.equal(existsSync(path), false);
+          else assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), changed);
+          checked = true;
+          // Restore the fixture before the separate receipt persistence path.
+          writeFileSync(path, original);
+          return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${identity.prNumber}`, launchRequestId: 'lrq_synthetic_child' }) };
+        });
+        submission.child = { pid: 12346 };
+        return submission;
+      },
+    });
+    assert.equal(checked, true, JSON.stringify(result));
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+  });
+}
+
 test('CLOSERPENDINGDEAD-01: one poll re-takes a dead intent through ordinary dispatch admission', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-dead-intent-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

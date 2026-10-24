@@ -7977,9 +7977,11 @@ async function maybeDispatchAmaCloserAttempt({
       // A crash before this write is covered by the exact-key process scan.
       try {
         const dispatchSubmitter = captureCloserProcess(submission?.child?.pid, { processExecFileSyncImpl });
-        if (dispatchSubmitter) updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
-          ...current, dispatchSubmitter,
-        }));
+        if (dispatchSubmitter) updateDispatchRecord(rootDir, targetDispatchIdentity, current => {
+          if (current?.dispatchIdempotencyKey !== dispatchIdempotencyKey
+            || current?.state !== 'dispatching') return current;
+          return { ...current, dispatchSubmitter };
+        });
       } catch (error) {
         logger?.warn?.(JSON.stringify({ event: 'ama_closer.submitter_identity_write_failed',
           repo, prNumber, error: error.message }));

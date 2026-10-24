@@ -37,11 +37,19 @@ export function probeCloserSubmitter(record, lease, options = {}) {
       ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args='],
       { ...psOptions, env: psEnvironment() }));
     if (!output.endsWith('\n')) throw Error('incomplete process scan');
-    rows = output.trimEnd().split('\n').map(line => {
+    rows = [];
+    for (const line of output.slice(0, -1).split('\n')) {
       const match = /^\s*(\d+)\s+(.{24})\s+(.+)$/.exec(line);
-      if (!match || !validPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
-      return { pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] };
-    });
+      if (!match) {
+        // Embedded argument newlines continue the preceding command. Keep
+        // them in the key scan, but an orphan continuation proves nothing.
+        if (!rows.length) throw Error('invalid process row');
+        rows.at(-1).command += `\n${line}`;
+        continue;
+      }
+      if (!validPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
+      rows.push({ pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] });
+    }
   } catch {
     result.reason = 'process-scan-unreadable';
     return result;

@@ -7,7 +7,7 @@ import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 // Account selection consumes the canonical fleet projection. Weekly thresholds,
 // freshness and reserve arithmetic stay in quota_reserve, not in this service.
-import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, weeklyOnlyReserveFloorMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
+import { harnessCapFromStatuses, quotaStatusesFromSnapshot, parseHqFleetQuotaSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 
 const LANES = Object.freeze({
   'hammer-claude': 'hammer-claude-corp',
@@ -55,7 +55,7 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
     const ready = { ready: broker.ready, can_serve: broker.canServe };
     diagnostics.push(...quotaAccountDiagnostics(payload, { provider: 'anthropic', authPath, cap, reserve: lane !== corporate }), ...broker.diagnostics);
     const locallyBlocked = blockedWorkerClasses.includes(lane);
-    const weekly = weeklyOnlyReserveFloorMeasurement(policy);
+    const weekly = reserveFloorWeeklyMeasurement(policy);
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
       && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
     const exhausted = locallyBlocked || cap.capped || (measured && weekly.percentRemaining === 0);

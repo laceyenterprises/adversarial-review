@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
-import { harnessCapFromStatuses, quotaStatusesFromSnapshot, weeklyOnlyReserveFloorMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
+import { harnessCapFromStatuses, quotaStatusesFromSnapshot, reserveFloorWeeklyMeasurement, quotaAccountDiagnostics } from './fleet-quota-status.mjs';
 import { ENUM_CODEX_WORKER_ACCOUNT_ORDER } from './config-loader.mjs';
 
 // Accounts share a model family, but never quota or broker evidence. Keep the
@@ -34,7 +34,7 @@ function selectCodexAccount(payload, order, { model = null,
     const cap = harnessCapFromStatuses(statuses, { harness: provider, model, authPath });
     const row = rows.find(entry => entry?.provider === 'openai'
       && (entry.authPath || entry.auth_path) === authPath);
-    const weekly = weeklyOnlyReserveFloorMeasurement(payload?.reserveFloors?.[`openai-${authPath}`]);
+    const weekly = reserveFloorWeeklyMeasurement(payload?.reserveFloors?.[`openai-${authPath}`]);
     const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
       && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
     const broker = readBrokerProvider(payload?.brokerAuth, provider);

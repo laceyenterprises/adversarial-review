@@ -186,12 +186,9 @@ export function readWeeklyOnlyReserveFloorEvidence(floor, credential) {
   };
 }
 
-export function weeklyOnlyReserveFloorMeasurement(floor) {
+export function reserveFloorWeeklyMeasurement(floor) {
   return readWeeklyOnlyReserveFloorEvidence(floor, 'unknown').measurement;
 }
-
-// Compatibility names retain the review consumer's weekly-only policy.
-export const reserveFloorWeeklyMeasurement = weeklyOnlyReserveFloorMeasurement;
 
 export function quotaStatusesFromSnapshot(payload) {
   const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];

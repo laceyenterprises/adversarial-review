@@ -12,7 +12,7 @@ const bundle = parseProducerContracts(bytes.toString('utf8'));
 const artifact = {
   contractVersion: bundle.contractVersion,
   exportCommand: bundle.exportCommand,
-  producerRevision,
+  producerRevision: producerRevision.toLowerCase(),
   exportSha256: createHash('sha256').update(bytes).digest('hex'),
   examples: bundle.producers['reserve-floors'].examples,
 };

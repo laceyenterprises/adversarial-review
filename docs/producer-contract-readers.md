@@ -29,10 +29,10 @@ status output retains its last 1,000 characters for investigation; blank stdout
 is consistently identified as `$stdout empty`.
 Existing malformed-input exceptions still throw, now naming the producer field.
 
-Account routers explicitly call `weeklyOnlyReserveFloorMeasurement`; its evidence
+Account routers explicitly call `reserveFloorWeeklyMeasurement`; its evidence
 wrapper delegates normalization to the pinned SDK after excluding short-window
-candidates for floors carrying `weeklyMeasurementReason`. Compatibility exports
-retain the same policy. Healthy admission, holds, thresholds and account order
+candidates for floors carrying `weeklyMeasurementReason`. The established helper
+name retains this policy. Healthy admission, holds, thresholds and account order
 are unchanged. Unknown evidence alone never authorizes model fallback.
 
 ### Weekly evidence and admission policy
@@ -47,8 +47,10 @@ The repository's `readReserveFloorWeeklyEvidence` export from
 current floors (those with a `weeklyMeasurementReason` key), this wrapper clears
 the short-window `measurement` candidate before calling the SDK reader and
 forwards `weeklyMeasurementReason` in its result. If no weekly candidate remains,
-it returns `measurement: null` and `source: null`, even when the raw SDK reader
-would select `source: 'measurement'`. Floors without the reason key retain the
+it returns `measurement: null` and `source: null`: both fields are forwarded
+from the pinned SDK reader. In contrast, calling the SDK's `readFleetQuota`
+on the original payload can still project `source: 'measurement'` for short
+evidence. Floors without the reason key retain the
 legacy fallback. The table below distinguishes raw SDK evidence from this
 repository's weekly-only admission policy. No SDK replacement is required.
 
@@ -169,9 +171,12 @@ python3 scripts/contracts/refresh.py ../agent-os
 
 The refresh command requires exactly one source checkout path; missing or extra
 arguments print usage to stderr and exit with status 2 before copying artifacts.
-Refresh removes stale managed JSON/owner records and definition excerpts, while
-preserving the separately maintained `quota/fleet-released.json` capture and its
-provenance. Deleted or renamed producer artifacts therefore cannot remain as
+Refresh removes stale JSON/owner records only inside the five named capture
+directories (`quota`, `broker`, `launch`, `dispatch`, `publication`), plus
+definition excerpts. It preserves the separately maintained
+`quota/fleet-released.json` capture and root-level artifacts other than the
+regenerated `provenance.json`, including `reserve-floors.json` and
+`released-provenance.json`. Deleted or renamed producer artifacts cannot remain as
 untracked evidence in a managed capture directory.
 
 This copies artifacts only. To recapture, first use the exact commands and

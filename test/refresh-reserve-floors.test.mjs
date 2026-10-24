@@ -36,7 +36,7 @@ test('reserve-floor refresh accepts hex revisions in any case and rejects invali
       assert.equal(result.status, 0, result.stderr);
       assert.deepEqual(JSON.parse(readFileSync(output)), {
         contractVersion: fixture.contractVersion, exportCommand: fixture.exportCommand,
-        producerRevision, exportSha256: createHash('sha256').update(bytes).digest('hex'),
+        producerRevision: revision.toLowerCase(), exportSha256: createHash('sha256').update(bytes).digest('hex'),
         examples: fixture.examples,
       });
     }

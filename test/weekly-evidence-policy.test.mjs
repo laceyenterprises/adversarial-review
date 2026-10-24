@@ -68,6 +68,7 @@ for (const credential of Object.keys(exportedReserveFloors())) {
       assert.equal(sdk.payload.reserveFloors[credential]?.weeklyMeasurementReason, floor?.weeklyMeasurementReason);
       const weekly = readWeeklyOnlyReserveFloorEvidence(floor, credential);
       assert.equal(weekly.weeklyMeasurementReason, floor?.weeklyMeasurementReason);
+      assert.equal(weekly.source, weekly.measurement === null ? null : source);
       if (!admitted) assert.ok(weekly.diagnostics.some(d => d.includes('quota_reserve.snapshot') && d.includes(`reserveFloors.${credential}`)));
       const reserveHeld = credential === 'anthropic-oauth'
         && ['active', 'paused', 'nearCap'].some(key => floor?.[key] !== false);

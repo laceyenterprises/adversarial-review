@@ -98,11 +98,47 @@ and Postgres was not exercised. No service activation was performed.
 Ruff check/format on the changed Python test, and both repositories'
 `git diff --check` passed.
 
-The required `npm test` was attempted once with a 960-second outer bound and
-reached that bound before completing. It reported failures in unmodified auth,
-archive/rebuild and local-runtime tests; no full-suite green is claimed. The
-two `codex-per-worker-auth.test.mjs` failures also reproduce when that entire
-unchanged file runs alone (120-second bound). The 23 affected files above all
-completed green. The final 93-case policy file was rerun after making its
-missing-floor case structurally absent and passed again. No broad rerun was
-used to replace the timed-out result.
+The earlier `npm test` attempt reached its 960-second outer bound before
+completing and reported auth, archive/rebuild and local-runtime failures.
+That attempt did not establish a baseline or prove those failures unrelated;
+no full-suite green or waiver of the CI gate is claimed. The 23 affected files
+above completed green. The final 93-case policy file was rerun after making
+its missing-floor case structurally absent and passed again.
+
+## Review remediation verification
+
+After rebasing onto freshly fetched trunk, the eight targeted files below
+passed **312 tests**, with no failures, skips or cancellations (120-second
+bound). The worker contract prohibits a full local suite; PR-head CI retains
+that gate.
+
+```bash
+node test/run-tests.mjs \
+  codex-per-worker-auth.test.mjs \
+  codex-account-routing.test.mjs \
+  codex-worker-account-routing.test.mjs \
+  claude-account-routing.test.mjs \
+  producer-contract-readers.test.mjs \
+  reserve-floor-measurement.test.mjs \
+  weekly-evidence-policy.test.mjs \
+  refresh-reserve-floors.test.mjs
+```
+
+The auth file passes all 16 cases and imports only the auth materializer, not
+the quota fixture helper; its import graph does not reach that helper. The
+refresh regression runs the real Python script against a disposable producer
+Git repository and verifies that root-level `reserve-floors.json` survives
+byte-for-byte while deleted artifacts inside managed subdirectories disappear.
+Its revision and full-export hash remain embedded in its own artifact; it is
+maintained by `refresh-reserve-floors.mjs`, separately from `provenance.json`.
+
+The installed pinned SDK evidence reader returns `source` alongside
+`measurement` and `diagnostics`; the weekly wrapper forwards it. The policy
+matrix now asserts that projection, including `source: null` when filtering
+removes all evidence. Both routers retain the established
+`reserveFloorWeeklyMeasurement` name and the same weekly-only policy. Refresh
+tests verify lowercase output for lowercase, uppercase and mixed-case SHAs.
+
+`npm run lint` (zero errors), `npm run typecheck:contracts`, the offline
+research-finding demo and `git diff --check` also passed. No persistent model,
+lifecycle transition, smoke promise or deployment step changes in this round.

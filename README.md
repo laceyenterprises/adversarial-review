@@ -2687,3 +2687,11 @@ See the [store contract](docs/data-model/finalization-ledger.md#fifo-admission-a
 and [operator observation procedure](docs/finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).
 
 LAC-2096 deployment restores automatic daemon intent reconciliation; pre-deploy reader grants and affected intents must be checked. Canonical identity/absence guarantees are PostgreSQL-scoped; producer-shaped SQLite ticket recovery remains fenced. See the recovery deployment boundaries in the closure runbook.
+
+LVR-04 mirrors the strict boolean
+`deploy.post_merge_activation.incident_dispatch` (default false). This is a
+forward-reader contract for the host's bounded deploy-incident repair. The review
+service does not dispatch incidents or change merge authority through this knob.
+`test/config-loader-incident-dispatch.test.mjs` covers default, explicit booleans
+and invalid values with synthetic configs only. Deploy the reader before enabling
+the setting in a host overlay.

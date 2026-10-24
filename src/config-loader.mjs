@@ -611,6 +611,10 @@ function schemaV1() {
                 __type: TYPE_BOOL,
                 __default: false,
               },
+              incident_dispatch: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
               dispatch_on_fail: {
                 __type: TYPE_BOOL,
                 __default: false,

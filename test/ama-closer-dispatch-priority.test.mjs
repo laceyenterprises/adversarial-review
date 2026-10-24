@@ -2909,3 +2909,58 @@ test('MERGESIGNAL-01: null logger preserves foreign-signal absence fallback', t 
   assert.equal(producerReads, 1, 'null logging must not interrupt absence evidence');
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
 });
+
+test('CLOSERPENDINGDEAD-01: background submission persists watcher and child identities before receipt', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-submitter-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
+  let submitted = false;
+  const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+    processExecFileSyncImpl: (command, psArgs, options) => {
+      assert.equal(command, 'ps');
+      assert.deepEqual(psArgs.slice(0, 3), ['-o', 'lstart=', '-p']);
+      assert.ok(options.timeout <= 1000);
+      return 'Thu Oct 22 10:18:18 2026\n';
+    },
+    execFileImpl: (command, dispatchArgs) => {
+      assert.equal(dispatchArgs[0], 'dispatch');
+      submitted = true;
+      const submission = Promise.resolve().then(() => {
+        const intent = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+        assert.deepEqual(intent.dispatchWatcher, { pid: process.pid, startedAt: '2026-10-22T10:18:18.000Z' });
+        assert.deepEqual(intent.dispatchSubmitter, { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' });
+        assert.equal(intent.dispatchPhase, 'submitting');
+        assert.equal(intent.launchRequestId, null);
+        return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${identity.prNumber}`, launchRequestId: 'lrq_synthetic_child' }) };
+      });
+      submission.child = { pid: 12346 };
+      return submission;
+    },
+  });
+  assert.equal(submitted, true, JSON.stringify(result));
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+});
+
+test('CLOSERPENDINGDEAD-01: one poll re-takes a dead intent through ordinary dispatch admission', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-dead-intent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
+  const at = args.dispatchContext.dispatchedAt;
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, targetRemediationSha: HEAD,
+    state: 'dispatching', dispatchPhase: 'submitting', dispatchIdempotencyKey: 'ama-closer-synthetic-dead',
+    lastAttemptedAt: at, dispatchTimeoutMs: 2_700_000, retryCount: 1, workerClass: 'hammer' }));
+  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 12345, now: at });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    processKillImpl: () => { throw Object.assign(Error('synthetic dead'), { code: 'ESRCH' }); },
+    processExecFileSyncImpl: (_command, psArgs) => psArgs[0] === '-axww'
+      ? '99 Thu Oct 22 10:18:18 2026 synthetic-process\n' : 'Thu Oct 22 10:18:18 2026\n',
+    readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+  });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});

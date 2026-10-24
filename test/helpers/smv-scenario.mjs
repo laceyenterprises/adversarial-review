@@ -895,6 +895,32 @@ if (scenario === 'clean') {
   assert.equal(noLaunch.evidence.ok, true);
   assert.equal(noLaunch.evidence.rowCount, 0);
   assert.equal(readAmaCloserLease(rootDir, identity()).terminalOutcome, 'deferred');
+  // CLOSERPENDINGDEAD-01: use only synthetic process observations. A child
+  // carrying the key and unreadable ps retain the same pending owner; complete
+  // death/absence proof releases it on the first pre-deadline poll.
+  const deadIdentity = { ...identity(), prNumber: prNumber + 20 };
+  const deadKey = 'ama-closer-smoke-dead-submitter';
+  updateAmaCloserDispatchRecord(rootDir, deadIdentity, () => ({ ...deadIdentity,
+    targetRemediationSha: headSha, state: 'dispatching', workerClass: 'hammer',
+    dispatchPhase: 'submitting', dispatchIdempotencyKey: deadKey,
+    lastAttemptedAt: liveNow, dispatchTimeoutMs: 2_700_000, retryCount: 1 }));
+  acquireAmaCloserLease({ rootDir, ...deadIdentity, now: liveNow, watcherPid: 12345 });
+  const deadOptions = { now: liveNow, readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+    processKillImpl: () => { throw Object.assign(Error('synthetic dead'), { code: 'ESRCH' }); },
+    readIntentReceiptImpl: () => ({ ok: true, rows: [] }) };
+  assert.equal((await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
+    processExecFileSyncImpl: () => `12346 Thu Oct 22 10:18:18 2026 hq dispatch --idempotency-key ${deadKey}\n`,
+  })).status, 'unknown');
+  assert.equal((await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
+    processExecFileSyncImpl: () => { throw Error('synthetic unknown'); },
+  })).status, 'unknown');
+  assert.equal(readAmaCloserLease(rootDir, deadIdentity).status, 'pending');
+  const reclaimed = await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
+    processExecFileSyncImpl: () => '99 Thu Oct 22 10:18:18 2026 synthetic-process\n',
+  });
+  assert.equal(reclaimed.status, 'no-launch');
+  assert.equal(reclaimed.record.reason, 'dead-submitter-no-launch-proven');
+  assert.equal(readAmaCloserLease(rootDir, deadIdentity).terminalOutcome, 'deferred');
   const legacyIdentity = { ...identity(), prNumber: prNumber + 2 };
   updateAmaCloserDispatchRecord(rootDir, legacyIdentity, () => ({ ...legacyIdentity,
     targetRemediationSha: legacyIdentity.headSha, workerClass: 'hammer', state: 'dispatching',

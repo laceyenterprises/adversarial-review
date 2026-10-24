@@ -12,6 +12,7 @@ import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAm
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
+import { probeCloserSubmitter } from './dispatch-submitter.mjs';
 
 const heldLocks = new WeakMap();
 function lockPath(rootDir, identity) {
@@ -158,6 +159,13 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const deadlineAt = (Number.isFinite(Date.parse(prior?.deadlineAt)) && prior.deadlineAt) || new Date(Number.isFinite(started) && timeout > 0
       ? started + Math.min(timeout, 2 ** 31 - 1) : Date.parse(firstObservedAt) + 30 * 60_000).toISOString();
     const deadlinePassed = Date.parse(now) >= Date.parse(deadlineAt);
+    // Re-prove absence after a crash between lease deferral and intent write.
+    const canProbeSubmitter = matchingPendingLease || (settledNoLaunch
+      && (!lease.holderHost || lease.holderHost === hostname()));
+    const processes = !legacy && canProbeSubmitter && record.dispatchPhase === 'submitting'
+      && !deadlinePassed ? probeCloserSubmitter(record, lease, options) : null;
+    const deadSubmitter = processes?.watcher.status === 'gone'
+      && processes.submitter.status === 'gone' && processes.key.status === 'absent';
     // Use the adapter's normal 30s ledger budget, scaled once for host load.
     const timeoutMs = loadAwareTimeoutMs(30_000, options.loadAwareTimeoutOptions);
     const ticketQuery = { kind: 'launch-requests-for-ticket-since',
@@ -237,15 +245,17 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         preReceiptReconciliation: { status, observedAt: now, query: evidence } };
     } else if (!foreignLease && ((legacy && rows?.length === 0 && Number.isFinite(started))
       || (!legacy && (!promotedLease || misattributedLease) && deadlinePassed && (rows?.length === 0 || operatorAbsence))
+      || (!legacy && deadSubmitter && rows?.length === 0)
       || (!legacy && matchingLease && (localDead || settledNoLaunch)
         && record.dispatchPhase === 'prepared' && rows?.length === 0))) {
       status = 'no-launch';
       const reason = legacy ? 'legacy-no-launch-proven' : operatorAbsence ? 'closer-ticket-no-launch-proven'
-        : deadlinePassed ? 'keyed-no-launch-proven' : 'interrupted-before-submission';
+        : deadlinePassed ? 'keyed-no-launch-proven' : deadSubmitter ? 'dead-submitter-no-launch-proven' : 'interrupted-before-submission';
       next = { ...record, state: 'no-dispatch', reason,
         retryCount: Math.max(0, Number(record.retryCount || 0) - 1),
         launchRequestId: null, dispatchId: null,
-        preReceiptReconciliation: { status, reason, observedAt: now, query: evidence } };
+        preReceiptReconciliation: { status, reason, observedAt: now, query: evidence,
+          ...(processes ? { processes } : {}) } };
       if (!options.dryRun) {
         options.beforeSettlement?.(next);
         if (misattributedLease) {
@@ -273,11 +283,13 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         : !rows ? 'receipt-lookup-unreadable' : rows.length ? 'receipt-identity-ambiguous' : 'submission-absence-unproven';
       next = { ...record, preReceiptReconciliation: { status: diagnosticStatus,
         firstObservedAt, deadlineAt, observedAt: now, reason,
+        ...(processes ? { processes } : {}),
         ...(evidence ? { query: evidence } : {}),
         ...(prior?.alertedAt ? { alertedAt: prior.alertedAt } : {}) } };
       // Bounded diagnostics: no launch timestamp refresh, no unbounded history,
       // no polling write/log storm. Only successful ledger proof clears ownership.
       if (prior?.status === diagnosticStatus && prior?.reason === reason && same(prior?.query, evidence)
+        && same(prior?.processes, processes || undefined)
         && Date.parse(now) - Date.parse(prior.observedAt) < 60_000) next = record;
     }
     if (!options.dryRun && next.preReceiptReconciliation?.status === 'inspection-required'
@@ -304,6 +316,11 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     }
     if (!options.dryRun && next !== record) {
       writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+      if (next.reason === 'dead-submitter-no-launch-proven') {
+        options.logger?.warn?.(JSON.stringify({ event: 'ama_closer.pre_receipt_dead_submitter_reclaimed',
+          repo: record.repo, prNumber: record.prNumber, headSha: record.headSha,
+          dispatchIdempotencyKey: record.dispatchIdempotencyKey, processes, query: evidence }));
+      }
       if (record.preReceiptReconciliation?.status !== next.preReceiptReconciliation.status
         || record.preReceiptReconciliation?.reason !== next.preReceiptReconciliation.reason
         || !same(record.preReceiptReconciliation?.query, next.preReceiptReconciliation.query)) {

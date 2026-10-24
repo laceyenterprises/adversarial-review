@@ -1,0 +1,70 @@
+import { execFileSync } from 'node:child_process';
+import { isAmaCloserPidAlive } from './closer-lease.mjs';
+
+const psOptions = { encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024 };
+const validPid = pid => Number.isInteger(pid) && pid > 0;
+const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
+  ? new Date(Date.parse(value)).toISOString() : null;
+const psTimestamp = value => timestamp(`${value} UTC`);
+const psEnvironment = () => ({ ...process.env, LC_ALL: 'C', TZ: 'UTC' });
+
+// Best effort at spawn time. Missing identity never authorizes early recovery.
+export function captureCloserProcess(pid, options = {}) {
+  if (!validPid(pid)) return null;
+  try {
+    const start = (options.processExecFileSyncImpl || execFileSync)('ps', ['-o', 'lstart=', '-p', String(pid)],
+      { ...psOptions, env: psEnvironment() });
+    return { pid, startedAt: psTimestamp(String(start).trim()) };
+  } catch { return { pid, startedAt: null }; }
+}
+
+// Scan before reading the ledger: a child can commit a launch then disappear
+// during ps. The later exact-key query must observe that committed launch.
+// Never persist or log command lines; keep only bounded identity evidence.
+export function probeCloserSubmitter(record, lease, options = {}) {
+  const watcher = { pid: lease.watcherPid, status: 'unknown', reason: 'watcher-liveness-unknown' };
+  const submitter = { pid: record.dispatchSubmitter?.pid || null, status: 'unknown' };
+  const key = { status: 'unknown', pids: [] };
+  const result = { watcher, submitter, key };
+  const alive = isAmaCloserPidAlive(lease.watcherPid, options.processKillImpl);
+  if (alive === false) Object.assign(watcher, { status: 'gone', reason: 'pid-absent' });
+  else if (alive === true) Object.assign(watcher, { status: 'live', reason: 'pid-present' });
+  let rows;
+  try {
+    // ww avoids command truncation on both macOS and Linux. A timeout, buffer
+    // overflow, empty result or malformed row is unknown, never an empty scan.
+    const output = String((options.processExecFileSyncImpl || execFileSync)('ps',
+      ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args='],
+      { ...psOptions, env: psEnvironment() }));
+    if (!output.endsWith('\n')) throw Error('incomplete process scan');
+    rows = output.trimEnd().split('\n').map(line => {
+      const match = /^\s*(\d+)\s+(.{24})\s+(.+)$/.exec(line);
+      if (!match || !validPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
+      return { pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] };
+    });
+  } catch {
+    result.reason = 'process-scan-unreadable';
+    return result;
+  }
+  const watcherRow = rows.find(row => row.pid === lease.watcherPid);
+  const expectedWatcher = record.dispatchWatcher;
+  if (watcherRow && expectedWatcher?.pid === lease.watcherPid && expectedWatcher.startedAt
+    && watcherRow.startedAt !== timestamp(expectedWatcher.startedAt)
+    && timestamp(expectedWatcher.startedAt)) {
+    Object.assign(watcher, { status: 'gone', reason: 'pid-reused',
+      expectedStartedAt: expectedWatcher.startedAt, observedStartedAt: watcherRow.startedAt });
+  }
+  const child = rows.find(row => row.pid === submitter.pid);
+  if (record.dispatchSubmitter && !validPid(submitter.pid)) {
+    Object.assign(submitter, { status: 'unknown', reason: 'submitter-identity-invalid' });
+  } else if (!child) Object.assign(submitter, { status: 'gone', reason: 'pid-absent' });
+  else if (timestamp(record.dispatchSubmitter?.startedAt)
+    && child.startedAt !== timestamp(record.dispatchSubmitter.startedAt)) {
+    Object.assign(submitter, { status: 'gone', reason: 'pid-reused',
+      expectedStartedAt: record.dispatchSubmitter.startedAt, observedStartedAt: child.startedAt });
+  } else Object.assign(submitter, { status: 'live', reason: 'pid-present', observedStartedAt: child.startedAt });
+  const matching = rows.filter(row => row.command.includes(record.dispatchIdempotencyKey));
+  key.status = matching.length ? 'live' : 'absent';
+  key.pids = matching.slice(0, 16).map(row => row.pid);
+  return result;
+}

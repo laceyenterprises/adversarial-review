@@ -185,8 +185,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
   // The proof authorizes terminal validation only: the pushed head is still
   // ineligible to merge until the hammer writes exact-head validation evidence.
   assert.ok(!execCalls.some(({ cmd, argv }) => cmd === 'gh' && argv[0] === 'pr' && argv[1] === 'merge'));
-  assert.deepEqual(daemonOutcomes.map(({ disposition, reason }) => [disposition, reason]),
-    [['not-taken', 'non-blocking-findings-present']]);
+  assert.deepEqual(daemonOutcomes, [], 'the selected final hammer skips the daemon merge lane');
   if (pr === 8123) {
     const mergeAgent = await import('../src/follow-up-merge-agent.mjs');
     const classify = (await import('../src/merge-agent-rescue-classifier.mjs')).default;

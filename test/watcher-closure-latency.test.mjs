@@ -555,8 +555,8 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(queueMigrationChecks, 6);
   assert.equal(handoffMigrationChecks, 6);
   assert.equal(backlogMigrationChecks, 6);
-  assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks, 111,
-    'round counter and wake telemetry reuse the initialized connection');
+  assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks, 114,
+    'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));
 });

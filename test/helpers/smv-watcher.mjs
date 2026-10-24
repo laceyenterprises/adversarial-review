@@ -16,7 +16,10 @@ export async function watcherTick({ rootDir, prNumber, headSha, evidence, store,
     labels: [], branchProtection: { requiredContexts: [] }, ...candidateOverrides };
   const reviewState = { blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0,
     nonBlockingFindingState: 'known', headSha, verdict: 'approved' };
-  if (findings) reviewState.nonBlockingFindingCount = 1;
+  if (findings) {
+    reviewState.nonBlockingFindingCount = 1;
+    reviewState.remediationStopCode = 'max-rounds-reached';
+  }
   const body = findings ? findingsBody : cleanBody;
   return handlePostedReviewRow({ rootDir, repoPath: repo, prNumber, existing: row,
     currentRevisionRef: headSha, logger: quiet,

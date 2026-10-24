@@ -167,7 +167,18 @@ export function classifyClosureOwnership(input) {
   return rescueOwnershipDecision(closureOwner);
 }
 
-function rescueOwnershipDecision(closureOwner) {
+function rescueOwnershipDecision(closureOwner, headSha = null) {
+  if (closureOwner?.action) {
+    // Adopted callers report workflows, including recovery and deferral. Their
+    // legacy owner spelling cannot turn reconciliation into a speculative launch.
+    const waiting = closureOwner.actor === 'closure-recovery'
+      || ['owned', 'reconcile', 'observe'].includes(closureOwner.queue?.intent)
+      || closureOwner.queue?.deferredBy
+      || (headSha && closureOwner.head !== headSha);
+    const decision = closureOwner.action === 'operator-hold' ? 'page-required'
+      : closureOwner.action === 'done' ? 'inconclusive' : waiting ? 'wait-closer' : null;
+    if (decision) return { decision, reason: closureOwner.reason, closureOwner };
+  }
   const decision = {
     'daemon-merge': 'merge-eligible', hammer: 'hammer-eligible',
     review: 'rereview-eligible', remediation: 'remediation-eligible',
@@ -191,7 +202,7 @@ function classify(input = {}) {
   ) {
     verdict = 'Request changes';
   }
-  const owned = input.closureOwner ? rescueOwnershipDecision(input.closureOwner)
+  const owned = input.closureOwner ? rescueOwnershipDecision(input.closureOwner, input.headSha)
     : input.closureOwnership ? classifyClosureOwnership(input.closureOwnership) : null;
   if (owned) return { ...owned, blockingFindings, nonBlockingFindings, parsedFindings };
   if (input.primaryChange && classifyClosureOwnership({ primaryChange: input.primaryChange, currentHead: input.headSha }).decision === 'page-required') {

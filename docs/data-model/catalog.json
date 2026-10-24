@@ -7,7 +7,7 @@
       "path": "docs/data-model/next-action-shadow.md",
       "store": "<watcher root>/data/next-action-shadow/disagreements.jsonl and .jsonl.1",
       "schemaSurface": "src/pr-next-action-shadow.mjs",
-      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs"],
+      "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs", "src/ama/closure-next-action.mjs"],
       "owner": "NXA-02 closure observation and rollout owner"
     },
     {
@@ -554,8 +554,10 @@
       "schemaSurface": "src/watcher-no-progress-lane.mjs",
       "relatedSchemaSurfaces": [
         "src/posted-review-row.mjs",
-        "src/operator-label-wake.mjs"
+        "src/operator-label-wake.mjs",
+        "src/ama/closure-next-action.mjs"
       ],
+      "optionalOwnershipFields": ["nextAction"],
       "owner": "watcher posted-review dispatch fairness",
       "optionalCadenceFields": ["lastRunAt"],
       "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
@@ -801,7 +803,8 @@
       "path": "docs/data-model/ama-closure-waits.md",
       "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
       "schemaSurface": "src/ama/closure-wait.mjs",
-      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs"],
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs", "src/ama/closure-next-action.mjs"],
+      "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],

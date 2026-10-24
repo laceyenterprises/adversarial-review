@@ -340,6 +340,10 @@ export function handlerDecisionFingerprint(value) {
     if (slug) slugs.add(slug);
   };
   add(value.outcome);
+  const selected = value.nextAction || value.amaClosureResult?.nextAction;
+  add(selected?.action);
+  add(selected?.actor);
+  add(selected?.reason);
   add(value.gateDecision?.state);
   add(value.gateDecision?.reason);
   for (const reason of normalizeReasonList(value.gateDecision?.reasons)) add(reason);
@@ -750,6 +754,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
   hammerRouteActive = false,
+  nextAction = null,
   operatorReason = null,
   urgent = false,
   escalate = true,
@@ -766,8 +771,28 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   // already returns `due` for a headless subject, so this fails open by
   // construction: an unknown head is walked at full speed, every tick.
   if (head === null) return null;
+  const selected = nextAction?.head === head ? nextAction : null;
+  if (selected) {
+    // Alerts and automatic stops retain an automated recovery workflow. Only
+    // explicit intent belongs in the operator lane; deadlines never stop work.
+    progressClass = selected.action === 'operator-hold'
+      ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING;
+    hammerRouteActive = !['operator-hold', 'done'].includes(selected.action);
+    if (selected.queue?.deferredBy === 'drain') escalate = false;
+  }
   const existing = readNoProgressLane(rootDir, identity, { logger });
   const sameHead = normalizeHead(existing?.headSha) === head;
+  if (sameHead && selected?.queue?.deferredBy === 'drain') {
+    // Drain is a scheduling observation, never progress or a charged attempt.
+    // Keep the pre-drain fingerprint, counters and first-progress clock intact.
+    writeLedger(rootDir, identity, { ...existing, nextAction: selected,
+      progressClass: PROGRESS_CLASS_SELF_RESOLVING, hammerRouteActive: true, lane: LANE_ACTIVE,
+      lastRunAt: now, updatedAt: now });
+    return { lane: LANE_ACTIVE, progressClass: PROGRESS_CLASS_SELF_RESOLVING,
+      progressed: false, noProgressTicks: normalizeCount(existing.noProgressTicks),
+      firstNoProgressAt: existing.firstNoProgressAt, backoffTicks: 0, demoted: false, headSha: head,
+      escalated: false, decisionReset: false };
+  }
   const sameFingerprint = sameHead
     && typeof existing?.fingerprint === 'string'
     && existing.fingerprint === fingerprint;
@@ -870,6 +895,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     decisionResets,
     progressClass: normalizedProgressClass,
     hammerRouteActive: hammerRouteActive === true,
+    ...(selected ? { nextAction: selected } : {}),
     noProgressTicks,
     // A walked PR starts its next backoff window from zero regardless of outcome.
     skippedTicks: 0,

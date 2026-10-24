@@ -350,7 +350,7 @@ for (const prState of ['merged', 'open']) test(`posted-review handler (${prState
   assert.equal(record.generation, captured.pass.generation);
 });
 
-for (const parked of [false, true]) test(`closure orchestration${parked ? ' (parked head)' : ''}: final legacy owner and every effect are unchanged with a failing shadow sink`, async (t) => {
+for (const parked of [false, true]) test(`closure orchestration${parked ? ' (parked head)' : ''}: shared owner and every effect are independent of a failing shadow sink`, async (t) => {
   const repo = 'example/synthetic-closure', prNumber = 37, head = HEAD;
   const reviewed = parked ? HEAD : OLD;
   const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only';
@@ -420,15 +420,10 @@ for (const parked of [false, true]) test(`closure orchestration${parked ? ' (par
   for (const record of records) assert.equal(record.subjectKey, `${repo}#${prNumber}`);
   const disagreement = records.find(r => r.kind === 'disagreement' && r.source === 'closure-orchestration');
   assert.deepEqual([shared.decision.action, shared.decision.actor, shared.decision.reason], ['hammer', 'hammer', 'ci-red-final']);
-  if (parked) {
-    // Legacy pages a red, exhausted, exact-head review; the table names the final hammer.
-    assert.deepEqual(plain.result.closureOwner, { owner: 'page', reason: 'review-rounds-exhausted' });
-    assert.deepEqual([disagreement.legacy.action, disagreement.legacy.reason], ['operator-hold', 'review-findings-final']);
-    assert.deepEqual(disagreement.fields, ['action', 'actor', 'reason']);
-  } else {
-    assert.deepEqual(plain.result.closureOwner, { owner: 'hammer', reason: 'ci-blocked-remediation-exhausted' });
-    assert.equal(disagreement, undefined, 'agreement is not logged');
-  }
+  assert.equal(plain.result.closureOwner.owner, 'hammer');
+  assert.equal(plain.result.closureOwner.actor, 'hammer');
+  assert.equal(plain.result.closureOwner.reason, 'ci-red-final');
+  assert.equal(disagreement, undefined, 'the adopted consumer reports the shared decision');
 });
 
 test('the consumer seam imports nothing and copies evidence before the caller resumes', async () => {

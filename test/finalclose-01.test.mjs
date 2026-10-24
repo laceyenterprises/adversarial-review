@@ -14,7 +14,7 @@ import { createAmaHammerBackgroundQueue, DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS 
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
-import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
+import { evaluateHammerStopHold, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -568,6 +568,12 @@ test('FINALCLOSE-01 final-round wait pages once at thirty minutes despite changi
 for (const path of ['daemon', 'closer']) {
   test(`FINALCLOSE-01 ${path} primary-change page leaves the final-round stall receipt available`, async t => {
     const rootDir = finalRound(t), pages = [];
+    if (path === 'daemon') {
+      const finalJob = join(rootDir, 'data', 'follow-up-jobs', 'completed', 'fixture__repo-pr-41-final.json');
+      const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only';
+      const job = JSON.parse(readFileSync(finalJob, 'utf8'));
+      writeFileSync(finalJob, JSON.stringify({ ...job, revisionRef: headSha, reviewBody: cleanBody, completion: {} }));
+    }
     let clock = Date.parse(started) + 60000;
     const observe = args => observeClosureWait({ ...args, now: clock,
       pageImpl: async (_text, options) => pages.push(options.dedupKey) });
@@ -578,12 +584,13 @@ for (const path of ['daemon', 'closer']) {
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
       currentRevisionRef: headSha, labelNames: [], now: () => clock,
       reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
-        reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+        reviewer_head_sha: path === 'daemon' ? headSha : reviewed, last_verdict: 'Comment only', posted_at: started },
       candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
         mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
       loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
       resolveAmaHammerDispatchModeImpl: () => 'inline',
-      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      fetchLatestHeadReviewBodiesImpl: async () => [path === 'daemon'
+        ? '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved' : body],
       proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
       runDaemonCleanMergeAttemptImpl: async () => path === 'daemon' ? refusal : { reason: 'not-eligible' },
       maybeDispatchAmaCloserImpl: async () => refusal,
@@ -785,6 +792,7 @@ for (const [label, rowHead, settledHead] of [
       fetchLatestHeadReviewBodiesImpl: async () => [body],
       proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
       runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
+      requestEligibleHammerWakeImpl: ({ shared }) => { dispatchedReviewState = shared.snapshot.observations.reviews.value; },
       maybeDispatchAmaCloserImpl: async args => {
         dispatches++;
         dispatchedReviewState = args.reviewState;
@@ -792,8 +800,9 @@ for (const [label, rowHead, settledHead] of [
       },
       logger: { log() {}, warn() {} },
     });
-    assert.equal(result.dispatched, true, JSON.stringify(result));
-    assert.equal(dispatches, 1);
+    assert.equal(result.dispatched, false, JSON.stringify(result));
+    assert.equal(dispatches, 0);
+    assert.ok(['review', 'remediate'].includes(result.nextAction.action));
     assert.equal(dispatchedReviewState.headSha, settledHead, 'settled head comes from the review evidence');
     assert.equal(dispatchedReviewState.postedAt, mismatched ? null : observed,
       'a receipt cannot be borrowed from another reviewed head');
@@ -817,6 +826,7 @@ test('HAMNOREREVIEW-01 a legacy handoff stop releases before SQLite review recon
   let liveReads = 0;
   const holds = [];
   const args = { rootDir, repoPath: repo, prNumber, currentRevisionRef: headSha, labelNames: [],
+    readHammerStopForHeadImpl: options => readHammerStopForHead({ ...options, hqRoot }),
     reviewStateRow,
     candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
       mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },

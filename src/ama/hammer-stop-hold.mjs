@@ -1,3 +1,4 @@
+import { observeClosureResult } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
@@ -398,6 +399,7 @@ export async function evaluateHammerStopHold({
   prMetadata,
   reviewState = null,
   strictNonBlockingRemediation = true,
+  sharedNextAction = null,
   excludeContexts = [],
   requiredCheckContexts = [],
   deliverAlertImpl = null,
@@ -551,6 +553,10 @@ export async function evaluateHammerStopHold({
     if (dirty) persist();
     return { action: 'release', hammerStop, changed: entry.releasedBy || [] };
   }
+  const recovery = sharedNextAction ? observeClosureResult(sharedNextAction, { hammerStop }).decision : null;
+  const ownerSummary = `action=${recovery?.action || 'hammer'} actor=${recovery?.actor || 'closure-recovery'} `
+    + `reason=${recovery?.reason || 'automated-stop'} head=${headSha} `
+    + `ageMs=${Math.max(0, Date.parse(now) - Date.parse(entry.firstObservedAt))}. `;
   const debounceKey = `${rootDir}\0${repo}\0${prNumber}\0${headSha}${stop.refusal ? `\0${stop.refusal.key}\0${entry.refusalGeneration}` : ''}`;
   const pageDue = stop.predicate !== 'history-read-failed'
     || Date.parse(now) - Date.parse(entry.firstObservedAt) >= HISTORY_READ_FAILURE_PAGE_GRACE_MS;
@@ -558,9 +564,10 @@ export async function evaluateHammerStopHold({
     const text = `Adversarial-review hammer stopped without merging ${repo}#${prNumber} on head `
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
       + (stop.historyReadError ? `Read error: ${stop.historyReadError}. ` : '')
+      + ownerSummary
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
       + (stop.refusal ? `Reasons: ${stop.refusal.reasons.join(', ')}. Missing evidence: ${JSON.stringify(stop.refusal.missingEvidence)}. Action: ${stop.refusal.next} `
-        : 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. ')
+        : 'Closure recovery rechecks the stopped workflow on the scheduled cadence. ')
       + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
       + 'the watcher re-checks on its scheduled cadence and re-dispatches once when one does.';
     try {
@@ -569,6 +576,7 @@ export async function evaluateHammerStopHold({
         payload: {
           repo, prNumber, headSha, predicate: stop.predicate, closingStatus: stop.closingStatus || null,
           next: stop.next || null, inputs,
+          ...(recovery ? { nextAction: recovery } : {}),
           ...(stop.refusal ? { refusal: stop.refusal, next: stop.refusal.next } : {}),
           ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
         },

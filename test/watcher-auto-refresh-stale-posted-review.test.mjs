@@ -1675,7 +1675,7 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
         review_status: 'posted',
         reviewer: 'codex',
         reviewer_head_sha: staleReviewedHead,
-        body_md: 'Verdict: Comment only\n\n## Blocking Issues\n- None.',
+        review_body: '## Blocking Issues\n- None.\n## Non-blocking Issues\n- Synthetic finding.\n## Verdict\nComment only',
       },
       candidate: {
         headSha: currentHead,
@@ -1690,7 +1690,7 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
         prAuthor: 'codex-worker-bot',
         prUpdatedAt: '2026-07-04T12:00:00Z',
       },
-      dispatchJob: { prUpdatedAt: '2026-07-04T12:00:00Z' },
+      dispatchJob: { prUpdatedAt: '2026-07-04T12:00:00Z', reviewCycleCapReached: true },
       labelNames: [],
       proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args,
         comments: [{ author: 'the-hammer-lacey[bot]',
@@ -1717,7 +1717,8 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
         assert.equal(headSha, currentHead);
         return { suppressed: true, reason: 'closer-commit-trailer' };
       },
-      fetchLatestHeadReviewBodiesImpl: async () => {
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => {
+        if (head === staleReviewedHead) return ['## Blocking Issues\n- None.\n## Non-blocking Issues\n- Synthetic finding.\n## Verdict\nComment only'];
         liveReviewFetches += 1;
         return [];
       },
@@ -1748,7 +1749,7 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
     assert.equal(captured[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
     assert.equal(captured[0].prMetadata.headSha, currentHead);
     assert.equal(closerProofCalls, 1);
-    assert.equal(liveReviewFetches, 0, 'exhausted non-settled gate does not fetch or spawn a fresh review');
+    assert.equal(liveReviewFetches, 1, 'one current-head observation keeps exhausted findings on their hammer route');
     assert.equal(warnings.join('\n').includes('no fresh adversarial review'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -29,6 +29,9 @@ const text = value => String(value || '').slice(0, 300);
 // A proven publication chain can still lack a settled live verdict. Preserve
 // that rejection while executing the separately selected, head-bound owner.
 export function hasExactHeadReviewDecision(result, headSha, reviewStateRow) {
+  const selected = result?.nextAction;
+  if (headSha && selected?.head === headSha && selected.action === 'review'
+    && selected.actor === 'reviewer' && selected.queue?.intent === 'dispatch') return true;
   const stale = result?.closerAuthoredStale;
   const isHeadBound = Boolean(headSha && stale?.reviewedHead)
     && stale.currentHead === headSha && stale.reviewedHead === reviewStateRow?.reviewer_head_sha
@@ -42,7 +45,7 @@ export function hasExactHeadReviewDecision(result, headSha, reviewStateRow) {
 export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
   readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
-  excludeWatcherPid = null, env = process.env }) {
+  excludeWatcherPid = null, env = process.env, includeOwnerEvidence = false }) {
   const alive = (pid, group = false) => {
     if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
     try { processKillImpl(group ? -Number(pid) : Number(pid), 0); return true; } catch (error) { return error.code === 'EPERM'; }
@@ -56,17 +59,18 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
     && Number(pendingLease.watcherPid) !== Number(excludeWatcherPid)
     && Number.isFinite(pendingAge) && pendingAge >= 0
     && pendingAge < amaCloserPendingLeaseExpiryMs(pendingLease.dispatchTimeoutMs)) {
-    return { owned: true, proof: 'pending-closer-lease' };
+    return { owned: true, proof: 'pending-closer-lease',
+      ...(includeOwnerEvidence ? { actor: 'hammer', lease: pendingLease } : {}) };
   }
   const rowHead = reviewStateRow?.revision_ref || reviewStateRow?.head_sha || reviewStateRow?.reviewer_head_sha;
   if (reviewStateRow?.reviewer_head_sha === headSha && alive(reviewStateRow?.reviewer_pgid, true)) {
-    return { owned: true, proof: 'live-reviewer' };
+    return { owned: true, proof: 'live-reviewer', ...(includeOwnerEvidence ? { actor: 'reviewer' } : {}) };
   }
   const requested = Date.parse(reviewStateRow?.reviewer_started_at || reviewStateRow?.rereview_requested_at || reviewStateRow?.reviewed_at);
   const age = Date.parse(now) - requested;
   if (rowHead === headSha && ['pending', 'pending-upstream', 'reviewing'].includes(reviewStateRow?.review_status)
     && Number.isFinite(age) && age >= 0 && age < ownerlessBoundMs(env)) {
-    return { owned: true, proof: 'bounded-review-request' };
+    return { owned: true, proof: 'bounded-review-request', ...(includeOwnerEvidence ? { actor: 'reviewer' } : {}) };
   }
   const prefix = `${String(repo).replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
   const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : loadAwareTimeoutMs(5000));
@@ -101,7 +105,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       const record = readRecord(join(dir, name), !queue || matchesName(name));
       if (!record || !sameRepo(record.repo) || Number(record.prNumber) !== Number(prNumber)) continue;
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
-      if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator' };
+      if (queue && alive(record.remediationWorker?.processId)) return { ...result, owned: true, proof: 'live-remediator', ...(includeOwnerEvidence ? { actor: 'remediator' } : {}) };
       const launchRequestId = record.remediationWorker?.launchRequestId || record.launchRequestId || record.dispatchId;
       if (record.state === 'dispatching' && !launchRequestId) {
         uncertain('dispatching-without-launch-id');
@@ -113,9 +117,10 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       }
       if (result.launchIds.length < 5) result.launchIds.push(text(launchRequestId));
       const cacheKey = JSON.stringify([rootDir, record.hqRoot || '', launchRequestId]);
-      let probe = terminalLaunches.get(cacheKey);
+      let probe = includeOwnerEvidence ? null : terminalLaunches.get(cacheKey);
       try {
         probe ||= await readStatusImpl({ launchRequestId, rootDir, hqRoot: record.hqRoot, signal,
+          includeRetryChain: true,
           // Yield while psql runs, retaining the remaining ownership-probe budget.
           timeoutMs: Math.max(1, deadline - Date.now()) });
       } catch { uncertain('ledger-read-failed'); continue; }
@@ -127,7 +132,7 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
         uncertain(probe?.reason || 'ledger-read-failed'); continue;
       }
       const inFlight = launchRequestOwned(probe);
-      if (inFlight === false) {
+      if (inFlight === false && !includeOwnerEvidence) {
         if (terminalLaunches.size >= 1000) terminalLaunches.delete(terminalLaunches.keys().next().value);
         terminalLaunches.set(cacheKey, probe);
       }
@@ -139,7 +144,13 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
         result.reservationDispatched = true;
       }
       if (inFlight === null) uncertain('missing-launch-status');
-      else if (inFlight) result.owned = true;
+      else if (inFlight) {
+        result.owned = true;
+        if (includeOwnerEvidence) Object.assign(result, {
+          actor: queue ? 'remediator' : bucket === 'ama-closer-dispatches' ? 'hammer' : null,
+          launchProbe: probe, launchRequestId,
+        });
+      }
     }
   }
   if (labels.includes('merge-agent-dispatched') && !mergeRecordSeen) uncertain('missing-merge-agent-dispatch-record');
@@ -223,6 +234,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   labels = candidate?.labels || [], result, reviewStateRow, dispatchJob, dispatchHammer,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = loadAwareTimeoutMs(5000),
+  onOwnershipObserved = null,
   logger = console, signal = null, now = new Date().toISOString(), env = process.env,
   fsImpl = { existsSync, mkdirSync, openSync, closeSync }, DatabaseImpl = Database, flockSyncImpl = fsExt.flockSync }) {
   if (!headSha || candidate?.merged === true || String(candidate?.prState || '').toLowerCase() !== 'open'
@@ -255,10 +267,12 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     } else {
       try {
         const probe = await ownershipOperation(({ signal: childSignal }) => hasOwnerImpl({ rootDir, repo, prNumber,
-          headSha, reviewStateRow, labels, now, env, signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
+          headSha, reviewStateRow, labels, now, env, includeOwnerEvidence: Boolean(onOwnershipObserved), signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
         ownership = typeof probe === 'boolean' ? { owned: probe } : probe;
       } catch { ownership = { uncertain: true }; }
     }
+    try { onOwnershipObserved?.(ownership); }
+    catch (error) { logger?.warn?.(`Closure ownership observation failed: ${text(error.message)}`); }
     if (ownership?.owned) {
       db.prepare('UPDATE ownership SET idleSince=NULL WHERE id=1').run();
       db.prepare('UPDATE heads SET idleSince=NULL WHERE head=?').run(headSha);

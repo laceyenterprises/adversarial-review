@@ -101,7 +101,7 @@ export function classifyDisagreements(lines, { dispositions = {}, aggregate = fa
       includesExpectedCorrection: (byDisposition['expected-correction'] || 0) > 0,
       evidenceSufficient: classified >= NEXT_ACTION_ROLLOUT_DISTINCT_CASES
         && (byDisposition['candidate-mistake'] || 0) > 0 && (byDisposition['expected-correction'] || 0) > 0,
-      note: 'Human rollout acceptance only. Legacy decideClosureOwner keeps authority until an authorized switch.',
+      note: 'Human rollout acceptance only. Adopted callers consume shared decisions; remaining callers retain legacy behavior.',
     },
   };
   if (!aggregate) {

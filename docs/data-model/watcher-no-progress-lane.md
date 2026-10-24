@@ -46,6 +46,7 @@ Required fields:
 | `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. This is carried forward across silent walks so the next usable decision can detect decision-only changes without treating missing handler output as a new baseline. |
 | `decisionResets` | number | Count of decision-only resets already honored for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
 | `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
+| `nextAction` | object, optional | NXA-05 selected shared decision for this head, including action, actor, reason, deadline, evidence references, key and queue intent. Automatic stops and cap/deadline reports retain recovery ownership. Explicit operator hold alone selects the operator lane when this field is supplied. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |
@@ -77,6 +78,8 @@ Optional `stalledEvent` field:
   to run. Either AMA kill switch retires hints too. Drain waits preserve all
   existing debt and do not charge counters. Other heads and refusals retain
   normal backoff. This lane never launches work itself.
+
+- With a selected automated decision the head stays eligible for the next pass even after an overdue report. Confirmed drain observations preserve counters, fingerprint and first-progress clock; clearance does not erase pre-drain debt.
 
 - The lane only changes how often a PR is re-walked; it never changes review,
   remediation, or merge eligibility decisions.

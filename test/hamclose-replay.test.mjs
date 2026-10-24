@@ -121,7 +121,7 @@ test('HAMCLOSE-03 unproven reversal pages once, keeps the hammer stopped and mak
     row: { review_status: 'posted', reviewer_head_sha: bad.headSha, reviewer: 'gemini', review_body: cleanBody } });
   assert.equal(store.merged, false); assert.equal(pages.length, 1);
   assert.match(pages[0], /PR 8132.*src\/a\.mjs.*no verified/);
-  assert.equal(store.lastClosure.closureOwner.owner, 'page');
+  assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
   assert.equal(classifyClosureOwnership({ primaryChange: bad, currentHead: bad.headSha }).decision, 'page-required');
 });
 
@@ -162,7 +162,7 @@ for (const options of [{ rebasedAdded: '+different()' }, { parentExtraHunk: true
       evidence, store, pageImpl: async text => pages.push(text),
       row: { review_status: 'posted', reviewer_head_sha: evidence.headSha, reviewer: 'gemini', review_body: cleanBody } });
     assert.equal(store.merged, false); assert.equal(pages.length, 1);
-    assert.equal(store.lastClosure.closureOwner.owner, 'page');
+    assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
   });
 }
 

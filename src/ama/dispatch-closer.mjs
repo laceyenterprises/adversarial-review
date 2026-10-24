@@ -11,8 +11,7 @@ import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
-import { decideClosureOwner } from './closure-owner.mjs';
-import { closureOwnerShadowEvidence, shadowNextActionLater } from '../pr-next-action-consumer.mjs';
+import { closureOwnerFromDecision, closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -4705,6 +4704,7 @@ export async function maybeDispatchAmaCloser(args) {
 }
 
 async function maybeDispatchAmaCloserAttempt({
+  sharedNextAction = null,
   cleanupScratchImpl,
   reviewState,
   prMetadata,
@@ -4897,6 +4897,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (!stop || stop.refusal || isInfrastructureStop(stop) || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
       || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
+        sharedNextAction,
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
         repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha,
@@ -5021,19 +5022,19 @@ async function maybeDispatchAmaCloserAttempt({
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, {
       repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
     }) : null;
-  const reviewHandoffOwner = reviewHandoffLease?.status === 'handed-to-review'
-    ? decideClosureOwner({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
-      strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }) : null;
-  // NXA-02 observational shadow only; the legacy owner below keeps authority.
-  if (reviewHandoffOwner) void shadowNextActionLater({ source: 'dispatch-closer-handoff', legacy: reviewHandoffOwner,
-    repo: dispatchContext.repo, prNumber, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-    evidence: () => closureOwnerShadowEvidence({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
-      strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }, {
-      subjectKey: `${dispatchContext.repo}#${prNumber}`, observedAt: new Date().toISOString(),
-      checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-      candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
-        isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels }) });
-  const reviewHandoffFindings = reviewHandoffOwner?.owner === 'hammer';
+  const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
+  const reviewHandoffShared = reviewHandoffLease?.status === 'handed-to-review'
+    ? closureDecisionMatches(sharedNextAction, decisionIdentity) ? sharedNextAction
+      : await resolveClosureNextAction({ input: { reviewState, currentHead: prMetadata.headSha,
+        lease: reviewHandoffLease, roundsLeft: false,
+        strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false },
+        subjectKey: `${dispatchContext.repo}#${prNumber}`, observedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
+        autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
+        checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+        candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
+          isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels }) : null;
+  const reviewHandoffOwner = reviewHandoffShared ? closureOwnerFromDecision(reviewHandoffShared.decision) : null;
+  const reviewHandoffFindings = hasHammerDispatchIntent(reviewHandoffShared, decisionIdentity);
   if (reviewHandoffOwner?.owner === 'review') {
     const wait = await observeClosureWait({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
       repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
@@ -5131,6 +5132,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (!ownerProofRecovery && hammerOwnerRouteOf(dispatchContext) === null
       && (!verdict.reasons.includes('stale-review-head') || dispatchContext?.liveHeadCloserAuthored === true)) {
       const hammerStopHold = evidenceStopHold || await evaluateHammerStopHoldImpl({
+        sharedNextAction,
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
         repo: dispatchContext?.repo,
@@ -6976,6 +6978,7 @@ async function maybeDispatchAmaCloserAttempt({
   }
 
   if (verdict.eligible && eligibleHammerRouteReasons.length === 0
+    && !hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
     && dispatchContext?.forceHammerAfterDaemonFailure !== true
     && dispatchContext?.finalRoundDispatchOnly !== true && !ownerProofRecovery) {
     return noAmaDispatch({
@@ -7362,6 +7365,7 @@ async function maybeDispatchAmaCloserAttempt({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'ama-closer-launch-in-progress',
+      ...(!samePrLaunch ? { capacity: { inFlight: otherPrLaunches.length, cap: maxConcurrentLaunches, workerClass } } : {}),
       activeLaunch: {
         repo: activeLaunch.repo,
         prNumber: activeLaunch.prNumber,

@@ -81,3 +81,16 @@ CLI, never to a closure consumer. Reports do not rewrite or repair the log.
 Overdue paging is separately opt-in through `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`
 and uses the existing closure-wait debounce/refund path. The log is telemetry,
 not the durable alert receipt. See [the shadow runbook](../RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02).
+
+NXA-05 adopted consumers may replace the cached immutable pair after changed
+proof, daemon gate or queued PR facts. Unchanged observations reuse it. A
+qualified existing daemon repair fallback is recorded as head-bound
+`progress.daemonRepair` admission evidence; the common policy still applies
+review proof, remaining rounds, automatic stops and caps first. This is neither
+a merge certificate nor a new refusal. Shadow sink/alert availability has no
+execution authority.
+
+NXA-05 also carries the existing daemon's validated terminal-head observation
+into the shared generation before mutation. That proof names both the reviewed
+and target heads; a later head cannot inherit it. The ordinary executor still
+revalidates HCP, exact-head proof, primary-change preservation, checks and leases.

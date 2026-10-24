@@ -105,6 +105,8 @@ export async function load(url, context, nextLoad) {
       import * as actual from '${fileUrl('src', 'ama-closure-orchestration.mjs')}?actual';
       export function maybeDispatchAmaClosureFor(options) {
         return actual.maybeDispatchAmaClosureFor({ ...options,
+          candidate: { ...options.candidate, statusCheckRollup: [{ name: 'repo-guards', status: 'COMPLETED',
+            conclusion: globalThis.__ciGreen || process.env.FIXTURE_CI_BLOCKED !== '1' ? 'SUCCESS' : 'FAILURE' }] },
           rootDir: process.env.FIXTURE_ISOLATED_ROOT,
           fetchMergedProtectiveDependentsImpl: async () => [],
           probeClosureOwnershipImpl: async () => ({ owned: false }),

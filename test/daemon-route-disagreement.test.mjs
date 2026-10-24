@@ -99,7 +99,7 @@ function closureArgs(rootDir, { daemonResult, closerCalls, logs, warns, head = H
       riskClass: 'low',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'builder',
     },
@@ -241,8 +241,9 @@ test('DIRTYOWN-01: the closer holds UNKNOWN+CLEAN like the daemon instead of rou
     });
     args.candidate = { ...args.candidate, mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' };
 
-    await maybeDispatchAmaClosureFor(args);
-    assert.equal(closerMergeableState, 'UNKNOWN', 'the closer sees the same UNKNOWN the daemon gates on');
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(closerMergeableState, null, 'the selected observer does not launch a closer');
+    assert.equal(result.nextAction.action, 'wait-for-CI');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

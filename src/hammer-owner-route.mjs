@@ -53,10 +53,14 @@ async function defaultDeliverAlert(text, options) {
   return deliverAlert(text, options);
 }
 
-function hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason }) {
+function hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason, nextAction }) {
   const head = String(headSha || 'unknown').slice(0, 12);
   const { summary } = HAMMER_OWNER_ROUTES[route];
-  const next = ' The PR has neither a reviewer nor a hammer; no automatic step remains on this head. '
+  const anchoredAt = Date.parse(nextAction?.deadline?.anchoredAt || '');
+  const next = nextAction
+    ? ` Next action: action=${nextAction.action} actor=${nextAction.actor} reason=${nextAction.reason} head=${nextAction.head}; `
+      + `ageMs=${Number.isFinite(anchoredAt) ? Math.max(0, Date.now() - anchoredAt) : 'unknown'}. Recovery retains ownership after this report.`
+    : ' The PR has neither a reviewer nor a hammer; no automatic step remains on this head. '
     + 'Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
     + 'A new head is adjudicated again subject to the hammer retry cap and lifetime ceiling.';
   return (outcome === 'hammer-no-merge'
@@ -83,7 +87,8 @@ async function pageHammerOwnerOutcome({
     // The outbox identity is stable per repo#pr@head, so a repeat tick re-uses
     // the queued or delivered page instead of paging again.
     const delivery = await observeClosureWait({ rootDir, repo: repoPath, prNumber, headSha,
-      reason: hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason }),
+      reason: hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason,
+        nextAction: amaClosureResult?.nextAction }),
       waitClass: 'final-round', immediate: true,
       pageImpl: text => deliverAlertImpl(text, {
         event: HAMMER_OWNER_ROUTES[route].pageEvent,
@@ -96,6 +101,7 @@ async function pageHammerOwnerOutcome({
           reason,
           route,
           launchRequestId: amaClosureResult?.launchRequestId || null,
+          ...(amaClosureResult?.nextAction ? { nextAction: amaClosureResult.nextAction } : {}),
         },
       }),
     });
@@ -175,7 +181,7 @@ export async function routeToHammerOwner({
         rootDir, route, repoPath, prNumber, headSha, outcome: finalOutcome, amaClosureResult, deliverAlertImpl, logger,
       });
       void shadowNextActionLater({ source: 'hammer-owner-route', passSnapshot, repo: repoPath, prNumber, rootDir,
-        legacy: { action: 'operator-hold', actor: 'operator',
+        legacy: amaClosureResult?.nextAction || { action: 'operator-hold', actor: 'operator',
           reason: finalOutcome === 'hammer-no-merge' ? 'hammer-final-no-merge' : 'retry-exhausted',
           legacyOwner: route, legacyReason: amaClosureResult?.reason || finalOutcome } });
       logger?.warn?.(

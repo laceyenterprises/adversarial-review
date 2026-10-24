@@ -84,8 +84,8 @@ export const handoffWakeLegacy = headSha => fromLegacyClosureOwner({ owner: 'wai
 export const NEXT_ACTION_SHADOW_LAUNCH_READ_MS = 5_000;
 const pick = (value, keys) => (value && typeof value === 'object'
   ? Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null);
-const REVIEW_KEYS = ['verdict', 'headSha', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
-  'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation'];
+const REVIEW_KEYS = ['verdict', 'headSha', 'riskClass', 'blockingFindingState', 'blockingFindingCount', 'nonBlockingFindingState',
+  'nonBlockingFindingCount', 'remediationPending', 'postedAt', 'commentOnlyFinalRoundPush', 'attestation', 'operatorApprovedEvidence'];
 const LEASE_KEYS = ['status', 'lrqId', 'headSha', 'acquiredAt', 'updatedAt', 'terminalOutcome', 'deadlineAt'];
 
 // NXA-01's ledger observation as the `launches` source. Any confirmed terminal
@@ -160,10 +160,19 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     checks: input.checks === undefined && checksRollup === undefined ? undefined
       : { conclusion: input.checks ?? null, ...(Array.isArray(checksRollup) ? { rollup: checksRollup } : {}) },
     policy: { strictMode: input.strictMode !== false, strictNonBlockingRemediation: input.strictNonBlockingRemediation !== false,
+      ...(input.operatorLogins ? { operatorLogins: input.operatorLogins } : {}),
+      ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),
       reviewCeilingReached: input.reviewCeilingReached === true, hammerCap: cap,
       ...(typeof autonomousMergeExecutionEnabled === 'boolean' ? { autonomousMergeExecutionEnabled } : {}) },
     progress: { diffEmpty: input.diffEmpty === true, ...(closerAuthoredStale ? { closerAuthoredStale } : {}),
+      ...(input.terminalReview ? { terminalReview: pick(input.terminalReview, ['validated', 'headSha', 'reviewedHeadSha']) } : {}),
       ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
+    ...(input.hammerStop ? { controls: {
+      stop: { deterministic: true, fingerprint: input.hammerStop.stopKey || input.hammerStop.predicate },
+      ...(input.hammerStop.refusal ? { safetyRefusal: {
+        deterministic: true, reason: input.hammerStop.predicate,
+      } } : {}),
+    } } : {}),
     ...(pr ? { pr: { ...pr, headSha: head, mergeable: input.mergeable ?? pr.mergeable } } : {}),
   };
   // A retained receipt can outlive its lease. Explicit review handoff stays

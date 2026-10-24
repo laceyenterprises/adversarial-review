@@ -1,7 +1,7 @@
 // ── NXA-02 observational shadow of the shared next action ────────────────────
 //
-// Consumers other than the NXA-03 wake and HAMATTEST-03 ownerless review keep
-// legacy decisions and effects. After deciding,
+// NXA-03/04/05 consumers adopt the shared decision independently of this
+// observational sink. Remaining legacy consumers, after deciding,
 // it hands this module (through src/pr-next-action-consumer.mjs, which copies
 // the evidence synchronously and loads this module lazily) that decision plus
 // evidence it already holds. The
@@ -38,6 +38,12 @@ const NOTE_LIMIT = 512;
 const decisionsByPass = new WeakMap();
 // Bare reads must not prevent closure orchestration from registering evidence.
 const baselineDecisionsByPass = new WeakMap();
+// Adopted callers replace a generation only after observing changed facts.
+// Existing consumers retain their immutable pair; later consumers share the new one.
+export function registerSharedNextAction(passSnapshot, shared) {
+  if (passSnapshot) decisionsByPass.set(passSnapshot, Promise.resolve(shared));
+  return shared;
+}
 const reportedOverdue = new Set();
 // Consumers without a pass (the no-progress lane) leave a legacy note that the
 // next pass decision for the same subject/head compares and drains.
@@ -106,8 +112,28 @@ function primaryChangeObservation(input, progress) {
 // Resolve execution intent independently of shadow sinks/alerts. Adopted wake
 // routing and observational callers share the exact pair for this generation;
 // Bare reads are provisional until closure evidence registers the shared pair;
-// subsequent changed facts require a new pass, never mutation of that pair.
-export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null } = {}) {
+// Changed closure facts publish a new immutable generation of that pair.
+export function resolveSharedNextAction({ snapshot = null, passSnapshot = null, evidence = null, refreshEvidence = false } = {}) {
+  if (refreshEvidence && evidence && passSnapshot && decisionsByPass.has(passSnapshot)) {
+    const { readLaunches, ...fields } = evidence;
+    const captured = { ...structuredClone(fields), readLaunches };
+    const previous = decisionsByPass.get(passSnapshot);
+    const refreshed = previous.then(async prior => {
+      const launch = captured.observations?.launches?.value?.closer;
+      const existing = prior.snapshot.observations?.launches;
+      const reuseLaunch = launch?.launchRequestId && launch.launchRequestId === existing?.value?.closer?.launchRequestId
+        && launch.headSha === existing.value.closer.headSha;
+      const next = await resolveSharedNextAction({ passSnapshot: prior.snapshot, evidence: reuseLaunch
+        ? { ...captured, readLaunches: null, observations: { ...captured.observations, launches: existing } } : captured });
+      if (JSON.stringify(next.snapshot.observations) === JSON.stringify(prior.snapshot.observations)
+        && JSON.stringify(next.snapshot.anchors) === JSON.stringify(prior.snapshot.anchors)
+        && next.snapshot.head === prior.snapshot.head) return prior;
+      const updated = Object.freeze({ ...next.snapshot, generation: (prior.snapshot.generation || 0) + 1 });
+      return Object.freeze({ snapshot: updated, decision: nextAction(updated) });
+    });
+    decisionsByPass.set(passSnapshot, refreshed);
+    return refreshed;
+  }
   if (passSnapshot && decisionsByPass.has(passSnapshot)) return decisionsByPass.get(passSnapshot);
   if (snapshot) return Promise.resolve(Object.freeze({ snapshot, decision: nextAction(snapshot) }));
   if (evidence) {

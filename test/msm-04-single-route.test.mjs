@@ -614,8 +614,8 @@ test('MSM-04: stale reviewed head without closer proof does not re-hammer', asyn
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('stale-review-head'));
+  assert.equal(result.reason, 'pending-required-checks');
+  assert.equal(result.nextAction.action, 'wait-for-CI');
   assert.equal(deps.calls.length, 0);
 });
 

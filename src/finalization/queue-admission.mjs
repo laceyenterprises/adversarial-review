@@ -17,7 +17,10 @@ const terminal = phase => ['merged', 'closed-observed', 'returned-to-closer'].in
 const parked = phase => phase.startsWith('parked-');
 const disposition = (phase, reason) => ({ phase, reason });
 
-export function classifyQueueAdmission(entry, receipt, live) {
+// Execution may supply a mechanically verified derivation from the immutable
+// admission head. It reuses structural policy without inventing a new review
+// or rebinding the signed current-head review to the derived SHA.
+export function classifyQueueAdmission(entry, receipt, live, derivation = null) {
   const s = live?.subject;
   if (!text(s?.sourceRef) || !isDeepStrictEqual(s.lane, entry.lane) || s.prNumber !== entry.prNumber) {
     return disposition('parked-infrastructure', 'subject-unavailable');
@@ -25,14 +28,14 @@ export function classifyQueueAdmission(entry, receipt, live) {
   // Lifecycle reconciliation needs no review, labels, closer, or merge call.
   if (['closed', 'merged'].includes(s.state)) return disposition('closed-observed', `live-${s.state}`);
   if (s.state !== 'open' || !sha(s.head) || !sha(s.baseSha)) return disposition('parked-infrastructure', 'subject-unavailable');
-  if (!sameSha(s.head, entry.head)) return disposition('returned-to-closer', 'external-head-change');
+  if (!sameSha(s.head, derivation?.head ?? entry.head)) return disposition('returned-to-closer', 'external-head-change');
   if (!Array.isArray(s.labels) || s.labels.some(l => !text(typeof l === 'string' ? l : l?.name))) {
     return disposition('parked-hold', 'labels-unavailable');
   }
   const labels = s.labels.map(l => typeof l === 'string' ? l : l.name);
   if (isOperatorHeld(labels)) return disposition('parked-hold', 'operator-hold');
   if (!receipt) return disposition('parked-infrastructure', 'admission-receipt-unavailable');
-  if (receipt.kind === 'clean' || receipt.handoff.dispositions.length === 0) {
+  if (!derivation && (receipt.kind === 'clean' || receipt.handoff.dispositions.length === 0)) {
     const review = live.currentReview;
     if (review?.complete !== true || !text(review.sourceRef)) return disposition('parked-infrastructure', 'current-head-review-unavailable');
     if (String(review.id) !== String((receipt.input ?? receipt.handoff).sourceReview.id) || !sameSha(review.commitId, s.head)

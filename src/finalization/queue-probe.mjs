@@ -8,6 +8,7 @@ import { resolveQueueOwnerAdapter } from './queue-owner.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
+import { resolveQueueGitAdapter } from './queue-git.mjs';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 export function queueRuntimeBuild() {
@@ -15,6 +16,7 @@ export function queueRuntimeBuild() {
   for (const file of ['queue-probe.mjs', 'queue-owner.mjs', 'queue-store.mjs', 'queue-wait.mjs', 'ledger-events.mjs', 'ledger-fold.mjs',
     'queue-handoff.mjs', 'queue-handoff-store.mjs', '../ama/closer-queue-handoff.mjs',
     'queue-admission.mjs', 'queue-clean-review.mjs', 'queue-read.mjs', '../ama/merge-eligibility.mjs', '../operator-hold-labels.mjs',
+    'queue-rebase.mjs', 'queue-git.mjs', 'queue-rebase-proof.mjs', '../ama/reviewed-rebase.mjs', '../load-aware-timeout.mjs',
     '../../migrations/20261023_finalization_queue.sql', '../../migrations/20261024_finalization_queue_handoff.sql',
     '../../migrations/20261025_finalization_queue_admission.sql']) {
     hash.update(file).update(readFileSync(join(moduleDir, file)));
@@ -23,7 +25,7 @@ export function queueRuntimeBuild() {
 }
 
 export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false } }, runtime: {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false } }, runtime: {
     build: queueRuntimeBuild(), pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
@@ -93,12 +95,34 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     } catch {
       result.capabilities.admission.reason = 'admission-schema-or-adapter-unavailable';
     }
+    try {
+      if (!result.capabilities.admission.available) throw new Error('admission unavailable');
+      const adapter = resolveQueueGitAdapter({ rootDir });
+      const resolved = adapter.probe({ timeoutMs: queueWaitMs(1_000, { ceilingMs: 5_000,
+        deadline: new Date(Date.parse(now) + 5_000).toISOString(), now, load }) });
+      const counts = db.prepare(`SELECT COUNT(*) AS prepared,
+        COALESCE(SUM(json_extract(payload_json,'$.rebase.publication.sourceRef') IS NOT NULL),0) AS published
+        FROM finalization_queue_entry WHERE json_extract(payload_json,'$.rebase.workspace') IS NOT NULL`).get();
+      const observations = db.prepare(`SELECT entry_id,phase,
+        json_extract(payload_json,'$.expectedOldHead') AS oldHead,
+        json_extract(payload_json,'$.candidate') AS candidate,
+        json_extract(payload_json,'$.exactBase') AS exactBase,
+        json_extract(payload_json,'$.rebase.publication') AS publication
+        FROM finalization_queue_entry WHERE json_extract(payload_json,'$.rebase.workspace') IS NOT NULL
+        ORDER BY rowid DESC LIMIT 100`).all().map(row => ({ ...row, publication: row.publication ? JSON.parse(row.publication) : null }));
+      result.observations.rebase = { ...counts, observations, sampleLimit: 100, organicPublicationObserved: counts.published > 0 };
+      result.capabilities.rebase = { available: true, ...resolved, schema: '20261023_finalization_queue',
+        liveAdapter: 'composition-required', credentialRunner: 'composition-required', routing: 'not-installed-by-this-capability' };
+    } catch {
+      result.capabilities.rebase.reason = 'rebase-store-or-git-proof-adapter-unavailable';
+    }
   } catch (error) {
     // Error codes are sufficient for operators; do not echo raw DB paths or
     // arbitrary adapter/auth diagnostics into this public read surface.
     result.capabilities.owner.reason = error.message === 'queue-schema-unavailable-or-incompatible' ? error.message : 'store-or-owner-adapter-unavailable';
     result.capabilities.handoff.reason = result.capabilities.owner.reason;
     result.capabilities.admission.reason = result.capabilities.owner.reason;
+    result.capabilities.rebase.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
@@ -106,9 +130,9 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
 export function queueProbeMain(argv = process.argv.slice(2)) {
   let rootDir;
   let capability;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission --json [--root DIR]';
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase --json [--root DIR]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }

@@ -143,3 +143,6 @@ export { normalizeQueueHandoff, validateQueueHandoff } from './queue-handoff.mjs
 export { createQueueHandoffService, resolveQueueHandoffStore } from './queue-handoff-store.mjs';
 export { createCleanReviewService, resolveCleanReviewStore, validateCleanReview } from './queue-clean-review.mjs';
 export { createQueueAdmissionService, resolveQueueAdmissionAdapters, classifyQueueAdmission } from './queue-admission.mjs';
+export { createQueueRebaseService } from './queue-rebase.mjs';
+export { resolveQueueGitAdapter } from './queue-git.mjs';
+export { proveQueueRebase } from './queue-rebase-proof.mjs';

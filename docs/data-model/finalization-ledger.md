@@ -324,3 +324,76 @@ actual receipt statements and reports counts by source/disposition plus a
 bounded sample of at most 100 recent receipts. Availability establishes installed
 storage/adapter capability, not live-reader composition, running watcher version,
 execution routing or authority. Organic admission evidence can remain pending.
+
+## Mechanical rebase and publication (MGQ-04)
+
+`createQueueRebaseService` extends the existing entry JSON and progress events;
+there is no additional table or migration. `rebase` contains the isolated workspace
+id, head repository/ref, source receipt digest, source admission head, preflight
+and last live observations, prior derivations, an author divergence warning and
+stable author/operator notice intents. `publication` records the observed head,
+exact base, source reference and observation time. These fields are observations
+and delivery intents; storing a notice does not assert that it was delivered.
+The later delivery composition owns transport and acknowledgements.
+
+Before the owner journals a push intent, the entry persists `expectedOldHead`,
+`candidate`, `exactBase`, complete proof and source receipt reference. The proof
+kind is `queue-ordered-binary-v1`: one-to-one contiguous linear commits, at most
+256, byte-identical ordered binary patches, unchanged author and message bytes,
+no empty commits, exact replay base, and no generated-file exclusions. Complete
+original commit objects (including historical signature headers) are retained as
+`sourceCommits[].raw`, encoded as byte-preserving Latin-1 strings in JSON.
+Signed produced/reviewed records and finding dispositions remain in the immutable
+admission receipt at their original SHAs. Rewritten commits receive no borrowed
+signature. `noop: true` records an already-current, nonempty change series without
+creating a commit or issuing a push.
+
+The Git adapter initializes an isolated repository beneath
+`data/finalization-git/<hash(repo,PR,admission-head)>-<unique>/`. Disposable working
+repositories have disabled hooks, user/system Git configuration, signing,
+autostash, rerere and submodule recursion. Raw patch output uses a byte-preserving
+encoding, explicit full indexes, binary output, paths, whitespace and submodule
+coverage. Workspaces persist for restart verification. The service first reconciles authoritative closed/merged state, even when a
+receipt or workspace is unreadable. For open work it always recomputes persisted
+proof before publishing or resuming; missing objects or
+unprovable changes return to the closer. Conflicts are never resolved, and no
+artifact generator is invoked. The API tree publisher is not a rebase executor.
+
+Live preflight reuses admission's shared structural eligibility and hold policy,
+plus explicit head-repository branch-write, force-push, fork/maintainer-edit rights
+and rules provenance. Missing/denied rights park outside FIFO with a named
+`author-and-operator` notice intent; unknown holds park as holds. A prior proven
+candidate may be the source of another mechanical replay after an outside base
+advance, retaining the full derivation chain and original patience. It does not
+manufacture a current-head review or modify source signatures.
+
+The owner issuance lock spans the last live read and complete Git subprocess.
+Publication uses the exact immutable candidate and
+`--force-with-lease=refs/heads/<head-ref>:<expectedOldHead>`. An explicit remote
+stale-info refusal is persisted as not-applied; an unrelated author head returns
+to the closer. A timeout, unreadable response or unknown transport outcome leaves
+the existing owner intent unresolved. Takeover still requires external stop/drain
+and authoritative outcome evidence for every outstanding request; observing the
+old head alone cannot prove remote quiescence.
+
+After reconciliation, a live candidate at the exact base resumes checks without
+a new commit/push. An old head permits reuse of the persisted candidate only when
+there is no earlier intent or the matching intent is proven not-applied. A prior
+successful result followed by an old-head observation parks instead of repushing.
+An unrelated head returns to the closer. A changed base invalidates checks and
+replays under the original deadline. Publication observations and prior phases
+remain replayable through the existing append-only progress events.
+
+Nominal live-read/SQLite budgets are 5 seconds with a 30-second ceiling. Git calls
+use 30 seconds nominal and a 60-second ceiling; all clip to remaining persisted
+patience and timer limits, scaling only nominal values once. Timeout kills the
+Git process group and waits for its close; this local drain does not substitute
+for remote quiescence after ambiguous transport failure. Owner expiry is separate.
+The default target resolver uses canonical SSH repository remotes. Network Git
+requires an explicitly injected per-operation entitled runner; the built-in
+adapter refuses network execution without it and never falls back to ambient
+SSH credentials. Local disposable transports use the bounded Git runner. Trusted
+composition supplies fresh live rights/policy evidence and the existing
+credential mechanism; no credentials enter receipts or repository configuration.
+The existing finalization policy `autonomousExecutionDisabled` intercepts local
+preparation and is rechecked under the issuance lock immediately before push.

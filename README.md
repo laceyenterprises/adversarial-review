@@ -2708,3 +2708,36 @@ service does not dispatch incidents or change merge authority through this knob.
 `test/config-loader-incident-dispatch.test.mjs` covers default, explicit booleans
 and invalid values with synthetic configs only. Deploy the reader before enabling
 the setting in a host overlay.
+
+### V2 mechanical rebase (MGQ-04)
+
+`createQueueRebaseService` prepares conflict-free rebases in isolated repositories,
+proves every ordered change including binary data, whitespace, paths, modes,
+symlinks and gitlinks, and persists the candidate/base/source before the fenced
+expected-old-head push. Empty commits, unsupported histories and unprovable
+preservation return to the closer. Generated files receive no exception.
+Original signed evidence stays at its source head; author warning and permission
+notice intents remain durable for the delivery composition.
+
+The execution lifecycle is ready → rebasing → publishing → waiting-checks,
+with permission/hold/infrastructure parking outside FIFO and terminal returns
+for author changes or failed proof. Restart verifies the persisted candidate and
+reconciles outstanding operations before retry. A published candidate resumes
+checks without repushing. A no-op keeps the SHA with explicit proof. Outside base
+movement keeps the original absolute deadline and records the derivation chain.
+These seams remain unwired until lane routing. Network Git requires the existing
+entitled credential mechanism through an injected runner; ambient SSH fallback
+is refused. The existing execution brake applies before preparation and push.
+No new CI or smoke step is added.
+
+Focused offline fixtures are `finalization-queue-rebase-proof.test.mjs`,
+`finalization-queue-rebase.test.mjs` and `finalization-queue-git.test.mjs`.
+After normal deployment, the runtime owner runs
+`node src/finalization/queue-probe.mjs --capability rebase --json` under the
+existing bounded load-aware supervisor. Require
+`.capabilities.rebase.available == true` and `.runtime.build != null` and record
+the Git/proof adapter and actual publication observations. Missing organic
+publications and live-adapter/routing composition remain pending. The probe
+checks the real schema and Git executable and never creates a workspace or
+mutates a lane. See the [operator procedure](docs/finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
+and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).

@@ -29,7 +29,7 @@ import { argusReviewerFailure, argusFailureDefers, argusReviewerDeferral } from 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SIMPLICITY_REVIEW_GUIDANCE } from './kernel/prompt-stage.mjs';
+import { REVIEW_EVIDENCE_GUIDANCE, SIMPLICITY_REVIEW_GUIDANCE } from './kernel/prompt-stage.mjs';
 import { extractSimplicityNote } from './kernel/verdict.mjs';
 
 import { defangUntrustedMarkdown } from './adapters/comms/github-pr-comments/pr-comments.mjs';
@@ -82,7 +82,7 @@ const MAX_COMMENT_CHARS = 60_000;
 let promptTemplateCache = null;
 export function loadArgusReviewPromptTemplate(rootDir = ROOT) {
   if (rootDir === ROOT && promptTemplateCache) return promptTemplateCache;
-  const text = `${readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8').trim()}\n\n${SIMPLICITY_REVIEW_GUIDANCE}`;
+  const text = `${readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8').trim()}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${SIMPLICITY_REVIEW_GUIDANCE}`;
   if (rootDir === ROOT) promptTemplateCache = text;
   return text;
 }

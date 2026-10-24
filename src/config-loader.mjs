@@ -6304,8 +6304,10 @@ function validateOsgShape(value, source = null) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AgentOSConfigError('osg: expected mapping', { key: 'osg', source });
   }
-  if (Object.hasOwn(value, 'policy') && (!value.policy || typeof value.policy !== 'object' || Array.isArray(value.policy))) {
-    throw new AgentOSConfigError('osg.policy: expected mapping', { key: 'osg.policy', source });
+  for (const key of ['policy', 'double_blind']) {
+    if (Object.hasOwn(value, key) && (!value[key] || typeof value[key] !== 'object' || Array.isArray(value[key]))) {
+      throw new AgentOSConfigError(`osg.${key}: expected mapping`, { key: `osg.${key}`, source });
+    }
   }
   if (Array.isArray(value.arms)) {
     const fields = OSG_SCHEMA.__keys.arms.__item.__keys;

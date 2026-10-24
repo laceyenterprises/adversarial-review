@@ -2196,6 +2196,13 @@ or concurrency algorithm changed.
 
 ### OSG configuration declarations
 
+OSG-16 adds inert `osg.double_blind` declarations for the dispatch owner:
+`enabled: false`, empty `window_start`/`window_end`, `sample_rate: 0.05` and
+`weekly_cap: 10`. Both optional numeric controls have strict bounds, and a null
+subtree is rejected in top, module and local layers. The shared synthetic vectors
+cover the same inputs in Node, Python and shell. This loader does not launch
+paired work or enable the experiment.
+
 OSG-13 adds the shared `osg.sample_rate` declaration: a number from 0 through
 1, defaulting to 0.5. The dispatch owner consumes it; this loader preserves
 Python/shell parity and leaves all modes off by default.

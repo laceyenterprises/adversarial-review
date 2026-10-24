@@ -61,6 +61,53 @@ test('OSG-11 null routing options use the ordinary non-diagnostic defaults', () 
 });
 
 const bridge = new URL('../bin/osg-reviewer-replay.mjs', import.meta.url);
+test('OSG-11 bridge can be invoked directly as an executable', () => {
+  const result = spawnSync(bridge.pathname, [], {
+    input: JSON.stringify({ operation: 'ranges', lines: '2-3', file: 'x.py' }),
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.equal(result.stdout, '[{"start":2,"end":3}]\n');
+});
+
+test('OSG-11 corporate reviewer identities retain harness and family restrictions', () => {
+  for (const [builder, harness, model] of [
+    ['claude-code', 'codex', 'gpt-6.1-sol'], ['codex', 'claude', 'claude-sonnet-4'],
+  ]) {
+    const arm = { harness, model, worker_class: `${harness}-reviewer-corp` };
+    assert.equal(replayRouteAllowed(builder, arm), true);
+    assert.equal(replayRouteAllowed(harness === 'codex' ? 'codex' : 'claude-code', arm), false);
+    for (const worker_class of ['other-reviewer-corp', `${harness}-reviewer-corp-extra`, 'pi']) {
+      assert.equal(replayRouteAllowed(builder, { ...arm, worker_class }), false);
+    }
+  }
+  assert.equal(replayRouteAllowed('codex', {
+    harness: 'pi', model: 'deepseek/model', worker_class: 'pi-reviewer-corp',
+  }, { diagnostic: true }), false);
+});
+
+test('OSG-11 reasoning and Bedrock model identifiers preserve cross-family refusal', () => {
+  for (const model of ['o1', 'o1-mini', 'o3', 'o3-mini', 'o4-mini', 'openai/o3-mini']) {
+    const arm = { harness: 'codex', model };
+    assert.equal(replayRouteAllowed('claude-code', arm), true, model);
+    assert.equal(replayRouteAllowed('codex', arm), false, model);
+    assert.equal(replayRouteAllowed('pi', arm, { builderModel: model }), false, model);
+    assert.equal(replayRouteAllowed('pi', { harness: 'pi', model: 'deepseek/model' }, {
+      diagnostic: true, builderModel: model,
+    }), true, model);
+  }
+  for (const model of ['anthropic.claude-sonnet-4', 'us.anthropic.claude-sonnet-4',
+    'eu.anthropic.claude-sonnet-4', 'bedrock/anthropic.claude-sonnet-4']) {
+    const arm = { harness: 'claude', model };
+    assert.equal(replayRouteAllowed('codex', arm), true, model);
+    assert.equal(replayRouteAllowed('claude-code', arm), false, model);
+    assert.equal(replayRouteAllowed('pi', arm, { builderModel: model }), false, model);
+  }
+  for (const model of ['o10', 'o3unknown', 'o2', 'untrusted.claude-sonnet-4']) {
+    assert.equal(replayRouteAllowed('claude-code', { harness: 'codex', model }), false, model);
+  }
+});
+
 function runBridge(value) {
   return spawnSync(process.execPath, [bridge.pathname], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000 });
 }

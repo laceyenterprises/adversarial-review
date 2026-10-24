@@ -2421,8 +2421,11 @@ The `ranges` operation serializes the shared parser's result directly (an empty
 array for unknown or unparseable citations); unsupported operations are rejected
 before dispatch. Native recommendations follow the canonical base builder route
 or permit Gemini for the canonical Gemini-eligible classes (`claude-code`,
-`codex`, `clio-agent`);
-unknown/same-family models are refused, including models concealed behind a
+`codex`, `clio-agent`).
+Codex and Claude arms accept their matching `-reviewer-corp` worker identities.
+Model-family detection includes OpenAI `o1`, `o3`, and `o4` reasoning IDs and
+Bedrock `anthropic.claude-*` IDs, including regional inference-profile prefixes.
+Unknown/same-family models are refused, including models concealed behind a
 third-party harness. DeepSeek through Pi can run diagnostically when the known
 builder family differs; that diagnostic permission cannot recommend a route.
 The caller owns pinned diff extraction, authorized read-only execution, budget

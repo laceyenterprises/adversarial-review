@@ -5,9 +5,9 @@ import { findingLineRanges } from './kernel/finding-lines.mjs';
 
 function modelFamily(model) {
   const value = String(model || '').toLowerCase();
-  const name = value.split('/').at(-1);
+  const name = value.split('/').at(-1).replace(/^(?:(?:us|eu|apac|global)\.)?anthropic\./, '');
   if (value.startsWith('deepseek/')) return 'deepseek';
-  if (name.startsWith('gpt-')) return 'codex';
+  if (name.startsWith('gpt-') || /^o(?:1|3|4)(?:-|$)/.test(name)) return 'codex';
   if (name.startsWith('claude-')) return 'claude';
   if (name.startsWith('gemini-')) return 'gemini';
   if (name.startsWith('deepseek')) return 'deepseek';
@@ -17,7 +17,9 @@ function modelFamily(model) {
 export function replayRouteAllowed(builderInput, arm, options = {}) {
   const { diagnostic = false, builderModel = null } = options ?? {};
   const builder = normalizeBuilderClass(builderInput);
-  if (arm?.worker_class && arm.worker_class !== (arm.harness === 'pi' ? 'pi' : `${arm.harness}-reviewer`)) return false;
+  const workerClass = arm?.harness === 'pi' ? 'pi' : `${arm?.harness}-reviewer`;
+  if (arm?.worker_class && arm.worker_class !== workerClass
+    && (!['codex', 'claude'].includes(arm.harness) || arm.worker_class !== `${workerClass}-corp`)) return false;
   const family = modelFamily(arm?.model);
   if (!builder || !family || reviewerRefusesBuilder(builder, family)) return false;
   // A non-native harness must not conceal the model's family. Known builder

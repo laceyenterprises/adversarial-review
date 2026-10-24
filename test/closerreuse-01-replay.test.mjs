@@ -1,3 +1,4 @@
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 // CLOSERREUSE-01 (SEV2 2026-09-29, agent-os#7355): a dead hammer's terminal
 // closer record failed every later closer decision for its PR.
 //
@@ -182,6 +183,8 @@ function closerDeps({ nextLaunch = NEXT_LRQ, launchStatus = 'failed', launchRows
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readExecutionVerdictsImpl: async ({ launchRequestId }) => ({ ok: true,
+      verdicts: [noWorkVerdict(launchRequestId, { verdict: 'work_started', reason: 'productive_progress' })] }),
     readPullRequestStateImpl: () => null,
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
@@ -327,7 +330,7 @@ for (const retryCount of [undefined, 1]) {
     assert.deepEqual(closerPassRows(rootDir), [{ attempt_number: 1, status: 'failed', launch: DEAD_LRQ }]);
     const rearmEvents = (deps) => deps.events.filter((entry) => entry.event === 'ama_closer.infra_dead_hammer_rearm');
     assert.deepEqual(rearmEvents(first).map((entry) => [entry.rearmed, entry.cause]),
-      [[true, 'process_exited_after_progress:api-429']]);
+      []);
 
     // 09:30Z: the same record, the same launch, the same attempt. Before
     // CLOSERREUSE-01 this threw and the watcher logged `AMA dispatch failed`.
@@ -356,9 +359,9 @@ for (const retryCount of [undefined, 1]) {
     assert.equal(lease.lrqId, NEXT_LRQ);
     // The 429 death was refunded once, on the first pass, not once per pass.
     const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-    assert.equal(ledger.retryable, 1);
-    assert.deepEqual(ledger.retryableLaunchRequestIds, [DEAD_LRQ]);
-    assert.equal(ledger.attemptCount, 1, 'only the re-arm is charged');
+    assert.equal(ledger.retryable, undefined);
+    assert.equal(ledger.retryableLaunchRequestIds, undefined);
+    assert.equal(ledger.attemptCount, 2, 'progress and the next dispatch remain charged');
     assert.equal(ledger.lifetimeAttemptCount, 2, 'the lifetime count is never refunded');
   });
 }
@@ -434,105 +437,27 @@ function seed7349AfterSecondDeath(rootDir) {
   writeWorkerStdout(rootDir, LRQ_7349_SECOND, DEAD_HAMMER_429_STDOUT);
 }
 
-test('#7349 replay: a hammer dead on a 429 re-arms within the series budget, then the cap pages', async (t) => {
+test('RCV-08 #7349 replay: quota after productive progress stays charged and the cap pages', async t => {
   _resetHammerRetryCapAlertDebounceForTests();
   const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-7349-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seed7349AfterSecondDeath(rootDir);
   const alerts = [];
-  const identity = { repo: REPO, prNumber: PR_7349 };
-
-  // 10:01Z. Before CLOSERREUSE-01: `hammer-retry-cap-exhausted`, operator paged.
-  const first = closerDeps({
-    nextLaunch: LRQ_7349_REARM,
-    launchRows: { [LRQ_7349_SECOND]: deadLaunchRow(LRQ_7349_SECOND) },
-    alerts,
-  });
-  const rearmed = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T10:01:00Z', prNumber: PR_7349, head: HEAD_7349 }),
-    ...first,
-  });
-  assert.equal(rearmed.dispatched, true, JSON.stringify(rearmed));
-  assert.equal(rearmed.launchRequestId, LRQ_7349_REARM);
-  assert.equal(alerts.length, 0);
-  const event = first.events.find((entry) => entry.event === 'ama_closer.infra_dead_hammer_rearm');
-  assert.equal(event?.rearmed, true, JSON.stringify(first.events));
-  assert.equal(event.cause, 'process_exited_after_progress:api-429');
-  let ledger = readHammerRetryCapLedger(rootDir, identity);
-  assert.equal(ledger.retryable, 1);
-  assert.deepEqual(ledger.retryableLaunchRequestIds, [LRQ_7349_SECOND]);
-  assert.equal(ledger.attemptCount, 2, 'the dead launch was handed back; the re-arm is charged');
-  assert.equal(ledger.lifetimeAttemptCount, 3);
-
-  // The re-armed hammer dies the same way. The series' one refund is spent, so
-  // this death stays charged and the normal cap suppresses and pages.
-  writeWorkerStdout(rootDir, LRQ_7349_REARM, DEAD_HAMMER_429_STDOUT);
-  const second = closerDeps({
-    nextLaunch: 'lrq_unexpected',
-    launchRows: { [LRQ_7349_REARM]: deadLaunchRow(LRQ_7349_REARM) },
-    alerts,
-  });
-  const capped = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T10:20:00Z', prNumber: PR_7349, head: HEAD_7349 }),
-    ...second,
-  });
-  assert.deepEqual(second.statusProbes, [LRQ_7349_REARM]);
-  assert.equal(capped.dispatched, false);
-  assert.equal(capped.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(capped.needsOperator, true);
-  assert.equal(second.launches.length, 0);
-  assert.equal(alerts.length, 1);
-  const spent = second.events.find((entry) => entry.event === 'ama_closer.infra_dead_hammer_rearm');
-  assert.equal(spent?.rearmed, false, JSON.stringify(second.events));
-  assert.equal(spent.reason, 'retry-budget-exhausted');
-  ledger = readHammerRetryCapLedger(rootDir, identity);
-  assert.equal(ledger.suppressed, true);
-  assert.equal(ledger.retryable, 1);
-
-  // Observing the same dead launch again neither throws, refunds nor re-logs.
-  const third = closerDeps({ nextLaunch: 'lrq_unexpected', launchRows: { [LRQ_7349_REARM]: deadLaunchRow(LRQ_7349_REARM) }, alerts });
-  const again = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T10:25:00Z', prNumber: PR_7349, head: HEAD_7349 }),
-    ...third,
-  });
-  assert.equal(again.dispatched, false);
-  assert.equal(again.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(third.events.some((entry) => entry.event === 'ama_closer.infra_dead_hammer_rearm'), false);
-  assert.equal(readHammerRetryCapLedger(rootDir, identity).retryable, 1);
-});
-
-for (const [label, launchRow, stdout] of [
-  ['an ordinary crash', deadLaunchRow(LRQ_7349_SECOND, 'worker_crashed'), DEAD_HAMMER_429_STDOUT],
-  ['an exit after progress with no 429', deadLaunchRow(LRQ_7349_SECOND), '{"type":"result","is_error":true,"result":"boom"}\n'],
-  ['an unreadable LRQ row', null, DEAD_HAMMER_429_STDOUT],
-]) {
-  test(`#7349 shape with ${label}: the death stays charged and the cap pages`, async (t) => {
-    _resetHammerRetryCapAlertDebounceForTests();
-    const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-7349-charged-'));
-    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    seed7349AfterSecondDeath(rootDir);
-    writeWorkerStdout(rootDir, LRQ_7349_SECOND, stdout);
-    const alerts = [];
-    const deps = closerDeps({
-      nextLaunch: 'lrq_unexpected',
-      launchRows: launchRow ? { [LRQ_7349_SECOND]: launchRow } : {},
-      alerts,
-    });
-
-    const result = await maybeDispatchAmaCloser({
-      ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T10:01:00Z', prNumber: PR_7349, head: HEAD_7349 }),
-      ...deps,
-    });
-
-    assert.equal(result.dispatched, false, JSON.stringify(result));
+  const args = closerArgs(rootDir, { dispatchedAt: '2026-09-29T10:01:00Z', prNumber: PR_7349, head: HEAD_7349 });
+  for (let tick = 0; tick < 2; tick++) {
+    const deps = closerDeps({ nextLaunch: 'lrq_unexpected', alerts,
+      launchRows: { [LRQ_7349_SECOND]: deadLaunchRow(LRQ_7349_SECOND) } });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, false);
     assert.equal(result.reason, 'hammer-retry-cap-exhausted');
     assert.equal(deps.launches.length, 0);
-    assert.equal(alerts.length, 1);
     const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_7349 });
-    assert.equal(ledger.retryable, undefined);
     assert.equal(ledger.attemptCount, 2);
-  });
-}
+    assert.equal(ledger.lifetimeAttemptCount, 2);
+    assert.equal(ledger.retryable, undefined);
+  }
+  assert.equal(alerts.length, 1);
+});
 
 test('failed backlog census defers when the configured floor is saturated', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-census-failure-'));

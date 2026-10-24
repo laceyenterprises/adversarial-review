@@ -1,3 +1,4 @@
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 // CLOSERREUSE-01: which hammer deaths re-arm the closer. The closer-level
 // replays (agent-os#7347, #7349) are in closerreuse-01-replay.test.mjs.
 
@@ -114,6 +115,7 @@ function rearmArgs(rootDir, overrides = {}) {
       launchRequestId: LRQ,
     },
     currentHeadSha: HEAD,
+    readExecutionVerdictsImpl: async () => ({ ok: true, verdicts: [noWorkVerdict(LRQ)] }),
     readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed', failure_class: 'oauth_access_token_revoked' } }),
     now: '2026-09-29T10:01:00Z',
     ...overrides,
@@ -123,15 +125,15 @@ function rearmArgs(rootDir, overrides = {}) {
 test('a revoked-grant death refunds the charged dispatch once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD });
+  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
 
   const rearm = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, { nextDispatchDiffersImpl: FALLS_BACK }));
   assert.deepEqual(rearm, {
     rearmed: true,
     reason: 'refunded',
-    cause: 'oauth_access_token_revoked',
+    cause: 'credential_before_work',
     failureClass: 'oauth_access_token_revoked',
-    retryable: 1,
+    retryable: undefined,
   });
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 0);
   const again = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, { nextDispatchDiffersImpl: FALLS_BACK }));
@@ -142,7 +144,7 @@ test('a revoked-grant death refunds the charged dispatch once', async (t) => {
 test('a hammer that pushed, a non-hammer launch, or an unreadable LRQ is never refunded', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-refused-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD });
+  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
   const base = rearmArgs(rootDir);
 
   assert.equal((await maybeRearmInfraDeadHammer({ ...base, currentHeadSha: 'f'.repeat(40) })).reason,
@@ -160,14 +162,14 @@ test('a hammer that pushed, a non-hammer launch, or an unreadable LRQ is never r
     readLaunchRequestStatusImpl: async () => {
       throw new Error('psql: connection refused');
     },
-  })).reason, /^rearm-failed:psql: connection refused/);
+  })).reason, /^rearm-failed$/);
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
 });
 
 test('an LRQ row the closer already read is reused, not read again', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-probe-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD });
+  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
   let reads = 0;
   const rearm = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, {
     launchRequestProbe: { ok: true, row: { status: 'failed', failure_class: 'adapter_boot_crash' } },
@@ -179,66 +181,46 @@ test('an LRQ row the closer already read is reused, not read again', async (t) =
   }));
   assert.equal(reads, 0);
   assert.equal(rearm.rearmed, true);
-  assert.equal(rearm.cause, 'adapter_boot_crash');
+  assert.equal(rearm.cause, 'credential_before_work');
 });
 
-test('an exit-without-close refund (HAMBG-02) and an infrastructure death share one budget per series', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-shared-budget-'));
+test('RCV-08 an unavailable or unknown verdict leaves infrastructure failures charged', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'rcv-08-unknown-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER };
-  recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD });
-  // The series' first hammer exited `succeeded` without closing: HAMBG-02 refunded it.
-  assert.equal(refundHammerRetryDispatch(rootDir, identity, {
-    jobKey: HEAD, headSha: HEAD, launchRequestId: 'lrq_exited-without-close',
-  }).refunded, true);
-  recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD });
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
+  for (const packet of [{ ok: false }, { ok: true, verdicts: [] },
+    { ok: true, verdicts: [noWorkVerdict(LRQ, { verdict: 'unknown' })] },
+    { ok: true, verdicts: [noWorkVerdict(LRQ, { verdict: 'work_started' })] }]) {
+    const result = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, {
+      readExecutionVerdictsImpl: async () => packet,
+    }));
+    assert.equal(result.rearmed, false);
+    assert.equal(result.reason, 'execution-not-proven-no-work');
+  }
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 1);
+});
 
-  // Its re-dispatch then dies of a revoked grant: no second refund.
-  const rearm = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, { nextDispatchDiffersImpl: FALLS_BACK }));
-  assert.equal(rearm.rearmed, false);
-  assert.equal(rearm.reason, 'retry-budget-exhausted');
-  assert.equal(rearm.cause, 'oauth_access_token_revoked');
+test('RCV-08 no-work refunds are independent of the bounded exit-without-close retry', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'rcv-08-independent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD, launchRequestId: 'lrq_prior' });
+  assert.equal(refundHammerRetryDispatch(rootDir, identity, {
+    jobKey: HEAD, headSha: HEAD, launchRequestId: 'lrq_prior',
+  }).refunded, true);
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
+  assert.equal((await maybeRearmInfraDeadHammer(rearmArgs(rootDir))).rearmed, true);
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   assert.equal(ledger.retryable, 1);
-  assert.equal(ledger.attemptCount, 1, 'the death stays charged');
-  assert.deepEqual(ledger.retryableLaunchRequestIds, ['lrq_exited-without-close']);
+  assert.equal(ledger.attemptCount, 0);
+  assert.equal(ledger.lifetimeAttemptCount, 1);
 });
 
-test('a revoked grant or boot crash stays charged while the next dispatch would run the same harness', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-persists-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD });
-
-  const probes = [];
-  const sameHarness = async (args) => {
-    probes.push(args);
-    return false;
-  };
-  const cases = [
-    ['no probe', {}],
-    ['same harness', { nextDispatchDiffersImpl: sameHarness }],
-    ['probe throws', { nextDispatchDiffersImpl: async () => { throw new Error('hq unreachable'); } }],
-    ['boot crash, same harness', {
-      nextDispatchDiffersImpl: sameHarness,
-      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'failed', failure_class: 'adapter_boot_crash' } }),
-    }],
-  ];
-  for (const [label, overrides] of cases) {
-    const rearm = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, overrides));
-    assert.equal(rearm.rearmed, false, label);
-    assert.equal(rearm.reason, 'infra-cause-persists', label);
-  }
-  assert.equal(probes[0].workerClass, 'hammer-claude');
-  assert.equal(probes[0].record.launchRequestId, LRQ);
-  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-  assert.equal(ledger.attemptCount, 1, 'the death stays charged');
-  assert.equal(ledger.retryable || 0, 0, 'the series keeps its refund');
-});
-
-test('a provider 429 clears by the next tick, so it refunds without asking about the next harness', async (t) => {
+test('RCV-08 a producer-certified pre-work quota failure refunds without interpreting the 429 text', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closerreuse-rearm-429-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD });
+  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, { jobKey: HEAD, headSha: HEAD, launchRequestId: LRQ });
   let probes = 0;
   const rearm = await maybeRearmInfraDeadHammer(rearmArgs(rootDir, {
     readLaunchRequestStatusImpl: async () => ({

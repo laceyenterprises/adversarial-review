@@ -824,7 +824,11 @@ DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
 inline daemon merge lane, before reviewer admission or closer dispatch. Every
 old and new changed path must be under `docs/` and end in `.md` or an image
 extension (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `ico`, `bmp`, `tif`,
-`tiff`). Agent instruction filenames and prompt/persona/identity directories
+`tiff`), or be an inert evidence file under `docs/postmortems/evidence/` at any
+depth ending in `.json`, `.txt`, `.yaml`, `.yml`, `.diff`, `.patch`, `.log` or
+`.csv`. Those evidence extensions elsewhere and executable files retain full
+review. Paths with `.` or `..` segments are excluded.
+Agent instruction filenames and prompt/persona/identity directories
 (matched case-insensitively) stay on the full path. Empty, unreadable or
 potentially capped inventories also take the full path. Classification is cached
 by PR revision; immutable base/head

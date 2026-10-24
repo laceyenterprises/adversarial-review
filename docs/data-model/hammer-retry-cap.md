@@ -39,7 +39,7 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 
 | Field | Shape | Contract |
 |---|---|---|
-| `schemaVersion` | number | Current value is `2`. Version `2` introduced the target-redrive fields: `targetRemediationSha`, `targetAttemptCount`, `targetSuppressed`, and `targetAlertedAt`. |
+| `schemaVersion` | number | Current value is `3`. Version `3` adds permanent charge/refund identities and target epochs. Version `2` introduced the target-redrive fields: `targetRemediationSha`, `targetAttemptCount`, `targetSuppressed`, and `targetAlertedAt`. |
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. |
 | `jobKey` | string or null | Stable reviewed-head key for the current per-series counter. A changed known job key resets `attemptCount`, `dispatchHeads`, ordinary retry refunds, and the three per-series deferral fields below. Lifetime refund usage survives. |
@@ -48,8 +48,8 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
 | `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
-| `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
-| `unexecutedLaunchRequestIds` | array of strings, optional | HAMREFUND-01, LABELGATE-01 and HOLDRELEASE-01 refunded launch identities, bounded to the newest ten entries. Preserved across dispatches, suppression writes and fresh-review resets; absent legacy values mean no recorded non-execution refunds. |
+| `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Retained for the series; reset with `retryable`. RCV-08 full refunds use permanent `noWorkRefunds` instead. |
+| `unexecutedLaunchRequestIds` | array of strings, optional | HAMREFUND-01, LABELGATE-01 and HOLDRELEASE-01 refunded launch identities, permanent for the retained PR ledger. Preserved across dispatches, suppression writes and fresh-review resets; absent legacy values mean no recorded non-execution refunds. |
 | `operatorHoldRefundStopKeys` | string array, optional | Audit stop keys already refunded by HOLDRELEASE-01. Preserved across dispatches, suppression writes and fresh-review resets; not truncated, so older stops cannot be refunded again after launch history rolls off. Missing legacy values mean no recorded hold refunds. |
 | `operatorHoldRefundedAt` | ISO-8601 string, optional | Latest successful hold-only refund timestamp. Preserved with the stop-key history across dispatches, suppression and fresh-review resets. |
 | `transientRetryHeads` | object of head SHA to positive integer grant count, optional | Spent closer-authored stale-head retry grants. Default limit is one grant per head. Retained for the PR's lifetime across target churn, dispatch/suppression writes and fresh-review job-key resets; unlike refunded launch history, this map is never truncated to ten heads. Absent legacy values mean no grants recorded. |
@@ -60,6 +60,10 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `deferralStartedAt` | ISO-8601 string or null | First observed deferral in this series; anchors the six-hour queue deadline. Resets with the job key. |
 | `deferralNextAt` | ISO-8601 string or null | Earliest resume time after the latest newly observed deferral; two-minute exponential backoff capped at thirty minutes. Resets with the job key. |
 | `lifetimeDeferralRefundCount` | integer in 0..12 | Contention lifetime refunds consumed across all series. Never reset by a fresh review or suppression write. New ledgers start at zero. Missing or malformed legacy values are treated as twelve (refunds exhausted); only operator reconciliation can restore unproven refund capacity. |
+| `dispatchCharges` | map of native attempt key to charge | Permanent launch, attempt (1), reviewed series, target SHA/epoch, ISO-8601 `chargedAt` (defaults to the current time when `now` is omitted/null), consumer version, effective wait snapshot, optional consumed transient grant identity and per-budget partial-credit flags. Written atomically with counters. Duplicate native keys/LRQs do not charge again. |
+| `noWorkRefunds` | map of charge key to receipt | Permanent verdict ID, launch/attempt, series/head, refund time and actual refunded budget flags. Stored with counter decrements; never a recent-history ring. |
+| `targetChargeEpoch` | string | New identity when the target changes, including changes stamped by suppression. Returning to an old SHA cannot make its old verdict debit the new epoch. |
+| `pendingTransientCharge` | object or null | Grant UUID, head and series awaiting its next confirmed dispatch. Only that dispatch consumes/binds the grant. |
 | `dispatchHeads` | string array | Unique dispatched head SHAs observed in the current reviewed-head series. Resets on a fresh-review job-key change. |
 | `lastDispatchedHeadSha` | string or null | Most recent head SHA used for a confirmed hammer dispatch. |
 | `suppressed` | boolean | `true` once any cap has blocked hammer dispatch for the ledger's current state. |
@@ -83,9 +87,8 @@ evidence. It rejects corrupt counters, already-refunded stop keys and launch
 identities, and a dispatch newer than the stop. Each eligible stop reduces
 `attemptCount`, `lifetimeAttemptCount` and the matching `targetAttemptCount`
 once, never below zero. Suppression flags clear so ordinary cap classification
-can re-evaluate remaining charges. No real execution is refunded. The newest
-ten launch IDs are shared with other refund consumers; permanent stop keys
-provide hold-refund deduplication after that bounded history rolls off.
+can re-evaluate remaining charges. No real execution is refunded. Launch IDs are shared permanently with other refund consumers; permanent stop keys
+also retain hold-refund deduplication.
 
 Current in-repo hammer audit producers do not emit this no-execution evidence.
 This refund path is inert for their audits until a producer supplies both the
@@ -106,19 +109,23 @@ explicit evidence and launch identity; a hold-only reason alone never qualifies.
   excluding proven hold-only non-execution refunds, the total launch ceiling is
   bounded by the normal lifetime ceiling plus twelve, excluding proven green lease-wait exhaustion.
   Both refund paths refuse a launch already refunded by the other path.
-- HAMREFUND-01 refunds the series and matching target counters only for a
-  terminal launch with durable harness evidence: `worker_killed` with `SIGTERM`
-  or `SIGKILL` in `failure_detail`, or an exact `codex-tool-host-unavailable`
-  value in `failure_class` or `failure_detail`. A bare `succeeded` row does not
-  qualify. The closer also requires an unchanged live OPEN head, readable
-  absence of a no-merge audit, no terminal local audit, and a cleanly missing
-  merged signal backed by repository producer evidence. Unknown ledger reads
-  never authorize this refund.
-- HAMREFUND-01 non-execution refunds clear series/target suppression but preserve
-  `lifetimeAttemptCount` and `lifetimeSuppressed`. The lifetime ceiling therefore
-  still bounds launches across fresh heads and slow-retry windows. They do not
-  consume the ordinary one-refund-per-series grant, and refuse launch identities
-  already in ordinary retry, contention or retained non-execution history.
+- RCV-08 consumes the RCV-07 `ExecutionVerdict.export` contract through the canonical
+  SQLite/Postgres read adapter. Only schema 1 / `cwp-execution/1` `no_work` with
+  an exact launch/attempt identity and credential-free ledger evidence references
+  authorizes a full refund. Failure classes, signal names, absent logs and 429
+  text cannot authorize it. Unknown, productive progress and post-progress quota
+  failures remain charged. Existing live OPEN head, no terminal audit, missing
+  merge-signal and readable provenance checks remain in the closer path.
+- Full refunds return the recorded lifetime charge and the current matching
+  series/target epoch charges, plus a transient grant only when that launch
+  consumed it. A delayed old-head refund never decrements the replacement
+  head/series. Counters and the permanent per-charge receipt commit in one
+  verified atomic write under a stable-inode PR-scoped flock. Every sibling
+  writer, including hold-stop refunds, participates; busy writers retry through
+  existing observation/error paths. A crash after rename replays the receipt.
+  A later verdict returns only allowances not already credited by a legacy refund. Legacy charges without a recorded launch binding are not guessed or backfilled.
+  Existing bounded exit-only and lease/label/hold deferrals retain their own
+  semantics and cannot double-credit a full no-work refund.
 - Per-series suppression clears when a known fresh reviewed-head job key
   arrives. STALECLOSER-03 also permits `grantTransientHammerRetry` to reopen an
   exhausted series/target cap once per closer-authored stale head: dispatch must
@@ -134,7 +141,7 @@ explicit evidence and launch identity; a hold-only reason alone never qualifies.
   most one, and clears `suppressed`, `targetSuppressed`, `suppressionState` and the
   three suppression stamps. It preserves alert timestamps, lifetime counts and
   lifetime suppression; it never grants once the lifetime ceiling is exhausted.
-  The grant is spent even if the subsequent launch fails. Confirmed launches
+  The grant is spent if the subsequent launch does real or unknown work; a producer-certified no-work launch returns its recorded grant once. Confirmed launches
   consume the reopened slot and increment the lifetime counter normally.
 - Target-redrive suppression is scoped to the live target SHA. When the target
   SHA changes, target suppression and `targetAlertedAt` reset so a genuinely new
@@ -178,3 +185,11 @@ These refunds do not consume the ordinary lifetime deferral refund allowance.
 Green lease identities are separate from `deferralLaunches`, so they do not
 consume the ordinary queue count or start its six-hour deadline. Other deferrals
 retain their existing bounded budget; a later real failure is charged normally. Daemon recovery still applies its live eligibility predicates.
+
+## Read-only activation
+
+`node bin/recovery-status.mjs --json` reports source health, observed runtime
+consumer versions and ages, configured values/resolution, charge/refund coverage,
+and effective spawn wait evidence. Missing receipts remain inactive; an organic
+charge observation older than 24 hours is stale. Refund counts are observations,
+not fabricated organic execution. See the RCV-08 runbook for operator deployment.

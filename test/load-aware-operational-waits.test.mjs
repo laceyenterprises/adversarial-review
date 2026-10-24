@@ -415,3 +415,27 @@ test('explicit daemon waiter deadlines scale once while effective deadlines stay
   assert.equal(upsertMergeLeaseWaiter({ ...request, deadlineSeconds: 90,
     effectiveDeadlineSeconds: 180 }).waiter.deadlineSeconds, 180);
 });
+
+test('RCV-08 600s spawn cap scales once, retains provision bound and respects outer/platform ceilings', t => {
+  busyHost(t);
+  const effective = __testables__.resolveAmaDispatchTimeoutMs({});
+  assert.equal(effective, 3_600_000);
+  const provision = __testables__.withProvisionTimeoutCappedAtDispatch({}, effective);
+  assert.equal(Number(provision.HQ_WORKER_PROVISION_TIMEOUT_SECONDS), 3510);
+  assert.equal(Number(provision.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS), 3555);
+  assert.equal(__testables__.resolveAmaDispatchTimeoutMs({}, { nowMs: 1000, deadlineMs: 2010 }), 1010);
+  assert.equal(__testables__.resolveAmaDispatchTimeoutMs({}, { ceilingMs: 1234 }), 1234);
+  assert.equal(__testables__.resolveAmaDispatchTimeoutMs({ dispatchTimeoutMs: Number.MAX_VALUE }), 2 ** 31 - 1);
+  assert.throws(() => __testables__.resolveAmaDispatchTimeoutMs({}, { nowMs: 1000, deadlineMs: 1000 }), { code: 'ETIMEDOUT' });
+  t.mock.method(os, 'loadavg', () => [0, 0, 0]);
+  syncBuiltinESMExports();
+  assert.equal(__testables__.resolveAmaDispatchTimeoutMs({}), 600_000);
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * 2, 0, 0]);
+  syncBuiltinESMExports();
+  const intermediate = __testables__.resolveAmaDispatchTimeoutMs({});
+  assert.equal(intermediate, 2_100_000);
+  assert.equal(Number(__testables__.withProvisionTimeoutCappedAtDispatch({}, intermediate)
+    .HQ_WORKER_PROVISION_TIMEOUT_SECONDS), 2010, 'intermediate load must not scale 2100s again to the 3600s policy cap');
+  assert.equal(Number(__testables__.withProvisionTimeoutCappedAtDispatch(
+    { HQ_WORKER_PROVISION_TIMEOUT_SECONDS: '30' }, intermediate).HQ_WORKER_PROVISION_TIMEOUT_SECONDS), 30);
+});

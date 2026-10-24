@@ -207,7 +207,10 @@ export async function runHammerController(script, args = [], {
       catch (error) { record.probeError = error.code || 'unknown'; stop('process-probe-unreadable'); }
       if (members?.length === 0 && exited) { drained = true; break; }
       const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
-      if (members && !owned) stop('process-identity-unconfirmed');
+      // A census can observe the shell's exit before Node delivers its exit
+      // event. An empty group grants no signal authority; wait for that event
+      // before deciding whether the completed script succeeded.
+      if (members?.length && !owned) stop('process-identity-unconfirmed');
       if (pendingValidator) {
         const clear = !reason && owned && members.some(member => member.pid === pendingValidator)
           && members.every(member => member.pid === child.pid || member.pid === pendingValidator);

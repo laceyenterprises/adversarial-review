@@ -1,3 +1,5 @@
+import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { validNoWorkVerdict } from '../execution-verdict.mjs';
 // CLOSERREUSE-01: re-arm the closer after a hammer that died of an
 // infrastructure cause.
 //
@@ -8,35 +10,10 @@
 // agent-os#7349 (SEV2 2026-09-29) lost both of its hammers to Claude 429s and
 // stopped at `hammer-retry-cap-exhausted`.
 //
-// The re-arm refunds the dead launch's charged dispatch in the retry-cap
-// ledger. It uses HAMBG-02's refund (refundHammerRetryDispatch), which has the
-// shape HAMGATE-01 gave the merge gate: `attemptCount` down, `retryable` up,
-// once per launch, lifetime count untouched. It draws on the same one-refund
-// budget per series. There is no second counter: past the budget a death stays
-// charged, and the normal cap suppresses and pages.
-//
-// A failed launch is re-armed only when all of these hold:
-//   - the dispatch was a hammer;
-//   - the hammer pushed nothing: the PR head is still the head it was
-//     dispatched on;
-//   - the LRQ's failure class is an infrastructure cause:
-//       oauth_access_token_revoked, adapter_boot_crash, or
-//       process_exited_after_progress with the provider's API 429. agent-os
-//       QUOTA429-01 reclassifies a claude-code worker's 429 stop to
-//       worker_killed, so worker_killed with the same 429 counts too.
-// The 429 must come from the harness: the LRQ's failure detail, the final
-// `result` event of the worker's stream-json stdout, or a provider error line.
-// A hammer's stream also carries every file it read, and this repo's own source
-// quotes the 429 text, so a 429 inside any other event is not evidence.
-//
-// A 429 clears by the next tick. A revoked grant or a deterministic adapter boot
-// crash does not: re-dispatching the same class on the same credential would
-// likely die the same way and spend the series' one refund, which a later
-// HAMBG-02 exit could have used. So those two causes are refunded only when the
-// next dispatch would run on a different harness (`nextDispatchDiffersImpl`,
-// e.g. the provider is now grounded and a fallback takes over). Otherwise the
-// death stays charged and is reported as `infra-cause-persists`.
-
+// RCV-08: failure classes and provider diagnostics are diagnostic helpers only.
+// Refund authority is the persisted RCV-07 ExecutionVerdict.export. Missing or
+// work_started evidence stays charged; existing admission health/backoff still
+// owns when another dispatch may run. No worker output is read by this consumer.
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -143,16 +120,6 @@ export function readDeadHammerWorkerOutput({ hqRoot, launchRequestId } = {}) {
   return { stdout: readFileTail(join(dir, 'stdout.log')), stderr: readFileTail(join(dir, 'stderr.log')) };
 }
 
-// Any doubt (no probe, a throw, a non-true answer) means "same harness".
-async function nextDispatchWouldDiffer(impl, args) {
-  if (typeof impl !== 'function') return false;
-  try {
-    return (await impl(args)) === true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Refund a failed hammer launch's dispatch when it died of an infrastructure
  * cause and pushed nothing. Best effort: never throws, and any doubt leaves
@@ -185,8 +152,7 @@ export async function maybeRearmInfraDeadHammer({
   ledgerDbPath = null,
   env = process.env,
   now = null,
-  readWorkerOutputImpl = readDeadHammerWorkerOutput,
-  nextDispatchDiffersImpl = null,
+  readExecutionVerdictsImpl = readExecutionVerdictsFromLedgerAsync,
 } = {}) {
   try {
     const launchRequestId = record?.launchRequestId || null;
@@ -205,25 +171,16 @@ export async function maybeRearmInfraDeadHammer({
     });
     if (!probe?.ok) return { rearmed: false, reason: `launch-request-unreadable:${probe?.reason || 'unknown'}` };
     const failureClass = String(probe.row?.failure_class || '').trim() || null;
-    const needsOutput = API_429_DEAD_HAMMER_FAILURE_CLASSES.includes(failureClass);
-    const output = needsOutput ? readWorkerOutputImpl({ hqRoot: record.hqRoot || hqRoot, launchRequestId }) : {};
-    const { infra, cause } = classifyDeadHammerCause({
-      failureClass,
-      failureDetail: probe.row?.failure_detail || '',
-      stdout: output?.stdout || '',
-      stderr: output?.stderr || '',
-    });
-    if (!infra) return { rearmed: false, reason: 'not-infrastructure', cause, failureClass };
-    const diedClass = record?.workerClass || workerClass;
-    if (INFRA_DEAD_HAMMER_FAILURE_CLASSES.includes(cause)
-      && await nextDispatchWouldDiffer(nextDispatchDiffersImpl, { record, workerClass: diedClass }) !== true) {
-      return { rearmed: false, reason: 'infra-cause-persists', cause, failureClass };
-    }
+    const verdictProbe = await readExecutionVerdictsImpl({ launchRequestId,
+      rootDir, hqRoot, ledgerTarget, ledgerDbPath, env });
+    const executionVerdict = verdictProbe?.ok ? verdictProbe.verdicts?.find(value =>
+      validNoWorkVerdict(value, launchRequestId)) : null;
+    if (!executionVerdict) return { rearmed: false, reason: 'execution-not-proven-no-work', failureClass };
+    const cause = executionVerdict.reason;
     const refund = refundHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: record.reviewedSha || jobKey,
       headSha: record.targetRemediationSha || record.headSha,
-      launchRequestId,
-      now,
+      launchRequestId, dispatchKey: record.dispatchIdempotencyKey, executionVerdict, now,
     });
     return {
       rearmed: refund.refunded === true,
@@ -232,7 +189,7 @@ export async function maybeRearmInfraDeadHammer({
       failureClass,
       retryable: refund.retryable,
     };
-  } catch (err) {
-    return { rearmed: false, reason: `rearm-failed:${err?.message || err}` };
+  } catch {
+    return { rearmed: false, reason: 'rearm-failed' };
   }
 }

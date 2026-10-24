@@ -1337,3 +1337,50 @@ test('RETRYCHAIN-02: an empty capacity census never requests an unfiltered launc
   });
   assert.deepEqual(result.rows, []);
 });
+
+import { readExecutionVerdictsFromLedger, readExecutionVerdictsFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
+
+test('RCV-08 reads the RCV-07 versioned export from canonical SQLite without writes', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dbPath = path.join(rootDir, 'synthetic.db');
+  const db = new Database(dbPath);
+  const verdict = noWorkVerdict('lrq_synthetic');
+  db.exec(`CREATE TABLE execution_verdicts (launch_request_id TEXT, attempt INTEGER, verdict_id TEXT,
+    verdict TEXT, reason TEXT, evidence_refs_json TEXT, producer TEXT, schema_version INTEGER, observed_at TEXT)`);
+  db.prepare('INSERT INTO execution_verdicts VALUES (?,?,?,?,?,?,?,?,?)').run(verdict.launchRequestId,
+    verdict.attempt, verdict.verdictId, verdict.verdict, verdict.reason, JSON.stringify(verdict.evidenceRefs),
+    verdict.producer, verdict.schemaVersion, verdict.observedAt);
+  db.close();
+  const before = readFileSync(dbPath);
+  const args = { ledgerTarget: { backend: 'sqlite', path: dbPath }, rootDir, env: HERMETIC_CONFIG_ENV,
+    launchRequestId: verdict.launchRequestId };
+  assert.deepEqual(readExecutionVerdictsFromLedger(args).verdicts, [verdict]);
+  assert.deepEqual((await readExecutionVerdictsFromLedgerAsync(args)).verdicts, [verdict]);
+  assert.deepEqual(readFileSync(dbPath), before);
+  assert.deepEqual(readExecutionVerdictsFromLedger({ ...args, launchRequestId: 'missing' }).verdicts, []);
+});
+
+test('RCV-08 PostgreSQL verdict export uses bounded read-only canonical adapter and redacts failures', () => {
+  let input;
+  const verdict = noWorkVerdict('lrq_pg');
+  const row = { launch_request_id: verdict.launchRequestId, attempt: 1, verdict_id: verdict.verdictId,
+    verdict: verdict.verdict, reason: verdict.reason, evidence_refs_json: verdict.evidenceRefs,
+    producer: verdict.producer, schema_version: 1, observed_at: verdict.observedAt };
+  const args = { ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' }, env: HERMETIC_CONFIG_ENV,
+    launchRequestId: verdict.launchRequestId,
+    spawnSyncImpl: (_cmd, _args, options) => {
+      input = options.input;
+      assert.ok(options.timeout > 0 && options.timeout <= 2 ** 31 - 1);
+      return { status: 0, stdout: JSON.stringify(row) + '\n' };
+    } };
+  const result = readExecutionVerdictsFromLedger(args);
+  assert.deepEqual(result.verdicts, [verdict]);
+  assert.match(input, /BEGIN READ ONLY/);
+  assert.match(input, /launch_request_id = :'lrq'/);
+  const failed = readExecutionVerdictsFromLedger({ ...args,
+    spawnSyncImpl: () => ({ status: 1, stderr: 'synthetic-secret-driver-error' }) });
+  assert.equal(failed.ok, false);
+  assert.equal(JSON.stringify(failed).includes('synthetic-secret'), false);
+});

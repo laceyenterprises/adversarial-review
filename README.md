@@ -1059,6 +1059,20 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+RCV-08 adds permanent no-work charge/refund receipts and serialized hammer budget
+accounting. The existing launch-terminal reconciliation edge now requires the
+RCV-07 versioned verdict for full refunds; terminal PR and hammer review authority
+remain unchanged. Focused offline `ama-hammer-retry-cap`, `ama-dead-hammer-rearm`,
+`hamrefund-01`, `closerreuse-01-replay`, `session-ledger-read-adapter` and
+`load-aware-operational-waits` fixtures cover accounting and waits. Existing smoke
+promises remain unchanged. After normal deployment, the owner runs the separate
+[read-only activation probe](docs/RUNBOOK-ama-closure.md#recovery-no-work-accounting-rcv-08);
+missing runtime observations remain pending for RCV-09 operator activation. Wait
+evidence retains the latest actual dispatch snapshot with its own 24-hour age
+limit when a later recovered charge has no snapshot. This verification promise
+lives in `post-merge-verify.json`; RCV-08 introduces no new state machine.
+
+
 LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.
 Current-head review, cross-model selection, verdict validation and merge gates
 remain required. Lifecycle states and disposable smoke promises are unchanged;
@@ -1144,7 +1158,9 @@ unregistered shell. Validators share that group. Terminal/parked/unreadable
 launch evidence and signals transition `running` → `stopping` → `quiescent`,
 or `cleanup-unconfirmed` on missing drain proof. Cancellation defers trap release
 until confirmed drain; the existing full lease-generation fence protects other
-holders. [Controller data](docs/data-model/hammer-controllers.md) describes the
+holders. An empty census before the shell exit event waits for that event,
+preserves the script's exit status and grants no signaling or lease-release
+authority by itself. [Controller data](docs/data-model/hammer-controllers.md) describes the
 two-second TERM grace, one-second drain bound and retained scratch. Focused
 offline `hammer-controller` tests extend source acceptance; the existing
 `smv-handoff` smoke promise is unchanged. Deployed organic cancellation and

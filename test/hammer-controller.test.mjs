@@ -326,6 +326,36 @@ test('a refused child kill is not a failed spawn and never proves quiescence', a
   assert.equal(f.receipt().leaseCleanup.reason, 'process-drain-unconfirmed');
 });
 
+for (const exitCode of [0, 7]) {
+  test(`empty census before shell exit event preserves status ${exitCode}`, async t => {
+    const f = fixture(t, 'exit 0');
+    let exited = false, snapshots = 0;
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, new PassThrough()],
+      kill() { throw new Error('empty census cannot authorize a signal'); },
+      unref() {},
+    });
+    const status = await runHammerController('/fixture', [], {
+      env: f.env, pollMs: 5, timeoutMs: 1000,
+      readLaunchImpl: async () => launch('running'), spawnImpl: () => child,
+      snapshotImpl() {
+        if (++snapshots === 1) return [{ pid: 4242, birth: 'fixture-birth' }];
+        if (snapshots === 2) setImmediate(() => { exited = true; child.emit('exit', exitCode); });
+        return [];
+      },
+      signalGroupImpl() { throw new Error('empty census cannot authorize a group signal'); },
+      releaseImpl({ drained }) {
+        assert.equal(exited, true);
+        assert.equal(drained, true);
+        return { released: false, reason: 'no-acquisition-receipt' };
+      },
+    });
+    assert.equal(status, exitCode);
+    assert.equal(f.receipt().reason, 'shell-exited');
+    assert.equal(f.receipt().drained, true);
+  });
+}
+
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   test(`controller ${signal} cancellation drains its shell and fences lease cleanup`, { timeout: 12000 }, async t => {
     const f = fixture(t, 'printf ready > "$HAM_RUN_DIR/ready"\nsleep 30');

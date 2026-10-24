@@ -224,7 +224,7 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
       try {
         recordHammerRetryDispatch(rootDir, record, { jobKey: record.reviewedSha || record.headSha,
           headSha: record.targetRemediationSha || record.headSha,
-          dispatchKey: record.dispatchIdempotencyKey, preserveSuppression: true, now });
+          dispatchKey: record.dispatchIdempotencyKey, launchRequestId: receipt.launch_request_id, preserveSuppression: true, now });
       } catch { budgetUnreadable = true; }
     }
     // Canonical receipt recovery is local evidence, independent of GitHub

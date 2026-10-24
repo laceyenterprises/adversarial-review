@@ -1,8 +1,10 @@
+import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
 import { captureCloserProcess } from './dispatch-submitter.mjs';
 import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
-import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, timerDelayMs, progressingOperationTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
@@ -188,7 +190,7 @@ import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
-import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer-rearm.mjs';
+import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
   HAMMER_EVIDENCE_FAILURES,
@@ -2768,9 +2770,9 @@ function formatHqDispatchError(errOrText) {
   return parts.join('\n') || String(errOrText || 'unknown hq dispatch error');
 }
 
-function resolveAmaDispatchTimeoutMs(cfg) {
+function resolveAmaDispatchTimeoutMs(cfg, options = {}) {
   const configured = Number(cfg?.dispatchTimeoutMs);
-  return loadAwareTimeoutMs(Number.isFinite(configured) && configured > 0 ? configured : 600_000);
+  return progressingOperationTimeoutMs(Number.isFinite(configured) && configured > 0 ? configured : 600_000, options);
 }
 
 const PROVISION_SELF_TIMEOUT_CUSHION_SECONDS = 90;
@@ -2785,7 +2787,7 @@ function capExistingTimeoutSeconds(env, key, capSeconds) {
 
 function withProvisionTimeoutCappedAtDispatch(env, dispatchTimeoutMs) {
   const baseEnv = env || process.env;
-  const normalizedDispatchTimeoutMs = resolveAmaDispatchTimeoutMs({ dispatchTimeoutMs });
+  const normalizedDispatchTimeoutMs = timerDelayMs(dispatchTimeoutMs);
   const dispatchTimeoutSeconds = Math.max(1, Math.floor(normalizedDispatchTimeoutMs / 1000));
   const provisionTimeoutCapSeconds = Math.max(
     1,
@@ -4720,6 +4722,7 @@ async function maybeDispatchAmaCloserAttempt({
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidenceAsync,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
+  readExecutionVerdictsImpl = readExecutionVerdictsFromLedgerAsync,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerDefault,
   useLaunchSnapshot = true,
   readLaunchRequestSnapshotImpl = readLaunchRequestSnapshotFromLedgerAsync,
@@ -5575,7 +5578,14 @@ async function maybeDispatchAmaCloserAttempt({
         terminalStatus, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
     const terminal = ['failed', 'succeeded'].includes(terminalStatus);
-    const reason = terminal ? unexecutedHammerReason(probe.row) : null;
+    const verdictProbe = terminal ? await Promise.resolve().then(() => readExecutionVerdictsImpl({
+      launchRequestId: existingRecord.launchRequestId,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath,
+      env, hqRoot, rootDir, signal,
+    })).catch(() => ({ ok: false })) : null;
+    const executionVerdict = verdictProbe?.ok && Array.isArray(verdictProbe.verdicts) ? verdictProbe.verdicts.find(value =>
+      validNoWorkVerdict(value, existingRecord.launchRequestId)) : null;
+    const reason = executionVerdict?.reason || null;
     if (reason && !auditTerminalOutcome) {
       const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl, repo, prNumber, signal });
       const noMerge = live?.state === 'OPEN' && live.headRefOid === existingRecord.headSha
@@ -5592,7 +5602,8 @@ async function maybeDispatchAmaCloserAttempt({
         const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
           jobKey: existingRecord.reviewedSha || reviewedSha,
           headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
-          now: dispatchContext.dispatchedAt,
+          now: dispatchContext.dispatchedAt, executionVerdict,
+          dispatchKey: existingRecord.dispatchIdempotencyKey,
         });
         if (refund.refunded || ['already-refunded', 'no-charged-attempt'].includes(refund.reason)
           || (refund.reason === 'no-ledger' && !readHammerRetryCapLedger(rootDir, { repo, prNumber }))) {
@@ -7316,7 +7327,7 @@ async function maybeDispatchAmaCloserAttempt({
       `[ama-closer] unsupported merge dispatch route=${JSON.stringify(mergeDispatchRoute)}`,
     );
   }
-  const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
+  const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg, { deadlineMs: dispatchContext.deadlineMs ?? Infinity });
   const releaseLaunchAdmission = await acquireLaunchAdmission(rootDir);
   try {
   throwIfAborted(signal);
@@ -7817,11 +7828,13 @@ async function maybeDispatchAmaCloserAttempt({
   // the head cannot reset the lifetime count. A genuinely never-spawned dispatch
   // (deploy bounce / branch-holder / transient / admit refusal) does NOT call
   // this — that fail-safe is preserved.
-  const recordHammerLaunchAgainstCap = (spawnPath) => {
+  const recordHammerLaunchAgainstCap = (spawnPath, launchRequestId) => {
     if (!isHammerWorkerClass(workerClass)) return;
     try {
       recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
-        dispatchKey: dispatchIdempotencyKey,
+        dispatchKey: dispatchIdempotencyKey, launchRequestId,
+        waitBudget: { dispatchTimeoutMs, nominalMs: Number(cfg?.dispatchTimeoutMs) || 600_000,
+          ceilingMs: 2 ** 31 - 1, outerDeadlineMs: dispatchContext.deadlineMs ?? null },
         jobKey: reviewedSha,
         headSha: targetRemediationSha,
         lifetimeDispatchCeiling: normalizeHammerLifetimeDispatchCeiling(
@@ -8195,7 +8208,7 @@ async function maybeDispatchAmaCloserAttempt({
       // dispatch-failed never spawned a worker and are intentionally NOT counted.
       if (ambiguousLaunch) {
         promoteLaunchedLease(parsedFailure);
-        recordHammerLaunchAgainstCap('ambiguous-launch-spawned');
+        recordHammerLaunchAgainstCap('ambiguous-launch-spawned', parsedFailure.launchRequestId);
       }
       let releasedPendingLease = false;
       let releasePendingLeaseError = null;
@@ -8263,7 +8276,7 @@ async function maybeDispatchAmaCloserAttempt({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
-  recordHammerLaunchAgainstCap('confirmed-launch');
+  recordHammerLaunchAgainstCap('confirmed-launch', parsed.launchRequestId);
   updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
     const liveRecord = { ...(current || {}) };
     delete liveRecord.terminalLaunchStatus;
@@ -8312,7 +8325,7 @@ async function maybeDispatchAmaCloserAttempt({
   // this does not). The ambiguous-launch path above ALSO counts (a worker that
   // spawned then died early); only genuinely never-spawned returns (lease-held /
   // dispatch-failed / branch-holder / transient / merged-signal) escape the count.
-  recordHammerLaunchAgainstCap('confirmed-launch');
+  recordHammerLaunchAgainstCap('confirmed-launch', parsed.launchRequestId);
 
   return {
     dispatched: true,

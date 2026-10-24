@@ -2035,3 +2035,42 @@ function spawnLedgerChild(command, args, options) {
     child.stdin.end(options.input);
   });
 }
+
+// RCV-07 consumer export, using the same canonical target and bounded read
+// paths as launch status. No classifier, migrations or writes run here.
+export function readExecutionVerdictsFromLedger(args = {}) {
+  return runLedgerStepsSync(readExecutionVerdictsSteps(args));
+}
+export function readExecutionVerdictsFromLedgerAsync(args = {}) {
+  return runLedgerStepsAsync(readExecutionVerdictsSteps(args), args);
+}
+function* readExecutionVerdictsSteps({ launchRequestId = null, ledgerTarget = null,
+  ledgerDbPath = null, env = process.env, rootDir = process.cwd(), hqRoot = null,
+  spawnSyncImpl = spawnSync } = {}) {
+  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath,
+    requiredTables: ['execution_verdicts'], env, rootDir, hqRoot });
+  if (!resolution.ok) return { ok: false, reason: 'execution-verdict-source-unavailable' };
+  const columns = 'launch_request_id, attempt, verdict_id, verdict, reason, evidence_refs_json, producer, schema_version, observed_at';
+  let result;
+  if (resolution.target.backend === 'sqlite') {
+    result = querySqliteRows(resolution.target, `SELECT ${columns} FROM execution_verdicts
+      ${launchRequestId ? 'WHERE launch_request_id = @launchRequestId' : ''}
+      ORDER BY observed_at DESC LIMIT 100`, launchRequestId ? { launchRequestId } : {});
+  } else if (resolution.target.backend === 'postgres') {
+    result = yield* queryPostgresRowsSteps(resolution.target,
+      `SELECT row_to_json(v) FROM (SELECT ${columns} FROM execution_verdicts
+      ${launchRequestId ? "WHERE launch_request_id = :'lrq'" : ''}
+      ORDER BY observed_at DESC LIMIT 100) v`, {
+        spawnSyncImpl, readOnly: true, psqlVars: launchRequestId ? [['lrq', launchRequestId]] : [],
+      });
+  } else return { ok: false, reason: 'execution-verdict-source-unavailable' };
+  if (!result.ok) return { ok: false, reason: 'execution-verdict-source-unavailable' };
+  try {
+    return { ok: true, source: 'session_ledger.execution_verdicts.ExecutionVerdict.export',
+      verdicts: result.rows.map(row => ({ launchRequestId: row.launch_request_id,
+        attempt: row.attempt, verdictId: row.verdict_id, verdict: row.verdict,
+        reason: row.reason, evidenceRefs: typeof row.evidence_refs_json === 'string'
+          ? JSON.parse(row.evidence_refs_json) : row.evidence_refs_json,
+        producer: row.producer, schemaVersion: row.schema_version, observedAt: row.observed_at })) };
+  } catch { return { ok: false, reason: 'execution-verdict-source-invalid' }; }
+}

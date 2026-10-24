@@ -1,4 +1,3 @@
-import { createFindingBatchTicker } from './findings-batch.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -1860,6 +1859,7 @@ async function main() {
     }
   }
 
+  const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
 

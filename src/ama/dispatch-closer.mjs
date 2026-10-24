@@ -5783,11 +5783,11 @@ async function maybeDispatchAmaCloserAttempt({
         }
         if (certifiedPark && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-            reason: 'hammer-merge-ready-checks-pending', recoveryWait: true });
+            reason: 'hammer-merge-ready-checks-pending', recoveryWait: true, nextActionShared: sharedNextAction });
         }
         if (certifiedPark && verdict.trace?.mergeability?.mergeableState === 'UNKNOWN') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-            reason: 'hammer-merge-ready-mergeability-unknown', recoveryWait: true });
+            reason: 'hammer-merge-ready-mergeability-unknown', recoveryWait: true, nextActionShared: sharedNextAction });
         }
         const mergeHead = certifiedPark ? queuedHead : reviewedSha;
         const reason = certifiedPark ? 'hammer-merge-ready-deferred' : 'current-head-hammer-already-ran-needs-operator';

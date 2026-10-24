@@ -13,7 +13,6 @@ import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lea
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
-import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';

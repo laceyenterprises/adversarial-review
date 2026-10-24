@@ -191,7 +191,6 @@ test('replay #7332: a conflicting, red-CI final-round head reaches one hammer in
     'the closer sees exactly the reasons production refused on',
   );
   assert.equal(payload.sharedNextAction.decision.action, 'hammer', 'CONFLICTING is a proven conflict');
-  assert.equal(payload.sharedNextAction.decision.action, 'hammer', 'a conflict does not wait on CI');
   assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
   assert.equal(run.outcome.outcome, 'ama-dispatched');
   assert.equal(run.hammerDispatches.length, 1, 'exactly one hammer');
@@ -236,7 +235,6 @@ test('replay #7332 with pending CI: a conflicting final-round head reaches one h
   const input = setup7332(rootDir, { statusCheckRollup: PENDING_7332_ROLLUP });
   const logs = [];
   const run = await replay(rootDir, { ...input, stubs: { ...input.stubs, now: WITHIN_CI_WAIT }, logs });
-  assert.equal(run.closerPayloads[0].sharedNextAction.decision.action, 'hammer');
   assert.equal(run.closerPayloads[0].sharedNextAction.decision.action, 'hammer');
   assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
   assert.equal(run.hammerDispatches.length, 1);

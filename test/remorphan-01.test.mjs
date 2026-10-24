@@ -381,3 +381,13 @@ test('HAMROUTE-01: observing a proof wait never adds a live ownership read to th
   assert.equal(waiting.amaClosureResult.ownerlessIdleMs, 15 * 60_000);
   assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
 });
+
+test('orphan review request normalizes an absent diagnostic reason', async t => {
+  const { args, calls } = setup(t);
+  const decision = { ...syntheticDecision(args.headSha), action: 'review', actor: 'reviewer', reason: undefined };
+  const result = await recoverOrphan({ ...args, result: { amaEnabled: true, nextAction: decision },
+    now: '2026-10-11T16:00:00.000Z' });
+  assert.equal(result.amaClosureResult.reviewRequest.triggered, true);
+  assert.equal(calls.reviews.length, 1);
+  assert.deepEqual(JSON.parse(recoveryState(args.rootDir).evidence).reasons, []);
+});

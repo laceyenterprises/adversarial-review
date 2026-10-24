@@ -987,7 +987,7 @@ test('REMCONFLICT-01: the hold releases a conflicting stop (CONFLICTING or DIRTY
   assert.equal(hammerStopPrIsConflicting({ mergeableState: 'MERGEABLE', mergeStateStatus: 'BEHIND' }), false);
 });
 
-test('Case 3: a stale review on a worker-pushed head is not held; the exact-head re-review stays its owner', async (t) => {
+test('Case 3: a stale review on a worker-pushed head retains the hammer stop hold', async (t) => {
   const rootDir = tmpRoot(t, 'noowner-case3-worker-head-');
   writeAmaAuditEntry({
     hqRoot: join(rootDir, 'hq-root'), repo: AOS, prNumber: 8022, headSha: CLOSER_8022, now: '2026-10-10T18:28:31Z',

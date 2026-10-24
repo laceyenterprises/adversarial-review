@@ -81,9 +81,12 @@ async function recoverAmaAutomationLocked({
     }
     if (!state.pagedReasons.includes(event.reason)) {
       try {
+        const observedAt = now();
+        const anchoredAt = [Date.parse(selected.deadline?.anchoredAt), Date.parse(state.firstActionableAt),
+          state.blockedSince, observedAt].find(Number.isFinite);
         await pageImpl(`SEV1 AMA automated recovery exhausted: ${repo}#${prNumber}@${headSha}: ${event.reason}; `
           + `action=${selected.action} actor=${selected.actor} reason=${selected.reason} head=${headSha} `
-          + `ageMs=${Math.max(0, now() - Date.parse(selected.deadline?.anchoredAt || state.firstActionableAt))}`,  {
+          + `ageMs=${Math.max(0, observedAt - anchoredAt)}`,  {
           event: event.event, payload: event,
         });
         state.paged = true;

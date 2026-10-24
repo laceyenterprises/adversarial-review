@@ -10,7 +10,7 @@ import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
 import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
-  resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
+  resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
@@ -271,6 +271,10 @@ test('orchestration routes one shared hammer decision despite overdue reports', 
   assert.deepEqual(f.effects.map(([kind]) => kind), ['wake', 'closer']);
   assert.equal(f.effects[0][1].decision, f.effects[1][1].decision);
   assert.equal(result.nextAction, f.effects[1][1].decision);
+  assert.equal(readClosureNextAction(result).decision, result.nextAction);
+  assert.equal(readClosureNextAction(result).snapshot.head, HEAD);
+  assert.equal(hasHammerDispatchIntent(readClosureNextAction(result), identity), true);
+  assert.equal(Object.hasOwn(result, 'nextActionShared'), false);
   assert.ok(f.waits.length > 0);
 });
 

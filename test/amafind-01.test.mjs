@@ -181,3 +181,40 @@ for (const observations of [
   assert.equal(calls.hammer, 0);
   assert.equal(calls.rereview.length, 0);
 });
+
+for (const [name, anchoredAt, firstActionableAt, blockedSince, ageMs] of [
+  ['selected anchor', AT, 'invalid', undefined, 5000],
+  ['durable anchor', 'invalid', AT, undefined, 5000],
+  ['numeric stall anchor', 'invalid', 'invalid', Date.parse(AT), 5000],
+  ['missing anchors', undefined, undefined, undefined, 0],
+  ['future anchor', '2026-01-01T00:00:10.000Z', undefined, undefined, 0],
+]) test(`exhaustion page has a finite age with ${name}`, async t => {
+  const shared = matrixPair({ checks: { conclusion: 'FAILURE' } });
+  const result = { nextAction: { ...shared.decision, deadline: anchoredAt ? { anchoredAt } : null } };
+  const { args, calls } = harness(t, result, { now: () => Date.parse(AT) + 5000 });
+  // The unchanged posting expires a prior review reservation before stalled()
+  // can create a new stall anchor, exercising the final observation fallback.
+  const state = { attempts: 0, rereviewPending: true, rereviewBaseline: 'first-pass',
+    rereviewRequestedAt: 0, firstActionableAt, blockedSince };
+  const key = createHash('sha256').update(`${args.repo}#${args.prNumber}@${HEAD}`).digest('hex');
+  // First create the store directory through an ordinary owned wait.
+  await recoverAmaAutomation({ ...args, result: { nextAction: { ...shared.decision,
+    queue: { intent: 'owned' } } } });
+  writeFileSync(join(args.rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery', `${key}.json`), JSON.stringify(state));
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+  assert.ok(calls.page[0][0].endsWith(`ageMs=${ageMs}`), calls.page[0][0]);
+  assert.equal(calls.hammer, 0);
+});
+
+for (const [action, actor] of [['remediate', 'remediator'], ['hammer', 'closure-recovery']]) {
+  test(`unsupported recovery dispatch ${action}/${actor} retains a bounded outcome`, async t => {
+    const decision = { ...matrixPair().decision, action, actor, queue: { intent: 'dispatch' } };
+    const { args, calls } = harness(t, { nextAction: decision });
+    const recovered = await recoverAmaAutomation(args);
+    assert.equal(recovered.outcome, 'ama-pending');
+    assert.equal(recovered.recovery.action, 'retry');
+    assert.equal(calls.hammer, 0);
+    assert.equal(calls.rereview.length, 0);
+  });
+}

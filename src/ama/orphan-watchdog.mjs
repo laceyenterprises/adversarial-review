@@ -273,7 +273,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       if (idleMs < ownerlessBoundMs(env)) {
         const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
           reviewStateRow, requestRereviewImpl, logger, db,
-          decisionReasons: [result.nextAction.reason] });
+          decisionReasons: [result?.nextAction?.reason].filter(Boolean) });
         return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
       }
     }

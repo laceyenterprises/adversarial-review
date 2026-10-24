@@ -3761,6 +3761,9 @@ errors spend attempts. Live ownership, deferred dispatch and read/proof waits
 retain their anchored deadline without consuming attempts. Historical UNKNOWN
 counters remain readable; they no longer choose eligibility or an owner.
 Recovery reports include the selected action, actor, reason, head and age.
+Exhaustion page age uses the first parseable selected or durable actionable
+anchor, then the numeric stall timestamp, then the current observation time;
+missing or malformed anchors cannot emit `ageMs=NaN`.
 Existing alert debounce, delivery retry and refund behavior remain in effect.
 Abort and coexistence-timeout errors propagate without charging recovery.
 

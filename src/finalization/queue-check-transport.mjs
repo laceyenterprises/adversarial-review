@@ -13,7 +13,7 @@ export function createEntitledQueueCheckRequest({ credentialEnv, execFileImpl = 
   return { name: 'entitled-gh-read-v1', async read({ path, deadline, timeoutMs, signal }) {
     if (!credentialEnv || (!['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'].some(key =>
       credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`]) && !credentialEnv.HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND)
-      || !/^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/commits\/[a-f0-9]{40}\/(check-runs|statuses)\?/.test(path)) {
+      || !/^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/commits\/[a-f0-9]{40}\/(check-runs|statuses)\?/i.test(path)) {
       throw new Error('entitled-check-reader-unavailable');
     }
     const callDeadline = new Date(Math.min(Date.parse(deadline), Date.parse(now()) + timeoutMs)).toISOString();
@@ -38,16 +38,21 @@ export function createEntitledQueueCheckRequest({ credentialEnv, execFileImpl = 
       if (!match) throw new Error('checks-response-unreadable');
       const links = match[1].split(/\r?\n/).filter(line => /^link:/i.test(line));
       let nextPage = null;
-      if (links.length > 1) throw new Error('checks-pagination-unreadable');
       if (links.length) {
-        for (const link of links[0].slice(5).split(',')) {
+        for (const link of links.map(line => line.slice(5)).join(',').split(',')) {
           const part = /^\s*<([^>]+)>;\s*rel="(next|prev|first|last)"\s*$/.exec(link);
           if (!part) throw new Error('checks-pagination-unreadable');
           if (part[2] === 'next') {
             const url = new URL(part[1]);
             const expected = new URL(path, 'https://api.github.com');
-            if (url.origin !== expected.origin || url.pathname !== expected.pathname
+            // Canonical repository-ID links only supply a page number; reads
+            // continue on the original named repository and exact candidate.
+            const canonical = /^\/repositories\/\d+(\/commits\/[a-f0-9]{40}\/(?:check-runs|statuses))$/i.exec(url.pathname);
+            const endpoint = '/' + expected.pathname.split('/').slice(-3).join('/');
+            if (url.origin !== expected.origin || (url.pathname !== expected.pathname
+              && canonical?.[1].toLowerCase() !== endpoint.toLowerCase())
               || url.searchParams.get('per_page') !== '100' || url.searchParams.get('filter') !== expected.searchParams.get('filter')) throw new Error('checks-pagination-unreadable');
+            if (nextPage !== null) throw new Error('checks-pagination-unreadable');
             nextPage = Number(url.searchParams.get('page'));
             if (!Number.isSafeInteger(nextPage) || nextPage < 2) throw new Error('checks-pagination-unreadable');
           }

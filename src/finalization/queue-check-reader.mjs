@@ -74,8 +74,12 @@ export function createQueueCheckReader({ request, policyAdapter, cfg, noCiAdapte
             total = nextTotal;
           }
           for (const item of items) {
+            // REST check runs have no created_at. Unstarted runs can have no
+            // timestamp at all; retain them without inventing recency evidence.
+            const createdAt = kind === 'check-runs' ? item.started_at ?? item.completed_at ?? null : item.created_at;
             if (!Number.isSafeInteger(item.id) || seen.has(item.id) || !text(item.name ?? item.context)
-              || !Number.isFinite(Date.parse(item.created_at)) || !text(item.html_url ?? item.target_url ?? item.url)) throw new Error('checks-invalid-result');
+              || (!(kind === 'check-runs' && createdAt === null) && !Number.isFinite(Date.parse(createdAt)))
+              || !text(item.html_url ?? item.target_url ?? item.url)) throw new Error('checks-invalid-result');
             seen.add(item.id);
             // Legacy statuses are scoped to the immutable commit endpoint. A
             // check run additionally carries its own head_sha, which must match.
@@ -84,7 +88,7 @@ export function createQueueCheckReader({ request, policyAdapter, cfg, noCiAdapte
               id: item.id, name: item.name ?? null, context: item.context ?? null, head: entry.candidate,
               ...(kind === 'check-runs' && item.app ? { app: { id: item.app.id ?? null, slug: item.app.slug ?? null } } : {}),
               status: item.status ?? null, state: item.state ?? null, conclusion: item.conclusion ?? null,
-              createdAt: item.created_at, startedAt: item.started_at ?? null, completedAt: item.completed_at ?? null,
+              createdAt, startedAt: item.started_at ?? null, completedAt: item.completed_at ?? null,
               url: item.html_url ?? item.target_url ?? item.url, sourceRef: response.sourceRef });
           }
           count += items.length;

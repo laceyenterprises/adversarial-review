@@ -32,6 +32,10 @@ function checkTimestampMs(item) {
   return latest;
 }
 
+function numericCheckId(item) {
+  return [item?.id, item?.databaseId].find(id => /^\d+$/.test(String(id))) ?? null;
+}
+
 function latestCheckRollupItems(items) {
   if (!Array.isArray(items)) return [];
   const latestByIdentity = new Map();
@@ -54,9 +58,9 @@ function latestCheckRollupItems(items) {
       result.push(item);
       continue;
     }
-    const priorId = result[prior.index]?.id ?? result[prior.index]?.databaseId;
-    const nextId = item?.id ?? item?.databaseId;
-    // GitHub timestamps can tie at second precision. REST numeric IDs order
+    const priorId = numericCheckId(result[prior.index]);
+    const nextId = numericCheckId(item);
+    // GitHub timestamps can tie at second precision. Numeric REST/GraphQL IDs order
     // reruns/status updates without allowing an older page item to win a tie.
     const orderedIds = /^\d+$/.test(String(priorId)) && /^\d+$/.test(String(nextId));
     if (timestampMs > prior.timestampMs || (timestampMs === prior.timestampMs

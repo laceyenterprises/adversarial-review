@@ -463,7 +463,11 @@ The entry JSON gains `infrastructure`: dependency/head/base/reason/causeKey,
 parkedAt, nextProbeAt, probeDeadline, recovered and recoveredAt. `checks` records
 candidate head and base, requiredSet (normalized contexts, source and SHA-256
 version), complete paginated API source references, latest run/status IDs, URLs,
-creation/start/completion timestamps and results. A failed final read preserves
+normalized recency/start/completion timestamps and results. REST check-run
+`createdAt` uses `started_at`, then `completed_at`; both can be null for an
+unstarted run. An undated run is retained without deduplication, so a queued run
+cannot disappear behind a completed success. Legacy statuses require
+`created_at`. A failed final read preserves
 the last snapshot as diagnostic evidence with `complete: false`; it is not green
 authority. Local validation and original signatures remain in the immutable
 admission receipt at their actual source SHAs.
@@ -473,14 +477,23 @@ complete, versioned policy/rules observation supplied by composition. It reads
 all check-run pages with `filter=all`, verifies the advertised total, and reads
 all legacy status pages. Duplicate/malformed IDs, partial pages, a changing
 required set, wrong check-run SHA and unavailable policy refuse certification.
-Latest creation timestamp selects reruns within each check producer or legacy
-status context; numeric IDs break ties. A green status or another App cannot
+Latest available creation/start/completion timestamp selects reruns within each
+check producer or legacy status context; numeric REST IDs or GraphQL
+`databaseId` values break ties even when GraphQL `id` is opaque.
+A green status or another App cannot
 replace a failed check-run producer that uses the same name. Legacy status
 SHA provenance comes from the immutable commit endpoint. The shared
 `classifyCheckRollup` remains the only CI classifier. Completed red returns to
 the closer; empty/missing/pending/unreadable/unknown results remain waits. Only an
 existing explicit per-repository no-CI policy with a fresh exact-head proof can
 substitute for empty CI; an empty API result alone cannot.
+
+The entitled GET transport accepts either SHA hex casing and combines repeated
+Link header lines. A next link must retain the GitHub origin, exact candidate,
+endpoint kind, page size and filter; canonical `/repositories/<id>/commits/...`
+paths may supply the page number. Subsequent reads still use the original named
+repository path. Malformed links and duplicate next relationships refuse the
+observation.
 
 `createQueueChecksService` consumes the acknowledgement's persisted 1,800,000ms
 nominal patience, sampled/scaled once and capped at 3,600,000ms. Polls, restarts

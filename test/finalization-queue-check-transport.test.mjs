@@ -63,6 +63,48 @@ test('Link pagination is explicit and confined to the immutable commit endpoint'
   await assert.rejects(foreign.read(req), /pagination/);
 });
 
+test('uppercase candidate SHAs use the same entitled read path', async () => {
+  const uppercase = path.replace(head, head.toUpperCase());
+  const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), load: idle, now: () => handoffTime(0),
+    execFileImpl: async (_cmd, args) => { assert.equal(args[4], uppercase); return response(); } });
+  assert.equal((await reader.read({ ...req, path: uppercase })).nextPage, null);
+});
+
+for (const kind of ['statuses', 'check-runs']) test(`${kind} pagination accepts split Link headers and canonical repository paths`, async () => {
+  const original = `/repos/example/review/commits/${head}/${kind}?per_page=100&page=1${kind === 'check-runs' ? '&filter=all' : ''}`;
+  const canonical = original.replace('/repos/example/review', '/repositories/123');
+  for (const split of [', ', '\r\nlInK: ']) {
+    const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), load: idle, now: () => handoffTime(0),
+      execFileImpl: async (_cmd, args) => {
+        assert.equal(args[4], original);
+        return response(`Link: <https://api.github.com${canonical.replace('&page=1', '&page=2')}>; rel="next"${split}<https://api.github.com${canonical.replace('&page=1', '&page=3')}>; rel="last"\r\n`);
+      } });
+    assert.equal((await reader.read({ ...req, path: original })).nextPage, 2);
+  }
+});
+
+for (const [name, next] of [
+  ['foreign origin', `https://example.invalid/repositories/123/commits/${head}/statuses?per_page=100&page=2`],
+  ['different SHA', `https://api.github.com/repositories/123/commits/${'a'.repeat(40)}/statuses?per_page=100&page=2`],
+  ['different endpoint', `https://api.github.com/repositories/123/commits/${head}/check-runs?per_page=100&page=2`],
+  ['different named repository', `https://api.github.com/repos/foreign/review/commits/${head}/statuses?per_page=100&page=2`],
+  ['malformed repository ID', `https://api.github.com/repositories/wrong/commits/${head}/statuses?per_page=100&page=2`],
+  ['wrong page size', `https://api.github.com/repositories/123/commits/${head}/statuses?per_page=10&page=2`],
+  ['wrong filter', `https://api.github.com/repositories/123/commits/${head}/statuses?per_page=100&page=2&filter=all`],
+]) test(`canonical pagination refuses ${name}`, async () => {
+  const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), load: idle, now: () => handoffTime(0),
+    execFileImpl: async () => response(`Link: <${next}>; rel="next"\r\n`) });
+  await assert.rejects(reader.read(req), /checks-pagination-unreadable/);
+});
+
+test('multiple Link header lines retain malformed and duplicate-next rejection', async () => {
+  const next = `Link: <https://api.github.com${path.replace('&page=1', '&page=2')}>; rel="next"\r\n`;
+  for (const headers of [next + next, next + 'Link: malformed\r\n']) {
+    const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), load: idle, now: () => handoffTime(0), execFileImpl: async () => response(headers) });
+    await assert.rejects(reader.read(req), /checks-pagination-unreadable/);
+  }
+});
+
 test('high load clips to remaining absolute budget after refresh and refuses expired reads', async () => {
   let clock = handoffTime(9), calls = 0;
   const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), now: () => clock,

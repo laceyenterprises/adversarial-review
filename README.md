@@ -2835,8 +2835,10 @@ and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and
 
 The unwired v2 finalization waiter resolves and versions the complete existing
 required set, enumerates all exact-candidate check-run and legacy-status pages,
-and uses the shared CI classifier. Latest reruns win, with numeric IDs breaking
-creation-time ties. Missing, pending, stale, partial, unreadable and inconclusive
+and uses the shared CI classifier. Latest reruns win, with numeric REST IDs or
+GraphQL database IDs breaking timestamp ties. REST runs use start/completion
+timestamps; undated queued runs remain pending evidence. Missing, pending,
+stale, partial, unreadable and inconclusive
 evidence never authorizes finalization. Existing explicit no-CI policy still
 requires a fresh candidate proof. Original local validation stays at its source
 SHA in the immutable receipt.

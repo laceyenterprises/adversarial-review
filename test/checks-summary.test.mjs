@@ -31,6 +31,19 @@ test('numeric IDs break equal creation timestamps across newest-first pages', ()
   assert.equal(classifyCheckRollup([older, newer]), 'FAILURE');
 });
 
+test('GraphQL database IDs break timestamp ties despite opaque node IDs', () => {
+  const createdAt = '2026-01-01T00:00:00Z';
+  for (const conclusion of ['FAILURE', 'SUCCESS']) {
+    const newer = { id: 'CR_newer', databaseId: '9007199254740993', name: 'unit', createdAt, conclusion };
+    const older = { id: 'CR_older', databaseId: '9007199254740992', name: 'unit', createdAt,
+      conclusion: conclusion === 'SUCCESS' ? 'FAILURE' : 'SUCCESS' };
+    for (const items of [[newer, older], [older, newer]]) assert.equal(classifyCheckRollup(items), conclusion);
+  }
+  const newer = { id: 'CR_newer', databaseId: 20, name: 'unit', createdAt, status: 'QUEUED' };
+  const older = { id: 'CR_older', databaseId: 10, name: 'unit', createdAt, conclusion: 'SUCCESS' };
+  for (const items of [[newer, older], [older, newer]]) assert.equal(classifyCheckRollup(items), 'PENDING');
+});
+
 test('green statuses and other Apps cannot replace a failed check-run producer with the same name', () => {
   const failed = { __typename: 'CheckRun', name: 'unit', app: { id: 1 }, createdAt: '2026-01-01T00:00:00Z', conclusion: 'FAILURE' };
   const status = { __typename: 'StatusContext', context: 'unit', createdAt: '2026-01-01T00:01:00Z', state: 'SUCCESS' };

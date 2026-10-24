@@ -22,7 +22,7 @@ const snapshot = (e, results = [{ name: 'unit', head: e.candidate, conclusion: '
   head: e.candidate, base: e.exactBase, requiredSet, results, complete: true, observedAt: handoffTime(0),
 });
 const runItem = (id, name = 'unit', overrides = {}) => ({ id, name, head_sha: head, status: 'completed', conclusion: 'success',
-  created_at: handoffTime(id), html_url: `https://example.invalid/check/${id}`, ...overrides });
+  started_at: handoffTime(id), completed_at: handoffTime(id + 1), html_url: `https://example.invalid/check/${id}`, ...overrides });
 function readerFixture({ runs = [], statuses = [], contexts = ['unit'], response, policy } = {}) {
   const calls = [];
   const reader = createQueueCheckReader({ cfg: { requiredCheckContexts: contexts }, load: idle, now: () => handoffTime(0),
@@ -87,6 +87,31 @@ test('latest cancelled versus successful reruns and legacy status select by crea
       { id: 2, context: 'legacy', state: 'success', created_at: handoffTime(2), target_url: 'https://example.invalid/2' }] }).read();
   assert.equal(classifyQueueChecks(result).kind, 'green');
   assert.equal(classifyQueueChecks(await readerFixture({ runs: [runItem(1), runItem(2, 'unit', { conclusion: 'cancelled' })] }).read()).kind, 'red');
+});
+
+test('REST runs use start then completion timestamps without requiring created_at', async () => {
+  const result = await readerFixture({ runs: [runItem(2), runItem(1, 'unit', { conclusion: 'cancelled', completed_at: handoffTime(100) })] }).read();
+  assert.equal(classifyQueueChecks(result).kind, 'green');
+  assert.equal(result.results[0].createdAt, handoffTime(2));
+  const fallback = await readerFixture({ runs: [runItem(1, 'unit', { started_at: null })] }).read();
+  assert.equal(fallback.results[0].createdAt, handoffTime(2));
+  assert.equal(classifyQueueChecks(fallback).kind, 'green');
+});
+
+test('undated queued REST runs remain pending alongside completed runs in either order', async () => {
+  const queued = runItem(2, 'unit', { status: 'queued', conclusion: null, started_at: null, completed_at: null });
+  for (const runs of [[runItem(1), queued], [queued, runItem(1)]]) {
+    const result = await readerFixture({ runs }).read();
+    assert.equal(result.results.find(item => item.id === 2).createdAt, null);
+    assert.equal(classifyQueueChecks(result).reason, 'checks-pending');
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), result);
+  }
+});
+
+test('malformed run timestamps and absent legacy status creation still refuse certification', async () => {
+  await assert.rejects(readerFixture({ runs: [runItem(1, 'unit', { started_at: 'invalid' })] }).read(), /checks-invalid-result/);
+  await assert.rejects(readerFixture({ runs: [runItem(1, 'unit', { started_at: null, completed_at: 'invalid' })] }).read(), /checks-invalid-result/);
+  await assert.rejects(readerFixture({ statuses: [{ id: 1, context: 'unit', state: 'success', url: 'https://example.invalid/status' }] }).read(), /checks-invalid-result/);
 });
 
 test('required-set changes mid-pagination stay unreadable', async () => {

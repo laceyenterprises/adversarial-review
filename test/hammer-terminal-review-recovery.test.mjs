@@ -161,7 +161,7 @@ test('HAMATTEST-03 a complete authenticated bridge preserves the reviewed verdic
     assert.equal(options.reviewState.verdict, 'comment-only');
     assert.equal(options.currentPrHeadSha, published);
     assert.equal(options.candidate.statusCheckRollup[0].conclusion, 'SUCCESS');
-    return { disposition: 'merged', reason: 'fixture-merged' };
+    return { disposition: 'merged', reason: 'fixture-merged', merged: true, remoteMergedConfirmed: true };
   } });
   assert.equal(result.terminalReason, 'merged');
   assert.equal(result.amaClosureResult.closerAuthoredStale.carryForward, true);

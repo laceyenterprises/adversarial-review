@@ -1,4 +1,5 @@
 import { captureReadyFindings } from './findings-backlog.mjs';
+import { observeDaemonGate, observeDaemonResult } from './ama/closure-next-action.mjs';
 import { readDocsFastPath } from './docs-only.mjs';
 import { emitDocsFastPathAttestation } from './reviewed-attestation.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -365,13 +366,25 @@ export function headHasValidatedHamTerminalRemediation({
  * hammer's `bin/merge-lease.mjs` uses, so daemon and hammer cannot double-merge.
  *
  * Returns the `attemptDaemonCleanMerge` result. The caller short-circuits the
- * closer/merge-agent dispatch on any disposition other than `not-taken`.
+ * the same shared decision generation through live evidence and declines.
  */
 export function runDaemonCleanMergeAttempt(args = {}) {
+  let shared = args.sharedNextAction;
   return withDaemonMergeReservation({ rootDir: args.rootDir || ROOT,
     repo: args.repoPath, base: args.candidate?.baseBranch, pr: args.prNumber,
     head: args.currentPrHeadSha || args.candidate?.headSha,
-  }, () => runDaemonCleanMergeAttemptInner(args));
+  }, async () => {
+    const result = await runDaemonCleanMergeAttemptInner({ ...args,
+      getNextAction: () => shared?.decision,
+      onGateSnapshot: gate => {
+        shared = observeDaemonGate(shared, gate, args.passSnapshot);
+        try { args.onGateSnapshot?.(gate, shared); }
+        catch (error) { args.logger?.warn?.(`[watcher] closure snapshot observation failed: ${error.message}`); }
+      },
+    });
+    shared = observeDaemonResult(shared, result, args.passSnapshot);
+    return shared ? { ...result, nextActionShared: shared } : result;
+  });
 }
 
 async function runDaemonCleanMergeAttemptInner({
@@ -420,7 +433,12 @@ async function runDaemonCleanMergeAttemptInner({
   emitProtectivePredecessorFindingImpl = null,
   guardStackedBaseImpl = guardStackedBase,
   onGateSnapshot = null,
+  getNextAction = () => null,
 } = {}) {
+  const reportGateSnapshot = gate => {
+    onGateSnapshot?.(gate);
+    return gate;
+  };
   const base = candidate?.baseBranch;
   const validatedHead = docsFastPath?.headSha || gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
@@ -550,6 +568,7 @@ async function runDaemonCleanMergeAttemptInner({
   try {
     liveRollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
   } catch (err) {
+    reportGateSnapshot({ readError: true });
     logger?.warn?.(
       `[watcher] AMA daemon clean-merge live-head refresh failed for ${repoPath}#${prNumber}; ` +
         `deferring this tick: ${err?.message || err}`,
@@ -566,6 +585,10 @@ async function runDaemonCleanMergeAttemptInner({
   }
   const snapshotHead = String(hamAuditHead || '').trim();
   const liveHead = String(liveRollup?.headSha || liveRollup?.headRefOid || '').trim();
+  reportGateSnapshot({ candidateHead: liveHead, prState: liveRollup?.state,
+    mergeable: liveRollup?.mergeable, mergeStateStatus: liveRollup?.mergeStateStatus,
+    labels: liveRollup?.labels, requiredChecks: resolveRollupRequiredChecks(liveRollup),
+    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg) });
   if (!liveHead) {
     return {
       disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
@@ -936,15 +959,12 @@ async function runDaemonCleanMergeAttemptInner({
         merged: false, skipMergeAgent: true, recoveryWait: true, retryAfterMs: 30_000 };
     }
   }
-  const reportGateSnapshot = gate => {
-    try { onGateSnapshot?.(gate); }
-    catch (error) { logger?.warn?.(`[watcher] closure snapshot observation failed: ${error.message}`); }
-    return gate;
-  };
-  const terminalReviewHead = certifiedNonCleanHead ? hamAuditHead : null;
+  const terminalReviewHead = (certifiedNonCleanHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
   const initialGate = {
+    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     docsFastPath,
     terminalReviewValidated: Boolean(terminalReviewHead && terminalReviewHead === liveHead),
+    ciRecoveryPending: ciMergePathPending,
     primaryChange,
     requirePrimaryChange: true,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -959,6 +979,8 @@ async function runDaemonCleanMergeAttemptInner({
   };
   reportGateSnapshot(initialGate);
   const daemonResult = await attemptDaemonCleanMergeImpl({
+    getNextAction,
+    onGateEvidenceImpl: reportGateSnapshot,
     onEligibleImpl: ({ headSha }) => observeClosureLag({ rootDir, repo: repoPath, prNumber,
       headSha, eligible: true, sloMs: cfg.closureLagSloMs, logger }),
     repo: repoPath,
@@ -1112,13 +1134,18 @@ async function runDaemonCleanMergeAttemptInner({
     } : null,
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
-      const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
+      const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl }).catch(error => {
+        reportGateSnapshot({ readError: true });
+        throw error;
+      });
       const state = String(rollup?.state || '');
       const freshDocs = docsFastPath ? await readDocsFastPathImpl({ repoPath, prNumber,
         subject: { headSha: validatedHead }, live: true, execFileImpl, env, execGhWithRetryImpl }) : null;
       const freshBootstrap = await bootstrapFor(rollup);
       ciMergePathPending = mergePathPendingFor(rollup);
       return reportGateSnapshot({
+        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+        ciRecoveryPending: ciMergePathPending,
         terminalReviewValidated: Boolean(terminalReviewHead
           && terminalReviewHead === (rollup?.headSha || rollup?.headRefOid || '')),
         // A moving base tip is normal: the reader reclassifies its immutable

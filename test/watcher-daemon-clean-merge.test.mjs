@@ -161,8 +161,8 @@ test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is un
       }),
       maybeDispatchAmaCloserImpl: async () => { hammerCalls++; return { dispatched: true }; },
     });
-    assert.equal(result.reason, 'clean-review-merge-path');
-    assert.equal(result.skipMergeAgent, false);
+    assert.equal(result.nextAction.action, 'wait-for-CI');
+    assert.equal(result.skipMergeAgent, true);
     assert.equal(hammerCalls, 0);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
@@ -588,17 +588,17 @@ test('daemon fail-closed retains its reasons for automated recovery (LAC-1559)',
       },
     });
 
-    // Decision is unchanged: still skip the closer/hammer and the merge-agent.
-    assert.equal(closerCalls, 0, 'a daemon fail-closed must NOT spawn a hammer');
-    assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.FAILED_CLOSED}`);
+    // A retryable no-merge observation belongs to the common capped repair owner.
+    assert.equal(closerCalls, 1);
+    assert.equal(result.nextAction.reason, 'retry-no-merge');
+    assert.equal(result.dispatched, true);
 
     // The park is now observable: a structured pageable event plus a human line.
     const parkEvent = logs
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
     assert.equal(parkEvent, undefined, 'the shared recovery router owns exhaustion paging');
-    assert.ok(logs.some((line) => /shared recovery router/.test(line)));
+    assert.ok(logs.some((line) => /hammer_fallback/.test(line)));
 
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -2663,10 +2663,12 @@ test('Deliverable 2: daemon fail-closed on a REMEDIABLE gate (gate-not-eligible/
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
+      dispatchJob: { remediationStopCode: 'max-rounds-reached' },
       logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'gate-not-eligible',
+        liveGate: { candidateHead: 'head-live', prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] },
         merged: false,
         attempts: 1,
         manualCloseRequired: true,
@@ -3725,7 +3727,8 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
       ...baseArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-        reason: 'gate-not-eligible', reasons: ['pr-not-mergeable'], merged: false, attempts: 1, manualCloseRequired: true,
+        reason: 'gate-not-eligible',
+        liveGate: { candidateHead: 'head-live', prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }], mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }, reasons: ['pr-not-mergeable'], merged: false, attempts: 1, manualCloseRequired: true,
       }),
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
@@ -4110,12 +4113,15 @@ test('fresh daemon failure overrides an empty candidate snapshot while cancelled
     for (const ciMergePathPending of [undefined, false, true]) {
       let hammers = 0;
       const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+        dispatchJob: { remediationStopCode: 'max-rounds-reached' },
         runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-          reason: 'gate-not-eligible', reasons: ['ci-not-green'], ciMergePathPending }),
+          reason: 'gate-not-eligible', reasons: ['ci-not-green'], ciMergePathPending,
+          liveGate: { candidateHead: 'head-live', prState: 'OPEN', mergeable: 'MERGEABLE',
+            requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: ciMergePathPending ? 'CANCELLED' : 'FAILURE' }] } }),
         maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
       });
       assert.equal(hammers, ciMergePathPending ? 0 : 1);
-      if (ciMergePathPending) assert.equal(result.reason, 'clean-review-merge-path');
+      if (ciMergePathPending) assert.equal(result.nextAction.action, 'wait-for-CI');
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
@@ -4409,7 +4415,8 @@ test('FINDINGSBATCH-01 handed-off non-blocking review merges without a hammer on
           reasons: ['ci-not-green'], ciMergePathPending: true }),
         maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
       });
-      assert.equal(waiting.reason, 'clean-review-merge-path');
+      assert.equal(waiting.nextAction.action, 'wait-for-CI');
+      assert.equal(waiting.nextAction.actor, 'ci');
       assert.equal(hammers, 0);
     }
   }

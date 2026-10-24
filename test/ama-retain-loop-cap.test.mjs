@@ -129,6 +129,7 @@ test('coexistence: a NON-not-eligible skipMergeAgent reason never escalates (onl
       dispatched: false,
       skipMergeAgent: true,
       reason: 'daemon-merged',
+      daemonCleanMerge: { remoteMergedConfirmed: true },
       amaEnabled: true,
     };
     for (let i = 0; i < AMA_RETAIN_LOOP_CAP + 3; i += 1) {

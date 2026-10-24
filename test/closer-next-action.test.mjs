@@ -350,7 +350,7 @@ test('existing no-CI proof updates the shared generation before a daemon merge',
     const current = await resolveSharedNextAction({ passSnapshot: f.args.passSnapshot });
     assert.equal(current.decision.action, 'daemon-merge');
     f.effects.push(['daemon-merge']);
-    return { disposition: 'merged', reason: 'daemon-merged' };
+    return { disposition: 'merged', reason: 'daemon-merged', merged: true, remoteMergedConfirmed: true };
   };
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(result.nextAction.action, 'done');
@@ -374,7 +374,7 @@ test('a fresh daemon red-CI snapshot routes to a remaining remediation round', a
 });
 
 test('admitted daemon repair uses the common policy without waiving proof or caps', () => {
-  const repair = { daemonRepair: { admitted: true, headSha: HEAD } };
+  const repair = { daemonExecution: { reason: 'merge-retry-budget-exhausted', headSha: HEAD } };
   assert.deepEqual(tuple(pair(base({ progress: repair })).decision), ['hammer', 'hammer', 'retry-no-merge']);
   const capped = pair(base({ progress: repair, policy: { autonomousMergeExecutionEnabled: true,
     hammerCap: { headSha: HEAD, retryExhausted: true } } }));
@@ -508,7 +508,7 @@ test('terminal-head daemon preflight publishes its validated decision before mut
       terminalReviewValidated: true });
     const shared = await resolveSharedNextAction({ passSnapshot: f.args.passSnapshot });
     assert.equal(shared.decision.action, 'daemon-merge');
-    return { disposition: 'merged', reason: 'merged' };
+    return { disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true };
   };
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(preflight, 1);
@@ -520,7 +520,7 @@ test('terminal-head daemon preflight publishes its validated decision before mut
 test('a recorded terminal judgment on an unchanged head retains daemon ownership', async t => {
   const f = closureFixture(t);
   f.args.headHasValidatedHamTerminalRemediationImpl = () => true;
-  f.args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'merged', reason: 'merged' });
+  f.args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true });
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(f.effects[0][1].decision.action, 'daemon-merge');
   assert.equal(result.nextAction.action, 'done');

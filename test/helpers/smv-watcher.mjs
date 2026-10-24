@@ -51,7 +51,7 @@ export async function watcherTick({ rootDir, prNumber, headSha, evidence, store,
             prTitle: candidate.title, hqRoot: rootDir, logger: quiet,
             fetchLiveGateImpl: async () => store.merged ? { ...gate, prState: 'MERGED' } : gate,
             acquireLeaseImpl: () => ({ acquired: true, lease: { leaseId: 'fixture' } }), releaseLeaseImpl() {},
-            runMergeImpl: async () => { await runMerge(headSha); store.merged = true; return { code: 0, stdout: '', stderr: '' }; },
+            runMergeImpl: async () => { await runMerge(headSha); store.merged = true; return { exitCode: 0, stdout: '', stderr: '' }; },
             writeAuditImpl: () => ({ written: true }), appendAuditImpl: () => ({ written: true }), readAuditImpl: () => null });
           return mapDaemonPrimaryChangeResult(result);
         },

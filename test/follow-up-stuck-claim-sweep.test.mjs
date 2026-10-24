@@ -1738,7 +1738,9 @@ test('REMLINK-01 restart reconciliation recovers publish evidence without top-le
     requestRereviewWakeImpl: () => ({ requested: true }) });
   assert.equal(result.action, 'completed');
   assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
-  assert.equal(followOns, 0);
+  assert.equal(followOns, 1, 'non-final publication retains watcher CI admission');
+  assert.equal(result.job.reReview.requested, true);
+  assert.deepEqual(readJobAtPath(result.jobPath).reReview, JSON.parse(JSON.stringify(result.job.reReview)));
   assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
 });
 
@@ -1808,7 +1810,9 @@ test('REMLINK-01 a CI retry settles an independently proven worker publish inste
   assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
   assert.equal(result.job.remediationPlan.transientRetries, 0);
   assert.equal(existsSync(pendingPathFor(f.rootDir, f.jobPath)), false);
-  assert.equal(followOns, 0);
+  assert.equal(followOns, 1, 'non-final publication retains watcher CI admission');
+  assert.equal(result.job.reReview.requested, true);
+  assert.deepEqual(readJobAtPath(result.jobPath).reReview, JSON.parse(JSON.stringify(result.job.reReview)));
   assert.equal(result.job.reReview.nextAction.action, 'remediate');
 });
 

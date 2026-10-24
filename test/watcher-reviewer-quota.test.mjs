@@ -1,3 +1,4 @@
+import { exportedReserveFloors } from './helpers/reserve-floor-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 import test from 'node:test';
@@ -103,8 +104,7 @@ test('STARTADMIT-01: AFH rollback still shares the fallback quota read and deleg
 test('STARTADMIT-01: stale poll evidence keeps the independently ready managed account held', async () => {
   const payload = JSON.parse(stdout);
   payload.providerStatuses.push({ provider: 'anthropic', authPath: 'oauth-corp', state: 'ok' });
-  payload.reserveFloors = { 'anthropic-oauth-corp': { active: false, paused: false, nearCap: false,
-    weeklyMeasurement: { status: 'measured', percentRemaining: 80 } } };
+  payload.reserveFloors = { 'anthropic-oauth-corp': exportedReserveFloors()['anthropic-oauth-corp'] };
   payload.brokerAuth = { provider_states: { 'claude-code-corp': { ready: true, can_serve: true } } };
   const f = fixture(JSON.stringify(payload));
   const good = await f.beginPoll().getGrounding();

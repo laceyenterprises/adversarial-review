@@ -223,7 +223,9 @@ export function createAmaHammerBackgroundQueue({
     entry.startedAtMs = nowMs();
     let settled;
     try {
-      settled = Promise.resolve(entry.run(entry.controller.signal));
+      settled = Promise.resolve(entry.run(entry.controller.signal, shared => {
+        if (!entry.controller.signal.aborted) entry.sharedNextAction = shared;
+      }));
     } catch (err) {
       settled = Promise.reject(err);
     }
@@ -262,7 +264,7 @@ export function createAmaHammerBackgroundQueue({
     /**
      * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number, startedAtMs?: number, boundMs: number}}
      */
-    submit({ key, run, onSettled = null, pendingDispatch = null, timeoutMs = null }) {
+    submit({ key, run, onSettled = null, pendingDispatch = null, timeoutMs = null, sharedNextAction = null }) {
       discardOlderHeads(key);
       for (const oldKey of settled.keys()) {
         if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
@@ -279,7 +281,8 @@ export function createAmaHammerBackgroundQueue({
           boundMs: existing.boundMs,
         };
       }
-      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
+      const entry = { key, prKey: prKey(key), run, onSettled, sharedNextAction,
+        state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
       const dispatchTimeoutMs = Number(timeoutMs);
       entry.boundMs = Number.isFinite(dispatchTimeoutMs) && dispatchTimeoutMs > 0
         ? dispatchTimeoutMs : loadAwareTimeoutMs(DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS, { maxMs: Infinity });
@@ -300,6 +303,7 @@ export function createAmaHammerBackgroundQueue({
       const entry = entries.get(key);
       if (entry && !entry.controller.signal.aborted) return {
         state: entry.state, startedAtMs: entry.startedAtMs, boundMs: entry.boundMs,
+        ...(entry.sharedNextAction ? { nextAction: entry.sharedNextAction.decision } : {}),
       };
       const outcome = settled.get(key);
       return outcome && nowMs() - outcome.settledAtMs <= settledTtlMs ? { state: 'settled' } : null;

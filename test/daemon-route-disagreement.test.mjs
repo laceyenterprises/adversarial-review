@@ -99,7 +99,7 @@ function closureArgs(rootDir, { daemonResult, closerCalls, logs, warns, head = H
       riskClass: 'low',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'builder',
     },
@@ -222,7 +222,7 @@ test('DIRTYOWN-01: a pre-lease UNKNOWN decline is logged but never counted, park
   }
 });
 
-test('DIRTYOWN-01: the closer holds UNKNOWN+CLEAN like the daemon instead of routing it to the daemon', async () => {
+test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoking the closer', async () => {
   const rootDir = tempRoot();
   try {
     const closerCalls = [];
@@ -241,8 +241,9 @@ test('DIRTYOWN-01: the closer holds UNKNOWN+CLEAN like the daemon instead of rou
     });
     args.candidate = { ...args.candidate, mergeable: 'UNKNOWN', mergeStateStatus: 'CLEAN' };
 
-    await maybeDispatchAmaClosureFor(args);
-    assert.equal(closerMergeableState, 'UNKNOWN', 'the closer sees the same UNKNOWN the daemon gates on');
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(closerMergeableState, null, 'the selected observer does not launch a closer');
+    assert.equal(result.nextAction.action, 'wait-for-CI');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

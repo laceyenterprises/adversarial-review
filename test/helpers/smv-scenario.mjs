@@ -125,6 +125,15 @@ if (scenario === 'clean') {
   const closerAuthoredStale = { currentHead: headSha, reviewedHead: base,
     decision: 'rereview-exact-head', carryForward: false };
   assert.equal(decideClosureOwner({ ...closureInput, attested: true, closerAuthoredStale }).owner, 'review');
+  const { resolveClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
+  const exactHead = await resolveClosureNextAction({
+    input: { ...closureInput, attested: true, closerAuthoredStale, checks: 'SUCCESS', lease: null },
+    subjectKey: `${repo}#${prNumber}`, observedAt: '2026-01-01T00:00:00.000Z',
+    candidate: { headSha, prState: 'open', mergeable: 'MERGEABLE' }, autonomousMergeExecutionEnabled: true,
+  });
+  assert.equal(exactHead.decision.action, 'review');
+  assert.equal(exactHead.decision.reason, 'exact-head-review');
+
   assert.equal(decideClosureOwner({ ...closureInput,
     closerAuthoredStale: { ...closerAuthoredStale, decision: 'eligible', carryForward: true } }).owner, 'daemon-merge');
   assert.equal(decideClosureOwner({ ...closureInput,
@@ -625,6 +634,32 @@ if (scenario === 'clean') {
   assert.equal(wakes, 2);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
+  const { closureOwnerFromDecision, observeClosureResult } = await import('../../src/ama/closure-next-action.mjs');
+  for (const result of [{ reason: 'deferred-by-drain', drainEpoch: 'epoch-05' },
+    { capacity: { inFlight: 7, cap: 7, workerClass: 'hammer' } }]) {
+    const constrained = observeClosureResult(wakeShared, result);
+    assert.equal(constrained.decision.action, wakeShared.decision.action);
+    assert.equal(constrained.decision.actor, wakeShared.decision.actor);
+    assert.equal(constrained.decision.reason, wakeShared.decision.reason);
+    assert.equal(constrained.decision.queue.intent, 'dispatch');
+    assert.deepEqual(constrained.decision.deadline, wakeShared.decision.deadline);
+    assert.ok(constrained.decision.queue.deferredBy);
+  }
+  const stopped = observeClosureResult(wakeShared, { hammerStop: {
+    predicate: 'synthetic-safety', refusal: { reasons: ['synthetic-safety'] } } });
+  assert.equal(closureOwnerFromDecision(stopped.decision).actor, 'closure-recovery');
+  assert.equal(stopped.decision.queue.intent, 'reconcile');
+  const { evaluateHammerStopHold } = await import('../../src/ama/hammer-stop-hold.mjs');
+  let stopPage;
+  const held = await evaluateHammerStopHold({ ...retrySubject, hqRoot: rootDir, sharedNextAction: wakeShared,
+    prMetadata: { headSha }, now: new Date().toISOString(),
+    readAuditImpl: () => ({ attempts: [{ head: headSha, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'synthetic-stop', startedAt: new Date().toISOString() }] }),
+    deliverAlertImpl: async (_text, options) => { stopPage = options; }, logger: quiet });
+  assert.equal(held.action, 'hold');
+  assert.equal(held.nextActionShared.decision.actor, 'closure-recovery');
+  assert.equal(held.nextActionShared.decision, stopPage.payload.nextAction);
+
   const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
   const closeoutAt = '2026-01-01T00:00:00.000Z';
   const closeoutJob = { repo: 'subject-closeout', prNumber: 1, revisionRef: 'a'.repeat(40),

@@ -582,7 +582,7 @@ test('MSM-04: stale reviewed head without closer proof does not re-hammer', asyn
       riskClass: 'low',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       prAuthor: 'builder',
     },
@@ -614,8 +614,15 @@ test('MSM-04: stale reviewed head without closer proof does not re-hammer', asyn
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('stale-review-head'));
+  // NXA-05 selects exact-head review before closer admission on an unproven
+  // stale pair, including at the review ceiling. Green CI must reach this guard.
+  assert.equal(result.nextAction.action, 'review');
+  assert.equal(result.nextAction.reason, 'exact-head-review');
+  assert.equal(result.closureOwner.owner, 'review');
+  assert.equal(result.closerAuthoredStale.reviewedHead, 'old-reviewed-head');
+  assert.equal(result.closerAuthoredStale.currentHead, 'new-current-head');
+  assert.equal(result.closerAuthoredStale.carryForward, false);
+  assert.ok(result.closerAuthoredStale.reasons.includes('hammer-app-attestation-missing'));
   assert.equal(deps.calls.length, 0);
 });
 

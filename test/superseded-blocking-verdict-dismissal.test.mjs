@@ -370,7 +370,7 @@ test('the dismissal message names both the judged head and the remediating head'
 // ── The wiring. The trigger is worthless if the orchestration never calls it:
 //    that is precisely the defect this SEV documents (two live, flag-enabled
 //    dismissal paths that nothing could reach). ────────────────────────────────
-test('orchestration: the third trigger runs at the current head BEFORE the daemon clean-merge attempt', async () => {
+test('orchestration: the third trigger runs at the current head before exact-head recovery', async () => {
   const calls = [];
   const order = [];
   await maybeDispatchAmaClosureFor({
@@ -394,7 +394,7 @@ test('orchestration: the third trigger runs at the current head BEFORE the daemo
       prState: 'open',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       isDraft: false,
     },
@@ -436,7 +436,7 @@ test('orchestration: the third trigger runs at the current head BEFORE the daemo
     maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'fixture' }),
   });
 
-  assert.deepEqual(order, ['dismiss', 'daemon'], 'the dismissal must precede the daemon merge attempt');
+  assert.deepEqual(order, ['dismiss'], 'unproven pending heads keep review ownership after the dismissal probe');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].repo, REPO);
   assert.equal(calls[0].prNumber, PR);
@@ -465,7 +465,7 @@ test('orchestration: the third trigger is skipped when no standing blocking find
       prState: 'open',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       isDraft: false,
     },
@@ -507,6 +507,6 @@ test('orchestration: the third trigger is skipped when no standing blocking find
     maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'fixture' }),
   });
 
-  assert.deepEqual(order, ['daemon'], 'no dismissal fetch should run when the review is already clean');
+  assert.deepEqual(order, [], 'pending heads require neither a dismissal fetch nor a daemon merge attempt');
   assert.equal(calls.length, 0);
 });

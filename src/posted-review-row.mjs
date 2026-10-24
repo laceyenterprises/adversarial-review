@@ -1197,8 +1197,9 @@ export function createNoProgressLaneGate({
       // The final review's generic operator flag does not describe closure
       // ownership. A retained hammer route must run each tick, including while
       // dispatch is queued; a named safety/operator refusal still wins.
-      const operatorHold = value?.outcome === 'await-operator' || value?.operatorHoldReason
-        || isSafetyRecoveryHold(value?.amaClosureResult);
+      const selectedNextAction = value?.amaClosureResult?.nextAction || value?.nextAction;
+      const operatorHold = Boolean(value?.operatorHoldReason) || isSafetyRecoveryHold(value?.amaClosureResult)
+        || (selectedNextAction ? selectedNextAction.action === 'operator-hold' : value?.outcome === 'await-operator');
       const hammerRouteActive = !timedOut && value?.hammerRouteActive === true && !operatorHold;
       const progressClass = !hammerRouteActive && (value?.gateDecision?.operatorDecisionRequired === true
         || operatorHold)
@@ -1223,7 +1224,9 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
+        operatorHold,
         hammerRouteActive,
+        nextAction: timedOut ? null : value?.amaClosureResult?.nextAction || value?.nextAction || null,
         operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Recovery bounds urgency to its tolerated cycle budget.

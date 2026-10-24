@@ -414,6 +414,7 @@ async function runDaemonCleanMergeAttemptInner({
   clobberGuardNowImpl = () => new Date().toISOString(),
   emitProtectivePredecessorFindingImpl = null,
   guardStackedBaseImpl = guardStackedBase,
+  onGateSnapshot = null,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -929,6 +930,27 @@ async function runDaemonCleanMergeAttemptInner({
         merged: false, skipMergeAgent: true, recoveryWait: true, retryAfterMs: 30_000 };
     }
   }
+  const reportGateSnapshot = gate => {
+    try { onGateSnapshot?.(gate); }
+    catch (error) { logger?.warn?.(`[watcher] closure snapshot observation failed: ${error.message}`); }
+    return gate;
+  };
+  const terminalReviewHead = certifiedNonCleanHead ? hamAuditHead : null;
+  const initialGate = {
+    terminalReviewValidated: Boolean(terminalReviewHead && terminalReviewHead === liveHead),
+    primaryChange,
+    requirePrimaryChange: true,
+    strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
+    candidateHead: liveHead,
+    requiredChecks: ciBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(liveRollup)
+      ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
+    mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
+    mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
+    prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
+    branchProtectionRequiredContexts,
+    labels: liveRollup?.labels,
+  };
+  reportGateSnapshot(initialGate);
   const daemonResult = await attemptDaemonCleanMergeImpl({
     onEligibleImpl: ({ headSha }) => observeClosureLag({ rootDir, repo: repoPath, prNumber,
       headSha, eligible: true, sloMs: cfg.closureLagSloMs, logger }),
@@ -954,19 +976,7 @@ async function runDaemonCleanMergeAttemptInner({
     branchProtectionRequiredContexts,
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
-    liveGate: {
-      primaryChange,
-      requirePrimaryChange: true,
-      strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-      candidateHead: liveHead,
-      requiredChecks: ciBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(liveRollup)
-        ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
-      mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
-      mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
-      prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
-      branchProtectionRequiredContexts,
-      labels: liveRollup?.labels,
-    },
+    liveGate: initialGate,
     mergeMethod,
     hqRoot,
     auditMetadata: {
@@ -1091,7 +1101,9 @@ async function runDaemonCleanMergeAttemptInner({
       const state = String(rollup?.state || '');
       const freshBootstrap = await bootstrapFor(rollup);
       ciMergePathPending = mergePathPendingFor(rollup);
-      return {
+      return reportGateSnapshot({
+        terminalReviewValidated: Boolean(terminalReviewHead
+          && terminalReviewHead === (rollup?.headSha || rollup?.headRefOid || '')),
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -1103,7 +1115,7 @@ async function runDaemonCleanMergeAttemptInner({
         merged: state.toUpperCase() === 'MERGED',
         branchProtectionRequiredContexts,
         labels: rollup?.labels,
-      };
+      });
     },
     // Non-blocking single-shot acquire: contention defers this tick (the watcher
     // must not block its poll loop waiting on a lease).

@@ -427,10 +427,9 @@ change or new check is required.
 policy for "who acts next on this open PR". It is pure and total. It reads one
 NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
 round?, evidenceRefs, decisionKey}`. NXA-03 adopts this decision for hammer wake
-routing, and NXA-04 adopts it for remediation closeout. HAMATTEST-03 also
+routing, NXA-04 for remediation closeout, and NXA-05 for closer routing and recovery ownership. HAMATTEST-03 also
 executes its head-bound exact-head review decision through the ownerless
-watchdog, including after the old review-round ceiling. Other caller routes
-keep their legacy effects. The decision grants no merge authority. The exact-head, provenance,
+watchdog, including after the old review-round ceiling. The retained legacy adapter is available for caller-only source rollback. The decision grants no merge authority. The exact-head, provenance,
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
@@ -441,7 +440,7 @@ closer handoff, the rescue classifier, the hammer-owner route page and the
 watcher handoff wake. Closure evidence registers one enriched decision per pass;
 an earlier bare snapshot read cannot prevent that enrichment. Later consumers
 reuse the enriched pair, including while its launch evidence read is pending.
-Further evidence changes require a new pass snapshot. Every
+Further evidence changes require a new immutable generation; adopted callers register the updated pair. Every
 action/actor/reason disagreement is appended to
 `data/next-action-shadow/disagreements.jsonl` under the watcher root (one
 rotation at 16 MiB) with its generation, source, deadline and evidence
@@ -521,6 +520,64 @@ pending acceptance. Workers perform no production observation or rollout.
 Rollback reverts this closeout adapter and its handoff seams by source revert;
 retain accepted NXA-03 wake adoption. No rollout evidence or deadline is a
 runtime refusal, and no new check, switch or override label is added.
+
+### Closer and recovery adoption (NXA-05)
+
+Closer orchestration, review handoff and queued launch preflight consume the
+shared snapshot/decision. Reports retain action, actor, reason, head, anchored
+UTC deadline and queue intent through capacity waits, automatic stops and cap
+exhaustion. Only explicit hold/draft/disabled-policy intent selects operator
+hold. An overdue report never stops a later eligible pass. Rescue projections preserve reconciliation, live ownership and queue deferral
+instead of treating the legacy hammer spelling as launch permission. The no-progress
+lane persists the selected decision and keeps automated recovery eligible;
+confirmed drain observations preserve its existing debt and original intent.
+When progress timestamps are absent, the existing closure-wait row retains the
+first actionable anchor. Anchor-only observations neither reserve nor send a page.
+
+Clean-head CI observation retains the existing daemon preflight, including
+no-CI bootstrap and cancelled-check recovery. Its bounded live gate reads update
+the shared generation before mutation. Validated terminal-head recovery retains the existing daemon preflight. Its
+head-bound terminal proof updates the decision before mutation; a moved head
+cannot inherit that proof. The existing qualified daemon repair
+fallback is recorded as head-bound admission evidence in the common policy;
+it cannot waive an earlier review, remaining remediation round, stop or cap.
+The existing head-scoped approval lane uses the same actor validator as the
+daemon; unclean review overrides still require its enforced operator allowlist.
+A passed review ceiling remains repair admission, never current-head merge proof.
+
+Changed proof or queued PR facts create a new immutable generation. Unchanged
+preflight facts reuse the decision. Queued preflight reads current checks and
+labels in its existing PR fetch, and changes in either invalidate the generation.
+In-flight queue lookups expose that refreshed generation. Stop evaluation returns
+the same recovery pair used in its alert, and callers retain it through dispatch
+and reporting. Explicit operator and safety holds take precedence over an older
+automated snapshot in the no-progress lane, including during drain deferral.
+An exact head-pair semantic or attested clean carry bypasses the historical review
+ceiling and reaches ordinary daemon eligibility; it never waives the merge gates.
+A discovered watchdog owner updates that same generation without repeating its
+probe. Adopted probes re-read retry descendants rather than caching terminal
+absence across passes. Exact-head review requests still require the
+watchdog's independent absence proof and exclusive reservation. Dispatch still
+reconciles interrupted receipts, retry descendants and branch/worktree holders
+before any successor launch. Terminal launch evidence frees live capacity;
+unreadable descendants retain reconciliation ownership. A succeeded receipt is
+reconciled against remote state, and an open empty-diff PR retains closure
+recovery until confirmed closed. Existing real caps, lease fencing, arming,
+strict/domain policy, HCP, semantic reversal proof and all merge predicates stay
+with their current executors. Failed CI and confirmed conflict admit repair;
+they do not authorize merge. No CI job, gate, label or runtime rollout refusal
+is added.
+
+Operator/SRE acceptance is pending. Under separate rollout authority, observe
+the first naturally eligible closer hammer through decision, admission, lease,
+repair and remote outcome. Compare live capacity census with terminal launches;
+observe same-head retry after a no-merge attempt when available. Verify the first
+eligible drain-clear pass retains intent and debt, and capacity clearance admits
+through the configured cap. Record unobserved scenarios as pending. Keep live
+case details private; publish only synthetic reproductions or aggregates.
+Workers perform no live observation, dispatch, state edit, restart or rollout.
+On divergence revert only this caller's policy adapter; retain landed launch,
+receipt, retry-chain and lease reconciliation repairs.
 
 ## Stacked-base reads (STACKEDBASE-01)
 
@@ -4660,8 +4717,8 @@ including Comment only findings, admit another hammer through the existing
 retry and lifetime caps. Reclaiming the handed lease for that hammer is locked
 and still uses atomic single-claim acquisition.
 
-`decideClosureOwner` in `src/ama/closure-owner.mjs` exposes the shared ownership
-answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
+`nextAction` exposes the shared workflow alongside orchestration results;
+`decideClosureOwner` remains the rollback/legacy adapter. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
 remain enforced. LEASEDEADPID-01 shares pending/dispatched reclaim predicates
 with closer dispatch: a dead local watcher's pending lease or a reclaimable
@@ -5135,9 +5192,11 @@ carry an older verdict; the exact-head review is the safe recovery in that case.
 A complete bridge with unsettled live review evidence retains its review intent
 as `selectedClosureOwner` through the wait wrapper. Both that intent and an
 explicit `rereview-exact-head` decision must bind the current and reviewed heads
-to the live candidate and review row. While bounded wait is active, `closureOwner`
-remains wait/page, including with live or uncertain ownership or a refused queue
-request; only successful watchdog queueing changes it to review. The rejected
+to the live candidate and review row. NXA-05 projects that shared workflow through
+the bounded wait: a refused queue retains review intent, a discovered live hammer
+retains hammer ownership, and unreadable or unclassified ownership retains closure
+recovery. An overdue page does not substitute an operator hold. The watchdog's
+existing ownership proof and once-per-head reservation still fence review. The rejected
 verdict remains visible; only a new authoritative review or valid carried verdict
 can settle it.
 Pending exact-head CI already records `required-checks-pending`, `resumeOwed`

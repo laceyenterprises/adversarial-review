@@ -229,13 +229,14 @@ test('a human push on top of the final round fails closed: no verdict, no hand-o
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seedFinalRound(rootDir);
   let payload = null;
-  await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+  const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
     candidate: { ...closureArgs(rootDir).candidate, headSha: HUMAN },
     currentRevisionRef: HUMAN,
     maybeDispatchAmaCloserImpl: async (args) => { payload = args; return { dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head'] }; },
   }));
-  assert.equal(payload.reviewState.verdict, '');
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false);
+  assert.equal(payload, null);
+  assert.equal(result.nextAction.action, 'review');
+  assert.equal(result.nextAction.head, HUMAN);
 });
 
 const WAITING_ROLLUPS = [
@@ -296,8 +297,8 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
         return { dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] };
       },
     }));
-    assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false, 'pending CI retains its bounded wait');
-    assert.equal(closure.commentOnlyFinalRoundAwaitingCi, true);
+    assert.equal(payload, null, 'the observer does not launch terminal validation');
+    assert.equal(closure.nextAction.action, 'wait-for-CI');
 
     const logs = [];
     for (let tick = 0; tick < 6; tick += 1) {
@@ -310,7 +311,7 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
       });
       assert.equal(outcome.outcome, 'ama-pending', `tick ${tick} must not route to AWAIT_OPERATOR_ACTION`);
     }
-    assert.ok(logs.some((line) => /holding .*#265 for PR-head CI on a proven comment-only final-round head/.test(line)));
+    assert.equal(closure.nextAction.head, PUSHED);
     assert.ok(!logs.some((line) => /retain-loop cap reached/.test(line)));
 
     // Red CI is not a wait: it still counts toward the cap.
@@ -321,7 +322,7 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
     assert.equal(red.commentOnlyFinalRoundAwaitingCi, undefined);
   });
 
-  test(`${name} CI past the deadline on a proven final-round head counts toward the retain cap again`, async (t) => {
+  test(`${name} CI past the deadline retains the selected observer without blocking work`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'final-round-ama-ci-timeout-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     seedFinalRound(rootDir);
@@ -333,7 +334,7 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] }),
     }));
     assert.equal(closure.commentOnlyFinalRoundAwaitingCi, undefined, 'the wait is no longer exempt');
-    assert.ok(warnings.some((line) => /final-round-ci-pending-timeout .*#265/.test(line)));
+    assert.equal(closure.nextAction.action, 'wait-for-CI');
 
     const logs = [];
     let outcome = null;
@@ -347,7 +348,7 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
         maybeDispatchAmaClosureForImpl: async () => closure,
       });
     }
-    assert.equal(outcome.outcome, 'recovery-exhausted', 'a hung CI wait exhausts automated recovery');
-    assert.ok(logs.some((line) => /ama.automated_recovery.exhausted/.test(line)));
+    assert.equal(outcome.outcome, 'ama-pending', 'overdue reporting does not invent an operator hold');
+    assert.ok(!logs.some((line) => /ama.automated_recovery.exhausted/.test(line)));
   });
 }

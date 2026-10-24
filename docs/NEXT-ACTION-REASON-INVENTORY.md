@@ -12,15 +12,17 @@ the disagreement.
 
 ## Status
 
-`nextAction(snapshot)` runs in **shadow only**. `decideClosureOwner`
-(`src/ama/closure-owner.mjs`, frozen v1) and its consumers keep authority and
-all effects. No caller is switched. A switch requires the human rollout
-acceptance in [Rollout](#rollout); this ticket authorizes no switch,
-production observation or rollout.
+NXA-03 adopts the shared decision for hammer wakes, NXA-04 for remediation
+closeout, and NXA-05 for closer routing and recovery projections. Other callers
+remain observational. Source adoption grants no production-operation authority;
+live rollout acceptance remains with the operator/SRE. Adopted final hammer
+pages report the selected workflow instead of replacing it with an operator hold.
+Existing exact-head approvals reuse the daemon actor validator; a review ceiling
+admits repair without supplying merge proof.
 
-There is one successor policy owner. `decideClosureOwner` remains the frozen
-legacy authority until a caller switches; at that point the legacy table is
-deleted, not kept as a second policy. `fromLegacyClosureOwner` expresses every
+There is one active successor policy owner per adopted caller.
+`decideClosureOwner` remains a source rollback adapter for those callers and
+serves the remaining legacy consumers. `fromLegacyClosureOwner` expresses every
 legacy output in the new vocabulary so the shadow compares the two tables. The
 adapter translates faithfully and does not correct: a legacy `page` stays
 `operator-hold` there, so the shadow shows where the new table names a recovery
@@ -73,9 +75,10 @@ the ownership reconciliation (`R04`). Unknown evidence is never treated as absen
 | R10 | mergeable CONFLICTING or mergeStateStatus DIRTY | hammer / hammer / `conflict-rebase` | admission |
 | R11 | checks pending (an empty rollup fails closed as pending) or mergeability UNKNOWN | wait-for-CI / ci / `checks-pending`, `mergeability-unknown` | observer (pending-gate bound), anchored at the latest check transition |
 | R12 | proven suppressed final-round push at this head | hammer / hammer / `suppressed-final-push` | admission |
-| R13 | invalid attestation; closer rereview decision; no current-head verdict without semantic or attested carry; review ceiling | review / reviewer / `attestation-invalid`, `exact-head-review`, `stale-verdict`, `handed-to-review`; hammer / hammer / `review-ceiling` | admission |
+| R13 | existing head-scoped approval under the daemon actor validator; invalid attestation; head-bound closer rereview decision before the historical review ceiling; no current-head verdict without semantic or attested carry; review ceiling | daemon-merge / daemon / `clean-exact-head`; review / reviewer / `attestation-invalid`, `exact-head-review`, `stale-verdict`, `handed-to-review`; hammer / hammer / `review-ceiling` | admission |
 | R14 | findings (or unknown finding state) on the current/carried head | remediate / remediator / `review-findings` (round); hammer / hammer / `review-findings-final` | admission |
-| R15 | clean verdict (strict mode honoured), green, MERGEABLE, attestation not unknown | daemon-merge / daemon / `clean-exact-head`, `carried-clean-head` | admission |
+| R15-daemon-repair | existing qualified daemon repair admission, exact head, clean proof, green and MERGEABLE | hammer / hammer / `retry-no-merge`; existing caps and earlier policy rows still apply | admission |
+| R15 | clean verdict (strict mode honoured) or exact-pair validated terminal-head proof, green, MERGEABLE, attestation not unknown | daemon-merge / daemon / `clean-exact-head`, `carried-clean-head` | admission |
 | R16 | anything else (also used by the policy guard above) | wait-for-CI / watcher / `snapshot-refresh`, `checks-unknown`, `attestation-unknown`, `reviews-unknown`, `verdict-unknown`, `policy-unknown` | refresh 60 s |
 
 Drain and capacity apply **once, after** selection, and only when the decision
@@ -227,9 +230,8 @@ of the log. It never writes and always exits 0. Dispositions stay in the rollout
 owner's private file, outside this repository (`{ "<caseKey>":
 "candidate-mistake" | "expected-correction" | "needs-investigation" }`). Publish
 only `--aggregate` output and synthetic reproductions. `rollout.evidenceSufficient`
-is guidance for human acceptance. It is not a CI, runtime or pre-push gate. If
-cases are insufficient, legacy keeps authority and the missing rollout evidence
-is stated.
+is guidance for human acceptance. It is not a CI, runtime or pre-push gate. Missing cases remain pending operator acceptance; rollout evidence never becomes
+a runtime refusal or removes an adopted workflow owner.
 
 Known limits of the shadow evidence:
 

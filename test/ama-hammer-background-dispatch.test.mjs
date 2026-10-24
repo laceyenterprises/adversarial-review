@@ -28,6 +28,21 @@ function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
 
+test('in-flight lookup exposes revalidated decisions without changing the submitted pair', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  const initial = Object.freeze({ decision: Object.freeze({ generation: 0 }) });
+  const refreshed = Object.freeze({ decision: Object.freeze({ generation: 1 }) });
+  let update, finish;
+  queue.submit({ key: 'fixture/repo#1@head', sharedNextAction: initial,
+    run: (_signal, updateShared) => { update = updateShared; return new Promise(resolve => { finish = resolve; }); } });
+  assert.equal(queue.get('fixture/repo#1@head').nextAction, initial.decision);
+  update(refreshed);
+  assert.equal(queue.get('fixture/repo#1@head').nextAction, refreshed.decision);
+  assert.equal(initial.decision.generation, 0);
+  finish({ dispatched: true });
+  await queue.drain();
+});
+
 test('classification retry accepts a null signal with the real timer', async () => {
   const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
   let reads = 0;
@@ -551,7 +566,13 @@ test('queued hammer dispatch launches the closer for a CONFLICTING PR and a CLEA
     });
     await maybeDispatchAmaClosureFor(args);
     await queue.drain();
-    assert.equal(closerCalls, 1, `${live.mergeable}/${live.mergeStateStatus || ''} reaches the closer`);
+    assert.equal(closerCalls, live.mergeable === 'UNKNOWN' ? 0 : 1);
+    if (live.mergeable === 'UNKNOWN') {
+      const waiting = await maybeDispatchAmaClosureFor(args);
+      assert.equal(waiting.nextAction.action, 'wait-for-CI');
+      assert.equal(waiting.reason, 'background-pr-mergeable-unknown');
+      continue;
+    }
     const settled = await maybeDispatchAmaClosureFor(args);
     assert.equal(settled.dispatched, true);
     assert.equal(settled.launchRequestId, 'lrq_conflict');
@@ -589,14 +610,16 @@ test('background mode: a terminal closer rejection reaches the caller on the nex
   // e.g. the hammer retry cap: the closer declines without dispatching and the
   // watcher must be free to fall through to merge-agent / alerting.
   const rejection = { dispatched: false, reason: 'hammer-retry-cap-exhausted' };
+  const now = () => Date.parse('2026-01-01T00:00:00Z');
   const inline = await maybeDispatchAmaClosureFor(closureArgs({
     resolveAmaHammerDispatchModeImpl: () => 'inline',
-    maybeDispatchAmaCloserImpl: async () => ({ ...rejection }),
+    now, maybeDispatchAmaCloserImpl: async () => ({ ...rejection }),
   }));
 
   const queue = createAmaHammerBackgroundQueue();
   let calls = 0;
   const args = closureArgs({
+    now,
     resolveAmaHammerDispatchModeImpl: () => 'background',
     amaHammerBackgroundQueueImpl: () => queue,
     maybeDispatchAmaCloserImpl: async () => {
@@ -609,7 +632,9 @@ test('background mode: a terminal closer rejection reaches the caller on the nex
   await queue.drain();
   const second = await maybeDispatchAmaClosureFor(args);
   assert.equal(calls, 1);
-  assert.deepEqual(second, inline, 'applied outcome is byte-identical to the inline result');
+  const withoutGeneration = result => ({ ...result, nextAction: { ...result.nextAction, generation: null } });
+  assert.deepEqual(withoutGeneration(second), withoutGeneration(inline), 'the same refusal retains the same recovery workflow');
+  assert.equal(second.closureOwner.actor, 'closure-recovery');
   assert.notEqual(second.skipMergeAgent, true, 'the merge-agent fallback is reachable again');
 });
 
@@ -1145,7 +1170,8 @@ for (const closer of [false, true]) {
     const result = await maybeDispatchAmaClosureFor(args);
     assert.equal(result.needsOperator, undefined);
     assert.equal(result.retryAfterMs, 30_000);
-    assert.ok(result.reasons.includes('duplicate-family-unresolved'));
+    if (closer) assert.ok(result.reasons.includes('duplicate-family-unresolved'));
+    else assert.equal(result.nextAction.action, 'review');
   });
 }
 
@@ -1184,8 +1210,9 @@ test('rebased closer head without an App attestation cannot arm HAM resume', asy
     suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
   args.fetchLatestHeadReviewBodiesImpl = () => assert.fail('no authoritative reviewer to fetch');
   args.resolveHamTerminalRemediationEvidenceImpl = () => assert.fail('no authority to certify this head');
-  await maybeDispatchAmaClosureFor(args);
-  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, false);
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(payloads.length, 0);
+  assert.equal(result.nextAction.action, 'review');
 });
 
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {
@@ -1198,7 +1225,12 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
     assert.equal(['hammer', 'daemon-merge'].includes(wakes[0].shared.decision.action)
       && wakes[0].shared.decision.actor !== 'closure-recovery',
     ['green', 'pending-conflict'].includes(scenario));
-    assert.equal(payloads.length, scenario === 'pending' ? 0 : 1);
+    const expectedDispatch = ['green', 'pending-conflict'].includes(scenario);
+    assert.equal(payloads.length, expectedDispatch ? 1 : 0);
+    if (!expectedDispatch && scenario !== 'pending') {
+      assert.ok(['review', 'remediate', 'wait-for-CI'].includes(result.nextAction.action));
+      return;
+    }
     if (scenario === 'pending') {
       assert.equal(result.reason, 'closer-head-ci-not-green');
       assert.equal(result.recoveryWait, true);

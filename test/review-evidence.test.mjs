@@ -249,6 +249,12 @@ test('evidence-only completion allows acknowledged advice and disambiguates dupl
 
 test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head without re-review', async t => {
   const { root, head } = gitFixture(t);
+  const previousDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
+  process.env.AGENT_OS_DEPLOY_CHECKOUT = join(root, 'deploy-checkout');
+  t.after(() => {
+    if (previousDeployCheckout === undefined) delete process.env.AGENT_OS_DEPLOY_CHECKOUT;
+    else process.env.AGENT_OS_DEPLOY_CHECKOUT = previousDeployCheckout;
+  });
   const body = review(card('Empty input throws'));
   const key = { repo: 'synthetic/project', prNumber: 7, attemptNumber: 1, passKind: 'first-pass' };
   beginReviewerPass(root, { ...key, reviewerClass: 'codex', headSha: head });

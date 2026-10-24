@@ -10,15 +10,15 @@
 // protection policy and lease CAS before any mutation. Repair admission (a red
 // or DIRTY head needing a hammer) is not merge permission.
 //
-// Until an authorized rollout switches a caller, `decideClosureOwner`
-// (src/ama/closure-owner.mjs, frozen v1) keeps authority. This module is its
-// successor policy owner: `fromLegacyClosureOwner` (src/pr-next-action-consumer.mjs)
+// NXA-03/04/05 adopt this policy for wake, closeout and closer/recovery
+// ownership. `decideClosureOwner` (src/ama/closure-owner.mjs) remains a source
+// rollback adapter. For remaining observational consumers, `fromLegacyClosureOwner` (src/pr-next-action-consumer.mjs)
 // expresses every legacy owner/reason in this vocabulary so the shadow
 // (src/pr-next-action-shadow.mjs) compares one table against the other. docs/NEXT-ACTION-REASON-INVENTORY.md
 // maps legacy reasons to rows; it is design documentation, not a registry.
 import { createHash } from 'node:crypto';
 import { classifyCheckRollup } from './checks-summary.mjs';
-import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
 import { launchRequestOwned, withLiveLaunchRetry } from './ama/launch-request-status.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
@@ -110,7 +110,7 @@ function checksFacts(checks) {
   return { state, runnerless, conclusion, progressMs: transitions.length ? Math.max(...transitions) : null };
 }
 
-function reviewFacts(reviews, head, policy) {
+function reviewFacts(reviews, head, policy, labels) {
   const value = reviews.value || {};
   // Normalized review state carries `verdict`; a raw review row carries only the
   // reviewed head and posting status, so its verdict remains unknown.
@@ -119,6 +119,7 @@ function reviewFacts(reviews, head, policy) {
   const verdict = normalized ? lower(value.verdict) || null : null;
   const strictMode = policy?.strictMode !== false;
   const attestation = ['valid', 'invalid', 'unknown'].includes(lower(value.attestation)) ? lower(value.attestation) : null;
+  const clean = Boolean(verdict && SETTLED_SUCCESS_VERDICTS.has(verdict) && isDaemonMergeReviewAllowed(value, { strictMode }));
   return {
     known: reviews.state === 'complete',
     normalized,
@@ -128,7 +129,11 @@ function reviewFacts(reviews, head, policy) {
     // when it names a different reviewed head or carries no verdict at all.
     currentHeadVerdictAbsent: reviews.state === 'complete'
       && (normalized ? !verdict || !sameHead(reviewedHead, head) : !sameHead(reviewedHead, head)),
-    clean: Boolean(verdict && SETTLED_SUCCESS_VERDICTS.has(verdict) && isDaemonMergeReviewAllowed(value, { strictMode })),
+    clean,
+    operatorOverride: hasOperatorApprovedOverride({ operatorApprovedEvidence: value.operatorApprovedEvidence,
+      operatorLogins: policy?.operatorLogins,
+      operatorLabelActorEnforcement: clean ? policy?.operatorLabelActorEnforcement : 'enforce',
+    }, { headSha: head, labels }),
     attestation,
     live: value.reviewerLive === true,
     suppressedFinalPush: value.commentOnlyFinalRoundPush === true,
@@ -223,7 +228,7 @@ function snapshotFacts(snapshot) {
     },
     labels,
     checks: checksFacts(sources.checks),
-    review: reviewFacts(sources.reviews, head, policyValue),
+    review: reviewFacts(sources.reviews, head, policyValue, labels),
     remediation: remediationFacts(sources.remediation),
     launch: launchFacts(sources.launches, head),
     lease: leaseFacts(sources.leases, head),
@@ -344,6 +349,11 @@ function selectRow(facts) {
     return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'empty-diff-close',
       deadlineKind: 'recovery', queue: 'reconcile' };
   }
+  const refusal = plain(controls?.safetyRefusal);
+  if (refusal && refusal.deterministic === true) {
+    return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
+      deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal.reason) || 'unnamed'}`] };
+  }
   const primary = plain(progress?.primaryChange);
   if (primary && primary.ok === false) {
     const primaryReason = text(primary.reason) || 'primary-change-unknown';
@@ -357,11 +367,6 @@ function selectRow(facts) {
         deadlineKind: 'admission', queue: 'dispatch', refs };
     }
     return refresh('structural-restriction-pending', refs);
-  }
-  const refusal = plain(controls?.safetyRefusal);
-  if (refusal && refusal.deterministic === true) {
-    return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
-      deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal.reason) || 'unnamed'}`] };
   }
 
   // R06: a merge receipt is not a merge. Only the remote PR state confirms it.
@@ -427,36 +432,48 @@ function selectRow(facts) {
   // R13: an unproven head gets an exact-head review. Context-only rebase proof
   // must be semantic; ancestry, inherited trailers or ticket ownership are not.
   if (!review.known) return refresh('reviews-unknown');
+  // Preserve the daemon's existing attributable, exact-head approval lane.
+  // Earlier ownership, stops, caps, structural and CI rows still take priority;
+  // the executor revalidates the live approval under the same actor policy.
+  if (review.operatorOverride && review.attestation !== 'invalid'
+    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE') {
+    return { row: 'R13-approved-head', action: 'daemon-merge', actor: 'daemon', reason: 'clean-exact-head',
+      deadlineKind: 'admission', queue: 'daemon' };
+  }
   const proof = plain(progress?.contentProof);
   // HAMATTEST-02 closer carry is accepted only for this exact head pair.
   const closerCarry = plain(progress?.closerAuthoredStale);
   const closerPair = Boolean(closerCarry && sameHead(closerCarry.currentHead, head)
     && sameHead(closerCarry.reviewedHead, review.reviewedHead));
   const handedToReview = leaseForHead && lease.status === 'handed-to-review';
+  const terminalReview = progress?.terminalReview;
+  const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
+    && sameHead(terminalReview.reviewedHeadSha, review.reviewedHead) && !handedToReview;
   const carryable = review.currentHeadVerdictAbsent && Boolean(review.verdict);
   const semanticCarry = carryable && Boolean(proof && SEMANTIC_PROOF_KINDS.has(lower(proof.kind))
     && proof.semantic === true && sameHead(proof.fromHead, review.reviewedHead) && sameHead(proof.toHead, head));
   const attestedCarry = carryable && closerPair && closerCarry.carryForward === true
     && closerCarry.decision !== 'rereview-exact-head' && !handedToReview;
-  const carried = semanticCarry || attestedCarry;
+  const carried = semanticCarry || attestedCarry || terminalHead;
   if (review.attestation === 'invalid') {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'attestation-invalid', deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (closerPair && closerCarry.decision === 'rereview-exact-head') {
+  // HAMATTEST-03: an explicit head-bound review decision survives the old ceiling.
+  if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'exact-head-review', deadlineKind: 'admission', queue: 'dispatch' };
   }
+  if (review.currentHeadVerdictAbsent && !carried && policy?.reviewCeilingReached === true && !handedToReview) {
+    return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
+  }
   if (review.currentHeadVerdictAbsent && !carried) {
-    if (policy?.reviewCeilingReached === true && !handedToReview) {
-      return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
-    }
     return { row: 'R13-review', action: 'review', actor: 'reviewer',
       reason: handedToReview ? 'handed-to-review' : review.reviewedHead && review.verdict ? 'stale-verdict' : 'exact-head-review',
       deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (!review.verdict) return refresh('verdict-unknown');
+  if (!review.verdict && !terminalHead) return refresh('verdict-unknown');
 
   // R14: findings go to a remaining remediation round or the final hammer.
-  if (!review.clean) {
+  if (!review.clean && !terminalHead) {
     if (handedToReview || attestedCarry) {
       return { row: 'R14-findings', action: 'hammer', actor: 'hammer', reason: 'review-findings-final', deadlineKind: 'admission', queue: 'dispatch' };
     }
@@ -468,6 +485,11 @@ function selectRow(facts) {
   }
   // R15: a valid clean (or carried terminal-head) review on a green, mergeable
   // head is the daemon's. Execution still re-proves every merge predicate.
+  if (progress?.daemonRepair?.admitted === true && sameHead(progress.daemonRepair.headSha, head)
+    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && review.attestation !== 'unknown') {
+    return { row: 'R15-daemon-repair', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
+      deadlineKind: 'admission', queue: 'dispatch' };
+  }
   if (checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && review.attestation !== 'unknown') {
     return { row: 'R15-daemon', action: 'daemon-merge', actor: 'daemon', reason: carried ? 'carried-clean-head' : 'clean-exact-head',
       deadlineKind: 'admission', queue: 'daemon' };

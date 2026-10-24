@@ -91,3 +91,13 @@ row pruning, completion reset or database deletion is implemented. Retained
 rows continue to describe prior heads and repeat observations use their original
 deadline and reservation. Each call closes its connection after observation and
 any alert attempt. Offline tests inject the pager and use temporary databases.
+
+### Shared decision anchors (NXA-05)
+
+When a closer snapshot lacks durable progress timestamps, an anchor-only call
+uses the existing `bounded-wait` row's first `started` value for the shared
+next-action deadline. Later polls reuse it. This observation never reserves a
+page or sends an alert, even if overdue. Persistence failure is diagnostic and
+cannot refuse execution. Ordinary observations retain existing delivery,
+debounce, refund and retry behavior and report the selected action and actor.
+There is no new table, column or migration.

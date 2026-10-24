@@ -41,7 +41,7 @@ test('HAMCLOSE-03 replay A: synthetic reversal merges in one posted-review/closu
   assert.equal(store.merged, true);
 });
 
-test('HAMCLOSE-03 replay B: delivered ceiling transfers a newer nonempty head to one hammer and one review', async t => {
+test('HAMCLOSE-03 replay B: head-bound exact-head review precedes the delivered ceiling hammer fallback', async t => {
   const rootDir = root(t), headSha = 'c'.repeat(40), old = 'a'.repeat(40);
   const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha,review_attempts)
@@ -63,19 +63,28 @@ test('HAMCLOSE-03 replay B: delivered ceiling transfers a newer nonempty head to
   const row = db.prepare('SELECT * FROM reviewed_prs').get();
   assert.equal(routeCappedReviewToClosure({ db, repo, prNumber: 8143, headSha, row, ceiling: 3 }), true);
   const identity = { rootDir, repo, prNumber: 8143, headSha };
-  let hammers = 0; const closureStore = { merged: false };
+  const closureStore = { merged: false };
   const cappedRow = { ...db.prepare('SELECT * FROM reviewed_prs').get(), review_body: cleanBody };
   await watcherTick({ ...identity, row: cappedRow, evidence: { headSha, hasHammerCommits: false },
     store: closureStore, closureOnly: true,
-    closerImpl: async args => {
-      assert.equal(args.reviewState.reviewCycleExhausted, true);
-      assert.equal(args.dispatchContext.reviewCycleCapReached, true);
-      assert.equal(acquireAmaCloserLease(identity).acquired, true); hammers++;
-      updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'hammer-8143' });
-      return { dispatched: true, workerClass: 'hammer', dispatchId: 'hammer-8143' };
-    } });
-  assert.equal(hammers, 1, JSON.stringify(closureStore));
-  assert.equal(acquireAmaCloserLease(identity).acquired, false);
+    closerImpl: async () => assert.fail('an explicit exact-head review must not dispatch a ceiling hammer') });
+  assert.equal(closureStore.merged, false);
+  const closure = closureStore.lastClosure;
+  assert.equal(closure.ownerProofFacts.reviewCycleExhausted, true);
+  assert.equal(closure.dispatched, false);
+  assert.equal(closure.nextAction.action, 'review');
+  assert.equal(closure.nextAction.reason, 'exact-head-review');
+  assert.equal(closure.closureOwner.owner, 'review');
+  assert.equal(closure.closerAuthoredStale.decision, 'rereview-exact-head');
+  assert.equal(closure.closerAuthoredStale.reviewedHead, old);
+  assert.equal(closure.closerAuthoredStale.currentHead, headSha);
+});
+
+test('HAMCLOSE-03 legacy hammer handoff authorizes only one exact-head review attempt', t => {
+  const rootDir = root(t), headSha = 'c'.repeat(40);
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
+  const identity = { rootDir, repo, prNumber: 8143, headSha };
+  assert.equal(acquireAmaCloserLease(identity).acquired, true);
   updateAmaCloserLease({ ...identity, status: 'handed-to-review' }); // Legacy receipt fixture.
   const reviewRow = { rereview_requested_at: '2026-10-12T06:15:00Z', revision_ref: headSha, rereview_reason: `system-orphan-head-review:${headSha}` };
   assert.equal(hammerHandoffReviewBypass({ ...identity, db, row: reviewRow }), true);
@@ -121,7 +130,7 @@ test('HAMCLOSE-03 unproven reversal pages once, keeps the hammer stopped and mak
     row: { review_status: 'posted', reviewer_head_sha: bad.headSha, reviewer: 'gemini', review_body: cleanBody } });
   assert.equal(store.merged, false); assert.equal(pages.length, 1);
   assert.match(pages[0], /PR 8132.*src\/a\.mjs.*no verified/);
-  assert.equal(store.lastClosure.closureOwner.owner, 'page');
+  assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
   assert.equal(classifyClosureOwnership({ primaryChange: bad, currentHead: bad.headSha }).decision, 'page-required');
 });
 
@@ -162,7 +171,7 @@ for (const options of [{ rebasedAdded: '+different()' }, { parentExtraHunk: true
       evidence, store, pageImpl: async text => pages.push(text),
       row: { review_status: 'posted', reviewer_head_sha: evidence.headSha, reviewer: 'gemini', review_body: cleanBody } });
     assert.equal(store.merged, false); assert.equal(pages.length, 1);
-    assert.equal(store.lastClosure.closureOwner.owner, 'page');
+    assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
   });
 }
 

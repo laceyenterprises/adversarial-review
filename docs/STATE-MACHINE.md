@@ -795,6 +795,16 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+NXA-05 adopts `nextAction(snapshot)` for closer routing, queued preflight and
+recovery ownership. Capacity, drain, automatic stops and exhausted retry reports
+retain the selected action and actor; only explicit policy/hold intent selects
+operator hold. Only confirmed merged/closed state is done. Changed evidence
+invalidates the generation; execution retains all exact-head, HCP, provenance,
+required-check, identity, arming and shared-lease checks. The compatibility owner
+projection adds `operator-hold` and `done` evaluation outputs; durable launch,
+lease and review lifecycle states are unchanged. See the
+[adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
+
 LAC-2093 bounds local validation under the shared lease with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
 independent of the load-scaled 360-second nominal absolute ceiling. Real pytest
@@ -1112,9 +1122,10 @@ hammer still suppresses re-review. No verdict or required-check predicate change
 A complete publication bridge that cannot carry an unsettled live verdict retains
 its review intent in `selectedClosureOwner`, with original refusal reasons intact.
 Both the explicit decision and selected intent require matching current and
-reviewed heads. During the bounded wait, `closureOwner` remains wait/page until
-the watchdog confirms ownership absence and successfully queues review; live or
-uncertain owners and queue refusals cannot report review ownership.
+reviewed heads. NXA-05 retains the selected workflow through bounded waits and
+pages. A refused review request retains review intent; a discovered live hammer
+updates the shared generation to its owned workflow. Uncertain ownership retains
+closure recovery. The watchdog still requires an absence proof before queueing.
 
 Historical `exact-head-review-required` and bare `stale-review-head` stops release
 with `hammer-responsibility` without a new review. Mixed safety refusals retain

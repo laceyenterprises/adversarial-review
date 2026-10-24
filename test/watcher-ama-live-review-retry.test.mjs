@@ -40,8 +40,8 @@ function baseArgs(rootDir) {
       prState: 'open',
       isDraft: false,
       riskClass: 'medium',
-      mergeable: true,
-      statusCheckRollup: [],
+      mergeable: 'MERGEABLE',
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       prAuthor: 'builder',
     },
@@ -51,6 +51,7 @@ function baseArgs(rootDir) {
     currentRevisionRef: 'head-live',
     loadConfigImpl: loadAmaEnabledConfig,
     liveReviewRetryDelaysMs: [0, 0],
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'fixture-declined' }),
     logger: { warn() {} },
   };
 }
@@ -94,10 +95,13 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
       },
       fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, _head, options) => {
         fetchOptions = options;
-        return ['## Summary\n\nLooks settled.\n\n## Verdict\n\nComment only'];
+        return ['## Summary\n\nLooks settled.\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.\n\n## Verdict\n\nComment only'];
+      },
+      requestEligibleHammerWakeImpl: ({ shared }) => {
+        seenReviewStates.push(shared.snapshot.observations.reviews.value);
+        return {};
       },
       maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-        seenReviewStates.push(reviewState);
         return { dispatched: true, reason: reviewState.verdict };
       },
     });
@@ -107,11 +111,10 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
       'gemini-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
-      closureOwner: { owner: 'hammer', reason: 'comment-only' },
-      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'comment-only', reviewCycleExhausted: false,
-        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' } });
+    assert.equal(result.dispatched, true);
+    assert.equal(result.reason, 'comment-only');
+    assert.equal(result.nextAction.action, 'daemon-merge');
+    assert.equal(result.closureOwner.owner, 'daemon-merge');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -133,8 +136,11 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
         }
         return ['## Summary\n\nStill blocked.\n\n## Verdict\n\nRequest changes'];
       },
+      requestEligibleHammerWakeImpl: ({ shared }) => {
+        seenReviewStates.push(shared.snapshot.observations.reviews.value);
+        return {};
+      },
       maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-        seenReviewStates.push(reviewState);
         return { dispatched: false, reason: reviewState.verdict };
       },
     });
@@ -142,16 +148,10 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
     assert.equal(lookupCalls, 2);
     assert.equal(seenReviewStates[0].verdict, 'request-changes');
     assert.equal(seenReviewStates[0].headSha, 'head-live');
-    assert.deepEqual(result, {
-      dispatched: false,
-      reason: 'request-changes',
-      closureOwner: { owner: 'remediation', reason: 'review-findings' },
-      namedReason: 'request-changes',
-      amaEnabled: true,
-      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'request-changes', reviewCycleExhausted: false,
-        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' },
-    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.nextAction.action, 'remediate');
+    assert.equal(result.nextAction.reason, 'review-findings');
+    assert.equal(result.closureOwner.owner, 'remediation');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -170,10 +170,13 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
       },
       fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, _head, options) => {
         fetchOptions = options;
-        return ['## Summary\n\nLooks settled.\n\n## Verdict\n\nComment only'];
+        return ['## Summary\n\nLooks settled.\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.\n\n## Verdict\n\nComment only'];
+      },
+      requestEligibleHammerWakeImpl: ({ shared }) => {
+        seenReviewStates.push(shared.snapshot.observations.reviews.value);
+        return {};
       },
       maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-        seenReviewStates.push(reviewState);
         return { dispatched: true, reason: reviewState.verdict };
       },
     });
@@ -183,11 +186,10 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
       'codex-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
-      closureOwner: { owner: 'hammer', reason: 'comment-only' },
-      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: 'comment-only', reviewCycleExhausted: false,
-        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' } });
+    assert.equal(result.dispatched, true);
+    assert.equal(result.reason, 'comment-only');
+    assert.equal(result.nextAction.action, 'daemon-merge');
+    assert.equal(result.closureOwner.owner, 'daemon-merge');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -206,8 +208,11 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
         err.status = 503;
         throw err;
       },
+      requestEligibleHammerWakeImpl: ({ shared }) => {
+        seenReviewStates.push(shared.snapshot.observations.reviews.value);
+        return {};
+      },
       maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-        seenReviewStates.push(reviewState);
         return { dispatched: false, reason: reviewState.verdict || 'fail-closed' };
       },
     });
@@ -215,17 +220,10 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
     assert.equal(lookupCalls, 3);
     assert.equal(seenReviewStates[0].verdict, '');
     assert.equal(seenReviewStates[0].headSha, 'head-live');
-    assert.deepEqual(result, {
-      dispatched: false,
-      reason: 'fail-closed',
-      selectedClosureOwner: { owner: 'review', reason: 'exact-head-review' },
-      closureOwner: { owner: 'review', reason: 'exact-head-review' },
-      namedReason: 'fail-closed',
-      amaEnabled: true,
-      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
-        verdict: null, reviewCycleExhausted: false,
-        commentOnlyFinalRoundCompleted: false, checks: [], mergeable: 'TRUE' },
-    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.nextAction.action, 'review');
+    assert.equal(result.nextAction.reason, 'exact-head-review');
+    assert.equal(result.closureOwner.owner, 'review');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -247,8 +245,11 @@ test('closure uses an initialized database while rereading the current round cou
       reviewStateDb,
       fetchLatestHeadReviewBodiesImpl: async () => ['## Verdict\n\nComment only'],
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'fixture-wait' }),
-      maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-        exhausted.push(reviewState.reviewCycleExhausted);
+      requestEligibleHammerWakeImpl: ({ shared }) => {
+        exhausted.push(shared.snapshot.observations.remediation.value.roundsLeft === false);
+        return {};
+      },
+      maybeDispatchAmaCloserImpl: async () => {
         return { dispatched: true, reason: 'fixture-dispatched' };
       },
     };
@@ -274,18 +275,21 @@ for (const reviewCycleExhausted of [false, true]) {
           commentOnlyFinalRoundRevisionRefs: commentOnlyFinalRoundCompleted ? ['head-live'] : [],
         }),
         fetchLatestHeadReviewBodiesImpl: async () => ['## Verdict\n\nComment only'],
+        requestEligibleHammerWakeImpl: ({ shared }) => {
+          seenReviewStates.push(shared.snapshot.observations.reviews.value);
+          return {};
+        },
         maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
-          seenReviewStates.push(reviewState);
           return { dispatched: false, reason: 'not-eligible' };
         },
       });
 
       assert.equal(seenReviewStates.length, 1);
-      assert.equal(seenReviewStates[0].reviewCycleExhausted, reviewCycleExhausted);
+      assert.equal(result.ownerProofFacts.reviewCycleExhausted, reviewCycleExhausted);
       assert.deepEqual(result.ownerProofFacts, {
         headSha: 'head-live', reviewedHeadSha: 'head-live', verdict: 'comment-only',
         reviewCycleExhausted, commentOnlyFinalRoundCompleted,
-        checks: [], mergeable: 'TRUE',
+        checks: baseArgs(rootDir).candidate.statusCheckRollup, mergeable: 'MERGEABLE',
       });
       assert.equal(result.dispatched, false, 'routing facts do not waive closer eligibility');
     });

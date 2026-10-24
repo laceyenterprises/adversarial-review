@@ -107,8 +107,8 @@ test('HAMATTEST-03 no early re-review: running launch suppresses review until it
   const f = await fixture(t);
   f.setStatus('running');
   const waiting = await f.tick();
-  assert.equal(waiting.amaClosureResult.closureOwner.owner, 'wait');
-  assert.equal(waiting.amaClosureResult.closureOwner.reason, 'required-checks-pending');
+  assert.equal(waiting.amaClosureResult.closureOwner.owner, 'hammer');
+  assert.equal(waiting.amaClosureResult.closureOwner.reason, 'live-owner');
   assert.equal(f.counts().requests, 0);
   assert.equal(f.row().review_status, 'posted');
   f.setStatus('succeeded');
@@ -216,10 +216,11 @@ for (const bridge of [false, true]) {
           observeClosureWaitImpl: async () => ({ exhausted, reason: 'required-checks-pending',
             boundedMs: 60000, retryAfterMs: 30000 }),
         });
-        assert.deepEqual(result.amaClosureResult.closureOwner, {
-          owner: exhausted ? 'page' : 'wait', reason: 'required-checks-pending',
-          boundedMs: 60000, retryAfterMs: 30000,
-        });
+        const selected = result.amaClosureResult.nextAction;
+        assert.equal(selected.action, ownership === 'queue-refused' ? 'review' : 'hammer');
+        assert.equal(selected.actor, ownership === 'queue-refused' ? 'reviewer' : 'closure-recovery');
+        assert.equal(result.amaClosureResult.closureOwner.actor, selected.actor);
+        assert.notEqual(selected.action, 'operator-hold', 'overdue reporting cannot erase recovery ownership');
         assert.equal(f.row().review_status, 'posted');
       });
     }

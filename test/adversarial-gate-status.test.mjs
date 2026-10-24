@@ -38,6 +38,19 @@ import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
 import { normalizeReviewVerdict as normalizeReviewVerdictCompat } from '../src/review-verdict.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 
+import { closureGateMergeability } from '../src/github-mergeability.mjs';
+import { loadDomainConfig } from '../src/domain-config.mjs';
+import { resolveMergeAuthorityConfigFromDomain } from '../src/domain-policy.mjs';
+
+function observedFromShared(shared, cfg = { eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } }) {
+  const pr = shared.snapshot.observations.pr.value;
+  return { reviewState: shared.snapshot.observations.reviews.value,
+    prMetadata: { headSha: shared.decision.head, isOpen: pr.state.toUpperCase() === 'OPEN',
+      isDraft: pr.isDraft, mergeableState: closureGateMergeability(pr),
+      statusCheckRollup: shared.snapshot.observations.checks.value.rollup, labels: pr.labels,
+      branchProtection: { requiredContexts: [] } }, cfg, options: {} };
+}
+
 const withWatcherRoot = (fn) => (options) => fn({
   rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-gate-status-watcher-')),
   ...options,
@@ -1815,13 +1828,17 @@ test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger
         };
       },
     }),
+    requestEligibleHammerWakeImpl: ({ shared }) => { observed = observedFromShared(shared,
+      resolveMergeAuthorityConfigFromDomain(loadDomainConfig(rootDir, 'code-pr'), {
+        enabled: true, eligibility: { riskClasses: ['low', 'medium', 'high', 'critical'], highRiskRequiresTwoKey: false },
+        branchProtection: { required: false } })); },
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
       return { dispatched: false, reason: 'fixture' };
     },
   });
 
-  assert.ok(observed, 'AMA closer payload should be built');
+  assert.ok(observed, 'normalized ownership evidence should be built');
   // (1) Resolution: the ledger default ('medium'), not 'unknown'.
   assert.equal(observed.reviewState.riskClass, 'medium');
   assert.notEqual(observed.reviewState.riskClass, 'unknown');
@@ -1886,13 +1903,14 @@ test('maybeDispatchAmaClosureFor carries stale reviewed head into AMA instead of
         };
       },
     }),
+    requestEligibleHammerWakeImpl: ({ shared }) => { observed = observedFromShared(shared); },
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
       return { dispatched: false, reason: 'fixture' };
     },
   });
 
-  assert.ok(observed, 'AMA closer payload should be built');
+  assert.ok(observed, 'normalized ownership evidence should be built');
   assert.equal(observed.reviewState.verdict, '');
   assert.equal(observed.reviewState.headSha, 'head-a-reviewed');
   assert.equal(observed.prMetadata.headSha, 'head-b-current');
@@ -1948,6 +1966,7 @@ async function observeAmaSnapshotProjection({
         return 'native';
       },
     }),
+    requestEligibleHammerWakeImpl: ({ shared }) => { observed = observedFromShared(shared); },
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
       return { dispatched: false, reason: 'fixture' };

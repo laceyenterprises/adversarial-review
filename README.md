@@ -1242,13 +1242,19 @@ source counts across consumers/passes, head/effect invalidation, immutable histo
 terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
+Closer decision snapshots retain queued preflight and stop-recovery generations
+through in-flight status reads and dispatch results. Explicit operator/safety
+holds override stale automated no-progress decisions, even during drain. Valid
+semantic and attested clean review carries retain ordinary merge eligibility at
+the review ceiling; exact-head checks and merge predicates remain mandatory.
+
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
 successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing and
 NXA-04 for remediation closeout; HAMATTEST-03 executes its head-bound exact-head
-review decision through the ownerless watchdog. Explicit decisions and selected
-review intents bind both the current and reviewed heads; bounded waits report
-wait/page until ownership is certainly absent and watchdog queueing succeeds.
-Other closure consumers retain legacy authority and observational shadow.
+review decision through the ownerless watchdog, before the historical review
+ceiling. Explicit decisions and selected review intents bind both the current and reviewed heads; NXA-05 reports retain the selected workflow through bounded waits and pages;
+watchdog queueing still requires proven ownership absence. Closer routing and
+recovery now adopt the same decision; the legacy adapter remains for source rollback.
 Disagreements and overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
 path only with `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`. The
 [shadow runbook](docs/RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02) and
@@ -1257,6 +1263,23 @@ and rollout acceptance. `node test/run-tests.mjs test/pr-next-action.test.mjs
 test/pr-next-action-shadow.test.mjs test/next-action-disagreements.test.mjs`
 verifies them with synthetic I/O. No lifecycle state, transition, state
 projection or smoke promise changes.
+
+NXA-05: closer routing, queued preflight, stop reports and no-progress ownership
+consume the shared decision. Rescue adapters retain recovery/deferral and head
+bindings. Legacy comment-only final jobs remain final for red-CI repair even
+when their nominal round counter is below the global ceiling. Alerts and real
+retry caps retain a recovery actor;
+only explicit intent selects operator hold. Changed proof or PR facts create a
+new immutable generation. Unchanged facts share the original decision. Existing daemon CI/bootstrap preflight refreshes the shared generation before
+mutation; qualified repair fallback remains head-bound and capped. Existing
+closure-wait storage supplies a durable anchor when progress evidence is absent.
+The no-progress ledger optionally retains `nextAction`; drain preserves its debt.
+Lease/receipt reconciliation, real capacity caps, pending launch reservations,
+physical worktree checks, semantic reversal proof and all merge safety stay in
+force. The handoff smoke checks selected ownership through drain/capacity and
+safety-stop observations. Live operator/SRE acceptance remains pending; no live
+operation or rollout is performed by this change. See the
+[caller adoption procedure](docs/RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
 NXA-04: normal and recovered remediation closeout use one shared successor.
 `reReview.nextAction` supplies suppression and comments with one owner, reason,
@@ -1583,14 +1606,17 @@ transport response, failed release stays retryable, and live leases renew until
 process drain is confirmed, independently of delivery rows. An approved
 exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
-HAMATTEST-03 exercises production coexistence with a bounded closure wait:
+HAMATTEST-03 verifies shared exact-head review selection after the historical
+review ceiling and exercises production coexistence with a bounded closure wait:
 live or uncertain hammer ownership suppresses re-review and retains the wait
 owner; after confirmed absence, a head-bound review decision queues in the same
 poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
-<a id="smv-handoff"></a>**smv-handoff:** NXA-04 verifies one closeout successor through pending, green
+<a id="smv-handoff"></a>**smv-handoff:** NXA-05 verifies that drain/capacity observations
+retain hammer intent and its deadline, and deterministic automatic stops retain
+closure-recovery ownership. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission
 intent for a pending non-final round. NXA-03 verifies shared immutable
 decision wake routing, live-owner suppression and one wake per reconciled
@@ -1896,16 +1922,20 @@ stateDiagram-v2
     state "follow-up-drain" as s6
     state "conflict-rebase" as s7
     state "daemon-merge" as s8
+    state "operator-hold" as s9
+    state "done" as s10
     [*] --> s0: closure-owner.01 recompute ownership: close
     [*] --> s1: closure-owner.02 recompute ownership: page
-    [*] --> s2: closure-owner.03 recompute ownership: wait
-    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
-    [*] --> s4: closure-owner.05 recompute ownership: review (including a head-bound shared rereview-exact-head decision before historical hammer ownership)
-    [*] --> s5: closure-owner.06 recompute ownership: remediation
+    [*] --> s2: closure-owner.03 project shared next action: wait
+    [*] --> s3: closure-owner.04 project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
+    [*] --> s4: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
+    [*] --> s5: closure-owner.06 project shared next action: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
     [*] --> s7: closure-owner.08 recompute ownership: conflict-rebase
-    [*] --> s8: closure-owner.09 recompute ownership: daemon-merge
-    s2 --> [*]: closure-owner.10 next bounded observation
+    [*] --> s8: closure-owner.09 project shared next action: daemon-merge
+    s2 --> [*]: closure-owner.10 next bounded observation; overdue reporting preserves the selected workflow
+    [*] --> s9: closure-owner.11 explicit hold, draft or disabled execution intent
+    [*] --> s10: closure-owner.12 confirmed merged or closed PR
     s0 --> [*]
     s1 --> [*]
     s3 --> [*]
@@ -1914,6 +1944,8 @@ stateDiagram-v2
     s6 --> [*]
     s7 --> [*]
     s8 --> [*]
+    s9 --> [*]
+    s10 --> [*]
 ```
 
 ### hammer-dispatch

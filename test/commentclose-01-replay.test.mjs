@@ -185,8 +185,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
   // The proof authorizes terminal validation only: the pushed head is still
   // ineligible to merge until the hammer writes exact-head validation evidence.
   assert.ok(!execCalls.some(({ cmd, argv }) => cmd === 'gh' && argv[0] === 'pr' && argv[1] === 'merge'));
-  assert.deepEqual(daemonOutcomes.map(({ disposition, reason }) => [disposition, reason]),
-    [['not-taken', 'non-blocking-findings-present']]);
+  assert.deepEqual(daemonOutcomes, [], 'the selected final hammer skips the daemon merge lane');
   if (pr === 8123) {
     const mergeAgent = await import('../src/follow-up-merge-agent.mjs');
     const classify = (await import('../src/merge-agent-rescue-classifier.mjs')).default;
@@ -315,12 +314,17 @@ function stage7311FinalRound(t, label) {
 
 async function withHqRoot(hqRoot, fn) {
   const originalHqRoot = process.env.HQ_ROOT;
+  const originalDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
   process.env.HQ_ROOT = hqRoot;
+  // Keep the synthetic workspace independent of the host's deploy location.
+  process.env.AGENT_OS_DEPLOY_CHECKOUT = path.join(hqRoot, 'deploy-checkout');
   try {
     return await fn();
   } finally {
     if (originalHqRoot === undefined) delete process.env.HQ_ROOT;
     else process.env.HQ_ROOT = originalHqRoot;
+    if (originalDeployCheckout === undefined) delete process.env.AGENT_OS_DEPLOY_CHECKOUT;
+    else process.env.AGENT_OS_DEPLOY_CHECKOUT = originalDeployCheckout;
   }
 }
 

@@ -295,7 +295,7 @@ test('native wake keeps current-head blocking verdicts and every other gate inel
   }
 });
 
-for (const parkedHead of [reviewed, head]) test('rescue requires a stale reviewed head for CI-repair ownership: ' + parkedHead[0], async t => {
+for (const parkedHead of [reviewed, head]) test('shared CI-repair ownership preserves executor safety: ' + parkedHead[0], async t => {
   const { args, wakes } = fixture(t);
   args.reviewStateRow.reviewer_head_sha = parkedHead;
   args.dispatchJob = {}; // Rescue has the durable row, not the watcher's handoff flag.
@@ -306,16 +306,16 @@ for (const parkedHead of [reviewed, head]) test('rescue requires a stale reviewe
     return { dispatched: false, skipMergeAgent: true, reason: 'synthetic-probe' };
   };
   const result = await maybeDispatchAmaClosureFor(args);
-  assert.equal(result.closureOwner.owner, parkedHead === reviewed ? 'hammer' : 'page', JSON.stringify(result));
+  assert.equal(result.closureOwner.owner, 'hammer', JSON.stringify(result));
   assert.equal(wakes[0].outcome, 'requested');
   assert.equal(wakes[0].nextAction.reason, 'ci-red-final');
   const rescue = classifyRescue({ closureOwner: result.closureOwner, reviewHeadSha: reviewed, headSha: head });
   if (parkedHead === reviewed) {
     assert.equal(rescue.decision, 'hammer-eligible');
-    assert.equal(rescue.reason, 'ci-blocked-remediation-exhausted');
+    assert.equal(result.nextAction.reason, 'ci-red-final');
   } else {
-    assert.notEqual(rescue.decision, 'hammer-eligible');
-    assert.equal(result.closureOwner.reason, 'review-rounds-exhausted');
+    assert.equal(result.closureOwner.reason, 'ci-red-final');
+    assert.equal(result.dispatched, false, 'repair intent does not waive the executor verdict gate');
   }
 });
 
@@ -389,7 +389,7 @@ test('rescue ownership preserves explicit review handoff, active remediation and
   }
 });
 
-test('an early daemon deferral after wake does not retire an interrupted closer intent', async t => {
+test('selected repair reconciles an interrupted closer intent before a successor', async t => {
   const { args, wakes } = fixture(t);
   const identity = { repo, prNumber, headSha: head };
   const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
@@ -398,10 +398,12 @@ test('an early daemon deferral after wake does not retire an interrupted closer 
   acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
   const lease = readAmaCloserLease(args.rootDir, identity);
   args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'deferred', reason: 'synthetic-daemon-wait' });
-  args.maybeDispatchAmaCloserImpl = () => assert.fail('daemon deferral never invokes the closer');
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, skipMergeAgent: true,
+    reason: 'existing-dispatch-unknown' });
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(wakes.length, 1);
-  assert.equal(result.reason, 'daemon-deferred');
+  assert.equal(result.reason, 'existing-dispatch-unknown');
+  assert.equal(result.nextAction.actor, 'closure-recovery');
   assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
   assert.deepEqual(readAmaCloserLease(args.rootDir, identity), lease);
 });
@@ -420,8 +422,10 @@ test('background pre-dispatch refusal leaves the interrupted intent and its leas
   let submission;
   args.amaHammerBackgroundQueueImpl = () => ({ submit(options) { submission = options; return { state: 'started' }; } });
   await maybeDispatchAmaClosureFor(args);
-  const result = await submission.run(new AbortController().signal);
+  let liveShared;
+  const result = await submission.run(new AbortController().signal, shared => { liveShared = shared; });
   assert.equal(result.reason, 'background-pr-draft');
+  assert.equal(result.nextActionShared, liveShared, 'the queue receives the same live refusal generation');
   submission.onSettled({ ok: true, result, elapsedMs: 0 });
   assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
   assert.deepEqual(readAmaCloserLease(args.rootDir, identity), lease);
@@ -470,7 +474,7 @@ for (const conclusion of ['FAILURE', 'SUCCESS', 'IN_PROGRESS']) {
       return { dispatched: false, reason: 'synthetic-probe' };
     };
     await maybeDispatchAmaClosureFor(args);
-    assert.equal(invoked, true);
+    assert.equal(invoked, conclusion === 'FAILURE');
   });
 }
 

@@ -122,7 +122,7 @@ function baseArgs(rootDir) {
       riskClass: 'low',
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'builder',
     },
@@ -142,7 +142,7 @@ function findingsArgs(rootDir) {
   const body = CLEAN_COMMENT_ONLY_REVIEW_BODY.replace('## Non-blocking Issues\n\n- None.',
     '## Non-blocking Issues\n\n- Improve the error message.');
   return { ...args, reviewStateRow: { ...args.reviewStateRow, review_body: body },
-    dispatchJob: { ...args.dispatchJob, nonBlockingFindingCount: 1, nonBlockingFindingState: 'known' },
+    dispatchJob: { ...args.dispatchJob, remediationStopCode: 'max-rounds-reached', nonBlockingFindingCount: 1, nonBlockingFindingState: 'known' },
     fetchLatestHeadReviewBodiesImpl: async () => [body] };
 }
 
@@ -152,6 +152,7 @@ test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is un
     let hammerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
+      candidate: { ...baseArgs(rootDir).candidate, statusCheckRollup: [] },
       dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known',
         nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
       runDaemonCleanMergeAttemptImpl: async () => ({
@@ -399,16 +400,11 @@ test('AMA closure passes watcher-recorded trailer-only head evidence to eligibil
       },
     });
 
-    assert.equal(result.reason, 'not-eligible');
-    assert.equal(seenOptions?.nonReviewableHeadDelta?.evidence, 'non_reviewable_head_delta');
-    assert.equal(seenOptions.nonReviewableHeadDelta.reviewedHead, reviewedHead);
-    assert.equal(seenOptions.nonReviewableHeadDelta.currentHead, currentHead);
-    assert.equal(seenOptions.nonReviewableHeadDelta.reason, 'closer-commit-trailer');
-    assert.equal(seenOptions.nonReviewableHeadDelta.suppression.suppressed, true);
-    assert.deepEqual(seenOptions.nonReviewableHeadDelta.commit.changedFiles, []);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
+    assert.equal(result.reason, 'handed-to-review');
+    assert.equal(result.nextAction.action, 'review');
+    assert.equal(result.nextAction.head, currentHead);
+    assert.equal(seenOptions, null, 'trailers alone do not dispatch a hammer');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('daemon loads merge-authority config with the adversarial config.yaml module (not shell-env-only)', async () => {
@@ -524,7 +520,8 @@ test('AMA closure preserves local merge-authority overrides over domain defaults
     });
 
     assert.equal(result.amaEnabled, true);
-    for (const cfg of [daemonCfg, closerCfg]) {
+    assert.equal(daemonCfg, null, 'the selected final hammer skips the daemon');
+    for (const cfg of [closerCfg]) {
       assert.equal(cfg.lha.consumeAttestations, false);
       assert.equal(cfg.autoHammerOnEligibilityMiss, true);
       assert.deepEqual(cfg.eligibility.riskClasses, ['low', 'medium', 'high', 'critical']);
@@ -926,7 +923,9 @@ test('watcher passes live HAM target separately from stable reviewed-head dispat
         author: 'the-hammer-lacey[bot]', body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${liveHead}`,
       }] }),
       fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: liveHead, parentSha: reviewedHead, message: 'Closed-By: hammer' }),
-      fetchLatestHeadReviewBodiesImpl: async () => [],
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === reviewedHead
+        ? [CLEAN_COMMENT_ONLY_REVIEW_BODY.replace('## Non-blocking Issues\n\n- None.',
+          '## Non-blocking Issues\n\n- Synthetic finding.')] : [],
       resolveHeadCloserCommitSuppressionImpl: async () => ({
         suppressed: true,
         reason: 'closer-commit-trailer',
@@ -1040,7 +1039,8 @@ test('watcher fails closed on permanent HAM stale-head resume proof errors', asy
     });
 
     assert.equal(result.dispatched, false);
-    assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, false);
+    assert.equal(seenDispatchContext, null);
+    assert.equal(result.nextAction.action, 'review');
     assert.ok(warnings.some(message => /not allowing hammer resume/.test(message)));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -3736,7 +3736,7 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
   }
 });
 
-test('daemon route disagreement hands off to the capped hammer and names failing gates', async () => {
+test('selected final hammer skips speculative daemon merge and fallback logging', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -3754,11 +3754,10 @@ test('daemon route disagreement hands off to the capped hammer and names failing
     assert.equal(closerCalls, 1, 'a failed selected route must hand off');
     assert.equal(result.dispatched, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
-    assert.deepEqual(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback')?.reasons,
-      ['ci-not-green', 'verdict-not-eligible']);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
+    assert.equal(result.nextAction.action, 'hammer');
+    assert.equal(parsed.find(d => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined,
+      'a selected final hammer does not make a speculative daemon attempt');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('daemon missing branch protection stays fail-closed for automated retry', async () => {
@@ -4080,7 +4079,7 @@ for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISP
 }
 
 
-test('clean reviews retain capped HAM for failures, conflicts and stale heads in both daemon dispositions', async () => {
+test('clean final reviews retain capped repair while a freshly moved head requires review', async () => {
   const rootDir = tempRoot();
   try {
     for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED]) {
@@ -4088,14 +4087,18 @@ test('clean reviews retain capped HAM for failures, conflicts and stale heads in
         let hammers = 0;
         const args = baseArgs(rootDir);
         const result = await maybeDispatchAmaClosureFor({ ...args,
+          dispatchJob: { ...args.dispatchJob, remediationStopCode: 'max-rounds-reached' },
           candidate: { ...args.candidate, mergeable: gate === 'pr-not-mergeable' ? 'CONFLICTING' : 'MERGEABLE',
-            statusCheckRollup: gate === 'ci-not-green' ? [{ name: 'ci', conclusion: 'FAILURE' }] : [] },
+            statusCheckRollup: [{ name: 'ci', conclusion: gate === 'ci-not-green' ? 'FAILURE' : 'SUCCESS' }] },
           runDaemonCleanMergeAttemptImpl: async () => ({ disposition,
-            reason: gate === 'stale-head' ? gate : 'gate-not-eligible', reasons: [gate] }),
+            reason: gate === 'stale-head' ? gate : 'gate-not-eligible', reasons: [gate],
+            ...(gate === 'stale-head' ? { liveGate: { candidateHead: 'c'.repeat(40), prState: 'OPEN',
+              mergeable: 'MERGEABLE', requiredChecks: [{ name: 'ci', conclusion: 'SUCCESS' }] } } : {}) }),
           maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
         });
-        assert.equal(result.dispatched, true, `${disposition}/${gate}`);
-        assert.equal(hammers, 1, `${disposition}/${gate}`);
+        assert.equal(result.dispatched, gate !== 'stale-head', `${disposition}/${gate}`);
+        assert.equal(hammers, gate === 'stale-head' ? 0 : 1, `${disposition}/${gate}`);
+        if (gate === 'stale-head') assert.equal(result.nextAction.action, 'review');
       }
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }

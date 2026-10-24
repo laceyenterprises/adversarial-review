@@ -17,7 +17,7 @@ async function page(text, options) {
 // sending it, refund on transport refusal, and keep the original wait deadline.
 export async function observeClosureWait({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null, launchAlive = false }) {
+  launchWait = null, launchAlive = false, anchorOnly = false }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -57,7 +57,7 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       const exhausted = immediate || (launching
         ? now - launchWait.startedAt >= launchWait.boundMs
         : !progress && now - row.started >= boundMs);
-      const notify = exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
+      const notify = !anchorOnly && exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
       return { exhausted, notify, startedAt: launching ? launchWait.startedAt : progress ? now : row.started,
         boundedMs: launching ? launchWait.boundMs : boundMs };
     }).immediate();

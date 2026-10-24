@@ -316,9 +316,9 @@ async function runOrchestrationForSuppression(suppressed, overrides = {}) {
       riskClass: 'low',
       prAuthor: 'codex-worker-bot',
       prState: 'open',
-      mergeable: 'MERGEABLE',
-      mergeStateStatus: 'CLEAN',
-      statusCheckRollup: [],
+      mergeable: suppressed ? 'CONFLICTING' : 'MERGEABLE',
+      mergeStateStatus: suppressed ? 'DIRTY' : 'CLEAN',
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       isDraft: false,
     },
@@ -381,11 +381,9 @@ test('orchestration: a self-certified stale head arms hammer resume (eligible to
 
 test('orchestration: an external push at a stale head NEVER arms hammer resume (stays blocked)', async () => {
   const payload = await runOrchestrationForSuppression(false);
-  assert.ok(payload, 'the hammer dispatch payload must be built (daemon declined)');
-  assert.equal(payload.reviewState.headSha, REVIEWED_HEAD);
-  assert.equal(payload.prMetadata.headSha, CURRENT_HEAD);
-  // EXTERNAL PUSH → resume NEVER armed. This is the safety invariant.
-  assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
+  assert.equal(payload.reviewState, undefined, 'unproven external pushes do not reach closer admission');
+  assert.equal(payload.orchestrationResult.nextAction.action, 'review');
+  assert.equal(payload.orchestrationResult.dispatched, false);
 });
 
 
@@ -396,11 +394,8 @@ test('watcher orchestration: merge-agent rebase of worker-authored head stays re
   const suppression = isTerminalCloserCommitIdentity(commit);
   assert.equal(suppression.suppressed, false);
   const payload = await runOrchestrationForSuppression(suppression.suppressed);
-  assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
-  assert.equal(isHammerRemediableEligibilityMiss(['stale-review-head'], {
-    reviewCycleExhausted: false,
-    allowStaleReviewHeadHammerResume: payload.dispatchContext.allowStaleReviewHeadHammerResume,
-  }), false);
+  assert.equal(payload.orchestrationResult.nextAction.action, 'review');
+  assert.equal(payload.orchestrationResult.dispatched, false);
 });
 
 for (const recoverable of [true, false]) {

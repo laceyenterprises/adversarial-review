@@ -202,8 +202,7 @@ test('replay #7334: a stale auto-refresh reason no longer parks the proven final
 
   // Merge still binds to exact-head HAM terminal validation evidence only.
   assert.ok(!execCalls.some(({ cmd, argv }) => cmd === 'gh' && argv[0] === 'pr' && argv[1] === 'merge'));
-  assert.deepEqual(daemonOutcomes.map(({ disposition, reason }) => [disposition, reason]),
-    [['not-taken', 'non-blocking-findings-present']]);
+  assert.deepEqual(daemonOutcomes, [], 'the selected final hammer skips the daemon merge lane');
   const mergeEligibility = isEligibleForAmaClosure(payload.reviewState, payload.prMetadata, cfg, { env: {} });
   assert.equal(mergeEligibility.eligible, false);
   assert.ok(mergeEligibility.reasons.includes('stale-review-head'), mergeEligibility.reasons.join(','));
@@ -387,7 +386,7 @@ test('a genuine pending head-change re-review of the pushed head keeps failing c
   // review yet, so there is no verdict, no final-round resume and no hand-off.
   const liveReviewHeads = [];
   let payload = null;
-  await maybeDispatchAmaClosureFor({
+  const result = await maybeDispatchAmaClosureFor({
     rootDir,
     reviewStateRow: {
       repo: job.repo, pr_number: job.prNumber, pr_state: 'open', review_status: 'pending',
@@ -425,9 +424,9 @@ test('a genuine pending head-change re-review of the pushed head keeps failing c
     },
   });
   assert.deepEqual(liveReviewHeads, [PUSHED]);
-  assert.equal(payload.reviewState.verdict, '');
-  assert.equal(payload.reviewState.blockingFindingState, 'unknown');
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false);
+  assert.equal(payload, null);
+  assert.equal(result.nextAction.action, 'review');
+  assert.equal(result.nextAction.head, PUSHED);
 });
 
 // Inject history evidence so these wiring fixtures remain offline.

@@ -53,7 +53,6 @@ function tempRoot(t, label) {
 // ── #7313: a proven final-round push reaches hammer terminal validation ────────
 
 
-
 for (const pr of [7313, 8123]) {
 test(`replay PR ${pr}: the proven final-round push goes to hammer terminal validation on the next tick`, async (t) => {
   const rootDir = tempRoot(t, '7313');
@@ -176,7 +175,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
   const [payload] = closerPayloads;
   assert.equal(payload.reviewState.verdict, 'comment-only');
   assert.equal(payload.reviewState.headSha, reviewedHead);
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
+  assert.equal(payload.sharedNextAction.decision.action, 'hammer');
   assert.equal(payload.dispatchContext.reviewedSha, reviewedHead);
   assert.equal(payload.dispatchContext.targetRemediationSha, pushedHead);
   const hammerDispatches = execCalls.filter(({ argv }) => argv[0] === 'dispatch' && argv.includes('hammer'));
@@ -192,12 +191,12 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
     assert.equal(await mergeAgent.applyMergeAgentStuckLabel({ rootDir, repo: job.repo,
       prNumber: pr, headSha: pushedHead, labels: [], logger: silent,
       ghExecFileImpl: async () => assert.fail('automatic owner must prevent stuck label') }), false);
-    const rescue = classify({ reviewBody: job.reviewBody, headSha: pushedHead,
+    const rescue = classify({ sharedNextAction: payload.sharedNextAction, reviewBody: job.reviewBody, headSha: pushedHead,
       reviewHeadSha: reviewedHead, commentOnlyFinalRoundPush: true,
       statusCheckRollup: greenRollup, labels: ['merge-agent-stuck'], mergeable: 'MERGEABLE' });
     assert.equal(rescue.decision, 'hammer-eligible');
     const dispatchJob = mergeAgent.buildMergeAgentDispatchJob(rootDir, {
-      repo: job.repo, prNumber: pr, headSha: pushedHead,
+      repo: job.repo, prNumber: pr, headSha: pushedHead, sharedNextAction: payload.sharedNextAction,
       statusCheckRollup: greenRollup, labels: ['merge-agent-stuck'], mergeable: 'MERGEABLE',
     });
     assert.equal(dispatchJob.mergeAgentRescueDecision, rescue.decision);

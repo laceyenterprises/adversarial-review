@@ -11,7 +11,7 @@ import { storedPrimaryChange } from '../src/ama/primary-change-store.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture, primaryRenameRepository } from './helpers/primary-change.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
+import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 const head = 'c'.repeat(40);
 
 test('REVERSALBLANK-01: removing author-added blank and whitespace-only lines passes with an audit count', () => {
@@ -116,7 +116,7 @@ test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-
   assert.equal(renameProofs.length, 1);
   assert.equal(checkPrimaryChange(oldEvidence, fixture.args.headSha).reason, 'primary-change-reverted');
   assert.equal(decideClosureOwner({ primaryChange: oldEvidence, currentHead: fixture.args.headSha }).reason,
-    'primary-change-needs-operator');
+    'primary-change-repair');
   assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
   assert.equal(isEligibleForAmaClosure({ headSha: fixture.args.headSha, verdict: 'approved', riskClass: 'low',
     remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
@@ -276,7 +276,7 @@ test('PRIMARYRENAME-01: changed bytes, deletion, foreign identity and an existin
     assert.equal(refusal.missingEvidence.summary.includes(`${fixture.args.headSha} author=`),
       !options.laterHammer, 'attribute the removing commit rather than the later head');
     assert.equal(decideClosureOwner({ primaryChange: evidence, currentHead: fixture.args.headSha }).reason,
-      'primary-change-needs-operator');
+      'primary-change-repair');
     const detailed = await fetchPrimaryChangeContext(fixture.args);
     assert.ok(checkPrimaryChange(detailed, fixture.args.headSha).missingEvidence.summary.includes(fixture.renameSha));
   }
@@ -659,7 +659,7 @@ test('closer dispatch retries failed reads and escalates deterministic unknown e
     });
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-repair-required');
-    assert.equal(result.needsOperator === true, !readFailed);
+    assert.equal(result.nextActionShared.decision.actor, readFailed ? 'closure-recovery' : 'hammer');
   }
 });
 

@@ -326,7 +326,7 @@ test('a HAM-validated head with still-pending required CI declines and falls thr
   }
 });
 
-test('a HAM daemon re-merge that fails closed falls through to the hammer (never parks)', async () => {
+test('a HAM daemon re-merge preserves a permanent fail-closed refusal', async () => {
   const rootDir = tempRoot();
   try {
     const result = await runDaemonCleanMergeAttempt(
@@ -340,8 +340,8 @@ test('a HAM daemon re-merge that fails closed falls through to the hammer (never
       }),
     );
 
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
-    assert.equal(result.reason, 'ham-terminal-remediation-daemon-permanent-merge-rejection');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'permanent-merge-rejection');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

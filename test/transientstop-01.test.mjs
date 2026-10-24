@@ -212,12 +212,12 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse(now) });
   let observedRecord;
   const closer = () => maybeDispatchAmaCloser({
-    reviewState: { verdict: 'approved', headSha: head, riskClass: 'low', remediationPending: false,
+    reviewState: { verdict: 'approved', headSha: head, riskClass: 'low', remediationPending: false, reviewCycleExhausted: true,
       blockingFindingState: 'known', blockingFindingCount: 0,
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
     prMetadata: { prNumber: 1, headSha: head, isOpen: true, isDraft: false, labels: [],
       mergeableState: 'MERGEABLE', branchProtection: { requiredContexts: [] },
-      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] },
     cfg: { enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
       eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
     dispatchContext: { rootDir: args.rootDir, hqRoot: args.rootDir, repo, reviewedSha: head,

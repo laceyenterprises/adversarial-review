@@ -623,3 +623,11 @@ comment retries project `status: succeeded` with explicit `succeeded: false`
 as `failed` before crossing the status-string boundary.
 
 LAC-2096 canonical payload/job identity and unidentified-row absence guarantees are PostgreSQL-scoped. Producer-shaped SQLite ticket recovery without projected ticket/head columns remains fenced/unsupported. Ambiguous identity must be handled before any foreign-receipt disposition, preserving the pending lease and charged attempt. Repository names compare case-insensitively. Deployment restores existing automatic daemon reconciliation; the operator dry-run does not freeze it.
+
+
+NXA-07: successor selection belongs to `nextAction(snapshot)`. This store
+retains execution/scheduling evidence and projects the selected action, actor,
+reason, head, anchored deadline, decision key and queue intent. Diagnostic reason
+text is not an eligibility registry. Automatic stops and unreadable evidence
+retain recovery ownership; only explicit hold/draft/disabled intent selects the
+operator. Existing durable attempt, lease, request and terminal fences remain.

@@ -40,7 +40,7 @@ function baseHammerArgs(rootDir, overrides = {}) {
       isDraft: false,
       mergeableState: 'MERGEABLE',
       labels: [],
-      statusCheckRollup: [],
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
       branchProtection: { requiredContexts: [] },
       author: 'builder',
       ...overrides.prMetadata,
@@ -90,7 +90,7 @@ function mechanicalHammerArgs(rootDir, overrides = {}) {
       ...(overrides.reviewState || {}),
     },
     prMetadata: {
-      mergeableState: 'DIRTY',
+      mergeableState: 'CONFLICTING',
       ...(overrides.prMetadata || {}),
     },
   });
@@ -133,8 +133,7 @@ test('MSM-04: review findings do not dispatch hammer before remediation exhausti
   });
 
   assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.equal(result.reason, 'review-findings');
   assert.equal(deps.calls.length, 0);
 });
 
@@ -792,9 +791,10 @@ test('HAMCLOSE-01 handed Comment only findings dispatch one hammer on that exact
     repo: identity.repo, prNumber: 404, headSha: HEAD, reviewedSha: HEAD,
     launchRequestId: 'prior-hammer', state: 'dispatched', lastObservedStatus: 'succeeded',
   }));
-  const deps = testDeps();
+  const deps = { ...testDeps(), readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+    row: { status: launchRequestId === 'prior-hammer' ? 'succeeded' : 'running' } }) };
   const args = { ...baseHammerArgs(rootDir, {
-    reviewState: { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 2 },
+    reviewState: { verdict: 'comment-only', reviewCycleExhausted: true, blockingFindingCount: 0, nonBlockingFindingCount: 2 },
     prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }] },
   }), ...deps };
   const result = await maybeDispatchAmaCloser(args);
@@ -803,7 +803,7 @@ test('HAMCLOSE-01 handed Comment only findings dispatch one hammer on that exact
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
   const second = await maybeDispatchAmaCloser(args);
   assert.equal(second.dispatched, false);
-  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status').length, 1);
 });
 
 test('HAMCLOSE-01 handed clean review selects daemon closure without classifying its prior hammer as failed', async t => {
@@ -818,7 +818,7 @@ test('HAMCLOSE-01 handed clean review selects daemon closure without classifying
     reviewState: { verdict: 'approved', blockingFindingCount: 0 },
     prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }] },
   }), ...deps });
-  assert.equal(result.reason, 'daemon-clean-route');
+  assert.equal(result.reason, 'clean-exact-head');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'handed-to-review');
   assert.equal(deps.calls.length, 0);
 });

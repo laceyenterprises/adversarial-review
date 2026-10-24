@@ -179,25 +179,22 @@ for (const exhausted of [false, true]) test(`HAMATTEST-03 a recorded bridge with
   assert.equal(f.counts().requests, 1);
 });
 
-for (const route of ['explicit', 'selected', 'legacy-owner']) {
-  test(`exact-head decision binds both heads for ${route}`, () => {
-    const result = { closerAuthoredStale: { currentHead: published, reviewedHead: reviewed,
-      decision: route === 'explicit' ? 'rereview-exact-head' : 'not-eligible' },
-      ...(route === 'explicit' ? {} : { [route === 'selected' ? 'selectedClosureOwner' : 'closureOwner']:
-        { owner: 'review', reason: 'exact-head-review' } }) };
-    const row = { reviewer_head_sha: reviewed };
-    assert.equal(hasExactHeadReviewDecision(result, published, row), true);
-    assert.equal(hasExactHeadReviewDecision(result, intermediate, row), false);
-    assert.equal(hasExactHeadReviewDecision(result, '', row), false);
-    assert.equal(hasExactHeadReviewDecision(result, published, {}), false);
-    assert.equal(hasExactHeadReviewDecision(result, published, { reviewer_head_sha: intermediate }), false);
-    for (const stale of [{ decision: result.closerAuthoredStale.decision },
-      { ...result.closerAuthoredStale, reviewedHead: published },
-      { ...result.closerAuthoredStale, reviewedHead: '' }]) {
-      assert.equal(hasExactHeadReviewDecision({ ...result, closerAuthoredStale: stale }, published, row), false);
-    }
-  });
-}
+test('exact-head review admission requires the shared dispatch decision', () => {
+  const nextAction = { head: published, action: 'review', actor: 'reviewer', queue: { intent: 'dispatch' } };
+  const result = { nextAction };
+  assert.equal(hasExactHeadReviewDecision(result, published), true);
+  assert.equal(hasExactHeadReviewDecision(result, intermediate), false);
+  assert.equal(hasExactHeadReviewDecision(result, ''), false);
+  for (const patch of [{ head: reviewed }, { action: 'hammer' }, { actor: 'closure-recovery' },
+    { queue: { intent: 'observe' } }, { queue: { intent: 'dispatch', deferredBy: 'drain' } }]) {
+    assert.equal(hasExactHeadReviewDecision({ nextAction: { ...nextAction, ...patch } }, published), false);
+  }
+  for (const diagnostic of [{ closerAuthoredStale: { currentHead: published, reviewedHead: reviewed,
+    decision: 'rereview-exact-head' } }, { selectedClosureOwner: { owner: 'review' } },
+  { closureOwner: { owner: 'review', reason: 'exact-head-review' } }]) {
+    assert.equal(hasExactHeadReviewDecision(diagnostic, published), false);
+  }
+});
 
 for (const bridge of [false, true]) {
   for (const ownership of ['live', 'uncertain', 'queue-refused']) {

@@ -52,6 +52,26 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
+test('verified terminal HAM completion crosses the retry row only with matching heads and safety gates', () => {
+  const options = {
+    reviews: { headSha: OLD, verdict: 'request changes', blockingFindingCount: 1 },
+    remediation: { roundsLeft: false },
+    launches: { closer: { headSha: HEAD, status: 'succeeded', outcome: 'no-merge', retryable: true } },
+    progress: { terminalReview: { validated: true, headSha: HEAD, reviewedHeadSha: OLD } },
+  };
+  assert.equal(nextAction(snap(options)).action, 'daemon-merge');
+  for (const terminalReview of [null, { validated: false, headSha: HEAD, reviewedHeadSha: OLD },
+    { validated: true, headSha: OTHER, reviewedHeadSha: OLD },
+    { validated: true, headSha: HEAD, reviewedHeadSha: OTHER }]) {
+    assert.equal(nextAction(snap({ ...options, progress: { terminalReview } })).reason, 'retry-no-merge');
+  }
+  assert.equal(nextAction(snap({ ...options, launches: { closer: { headSha: HEAD, status: 'running' } } })).reason, 'live-owner');
+  assert.equal(nextAction(snap({ ...options, checks: { conclusion: 'PENDING' } })).action, 'wait-for-CI');
+  assert.equal(nextAction(snap({ ...options, checks: { conclusion: 'FAILURE' } })).reason, 'ci-red-final');
+  assert.equal(nextAction(snap({ ...options, policy: { hammerCap: { lifetimeExhausted: true } } })).reason, 'lifetime-exhausted');
+  assert.equal(nextAction(snap({ ...options, leases: { closer: { headSha: HEAD, status: 'handed-to-review' } } })).reason, 'retry-no-merge');
+});
+
 test('the decision has exactly the shared contract fields, frozen and typed', () => {
   const decision = nextAction(snap());
   assert.ok(Object.isFrozen(decision));

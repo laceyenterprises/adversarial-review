@@ -1,3 +1,4 @@
+import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -14,7 +15,6 @@ import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-act
 import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
-import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
 import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
@@ -41,7 +41,6 @@ import {
 } from './ama/coexistence.mjs';
 import {
   DAEMON_MERGE_DISPOSITION,
-  TRANSIENT_GATE_READ_REASONS,
   isDaemonMergeReviewAllowed,
 } from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
@@ -89,7 +88,7 @@ import {
   writeCloserAuthoredStaleAudit,
 } from './closer-authored-stale.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
-import { proveCommentOnlyFinalRoundHead, findFinalRemediationPushJob } from './comment-only-final-round.mjs';
+import { findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -104,7 +103,6 @@ import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import {
   closureGateMergeability,
-  isGithubMergeConflict,
   normalizeGithubMergeability,
   resolveMergeabilityWithSampling,
 } from './github-mergeability.mjs';
@@ -655,108 +653,6 @@ const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
 );
 export const DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5_000;
-// How long PR-head CI may stay pending on a proven comment-only final-round head
-// before the wait stops being exempt from the retain-loop cap.
-export const FINAL_ROUND_CI_WAIT_DEADLINE_MS = 2 * 60 * 60 * 1000;
-
-// Retained source-rollback classifiers. Runtime ownership uses nextAction;
-// these exports do not select or force a daemon-decline successor.
-//
-// When the daemon clean-path fails closed on a REMEDIABLE gate, a fleet-worker
-// (identity-resolved) clean PR should be handed to the SAME capped hammer the
-// `not-taken` path already uses — the hammer re-validates the required gate at
-// the post-remediation head and merges under its own lease — instead of parking
-// for manual close. Worker-identity and lease misses still fail closed (no
-// blind merge-clicker). A verdict miss after the router selected the daemon
-// is a route disagreement:
-// hand it to the capped hammer rather than reselecting the daemon every tick.
-const DAEMON_HAMMER_REMEDIABLE_GATE_REASONS = new Set([
-  'verdict-not-eligible',
-  'ci-not-green',
-  'pr-not-mergeable',
-  'stale-head',
-]);
-const DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS = new Set([
-  'lease-not-held',
-]);
-
-/**
- * Is this daemon `failed-closed` result one a single capped hammer can plausibly
- * remediate into a merge? True ONLY for a remediable gate on a PR that already
- * cleared the daemon's worker-identity gate (so it is an attributed fleet-worker
- * PR). Worker-identity, permanent/unclassified merge rejections, and transient
- * budget/read exhaustion are NOT hammer-remediable here.
- *
- * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
- * @returns {boolean}
- */
-export function isDaemonFailClosedHammerRemediable(daemonCleanMerge) {
-  if (!daemonCleanMerge || daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.FAILED_CLOSED) {
-    return false;
-  }
-  const reason = String(daemonCleanMerge.reason || '');
-  // Worker-identity-unresolved is NOT hammer-remediable — that PR is un-attributed
-  // and closes (if at all) via Deliverable 1's operator-approval lane on the
-  // daemon path, never a spawned merge-clicker.
-  if (reason === 'worker-identity-unresolved') return false;
-  // The daemon's own stale-head terminal: the reviewed head moved, so a fresh
-  // review head gets its own hammer under the per-PR cap.
-  if (reason === 'stale-head') return true;
-  // A `gate-not-eligible` terminal carries the exact failing eligibility gates.
-  if (reason !== 'gate-not-eligible') return false;
-  return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
-}
-
-function daemonGateReasonsHammerRemediable(gateReasons) {
-  const reasons = Array.isArray(gateReasons) ? gateReasons.map((r) => String(r)) : [];
-  if (reasons.length === 0) return false;
-  // Any non-remediable gate co-occurring → park (fail closed).
-  if (reasons.some((r) => DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS.has(r))) return false;
-  // DIRTYOWN-01: a transient mergeability read riding along a real remediable
-  // miss says nothing about the head — it must not turn that miss into a park.
-  // A transient-only decline stays non-remediable (retried next tick).
-  const substantive = reasons.filter((r) => !['pr-mergeability-unknown', 'primary-change-read-failed'].includes(r));
-  // EVERY remaining gate must be hammer-remediable.
-  return substantive.length > 0
-    && substantive.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
-}
-
-/**
- * CIDEDUPE-01: is this daemon `not-taken` decline one the capped hammer can take
- * over once the closer/daemon route disagreement passes its bound? Same gate
- * classification as the fail-closed fallback above, applied to the pre-lease
- * `not-eligible` decline; every other decline parks for the operator instead.
- *
- * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
- * @returns {boolean}
- */
-export function isDaemonNotTakenHammerRemediable(daemonCleanMerge) {
-  if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
-  if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
-  return daemonGateReasonsHammerRemediable(daemonCleanMerge.reasons);
-}
-
-function daemonGateReasonsTransientRead(gateReasons) {
-  return Array.isArray(gateReasons) &&
-    gateReasons.length > 0 &&
-    gateReasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(String(reason)));
-}
-
-/**
- * DIRTYOWN-01: is this daemon `not-taken` decline made only of transient GitHub
- * reads (`pr-mergeability-unknown`, `labels-unavailable`)? Such a decline says
- * nothing about the head, so it is logged but never counted toward the route
- * disagreement bound — a steady merge stream that keeps GitHub recomputing
- * mergeability must not page an operator for a manual close.
- *
- * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
- * @returns {boolean}
- */
-export function isDaemonNotTakenTransientRead(daemonCleanMerge) {
-  if (daemonCleanMerge?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) return false;
-  if (String(daemonCleanMerge.reason || '') !== 'not-eligible') return false;
-  return daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
-}
 
 // DIRTYOWN-02: a bare `reason=not-eligible` does not say which eligibility
 // reasons parked the PR, so the background log lines carry the array too.
@@ -887,24 +783,18 @@ async function maybeDispatchAmaClosureForInner({
       hammerWakeSink.closerInvoked = true;
       return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
     }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
-  let result;
-  try { result = await dispatchAmaClosureFor(dispatchArgs); }
-  catch (error) {
-    if (error?.code !== 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || options.signal?.aborted) throw error;
-    // FINALCLOSE-01: retry admission from local final-round evidence, without
-    // repeating the timed-out reads or attempting any watcher merge.
-    result = await dispatchAmaClosureFor({ ...dispatchArgs, finalRoundDispatchOnly: error });
-  }
+  let result = await dispatchAmaClosureFor(dispatchArgs);
   if (hammerWakeSink.value && hammerWakeSink.closerInvoked) {
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
   if (result && closureOwnerSink.shared) {
+    const executorShared = readClosureNextAction(result);
     const { nextActionShared, ...publicResult } = result;
     result = publicResult;
-    closureOwnerSink.shared = observeClosureResult(nextActionShared || closureOwnerSink.shared,
+    closureOwnerSink.shared = observeClosureResult(nextActionShared || executorShared || closureOwnerSink.shared,
       (isSafetyRecoveryHold({ ...result, needsOperator: false })
-        || (result.needsOperator && !result.boundedWait?.exhausted))
+        || (result.needsOperator && !result.primaryChangeRepair && !result.boundedWait?.exhausted))
         ? { ...result, safetyRefusal: true } : result, options.passSnapshot);
     const selected = closureOwnerSink.shared.decision;
     result = { ...result, nextAction: selected, closureOwner: closureOwnerFromDecision(selected),
@@ -974,7 +864,6 @@ function closureWaitProgress(result, startedAt) {
 async function dispatchAmaClosureFor({
   hammerWakeSink = null,
   passSnapshot = null,
-  finalRoundDispatchOnly = null,
   finalRoundSink = null,
   closerAuthoredStaleSink = null,
   ownerProofFactsSink = null,
@@ -1014,11 +903,9 @@ async function dispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   requestEligibleHammerWakeImpl = requestEligibleHammerWake,
-  recoverStrandedCloserHeadImpl = recoverStrandedCloserHead,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
-  proveCommentOnlyFinalRoundHeadImpl = proveCommentOnlyFinalRoundHead,
   proveCloserAuthoredStaleHeadImpl = proveCloserAuthoredStaleHead,
   // STALECLOSER-03: return the shared closer-authored-stale decision before any
   // side effect (lease rekey, audits, wakes, dispatch). merge-agent rescue reads it.
@@ -1228,78 +1115,6 @@ async function dispatchAmaClosureFor({
       ? { waitClass: 'final-round', startedAt: finalRoundSink.value.startedAt } : {}),
     ...args,
   });
-  if (finalRoundDispatchOnly) {
-    if ((!reviewCycleExhausted && !finalPush && !finalRoundKnown) || !finalHead || probeCloserAuthoredStale
-      || cfg.autonomousMergeExecutionEnabled === false) throw finalRoundDispatchOnly;
-    const snapshot = await buildAdversarialGateSnapshot(rootDir, { repo: repoPath, prNumber,
-      reviewRow: reviewStateRow, headSha: reviewStateRow?.reviewer_head_sha || finalHead,
-      labels: labelNames, includeSettledReview: true });
-    const settled = snapshot.settledReview || {};
-    if (settled.remediationPending === true) throw finalRoundDispatchOnly;
-    const reviewedSha = snapshot.reviewedHeadSha || reviewStateRow?.reviewer_head_sha;
-    if (!reviewedSha) throw finalRoundDispatchOnly;
-    const args = {
-      reviewState: { ...settled, headSha: reviewedSha,
-        riskClass: String(candidate?.riskClass || ledgerRiskClass || 'unknown').toLowerCase(),
-        reviewCycleExhausted: true, completedRemediationRounds: completedRemediationRoundsForPR,
-        completedRereviewRounds: completedRereviewRoundsForPR },
-      prMetadata: { prNumber, headSha: finalHead,
-        isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
-        isDraft: Boolean(candidate?.isDraft), labels: labelNames, mergeableState: 'UNKNOWN',
-        statusCheckRollup: candidate?.statusCheckRollup || [],
-        branchProtection: candidate?.branchProtection || { requiredContexts: [] },
-        author: candidate?.prAuthor, title: candidate?.title || '', body: candidate?.body || '' },
-      cfg,
-      options: { env },
-      dispatchContext: { rootDir, repo: repoPath, reviewedSha, targetRemediationSha: finalHead,
-        dispatchRecordHeadSha: reviewedSha, finalRoundDispatchOnly: true,
-        dispatchReason: 'exhausted-final-hammer',
-        daemonFailureReasons: [`ama-coexistence-operation-timeout:${finalRoundDispatchOnly.operation}`],
-        reviewCycleCapReached, ciBlockedHammerOwner,
-        prUrl: `https://github.com/${repoPath}/pull/${prNumber}`,
-        reviewer: reviewStateRow?.reviewer || '', riskClass: candidate?.riskClass || ledgerRiskClass || 'unknown',
-        requiredGateContext: resolveGateStatusContext(env),
-        parentSession: env.HQ_PARENT_SESSION || 'session:watcher',
-        dispatchedAt: new Date(now()).toISOString(), orchestrationMode }, logger,
-    };
-    const run = async (signal, background = false) => {
-      throwIfAborted(signal);
-      return maybeDispatchAmaCloserImpl({ ...args, signal,
-        ...(background ? { operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] } : {}) });
-    };
-    let result;
-    if (resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
-      const key = amaHammerBackgroundKey({ repo: repoPath, prNumber, headSha: finalHead });
-      const queue = amaHammerBackgroundQueueImpl({ maxConcurrent: cfg.amaCloserMaxConcurrentLaunches });
-      const settled = queue.takeSettled?.(key);
-      if (settled) {
-        if (!settled.ok) throw settled.error;
-        result = settled.result;
-      } else {
-        const submission = queue.submit({ key, timeoutMs: Number(cfg.dispatchTimeoutMs) > 0 ? loadAwareTimeoutMs(cfg.dispatchTimeoutMs) : undefined,
-          pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: finalHead },
-          run: async signal => {
-            let live;
-            for (let attempt = 0; ; attempt++) {
-              throwIfAborted(signal);
-              try { live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger }); break; }
-              catch (error) {
-                if (attempt >= 2 || !isOrphanRecoveryWait(error)) throw error;
-                await abortableSleep((attempt + 1) * 1000, signal);
-              }
-            }
-            if (live?.state !== 'OPEN' || live.headSha !== finalHead || live.isDraft) {
-              return { dispatched: false, skipMergeAgent: true, reason: 'final-round-live-head-changed' };
-            }
-            // Keep the observed label gates; the closer and hammer refresh them before execution.
-            return run(signal, true);
-          } });
-        result = { dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON,
-          ...amaHammerBackgroundProgress(submission, now()) };
-      }
-    } else result = await run(signal);
-    return withAmaDispatchMetadata({ ...result, skipMergeAgent: true }, { amaEnabled: true });
-  }
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
   // base branch moves (a steady merge stream keeps `main` moving). The
@@ -2005,21 +1820,6 @@ async function dispatchAmaClosureFor({
       nextAction: decision, boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
 
-  // Transient-only misses on a closer's parked head (exact-head CI pending,
-  // mergeability UNKNOWN) are an ordinary watcher wait: retry, never stop. Red
-  // or unknown CI and real conflicts still reach the capped hammer repair lane.
-  // The snapshot above uses evaluateMergeEligibility, with validatedHead carried
-  // forward even for retry. Its head matches; isEligibleForAmaClosure's
-  // stale-review-head reason is not part of this snapshot.
-  if (!orphanRecovery?.ownerProof && closerOnlyHeadDelta && closerAuthoredStale.decision === 'retry'
-    && disabledEligibility.reasons.length > 0
-    && disabledEligibility.reasons.every((reason) => ['ci-not-green', 'pr-mergeability-unknown'].includes(reason))) {
-    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: closerAuthoredStale.reasons.includes('ci-pending')
-        ? 'closer-head-ci-not-green' : 'closer-head-mergeability-unknown',
-      reasons: disabledEligibility.reasons, closerAuthoredStale }, { amaEnabled: true });
-  }
-
   let allowStaleReviewHeadHammerResume = false;
   // NOOWNER-01: a closer tip suppresses ordinary automatic review refresh;
   // ownerless, uncertified heads return to hammer validation.
@@ -2387,7 +2187,9 @@ async function dispatchAmaClosureFor({
     if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: 'primary-change-needs-operator' };
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
-      needsOperator: true, missingEvidence, daemonCleanMerge }, { amaEnabled: true });
+      needsOperator: true, missingEvidence, daemonCleanMerge,
+      primaryChangeRepair: hasHammerDispatchIntent(shared, { repo: repoPath, prNumber, headSha: currentPrHeadSha }),
+    }, { amaEnabled: true });
   }
 
   if (!orphanRecovery?.ownerProof && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
@@ -2512,94 +2314,11 @@ async function dispatchAmaClosureFor({
         ? 'active-remediation-job' : 'pending-required-checks', nextAction: decision,
       boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
-  // HMR-01: how long has this PR been TERMINAL and still unmerged?
-  //
-  // A settled comment-only verdict may spawn one final non-blocking round, so
-  // `reviewCycleExhausted` need not flip for it and the hammer can be structurally
-  // unreachable (see isHammerRemediableEligibilityMiss). The operator contract is
-  // Codex-first / Hammer-last, so the hammer must not fire on a FRESH comment-only
-  // verdict -- only once the PR has sat terminal past the same grace that
-  // `review:terminal_but_unmerged` already tickets on.
-  //
-  // `posted_at` is when the settled review landed. Null/unparseable yields null,
-  // which leaves the downstream branch inert and behaviour exactly as before.
-  const settledCommentOnlyTerminalMs = (() => {
-    const verdict = String(gateSnapshot?.settledReview?.verdict || '').trim();
-    if (verdict !== 'comment-only') return null;
-    const postedAt = Date.parse(String(reviewStateRow?.posted_at || ''));
-    if (!Number.isFinite(postedAt)) return null;
-    return Math.max(0, Date.now() - postedAt);
-  })();
-  const commentOnlyFinalRoundShape =
-    reviewState.verdict === 'comment-only' &&
-    reviewState.remediationPending === false &&
-    reviewState.blockingFindingState === 'known' &&
-    reviewState.blockingFindingCount === 0 &&
-    reviewState.nonBlockingFindingState === 'known' &&
-    (reviewState.nonBlockingFindingCount > 0 || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true);
-  // COMMENTCLOSE-01: prove the final-round head whatever CI says. The proof only
-  // authorizes the hammer's terminal validation of this exact head; merge still
-  // needs that validation's exact-head `ham_terminal_remediation_validated`.
-  let commentOnlyFinalRoundProven = false;
-  if (commentOnlyFinalRoundShape) {
-    try {
-      commentOnlyFinalRoundProven = await proveCommentOnlyFinalRoundHeadImpl({
-        repo: repoPath,
-        reviewedHead: reviewState.headSha,
-        currentHead: currentPrHeadSha,
-        completedRevisionRefs: commentOnlyFinalRoundRevisionRefs,
-        completedPushedHeads: commentOnlyFinalRoundPushedHeads,
-        execFileImpl: execFileAsync,
-        logger,
-      });
-    } catch (err) {
-      logger.warn?.(`[watcher] AMA comment-only final-round proof failed for ${repoPath}#${prNumber} authOutage=${err?.authOutage === true}: ${err?.message || err}`);
-    }
-  }
-  const finalRoundCiNotGreen = disabledEligibility.reasons.includes('ci-not-green');
-  // DIRTYOWN-02 (agent-os#7332): a conflicting final-round head cannot go green
-  // by waiting. Its CI may never run, or may run red on the unmergeable head,
-  // and the hammer has to rebase first either way. So a conflict resumes the
-  // hammer whatever CI says. Non-conflicting heads retain the pending-CI wait;
-  // failed CI is handed to the hammer for repair (HAMREDCI-01).
-  // `pr-not-mergeable` alone is not a conflict: with an empty raw `mergeable`
-  // it also covers BLOCKED (which a red required check reports), UNSTABLE and
-  // BEHIND. So the bypass needs GitHub's raw conflict signal as well.
-  const finalRoundConflicting = disabledEligibility.reasons.includes('pr-not-mergeable') &&
-    isGithubMergeConflict(mergeabilityForGate || {});
-  // Waiting for CI on a proven final-round head is progress, not a stall, so it
-  // must not spend the retain-loop cap that parks a PR for the operator. Refused
-  // red-CI dispatches still count. A conflicting head is not waiting on CI
-  // either (see above), so it never gets the exemption.
-  const finalRoundChecks = commentOnlyFinalRoundProven && finalRoundCiNotGreen && !finalRoundConflicting
-    ? summarizeExternalChecks(prMetadata.statusCheckRollup, { env, cfg })
-    : null;
-  // A known rollup without external checks may precede CI registration. It
-  // stays non-green, but shares the bounded wait rather than burning recovery.
-  const finalRoundCiPending = Boolean(finalRoundChecks?.rollupKnown &&
-    finalRoundChecks.failedChecks.length === 0 &&
-    (finalRoundChecks.pendingChecks.length > 0 || finalRoundChecks.totalExternalChecks === 0));
-  const commentOnlyFinalRoundResume = commentOnlyFinalRoundProven &&
-    (!finalRoundCiNotGreen || finalRoundConflicting || finalRoundChecks?.failedChecks.length > 0);
-  // The wait is bounded: CI still pending past the deadline (a hung or never-
-  // scheduled check) counts toward the retain cap again, so the PR reaches the
-  // operator instead of being held forever. Measured from the proven push.
-  const finalRoundPushedAtMs = finalRoundCiPending
-    ? Math.max(...commentOnlyFinalRoundPushedHeads
-      .filter((entry) => entry?.workerPushedHeadSha === currentPrHeadSha)
-      .map((entry) => Date.parse(entry?.completedAt || ''))
-      .filter(Number.isFinite))
-    : Number.NaN;
-  const finalRoundCiWaitMs = Number(now()) - finalRoundPushedAtMs;
-  const commentOnlyFinalRoundAwaitingCi = finalRoundCiPending &&
-    Number.isFinite(finalRoundCiWaitMs) && finalRoundCiWaitMs < loadAwareTimeoutMs(FINAL_ROUND_CI_WAIT_DEADLINE_MS, { maxMs: Infinity });
-  if (finalRoundCiPending && !commentOnlyFinalRoundAwaitingCi) {
-    logger?.warn?.(
-      `[watcher] final-round-ci-pending-timeout ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}: ` +
-        `PR-head CI still pending ${Number.isFinite(finalRoundCiWaitMs) ? `${Math.round(finalRoundCiWaitMs / 60_000)} min` : '(push time unknown)'} ` +
-        `after the proven final-round push; the retain-loop cap applies and escalates to the operator`,
-    );
-  }
+  // Final-push provenance was collected into the shared snapshot above. Its
+  // successor and pending-check ownership cannot be selected a second time.
+  const commentOnlyFinalRoundProven = Boolean(remediationHandoff);
+  const commentOnlyFinalRoundAwaitingCi = shared.decision.action === 'wait-for-CI'
+    && shared.decision.actor === 'ci';
   const shouldLookupMergedProtectiveDependents =
     reviewCycleExhausted ||
     hamTerminalRemediationValidated ||
@@ -2620,9 +2339,6 @@ async function dispatchAmaClosureFor({
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),
-    settledCommentOnlyTerminalMs,
-    commentOnlyFinalRoundResume,
-    commentOnlyFinalRoundConflicting: finalRoundConflicting,
     rootDir,
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
@@ -2810,22 +2526,12 @@ async function dispatchAmaClosureFor({
             return { dispatched: false, reason: 'background-pr-state-changed', ...changedDecision };
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft', ...changedDecision };
-          // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
-          // conflict), so it dispatches. UNKNOWN surviving the bounded sampling
-          // window waits for the next cycle, including UNKNOWN+CLEAN.
-          const liveMergeability = normalizeGithubMergeability(live || {});
-          if (liveMergeability === 'UNKNOWN' || launchShared.decision.reason === 'mergeability-unknown') {
-            return { dispatched: false, reason: 'background-pr-mergeable-unknown', mergeable: 'UNKNOWN', ...changedDecision };
-          }
-          if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
-            return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null, ...changedDecision };
-          }
-          if (launchShared !== shared && !hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })) {
-            return { dispatched: false, reason: 'background-pr-state-changed', ...changedDecision };
+          if (!hasHammerDispatchIntent(launchShared, { repo: repoPath, prNumber, headSha: live.headSha })) {
+            return { dispatched: false, reason: launchShared.decision.reason, recoveryWait: true, skipMergeAgent: true, retryAfterMs: 30_000, ...changedDecision };
           }
           const launched = await maybeDispatchAmaCloserImpl({ ...closerArgs, sharedNextAction: launchShared, signal: backgroundSignal,
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
-          const settledShared = launched?.nextActionShared || launchShared;
+          const settledShared = launched?.nextActionShared || readClosureNextAction(launched) || launchShared;
           updateSharedNextAction(settledShared);
           return { ...launched, nextActionShared: settledShared };
         },
@@ -2886,9 +2592,7 @@ async function dispatchAmaClosureFor({
       }
       result = backgroundSettled.result;
       if (
-        result?.reason === 'background-pr-state-changed' ||
-        result?.reason === 'background-pr-not-mergeable' ||
-        result?.reason === 'background-pr-mergeable-unknown'
+        result?.reason === 'background-pr-state-changed'
       ) {
         result = { ...result, skipMergeAgent: true, retryAfterMs: 30_000 };
       } else if (result?.reason === 'background-pr-draft') {
@@ -2931,21 +2635,6 @@ async function dispatchAmaClosureFor({
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
-  // Classify hard refusals before any exact-head review request can take ownership.
-  if (result?.reason === 'not-eligible') {
-    const hardReason = (result.reasons || []).find((reason) =>
-      ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
-        'fast-merge-state-unsupported'].includes(reason)
-      || String(reason).startsWith('label-'));
-    if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
-  }
-
-  const closerRecovery = await recoverStrandedCloserHeadImpl({ result: { ...result, hamTerminalRemediationValidated },
-    closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
-    prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
-    timeoutMs: operationTimeoutMs, logger });
-  if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
-
   if (result?.needsOperator && result?.reason === 'primary-change-repair-required') {
     try {
       await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
@@ -3067,6 +2756,24 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       timeoutMs: err.timeoutMs || operationTimeoutMs || null,
     }, { amaEnabled: true });
   }
+  // Partial executor results still project the shared policy. Missing decision
+  // evidence is an owned refresh/reconciliation, never proof of launch absence.
+  if (amaClosureResult?.amaEnabled && !amaClosureResult.nextAction) {
+    const head = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
+    let anchor = reviewStateRow?.posted_at || reviewStateRow?.reviewed_at || null;
+    try {
+      const wait = await observeClosureWait({ rootDir, repo: repoPath, prNumber, headSha: head, anchorOnly: true });
+      anchor ||= new Date(wait.startedAt).toISOString();
+    } catch { /* Diagnostic persistence cannot refuse a workflow. */ }
+    const snapshot = deriveNextActionSnapshot({ base: passSnapshot,
+      subjectKey: `${repoPath}#${prNumber}`, head, observedAt: new Date().toISOString(),
+      anchors: { firstActionableAt: anchor }, observations: {
+        pr: { headSha: head, state: candidate?.prState, isDraft: candidate?.isDraft, labels: labelNames },
+      } });
+    const shared = Object.freeze({ snapshot, decision: nextAction(snapshot) });
+    amaClosureResult = bindClosureNextAction({ ...amaClosureResult, nextAction: shared.decision,
+      closureOwner: closureOwnerFromDecision(shared.decision) }, shared);
+  }
   throwIfAborted(signal);
   logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
     reason: amaClosureResult?.dispatched ? 'hammer-running'
@@ -3148,37 +2855,16 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       urgent: !amaClosureResult.boundedWait.exhausted, amaClosureResult };
   }
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
-  const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
+  const amaClosureEligibilityMiss = amaClosureResult?.eligibilityRejected === true;
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);
-  // The only safety exception is scoped primary-change evidence recovery.
-  // A newly submitted background run has not evaluated its gates yet and
-  // cannot be preempted. Unknown dispatch status retains ownership even after
-  // lease expiry: age alone cannot prove that the hammer has stopped.
-  const primaryChangeOperatorHold = (result) => (
-    ['primary-change-needs-operator', 'primary-change-repair-required'].includes(result?.reason)
-      && result?.needsOperator === true
-  );
-  // Reuse the recovery classifier after removing only the primary-change
-  // exception. A co-occurring safety reason in either result still owns the PR.
-  const otherSafetyHold = isSafetyRecoveryHold({
-    reasons: [amaClosureResult?.reason, amaClosureResult?.operatorReason,
-      ...(amaClosureResult?.reasons || []), amaClosureResult?.daemonCleanMerge?.reason,
-      amaClosureResult?.daemonCleanMerge?.operatorReason,
-      ...(amaClosureResult?.daemonCleanMerge?.reasons || [])]
-      .filter((reason) => reason && !/^primary-change-(?:reverted|unknown|needs-operator|repair-required)$/.test(reason)),
-  });
-  // Production promotes the daemon refusal to the top level. Read a nested
-  // refusal only under that result or the daemon's own fail-closed wrapper.
-  const daemonOperatorHold = ['primary-change-needs-operator', 'daemon-failed-closed']
-    .includes(amaClosureResult?.reason)
-    && primaryChangeOperatorHold(amaClosureResult?.daemonCleanMerge);
-  const operatorHoldPath = otherSafetyHold ? null : daemonOperatorHold
-    ? 'daemon-clean-merge'
-    : primaryChangeOperatorHold(amaClosureResult)
-      ? 'closer' : null;
-  const operatorHold = operatorHoldPath === 'daemon-clean-merge'
-    ? amaClosureResult.daemonCleanMerge : amaClosureResult;
-  const amaClosureOperatorPreemptable = operatorHoldPath !== null;
+  // The scoped operator lane is an executor of the selected repair workflow.
+  // Identity, ownership and physical safety checks still apply; reason text
+  // cannot turn a recovery observation into dispatch authority.
+  const amaClosureOperatorPreemptable = amaClosureResult?.primaryChangeRepair === true
+    && hasHammerDispatchIntent(readClosureNextAction(amaClosureResult), {
+      repo: repoPath, prNumber,
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha,
+    });
   // Scan leases only before taking over a settled primary-change refusal.
   // Terminal results and other safety holds keep their normal recovery routing.
   const liveLease = amaEnabled && mergeAgentRequestedScoped && amaClosureOperatorPreemptable
@@ -3189,7 +2875,8 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   const coexistence = decideMergeAgentCoexistence({
     amaEnabled,
     amaClosureDispatched: false,
-    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent) || safetyHold,
+    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent) || safetyHold
+      || ['owned', 'reconcile', 'observe'].includes(amaClosureResult?.nextAction?.queue?.intent),
     amaCloserLeaseHeld,
     amaClosureOperatorPreemptable,
     amaClosureEligibilityMiss,
@@ -3208,7 +2895,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     logger?.log?.(JSON.stringify({ event: 'ama.primary_change.operator_fallback',
       repo: repoPath, pr: prNumber, headSha: currentRevisionRef || candidate?.headSha,
       actor: mergeAgentRequestEvent.actor, eventId: mergeAgentRequestEvent.id,
-      path: operatorHoldPath, reason: operatorHold.reason, reasons: operatorHold.reasons }));
+      nextAction: amaClosureResult.nextAction }));
     return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }
@@ -3221,7 +2908,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);
     return { outcome: 'ama-pending', amaClosureResult };
   }
-  if (amaClosureResult?.amaEnabled && (safetyHold || amaClosureResult?.skipMergeAgent || (amaClosureResult?.reason === 'not-eligible'
+  if (amaClosureResult?.amaEnabled && (safetyHold || amaClosureResult?.skipMergeAgent || (amaClosureEligibilityMiss
     && !mergeAgentRequestedScoped))) {
     return recoverAmaAutomationImpl({
       rootDir, repo: repoPath, prNumber,

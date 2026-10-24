@@ -1,7 +1,6 @@
 import { handlePostedReviewRow } from '../../src/posted-review-row.mjs';
 import { maybeDispatchAmaClosureFor } from '../../src/ama-closure-orchestration.mjs';
 import { attemptDaemonCleanMerge } from '../../src/ama/daemon-merge.mjs';
-import { mapDaemonPrimaryChangeResult } from '../../src/daemon-clean-merge.mjs';
 import { observeClosureWait } from '../../src/ama/closure-wait.mjs';
 const repo = 'fixture/repo';
 export const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
@@ -53,7 +52,7 @@ export async function watcherTick({ rootDir, prNumber, headSha, evidence, store,
             acquireLeaseImpl: () => ({ acquired: true, lease: { leaseId: 'fixture' } }), releaseLeaseImpl() {},
             runMergeImpl: async () => { await runMerge(headSha); store.merged = true; return { exitCode: 0, stdout: '', stderr: '' }; },
             writeAuditImpl: () => ({ written: true }), appendAuditImpl: () => ({ written: true }), readAuditImpl: () => null });
-          return mapDaemonPrimaryChangeResult(result);
+          return result;
         },
       }) }),
     dispatchMergeAgentForPRImpl: async () => { throw new Error('merge-agent fallback must not run'); },

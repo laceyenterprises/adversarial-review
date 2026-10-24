@@ -2819,7 +2819,7 @@ async function dispatchMergeAgentForPR({
   };
 }
 
-function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {
+function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null, passSnapshot = null, sharedNextAction = null } = {}) {
   const finalPush = findFinalRemediationPushJob(rootDir, candidate);
   const latestJob = findLatestFollowUpJobForPR(rootDir, {
     repo: candidate.repo,
@@ -2828,6 +2828,9 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
   }) || finalPush;
   const parsedReview = parseMergeAgentRescueReviewBody(latestJob?.reviewBody);
   const classifierResult = classifyMergeAgentRescue({
+    sharedNextAction: sharedNextAction || candidate.sharedNextAction || null,
+    snapshot: passSnapshot || candidate.passSnapshot || candidate.snapshot || null,
+    prState: candidate.prState,
     closureOwner: candidate.closureOwner || null,
     commentOnlyFinalRoundPush: hasCommentOnlyFinalRoundPush(rootDir, { repo: candidate.repo, prNumber: candidate.prNumber, headSha: candidate.headSha }),
     reviewBody: latestJob?.reviewBody ?? null,

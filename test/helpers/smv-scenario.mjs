@@ -19,11 +19,11 @@ const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { buildFollowUpJob, createFollowUpJob, claimNextFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
-const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
-const { maybeDispatchAmaCloser, isHammerRemediableEligibilityMiss, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
+const { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease, isReclaimablePendingAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
+const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
   updateAmaCloserDispatchRecord, __testables__ } = await import('../../src/ama/dispatch-closer.mjs');
 const { reconcilePreReceiptIntent } = await import('../../src/ama/pre-receipt-intent.mjs');
-const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
+const { requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { deriveNextActionSnapshot, nextAction } = await import('../../src/pr-next-action.mjs');
 const { shadowNextAction } = await import('../../src/pr-next-action-shadow.mjs');
 const { routeCappedReviewToClosure } = await import('../../src/hamclose-review-admission.mjs');
@@ -33,7 +33,10 @@ const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = aw
 const { prepareMarkRereviewCiBlocked, prepareMarkAttemptStarted, prepareMarkPosted,
   prepareReleaseUnsettledPostedReview } = await import('../../src/review-state-statements.mjs');
 const { requeuePostedReviewWithoutHead } = await import('../../src/posted-review-head-repair.mjs');
-const { decideClosureOwner } = await import('../../src/ama/closure-owner.mjs');
+const { closureOwnerFromDecision } = await import('../../src/ama/closure-owner.mjs');
+const { cases: actionCases, matrixPair } = await import('./next-action-matrix.mjs');
+const { default: classifyRescue } = await import('../../src/merge-agent-rescue-classifier.mjs');
+const { closeoutRereview } = await import('../../src/remediation-closeout.mjs');
 const { isEligibleForAmaClosure } = await import('../../src/ama/eligibility.mjs');
 const { fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } = await import('../../src/ama/hammer-head-validation.mjs');
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
@@ -94,14 +97,9 @@ if (scenario === 'clean') {
     updateAmaCloserLease({ rootDir: parkedRoot, ...receipt, status: 'terminal', terminalOutcome: 'deferred' });
     updateAmaCloserDispatchRecord(parkedRoot, receipt, () => ({ ...receipt,
       state: 'dispatched', launchRequestId: 'resumed', lastObservedStatus: status }));
-    const ownerInput = { rootDir: parkedRoot, lease: readAmaCloserLease(parkedRoot, receipt),
-      currentHead: headSha, reviewState: { verdict: 'approved', headSha,
-        blockingFindingState: 'known', blockingFindingCount: 0,
-        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } };
     let resumedProbe = { ok: true, row: { status: 'running' } };
     for (let poll = 0; poll < 2; poll++) {
-      assert.equal(decideClosureOwner({ ...ownerInput,
-        readLaunchRequestStatusImpl: () => resumedProbe }).owner, 'wait');
+
       const dispatch = await maybeDispatchAmaCloser({ cfg: { enabled: true }, prMetadata: receipt,
         dispatchContext: { rootDir: parkedRoot, repo }, readLaunchRequestStatusImpl: async () => resumedProbe,
         execFileImpl: refuse, cleanupScratchImpl: refuse });
@@ -114,8 +112,7 @@ if (scenario === 'clean') {
     assert.equal(resumedActive.length, 1);
     assert.equal(resumedActive[0].holdsCapacity, true);
     resumedProbe = { ok: true, row: { status: 'canceled' } };
-    assert.equal(decideClosureOwner({ ...ownerInput,
-      readLaunchRequestStatusImpl: () => resumedProbe }).owner, 'daemon-merge');
+    assert.equal(launchRequestOwned(resumedProbe), false);
   }
 
   // HAMATTEST-02: the shared, head-bound decision selects ownership only.
@@ -124,7 +121,7 @@ if (scenario === 'clean') {
   const closureInput = { reviewState, currentHead: headSha, roundsLeft: false, reviewCeilingReached: true };
   const closerAuthoredStale = { currentHead: headSha, reviewedHead: base,
     decision: 'rereview-exact-head', carryForward: false };
-  assert.equal(decideClosureOwner({ ...closureInput, attested: true, closerAuthoredStale }).owner, 'review');
+
   const { resolveClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
   const exactHead = await resolveClosureNextAction({
     input: { ...closureInput, attested: true, closerAuthoredStale, checks: 'SUCCESS', lease: null },
@@ -134,10 +131,7 @@ if (scenario === 'clean') {
   assert.equal(exactHead.decision.action, 'review');
   assert.equal(exactHead.decision.reason, 'exact-head-review');
 
-  assert.equal(decideClosureOwner({ ...closureInput,
-    closerAuthoredStale: { ...closerAuthoredStale, decision: 'eligible', carryForward: true } }).owner, 'daemon-merge');
-  assert.equal(decideClosureOwner({ ...closureInput,
-    closerAuthoredStale: { ...closerAuthoredStale, currentHead: base } }).owner, 'hammer');
+
   // HAMATTEST-03: production coexistence executes review before its wait return.
   const { resolveMergeAgentCoexistenceForWatcher } = await import('../../src/ama-closure-orchestration.mjs');
   for (const decision of ['rereview-exact-head', 'not-eligible']) {
@@ -150,6 +144,7 @@ if (scenario === 'clean') {
         reason: 'not-eligible', closerAuthoredStale: { ...closerAuthoredStale, decision,
           reasons: ['verdict-not-settled-success', 'blocking-findings-unknown'] },
         selectedClosureOwner: { owner: 'review', reason: 'exact-head-review' },
+        nextAction: exactHead.decision,
         closureOwner: { owner: 'wait', reason: 'required-checks-pending' },
         boundedWait: { exhausted: false, reason: 'required-checks-pending' } }),
       orphanOptions: { hasOwnerImpl: async () => ({ owned: hammerLive, uncertain: ownershipUncertain }), pageImpl: refuse,
@@ -350,6 +345,26 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  const terminalHead = 'a'.repeat(40), reviewedHead = 'b'.repeat(40);
+  const terminalOptions = {
+    reviews: { headSha: reviewedHead, verdict: 'request changes', blockingFindingState: 'known',
+      blockingFindingCount: 1, nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    launches: { closer: { headSha: terminalHead, row: { status: 'succeeded' }, outcome: 'no-merge', retryable: true } },
+    progress: { terminalReview: { validated: true, headSha: terminalHead, reviewedHeadSha: reviewedHead } },
+  };
+  for (const [conclusion, action] of [['PENDING', 'wait-for-CI'], ['FAILURE', 'hammer'], ['SUCCESS', 'daemon-merge']]) {
+    assert.equal(matrixPair({ ...terminalOptions, checks: { conclusion } }).decision.action, action);
+  }
+  assert.equal(matrixPair({ ...terminalOptions, progress: { terminalReview: {
+    validated: true, headSha: 'c'.repeat(40), reviewedHeadSha: reviewedHead } } }).decision.reason, 'retry-no-merge');
+  for (const [name, observations, action, actor] of actionCases) {
+    const shared = matrixPair(observations);
+    assert.deepEqual([shared.decision.action, shared.decision.actor], [action, actor], name);
+    assert.equal(closureOwnerFromDecision(shared.decision).actor, actor);
+    assert.equal(classifyRescue({ sharedNextAction: shared }).closureOwner.decisionKey, shared.decision.decisionKey);
+    assert.equal(closeoutRereview(shared).nextAction, shared.decision);
+  }
+
   // REMEDBRANCH-01: unresolved creation cannot hand a branchless job to a worker.
   const branchRoot = join(rootDir, 'branch-contract');
   const blocked = createFollowUpJob({ rootDir: branchRoot, repo, prNumber,
@@ -582,7 +597,7 @@ if (scenario === 'clean') {
   assert.equal(hammers, 1); assert.equal(store.merged, false);
   const oldHead = headSha;
   writeFileSync(join(gitDir, 'fixture.txt'), 'synthetic remediated change\n'); git('add', 'fixture.txt'); git('commit', '-q', '-m', 'Synthetic hammer repair'); headSha = git('rev-parse', 'HEAD');
-  assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha: oldHead }, currentHead: headSha }).owner, 'review');
+
   const retry = await handoffHammerReview({ ...identity(),
     requestBoundedReviewImpl: () => assert.fail('hammer heads never request review'), logger: quiet });
   assert.equal(retry.outcome, 'hammer-retry-required');
@@ -661,7 +676,7 @@ if (scenario === 'clean') {
   assert.equal(wakes, 2);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
-  const { closureOwnerFromDecision, observeClosureResult, reviseClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
+  const { observeClosureResult, reviseClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
   for (const result of [{ reason: 'deferred-by-drain', drainEpoch: 'epoch-05' },
     { capacity: { inFlight: 7, cap: 7, workerClass: 'hammer' } }]) {
     const constrained = observeClosureResult(wakeShared, result);
@@ -718,7 +733,7 @@ if (scenario === 'clean') {
   assert.equal(receipt.decision.reason, 'merge-receipt-unconfirmed');
   assert.equal(daemonShared.decision.actor, 'daemon');
 
-  const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
+  const { remediationCloseout } = await import('../../src/remediation-closeout.mjs');
   const closeoutAt = '2026-01-01T00:00:00.000Z';
   const closeoutJob = { repo: 'subject-closeout', prNumber: 1, revisionRef: 'a'.repeat(40),
     completedAt: closeoutAt, remediationPlan: { currentRound: 2, maxRounds: 2 } };
@@ -828,17 +843,6 @@ if (scenario === 'clean') {
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, remediationCloseoutOwned: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
-  for (const reviewCycleExhausted of [false, true]) {
-    for (const findings of [[], ['verdict-not-settled-success'], ['non-blocking-findings-present']]) {
-      const reasons = ['stale-review-head', 'ci-not-green', ...findings];
-      const options = { reviewCycleExhausted, commentOnlyFinalRoundResume: true };
-      assert.equal(isHammerRemediableEligibilityMiss(reasons, { reviewCycleExhausted }), false);
-      assert.equal(isHammerRemediableEligibilityMiss(reasons, options), true);
-      for (const hold of ['blocking-findings-present', 'blocking-findings-unknown', 'ama-disabled']) {
-        assert.equal(isHammerRemediableEligibilityMiss([...reasons, hold], options), false);
-      }
-    }
-  }
   const ceilingDb = openReviewStateDb(rootDir); ensureReviewStateSchema(ceilingDb);
   const ceilingPr = 8, ceilingLogs = [];
   ceilingDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha)
@@ -854,39 +858,24 @@ if (scenario === 'clean') {
   assert.equal(ceilingLogs.length, 1);
   assert.equal(ceilingDb.prepare('SELECT reviewer_head_sha FROM reviewed_prs WHERE pr_number=?').get(ceilingPr).reviewer_head_sha, base);
   ceilingDb.close();
-  for (const dispatchReason of ['exhausted-final-hammer', 'review-ceiling-terminal-remediation', null]) {
-    for (const reviewCycleExhausted of [true, false]) {
-      const ceilingEligibility = hammerWakeEligibility({ eligible: false,
-        reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason,
-        reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted }, headSha });
-      assert.equal(ceilingEligibility.eligible, true);
-    }
-  }
-  const ceilingEligibility = hammerWakeEligibility({ eligible: false,
-    reasons: ['verdict-not-eligible', 'stale-head'] }, { dispatchReason: null,
-    reviewCeilingReached: true, reviewState: { headSha: base, reviewCycleExhausted: false }, headSha });
-  assert.equal(requestEligibleHammerWake({ ...identity(), prNumber: ceilingPr,
-    eligibility: ceilingEligibility, eligibilityReason: 'review-ceiling-terminal-remediation',
+  const ceilingShared = matrixPair({ checks: { conclusion: 'FAILURE' } });
+  assert.equal(requestEligibleHammerWake({ rootDir, repo: 'subject-07', prNumber: ceilingPr,
+    headSha: ceilingShared.decision.head, shared: ceilingShared,
     log: quiet, requestWatcherWakeImpl: () => ({ requested: true }) }).outcome, 'requested');
   const pendingIdentity = { ...identity(), headSha: base };
   const pendingLease = acquireAmaCloserLease({ ...pendingIdentity, watcherPid: 4242 }).lease;
-  const closureInput = { currentHead: base, lease: pendingLease, roundsLeft: false,
-    reviewState: { verdict: 'comment-only', headSha: base, blockingFindingState: 'known', blockingFindingCount: 0,
-      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1, remediationPending: false } };
-  assert.equal(decideClosureOwner({ ...closureInput, processKillImpl() {} }).reason, 'in-flight:4242');
-  assert.equal(decideClosureOwner({ ...closureInput, waitExhausted: true, processKillImpl() {
-    throw Object.assign(new Error('synthetic dead watcher'), { code: 'ESRCH' });
-  } }).owner, 'hammer');
-  assert.deepEqual(readAmaCloserLease(rootDir, pendingIdentity), pendingLease);
   const leaseNowMs = Date.now();
+  assert.equal(isReclaimablePendingAmaCloserLease(pendingLease, { now: leaseNowMs,
+    processKillImpl() { throw Object.assign(new Error('synthetic ESRCH'), { code: 'ESRCH' }); } }), true);
+  assert.deepEqual(readAmaCloserLease(rootDir, pendingIdentity), pendingLease);
   const foreignPendingLease = { ...pendingLease, holderHost: `${pendingLease.holderHost}.foreign`,
     acquiredAt: new Date(leaseNowMs).toISOString() };
   let foreignPidProbes = 0;
-  const foreignInput = { ...closureInput, lease: foreignPendingLease, now: leaseNowMs,
+  const foreignOptions = { now: leaseNowMs,
     processKillImpl() { foreignPidProbes++; throw Object.assign(new Error('synthetic ESRCH'), { code: 'ESRCH' }); } };
-  assert.equal(decideClosureOwner(foreignInput).owner, 'wait');
-  assert.equal(decideClosureOwner({ ...foreignInput,
-    now: leaseNowMs + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS }).owner, 'hammer');
+  assert.equal(isReclaimablePendingAmaCloserLease(foreignPendingLease, foreignOptions), false);
+  assert.equal(isReclaimablePendingAmaCloserLease(foreignPendingLease, { ...foreignOptions,
+    now: leaseNowMs + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS + 1 }), true);
   assert.equal(foreignPidProbes, 0);
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {
@@ -930,30 +919,15 @@ if (scenario === 'clean') {
     VALUES (?,?,'2026-01-01','gemini','reviewing','synthetic-session')`).run(repo, prNumber);
   assert.equal(prepareMarkRereviewCiBlocked(db).run('2026-01-01','red CI','2026-01-01',headSha,headSha,'synthetic-session',repo,prNumber).changes, 1);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=?').get(prNumber).review_status, 'ci-blocked'); db.close();
-  assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha, blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' }, currentHead: headSha, checks: 'FAILURE' }).owner, 'hammer');
-  const exhausted = { verdict: 'comment-only', headSha: base, reviewCycleExhausted: true };
-  const eligibility = hammerWakeEligibility({ eligible: false,
-    reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] }, {
-    dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
-    reviewState: exhausted, headSha, checksConclusion: 'FAILURE' });
-  assert.equal(eligibility.eligible, true);
-  const wake = requestEligibleHammerWake({ ...identity(), eligibility,
-    eligibilityReason: 'exhausted-final-hammer-ci-repair', log: quiet,
+
+  const repairShared = matrixPair({ checks: { conclusion: 'FAILURE' } });
+  const wake = requestEligibleHammerWake({ rootDir, repo: 'subject-07', prNumber,
+    headSha: repairShared.decision.head, shared: repairShared, log: quiet,
     requestWatcherWakeImpl: () => ({ requested: true }) });
   assert.equal(wake.outcome, 'requested');
-  assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
-    ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }).owner, 'hammer');
-  assert.deepEqual(decideClosureOwner({ reviewState: { headSha, verdict: '' }, currentHead: headSha,
-    ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }),
-  { owner: 'page', reason: 'review-rounds-exhausted' });
   const repairConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
-  for (const checks of repairConclusions) {
-    assert.equal(hammerWakeEligibility({ eligible: false,
-      reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] }, {
-      dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
-      reviewState: exhausted, headSha, checksConclusion: checks }).eligible, true);
-    assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
-      ciBlockedHammerOwner: true, roundsLeft: false, checks }).owner, 'hammer');
+  for (const conclusion of repairConclusions) {
+    assert.equal(matrixPair({ checks: { conclusion } }).decision.action, 'hammer');
   }
   const promptDir = join(rootDir, 'data', 'smoke-intent-prompts');
   mkdirSync(promptDir, { recursive: true });
@@ -1079,7 +1053,7 @@ if (scenario === 'clean') {
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
-  evidence = { incompleteFinalRoundRequeued: true, finalRoundRedCiWithoutFindings: true, finalRoundBlockingHoldsPreserved: true, completedFinalRoundPreserved: true, finalRoundStartingBaseProven: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+  evidence = { incompleteFinalRoundRequeued: true, finalRoundRedCiWithoutFindings: true, repairSelectionShared: true, completedFinalRoundPreserved: true, finalRoundStartingBaseProven: true, sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     greenCeilingMovedHeadWake: true, ceilingTransitionOnce: true, originalReviewIdentityRetained: true,
     deadPendingOwnerReleased: true, livePendingOwnerWaits: true, ownershipLeavesLeaseIntact: true,
     foreignPendingOwnerUsesAgeOnly: true, numericLeaseClockAccepted: true,
@@ -1141,7 +1115,7 @@ if (scenario === 'clean') {
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });
   assert.equal(isHeldAmaCloserLease(rootDir, identity()), false);
   assert.equal(acquireAmaCloserLease(identity()).acquired, false, 'expiry alone cannot authorize lease theft');
-  assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha }, currentHead: headSha, lease: { status: 'dispatched' }, waitExhausted: true }).owner, 'page');
+
   let pages = 0;
   for (const now of [0, 1800001, 1800002]) await observeClosureWait({ ...identity(), now, reason: 'synthetic-stale-lease', pageImpl: async () => { pages++; } });
   assert.equal(pages, 1);

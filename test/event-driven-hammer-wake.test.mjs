@@ -13,13 +13,15 @@ import {
   scheduleHammerWakeAuditSweep,
   sweepHammerWakeAudits,
 } from '../src/hammer-wake.mjs';
+import { matrixPair, HEAD } from './helpers/next-action-matrix.mjs';
 import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
 
 const identity = {
-  repo: 'laceyenterprises/agent-os',
-  prNumber: 6613,
-  headSha: 'abc123currenthead',
-  eligibilityReason: 'clean-current-head-ci-green-policy-eligible',
+  repo: 'subject-07',
+  prNumber: 7,
+  headSha: HEAD,
+  eligibilityReason: 'shared-next-action',
+  wakeAttemptKey: 'initial',
 };
 
 function root() {
@@ -39,7 +41,7 @@ test('clean current-head eligible verdict wakes the existing AMA watcher route',
   const result = requestEligibleHammerWake({
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   });
@@ -58,12 +60,12 @@ test('not-yet-eligible snapshot skips without creating a wake reservation', () =
   const result = requestEligibleHammerWake({
     rootDir: root(),
     ...identity,
-    eligibility: { eligible: false, reasons: ['ci-not-green'] },
+    shared: matrixPair({ checks: { conclusion: 'PENDING' } }),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   });
   assert.equal(result.outcome, 'skipped');
-  assert.equal(result.reason, 'ci-not-green');
+  assert.equal(result.reason, 'checks-pending');
   assert.equal(calls.length, 0);
 });
 
@@ -73,7 +75,7 @@ test('duplicate wake key does not start a second close-lane race', () => {
   const args = {
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   };
@@ -89,7 +91,7 @@ test('latency telemetry failure does not demote a delivered wake', () => {
   const args = {
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {}, warn() {} },
   };
@@ -115,7 +117,7 @@ test('audit directory failure returns a failed event instead of throwing', () =>
   const result = requestEligibleHammerWake({
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   });
@@ -130,12 +132,12 @@ test('merge-rule refusal does not wake Hammer', () => {
   const result = requestEligibleHammerWake({
     rootDir: root(),
     ...identity,
-    eligibility: { eligible: false, reasons: ['branch-protection-missing-gate'] },
+    shared: matrixPair({ controls: { safetyRefusal: { deterministic: true, reason: 'protection-07' } } }),
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
   });
   assert.equal(result.outcome, 'skipped');
-  assert.equal(result.reason, 'branch-protection-missing-gate');
+  assert.equal(result.reason, 'safety-refusal');
   assert.equal(calls.length, 0);
 });
 
@@ -145,7 +147,7 @@ test('wake-path failure is retryable without allowing duplicate successful wakes
   const args = {
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     log: { log() {} },
   };
   const failed = requestEligibleHammerWake({
@@ -182,7 +184,7 @@ test('stale reserved wake reservation is recovered by a later caller', () => {
   const recovered = requestEligibleHammerWake({
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     observedAt: new Date(nowMs).toISOString(),
     nowMs,
     requestWatcherWakeImpl: wakeImpl(calls),
@@ -216,7 +218,7 @@ test('malformed reservation time recovers from the audit file mtime', () => {
   const recovered = requestEligibleHammerWake({
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     nowMs,
     requestWatcherWakeImpl: wakeImpl(calls),
     log: { log() {} },
@@ -231,7 +233,7 @@ test('retry archives remain inside the age and file-count retention bounds', asy
   const args = {
     rootDir,
     ...identity,
-    eligibility: { eligible: true, reasons: [] },
+    shared: matrixPair(),
     requestWatcherWakeImpl: () => { throw new Error('watcher unavailable'); },
     log: { log() {} },
   };
@@ -273,7 +275,7 @@ test('wake dispatch defers retention I/O and coalesces sweeps through the cooldo
   const oldTime = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
   utimesSync(expired, oldTime, oldTime);
   const calls = [];
-  const args = { rootDir, ...identity, eligibility: { eligible: true, reasons: [] },
+  const args = { rootDir, ...identity, shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl(calls), log: { log() {} } };
 
   assert.equal(requestEligibleHammerWake(args).outcome, 'requested');
@@ -340,7 +342,7 @@ test('health surface parses only the newest hammer wake audit files', () => {
 
 // Regression: the same trusted ancestry must cover ALL delta commits.
 import { proveCloserOnlyHeadDelta } from '../src/head-closer-commit-suppression.mjs';
-import { isHammerRemediableEligibilityMiss } from '../src/ama/dispatch-closer.mjs';
+
 for (const scenario of ['own', 'worker', 'unrelated', 'budget']) {
   test(`HAMCIWAKE-01 ancestry: ${scenario}`, async () => {
     const parents = { H2: 'H1', H1: scenario === 'unrelated' ? 'other' : 'H0' };
@@ -352,55 +354,6 @@ for (const scenario of ['own', 'worker', 'unrelated', 'budget']) {
     assert.equal(proven, scenario === 'own');
   });
 }
-test('HAMCIWAKE-01 nonblocking closer resume retains blocking-finding refusal', () => {
-  const reasons = ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present'];
-  const options = { allowStaleReviewHeadHammerResume: true };
-  assert.equal(isHammerRemediableEligibilityMiss(reasons, options), true);
-  assert.equal(isHammerRemediableEligibilityMiss(reasons), false);
-  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'blocking-findings-present'], options), false);
-});
-
-for (const terminalOutcome of ['failed-without-merge', 'succeeded']) {
-  test(`HAMRETRY-01: wake follows a reconciled ${terminalOutcome} attempt once`, async () => {
-    const { updateAmaCloserDispatchRecord } = await import('../src/ama/dispatch-closer.mjs');
-    const { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
-    const rootDir = root();
-    const subject = { repo: 'synthetic/repository', prNumber: 23, headSha: 'a'.repeat(40) };
-    const calls = [];
-    const args = { rootDir, ...subject, eligibility: { eligible: true, reasons: [] },
-      requestWatcherWakeImpl: wakeImpl(calls), log: { log() {} } };
-    assert.equal(requestEligibleHammerWake(args).outcome, 'requested');
-    acquireAmaCloserLease({ rootDir, ...subject });
-    updateAmaCloserLease({ rootDir, ...subject, status: 'dispatched', lrqId: 'synthetic-attempt-one' });
-    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'running hammer retains wake dedupe');
-    updateAmaCloserLease({ rootDir, ...subject, status: 'terminal', terminalOutcome });
-    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'an audit alone cannot prove the hammer exited');
-    updateAmaCloserDispatchRecord(rootDir, subject, () => ({ ...subject,
-      state: 'launch-terminal', terminalLaunchStatus: 'succeeded', launchRequestId: 'synthetic-attempt-one' }));
-    const retries = terminalOutcome === 'failed-without-merge';
-    assert.equal(requestEligibleHammerWake(args).outcome, retries ? 'requested' : 'duplicate');
-    assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'one re-wake per finished attempt');
-    if (retries) {
-      deleteAmaCloserLease(rootDir, subject);
-      acquireAmaCloserLease({ rootDir, ...subject });
-      updateAmaCloserLease({ rootDir, ...subject, status: 'dispatched', lrqId: 'synthetic-attempt-two' });
-      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate');
-      updateAmaCloserLease({ rootDir, ...subject, status: 'terminal', terminalOutcome });
-      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate', 'a predecessor record cannot re-arm the new attempt');
-      updateAmaCloserDispatchRecord(rootDir, subject, () => ({ ...subject,
-        state: 'launch-terminal', terminalLaunchStatus: 'failed', launchRequestId: 'synthetic-attempt-two' }));
-      assert.equal(requestEligibleHammerWake(args).outcome, 'requested');
-      assert.equal(requestEligibleHammerWake(args).outcome, 'duplicate');
-    }
-    assert.equal(calls.length, retries ? 3 : 1);
-    const { openReviewStateDb } = await import('../src/review-state.mjs');
-    const db = openReviewStateDb(rootDir);
-    try {
-      assert.equal(db.prepare("SELECT count(*) AS count FROM review_latency_events WHERE event_type = 'hammer_wake'").get().count,
-        calls.length, 'each delivered attempt has its own latency event');
-    } finally { db.close(); }
-  });
-}
 
 
 test('wake telemetry borrows the initialized watcher connection without closing it or losing its receipt', t => {
@@ -410,7 +363,7 @@ test('wake telemetry borrows the initialized watcher connection without closing 
   ensureReviewStateSchema(reviewStateDb);
   t.after(() => reviewStateDb.close());
   const args = { rootDir, reviewStateDb, repo: 'fixture/project', prNumber: 1,
-    headSha: 'a'.repeat(40), eligibilityReason: 'fixture-eligible', eligibility: { eligible: true, reasons: [] },
+    headSha: 'a'.repeat(40), eligibilityReason: 'shared-next-action', wakeAttemptKey: 'initial', shared: matrixPair(),
     requestWatcherWakeImpl: wakeImpl([]), log: { log() {} } };
   const result = requestEligibleHammerWake(args);
   assert.equal(result.outcome, 'requested');

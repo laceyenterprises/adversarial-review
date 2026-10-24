@@ -3405,34 +3405,7 @@ function mergeabilityLaneFixture(rootDir, logger = silentLogger) {
   return { gate, handler, run };
 }
 
-test('HAMUNKNOWN-01 real handler keeps K UNKNOWN probes active then backs off before the deadline', async () => {
-  const rootDir = tempRoot();
-  try {
-    const { gate, handler, run } = mergeabilityLaneFixture(rootDir);
-    for (let tick = 0; tick < 2; tick += 1) {
-      for (const reason of ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']) {
-        const value = await run(reason);
-        assert.equal(value.outcome, 'ama-pending');
-        assert.equal(value.urgent, true);
-        assert.equal(gate.evaluate(handler).run, true);
-      }
-    }
-    for (let tick = 0; tick < 12; tick += 1) {
-      for (const reason of ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']) {
-        const value = await run(reason);
-        assert.equal(value.outcome, 'ama-pending', 'time floor still prevents exhaustion');
-        assert.equal(value.urgent, false);
-      }
-    }
-    assert.equal(gate.evaluate(handler).run, false, 'spent cycle budget cannot retain the active lane');
-    for (let tick = 0; tick < 12; tick += 1) {
-      assert.equal((await run('background-pr-mergeable-unknown', { stuckDeadlineMs: 0 })).outcome,
-        'recovery-exhausted');
-      await run('ama-closer-dispatch-backgrounded');
-    }
-    assert.equal(gate.evaluate(handler).run, false, 'exhausted series never makes queued probes urgent');
-  } finally { rmSync(rootDir, { recursive: true, force: true }); }
-});
+
 
 test('HAMUNKNOWN-01 background permanent refusals still demote after decision-reset cap', async () => {
   const rootDir = tempRoot();

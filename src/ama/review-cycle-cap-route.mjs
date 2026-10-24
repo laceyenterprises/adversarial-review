@@ -61,18 +61,6 @@ export function hammerOwnerRouteOf(context) {
   return null;
 }
 
-// Dispatch admission only. CI repair and the pre-remediation verdict belong to
-// the final hammer; structural holds and current-head blocking findings do not.
-export function ciBlockedHammerReasonsCovered(reasons, { ciBlockedHammerOwner,
-  checksConclusion, remediationPending } = {}) {
-  return ciBlockedHammerOwner === true && remediationPending !== true
-    && ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']
-      .includes(checksConclusion)
-    && Array.isArray(reasons) && reasons.length > 0
-    && reasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',
-      'non-blocking-findings-present', 'ci-not-green'].includes(reason));
-}
-
 export function hammerOwnerRouteForPageEvent(event) {
   return Object.values(HAMMER_OWNER_ROUTES).find((route) => route.pageEvent === event) || null;
 }
@@ -94,6 +82,12 @@ const FAILED_CHECKS_LIMIT = 20;
 // Anything else (dispatched, in flight, waiting on CI, a structural hold) is
 // not a page.
 export function hammerOwnerRouteFinalOutcome(amaClosureResult) {
+  // Reporting projection only; this never selects or rearms a workflow.
+  const selected = amaClosureResult?.nextAction;
+  if (selected?.actor === 'closure-recovery' && selected.queue?.intent === 'reconcile') {
+    if (['retry-exhausted', 'lifetime-exhausted'].includes(selected.reason)) return 'hammer-cap-exhausted';
+    if (selected.reason === 'hammer-final-no-merge') return 'hammer-no-merge';
+  }
   const reason = String(amaClosureResult?.reason || '');
   if (HAMMER_FINAL_NO_MERGE_REASONS.has(reason)) return 'hammer-no-merge';
   if (HAMMER_CAP_EXHAUSTED_REASONS.has(reason)) return 'hammer-cap-exhausted';

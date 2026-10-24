@@ -9,8 +9,8 @@
 
 The shadow appends diagnostic comparisons between legacy ownership and the
 shared next-action decision. These records grant no dispatch or merge authority;
-NXA-03 consumes the shared decision for hammer wake routing only. Other
-consumers retain legacy effects. The shadow log itself grants no authority. The watcher and closure consumers write
+All adopted consumers now execute projections of the shared decision. Historical
+legacy adapters remain available only for observational comparison. The shadow log itself grants no authority. The watcher and closure consumers write
 under their configured root. The rollout owner classifies the evidence through
 the read-only report CLI, with optional dispositions in a separate private file.
 
@@ -94,3 +94,11 @@ NXA-05 also carries the existing daemon's validated terminal-head observation
 into the shared generation before mutation. That proof names both the reviewed
 and target heads; a later head cannot inherit it. The ordinary executor still
 revalidates HCP, exact-head proof, primary-change preservation, checks and leases.
+
+
+NXA-07: successor selection belongs to `nextAction(snapshot)`. This store
+retains execution/scheduling evidence and projects the selected action, actor,
+reason, head, anchored deadline, decision key and queue intent. Diagnostic reason
+text is not an eligibility registry. Automatic stops and unreadable evidence
+retain recovery ownership; only explicit hold/draft/disabled intent selects the
+operator. Existing durable attempt, lease, request and terminal fences remain.

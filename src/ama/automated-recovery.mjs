@@ -7,52 +7,14 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { amaRetainLoopCapFor } from '../kernel/convergence-budget.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
-import { isCloserHeadRereviewDeclined } from '../closer-head-rereview-decline.mjs';
+import { readClosureNextAction } from './closure-next-action.mjs';
+import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 
-const FINDING_REASONS = new Set([
-  'blocking-findings-unknown',
-  'non-blocking-findings-present', 'non-blocking-findings-unknown',
-  'verdict-not-settled-success', 'verdict-not-eligible',
-  'ci-not-green', 'pr-not-mergeable',
-]);
-
-const FOLLOW_UP_REASONS = new Set([
-  'blocking-findings-present', 'remediation-pending', 'remediation-state-unknown',
-]);
-
-const IN_PROGRESS_REASONS = new Set([
-  'hammer-closer-in-flight', 'lease-held', 'live-run-in-flight',
-  'active-remediation-job', 'ama-closer-dispatch-backgrounded',
-  'dispatch-status-unknown', 'closer-lease-held-by-other-process',
-  'daemon-deferred', 'deferred',
-]);
-
-const MERGEABILITY_UNKNOWN_NEUTRAL_REASONS = new Set([
-  ...IN_PROGRESS_REASONS, 'ama-closer-launch-in-progress',
-  'background-pr-state-unavailable', 'ama-coexistence-operation-timeout',
-  'closer-head-mergeability-unknown',
-]);
-
-const TRANSIENT_GATE_READ_REASONS = new Set(['pr-mergeability-unknown', 'labels-unavailable']);
-
-const CONFIG_HOLD_REASONS = new Set([
-  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'pr-is-draft',
-  'current-head-ham-terminal-remediation-needs-operator',
-]);
-
-// This authorizes remediation DISPATCH only, never a merge or a gate waiver.
-export function automatedHammerReasonsCovered(reasons) {
-  return Array.isArray(reasons) && reasons.length > 0
-    && reasons.every((reason) => FINDING_REASONS.has(reason));
-}
-
+// Physical refusals are explicit evidence, never a reason-string allowlist.
 export function isSafetyRecoveryHold(result) {
-  const reasons = [result?.reason, result?.operatorReason, ...(result?.reasons || []),
-    ...(result?.daemonCleanMerge?.reasons || [])].filter(Boolean);
-  return result?.needsOperator === true
-    || reasons.some((reason) => CONFIG_HOLD_REASONS.has(String(reason).replace(/^not-eligible:/, ''))
-    || /^(?:not-eligible:)?label-/.test(reason)
-    || /(?:two-key|security-hold|destructive-migration|risk-class-not-permitted|primary-change-(?:reverted|needs-operator))/.test(reason));
+  return result?.safetyRefusal === true || result?.nextAction?.action === 'operator-hold'
+    || (result?.nextAction?.row === 'R05-structural' && result.nextAction.actor === 'closure-recovery')
+    || (result?.needsOperator === true && !result?.primaryChangeRepair);
 }
 
 async function requestRereview(options) {
@@ -96,42 +58,22 @@ async function recoverAmaAutomationLocked({
   const waiting = (action, amaClosureResult = result) => {
     clearStall();
     return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action },
-      urgent: state.mergeabilityUnknownCycles > 0 && state.mergeabilityUnknownCycles <= maxAttempts
-        && !state.event && ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded'].includes(reason) };
+      urgent: selected.queue?.intent === 'owned' || Boolean(selected.queue?.deferredBy) };
   };
-  const ordinaryWait = (value) => IN_PROGRESS_REASONS.has(value?.reason)
-    || value?.daemonCleanMerge?.disposition === 'deferred'
-    || value?.recoveryWait || value?.commentOnlyFinalRoundAwaitingCi === true
-    || FOLLOW_UP_REASONS.has(value?.reason)
-    || (value?.reasons || []).some((item) => FOLLOW_UP_REASONS.has(item));
-  const transientGateRead = reason === 'not-eligible' && reasons.length > 0
-    && reasons.every((item) => TRANSIENT_GATE_READ_REASONS.has(item));
-  if (reason !== 'background-pr-mergeable-unknown' && !MERGEABILITY_UNKNOWN_NEUTRAL_REASONS.has(reason)
-    && !transientGateRead) {
-    if (state.mergeabilityUnknownCycles || state.mergeabilityUnknownSince != null
-      || state.event?.reason === 'background-pr-mergeable-unknown') {
-      state.mergeabilityUnknownCycles = 0;
-      delete state.mergeabilityUnknownSince;
-      // A resolved UNKNOWN must not suppress later hammer/rereview recovery.
-      // Preserve per-reason receipts while allowing a different stall to page.
-      if (state.event?.reason === 'background-pr-mergeable-unknown') delete state.event;
-      save();
-    }
-  }
-  // Ownership and ordinary time gates are progress, not failed recovery.
-  if (reason === 'daemon-merged') return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: result };
-  if (isSafetyRecoveryHold(result)) {
-    clearStall();
-    return { outcome: 'await-operator', amaClosureResult: result };
-  }
-  if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return waiting('disabled');
-  if (transientGateRead) return stalled('await-mergeability');
-  if (ordinaryWait(result)) return waiting(
-    FOLLOW_UP_REASONS.has(reason) || reasons.some((item) => FOLLOW_UP_REASONS.has(item))
-      ? 'await-remediation' : 'in-progress');
+  const selected = result?.nextAction?.head === headSha ? result.nextAction
+    : nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head: headSha,
+      observedAt: new Date(now()).toISOString(),
+      anchors: { firstActionableAt: state.firstActionableAt || new Date(now()).toISOString() },
+      observations: { pr: { state: 'OPEN', headSha } } }));
+  state.firstActionableAt ||= selected.deadline?.anchoredAt;
+  state.nextAction = selected;
+  if (selected.action === 'done') return { outcome: 'pr-terminal', terminalReason: selected.reason, amaClosureResult: result };
+  if (selected.action === 'operator-hold') return { outcome: 'await-operator', amaClosureResult: result };
+  const ordinaryWait = value => Boolean(value?.nextAction && (value.nextAction.queue?.intent !== 'dispatch'
+    || value.nextAction.queue?.deferredBy));
   async function exhausted() {
     const event = state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
-      reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts };
+      reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts, nextAction: selected };
     if (!state.event) {
       state.event = event;
       save();
@@ -139,7 +81,12 @@ async function recoverAmaAutomationLocked({
     }
     if (!state.pagedReasons.includes(event.reason)) {
       try {
-        await pageImpl(`SEV1 AMA automated recovery exhausted: ${repo}#${prNumber}@${headSha}: ${event.reason}`, {
+        const observedAt = now();
+        const anchoredAt = [Date.parse(selected.deadline?.anchoredAt), Date.parse(state.firstActionableAt),
+          state.blockedSince, observedAt].find(Number.isFinite);
+        await pageImpl(`SEV1 AMA automated recovery exhausted: ${repo}#${prNumber}@${headSha}: ${event.reason}; `
+          + `action=${selected.action} actor=${selected.actor} reason=${selected.reason} head=${headSha} `
+          + `ageMs=${Math.max(0, observedAt - anchoredAt)}`,  {
           event: event.event, payload: event,
         });
         state.paged = true;
@@ -152,7 +99,7 @@ async function recoverAmaAutomationLocked({
           repo, pr: prNumber, head: headSha }));
       }
     }
-    return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state };
+    return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state, nextAction: selected };
   }
   // While a requested pass owns the row, don't consume retries or start HAM.
   const reviewStamp = String(reviewStateRow?.posted_at || reviewStateRow?.reviewer_session_uuid || 'unobserved');
@@ -167,18 +114,6 @@ async function recoverAmaAutomationLocked({
     state.rereviewPending = false;
     save();
   }
-  // HAMUNKNOWN-01: count settled UNKNOWN cycles, not queue/in-flight ticks.
-  // Reuse the recovery budget and SEV1 route; never ask for a stale-head review
-  // or consume hammer launch attempts merely because GitHub is recomputing.
-  if (reason === 'background-pr-mergeable-unknown') {
-    state.mergeabilityUnknownCycles = (state.mergeabilityUnknownCycles || 0) + 1;
-    state.mergeabilityUnknownSince ??= now();
-    state.lastReason = reason;
-    save();
-    if (state.event || (state.mergeabilityUnknownCycles > maxAttempts
-      && now() - state.mergeabilityUnknownSince >= stuckDeadlineMs)) return exhausted();
-    return waiting('await-mergeability');
-  }
   async function stalled(action, amaClosureResult = result) {
     state.blockedSince ??= now();
     state.lastReason = amaClosureResult?.reason || reason;
@@ -192,31 +127,23 @@ async function recoverAmaAutomationLocked({
     clearStall();
     save();
   };
-  if (reason === 'ama-closer-launch-in-progress') {
-    let launch;
-    try { launch = await reclaimLaunch(); }
-    catch (err) { logger.warn?.(`[ama-recovery] launch reconciliation failed: ${err?.message || err}`); }
-    if (launch?.active > 0) return waiting('active-launch');
-    if (launch?.reclaimed > 0) return waiting('reclaim-launch');
+  const launch = readClosureNextAction(result)?.snapshot.observations.launches?.value?.closer;
+  if (selected.actor === 'closure-recovery' && launch?.launchRequestId) {
+    try { await reclaimLaunch(); }
+    catch (error) { logger.warn?.(`[ama-recovery] launch reconciliation failed: ${error.message}`); }
+    // A changed receipt invalidates this generation; the next pass re-decides.
   }
-  const stale = reasons.includes('stale-review-head') || reasons.includes('stale-head');
-  const hammerHead = result?.ownerProofFacts?.headSha === headSha
-    && result.ownerProofFacts.liveHeadCloserAuthored === true;
-  const malformed = reasons.some((item) => /findings-unknown$/.test(item));
-  if (state.event) return exhausted();
-  if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return stalled('attempt-cap');
-  // NOOWNER-01: the watcher declined this head's re-review (its tip is a closer
-  // commit, which is never re-reviewed). Asking again would only loop; wait out
-  // the stall deadline, then page once.
-  if (stale && !hammerHead && isCloserHeadRereviewDeclined(reviewStateRow, headSha)) return stalled('rereview-declined-closer-head');
+  if (selected.queue?.intent !== 'dispatch' || selected.queue?.deferredBy) {
+    return selected.queue?.intent === 'owned' ? waiting('in-progress') : stalled('observe');
+  }
+  if (state.attempts >= maxAttempts) return stalled('attempt-cap');
   try {
-    if (!hammerHead && (stale || (malformed && !state.rereviewRequested))) {
+    if (selected.action === 'review' && selected.actor === 'reviewer') {
       state.rereviewBaseline = reviewStamp;
       state.rereviewRequestedAt = now();
       save();
       const rereview = await requestRereviewImpl({ rootDir, repo, prNumber,
-        targetRevisionRef: headSha, reason: `AMA automated recovery: ${stale ? 'stale-review-head' : 'malformed-findings'}`,
-        automaticMalformedRecovery: malformed, logger });
+        targetRevisionRef: headSha, reason: `AMA automated recovery: ${selected.reason}`, logger });
       state.rereviewPending = rereview?.triggered === true || rereview?.reason === 'already-pending';
       if (state.rereviewPending) {
         state.rereviewRequested = true;
@@ -227,7 +154,7 @@ async function recoverAmaAutomationLocked({
       if (!state.rereviewPending) return stalled('rereview-refused');
       return { outcome: 'ama-pending', amaClosureResult: result, recovery: { ...state, action: 'rereview', rereview } };
     }
-    if (hammerHead || automatedHammerReasonsCovered(reasons)) {
+    if (selected.action === 'hammer' && selected.actor === 'hammer') {
       const retry = await dispatchHammer();
       if (retry?.dispatched) {
         charge();
@@ -236,7 +163,8 @@ async function recoverAmaAutomationLocked({
       if (ordinaryWait(retry)) return waiting('in-progress', retry);
       if (isSafetyRecoveryHold(retry)) {
         clearStall();
-        return { outcome: 'await-operator', amaClosureResult: retry, recovery: state };
+        return { outcome: retry.nextAction?.action === 'operator-hold' ? 'await-operator' : 'ama-pending',
+          amaClosureResult: retry, recovery: state };
       }
       return stalled('hammer-refused', retry);
     }

@@ -1251,23 +1251,15 @@ hammer from reaching its rebase, including REMCONFLICT-01 conflict repair.
 
 CIUNKNOWN-01 keeps empty rollups unknown. Bootstrap requires API-confirmed absence of repository workflows and base-branch required-check rules plus green managed pre-push evidence for the exact repository/head. It is limited to a settled clean review or a HAM-certified head, is revalidated before merge, and records `ciMode: no-ci-bootstrap` in the audit. All other authority and safety gates remain mandatory. Cancelled-only external CI requests one workflow rerun per check/head; a later cancelled attempt pages once.
 
-AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads
-request a current-head re-review; unknown findings request one re-review then
-retry the ordinary closer; strict-mode comment-only findings dispatch the hammer
-only after its existing grace, proven final-round resume or exhaustion gates.
-HAMREDCI-01 lets a proven comment-only final-round resume reach the hammer with
-failed CI, including a stale reviewed head with or without remaining non-blocking
-findings or strict non-blocking remediation enabled.
-The hammer repairs checks before the unchanged exact-head merge predicates.
-Pending-only CI on a non-conflicting head retains its bounded wait, including a
-known rollup without external checks while CI registers. Empty rollups stay
-non-green; the proven-push deadline restores retain-loop charging. Blocking or
-unknown blocking findings, structural blocks, hard-stop labels and merge leases
-retain their gates. Existing states, transitions and smoke promises are unchanged.
-Blocking findings and unknown/pending remediation state retain Codex-first
-follow-up ownership without spending recovery attempts or paging. Recovery
-widens worker-class admission only; the ordinary closer proves terminal
-authority after exhaustion and follow-up ownership release.
+AMAFIND-01 recovery projects the shared action and preserves its actor and
+anchored deadline. Findings and failed CI select remaining remediation or a final
+hammer; unknown checks and unresolved ownership retain observers or recovery.
+Only explicit hold/draft/disabled-policy intent assigns operator ownership.
+Existing arming, exact-head/identity/content/HCP proof, protection, required-check
+and lease gates remain mandatory before merge. Read/proof waits and physical
+retry refunds preserve their durable budgets. There is no separate grace,
+final-push timeout or reason-based recovery eligibility table.
+
 Terminal or phantom launches reconcile through ledger-backed liveness checks.
 Every retry retains all ordinary safety, identity and merge gates. Safety and
 explicit configuration/operator holds await adjudication. Active owners, lease
@@ -2099,3 +2091,23 @@ LEGACYINTENT-01 adds legacy no-key settlement only when a successful canonical
 ledger ticket/time query returns no rows at or after the attempt timestamp.
 The audited single-PR command defaults to dry-run; any row or unreadable ticket query
 retains ownership for that recovery path. Source changes authorize no production action.
+
+
+### Shared successor projections after NXA-07
+
+All adopted review/closure consumers project `nextAction(snapshot)`. The
+closure-owner and rescue adapters no longer choose independently. Automated
+and orphan recovery may reserve a selected reviewer/hammer attempt only after
+the existing ownership proof; unreadable descendants retain reconciliation.
+No-progress scheduling retains the selected actor through stops, caps and drain.
+Background preflight replaces changed facts and re-decides, preserving CI repair
+admission alongside UNKNOWN. Existing lifecycle states, terminal settlement,
+claim CAS, execution proof, retry limits and shared lease transitions remain.
+The closer carries the eligibility predicate's verified terminal-HAM evidence
+into the shared snapshot, bound to the current and reviewed heads. That proof
+allows certified completion to proceed through the CI and review gates rather
+than selecting another retry solely because the worker exited without merging.
+Live ownership, stop controls and retry limits retain priority; a handoff to
+review invalidates the terminal proof for successor selection.
+Offline handoff smoke verifies the adapter matrix; organic rollout is separate
+operator/SRE acceptance. Source rollback is revision `4d06237c`.

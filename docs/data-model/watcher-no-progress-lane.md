@@ -124,3 +124,11 @@ Optional `stalledEvent` field:
   fingerprint, later unchanged ticks do not re-emit the stalled event.
 - Merge and close cleanup removes the per-PR ledger once no future walk is
   possible.
+
+
+NXA-07: successor selection belongs to `nextAction(snapshot)`. This store
+retains execution/scheduling evidence and projects the selected action, actor,
+reason, head, anchored deadline, decision key and queue intent. Diagnostic reason
+text is not an eligibility registry. Automatic stops and unreadable evidence
+retain recovery ownership; only explicit hold/draft/disabled intent selects the
+operator. Existing durable attempt, lease, request and terminal fences remain.

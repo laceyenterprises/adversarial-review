@@ -10,12 +10,8 @@
 // protection policy and lease CAS before any mutation. Repair admission (a red
 // or DIRTY head needing a hammer) is not merge permission.
 //
-// NXA-03/04/05/06 adopt this policy for wake, closeout and closer/recovery
-// ownership. `decideClosureOwner` (src/ama/closure-owner.mjs) remains a source
-// rollback adapter. For remaining observational consumers, `fromLegacyClosureOwner` (src/pr-next-action-consumer.mjs)
-// expresses every legacy owner/reason in this vocabulary so the shadow
-// (src/pr-next-action-shadow.mjs) compares one table against the other. docs/NEXT-ACTION-REASON-INVENTORY.md
-// maps legacy reasons to rows; it is design documentation, not a registry.
+// Every caller projects this decision. Reason text is diagnostic evidence,
+// never an admission registry. Rollback uses a prior source revision.
 import { createHash } from 'node:crypto';
 import { classifyCheckRollup } from './checks-summary.mjs';
 import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
@@ -408,6 +404,11 @@ function selectRow(facts) {
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'hammer-final-no-merge',
       deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt };
   }
+  const handedToReview = leaseForHead && lease.status === 'handed-to-review';
+  const terminalReview = progress?.terminalReview;
+  const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
+    && sameHead(terminalReview.reviewedHeadSha, review.reviewedHead) && !handedToReview;
+  // Certified terminal evidence proceeds through the CI and review gates below.
   // R08: terminal no-merge with retry remaining (exit zero is not merged).
   const approvedHead = review.known && review.operatorOverride && review.attestation !== 'invalid'
     && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE';
@@ -417,7 +418,7 @@ function selectRow(facts) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
       deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true) {
+  if (launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true && !terminalHead) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
   }
@@ -464,10 +465,6 @@ function selectRow(facts) {
   const closerCarry = plain(progress?.closerAuthoredStale);
   const closerPair = Boolean(closerCarry && sameHead(closerCarry.currentHead, head)
     && sameHead(closerCarry.reviewedHead, review.reviewedHead));
-  const handedToReview = leaseForHead && lease.status === 'handed-to-review';
-  const terminalReview = progress?.terminalReview;
-  const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
-    && sameHead(terminalReview.reviewedHeadSha, review.reviewedHead) && !handedToReview;
   const carryable = review.currentHeadVerdictAbsent && Boolean(review.verdict);
   const semanticCarry = carryable && Boolean(proof && SEMANTIC_PROOF_KINDS.has(lower(proof.kind))
     && proof.semantic === true && sameHead(proof.fromHead, review.reviewedHead) && sameHead(proof.toHead, head));

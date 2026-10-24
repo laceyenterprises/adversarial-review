@@ -340,6 +340,7 @@ function closerDeps({ nextLaunch, comments = [PREMERGE_AUDIT_COMMENT], alerts = 
     statusProbes,
     launches,
     alerts,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
         statusProbes.push(args[2]);

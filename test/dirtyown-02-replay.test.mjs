@@ -32,7 +32,7 @@ import {
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
-import { isHammerRemediableEligibilityMiss, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser } from "../src/ama/dispatch-closer.mjs";
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import { proveCommentOnlyFinalRoundHead } from '../src/comment-only-final-round.mjs';
@@ -190,8 +190,7 @@ test('replay #7332: a conflicting, red-CI final-round head reaches one hammer in
     INCIDENT_7332_REASONS,
     'the closer sees exactly the reasons production refused on',
   );
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundConflicting, true, 'CONFLICTING is a proven conflict');
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true, 'a conflict does not wait on CI');
+  assert.equal(payload.sharedNextAction.decision.action, 'hammer', 'CONFLICTING is a proven conflict');
   assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
   assert.equal(run.outcome.outcome, 'ama-dispatched');
   assert.equal(run.hammerDispatches.length, 1, 'exactly one hammer');
@@ -236,8 +235,7 @@ test('replay #7332 with pending CI: a conflicting final-round head reaches one h
   const input = setup7332(rootDir, { statusCheckRollup: PENDING_7332_ROLLUP });
   const logs = [];
   const run = await replay(rootDir, { ...input, stubs: { ...input.stubs, now: WITHIN_CI_WAIT }, logs });
-  assert.equal(run.closerPayloads[0].dispatchContext.commentOnlyFinalRoundConflicting, true);
-  assert.equal(run.closerPayloads[0].dispatchContext.commentOnlyFinalRoundResume, true);
+  assert.equal(run.closerPayloads[0].sharedNextAction.decision.action, 'hammer');
   assert.equal(run.closerResults[0].dispatched, true, JSON.stringify(run.closerResults[0].reasons));
   assert.equal(run.hammerDispatches.length, 1);
   assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), false);
@@ -325,20 +323,3 @@ test('replay #7330 with its live ledger: two hammer launches on the reviewed hea
 });
 
 // ── The closer's own rule, both sides of the review budget ───────────────────
-
-test('a proven final-round resume covers a conflict with red CI, and never a blocking finding', () => {
-  for (const reviewCycleExhausted of [false, true]) {
-    const options = {
-      reviewCycleExhausted, commentOnlyFinalRoundResume: true, commentOnlyFinalRoundConflicting: true,
-    };
-    assert.equal(isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, options), true, `exhausted=${reviewCycleExhausted}`);
-    for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown']) {
-      assert.equal(isHammerRemediableEligibilityMiss([...INCIDENT_7332_REASONS, blocker], options), false, blocker);
-    }
-    assert.equal(
-      isHammerRemediableEligibilityMiss(INCIDENT_7332_REASONS, { reviewCycleExhausted }),
-      false,
-      'without the proof the stale head still parks',
-    );
-  }
-});

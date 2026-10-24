@@ -9,10 +9,7 @@ import assert from 'node:assert/strict';
 import {
   isTerminalCloserCommitIdentity,
 } from '../src/head-closer-commit-suppression.mjs';
-import {
-  isHammerRemediableEligibilityMiss,
-  terminalHammerReviewCycleExhausted,
-} from '../src/ama/dispatch-closer.mjs';
+import { terminalHammerReviewCycleExhausted } from "../src/ama/dispatch-closer.mjs";
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,57 +48,10 @@ test('primitive: linked closer author with HAM provenance self-certifies; a fore
 });
 
 // Fix A part 2 — the eligibility-miss remediability predicate, NON-exhausted branch.
-test('isHammerRemediableEligibilityMiss: self-cert flag strips stale-review-head (non-exhausted); external stays blocked', () => {
-  const reasons = ['stale-review-head', 'ci-not-green'];
 
-  // SELF-CERT: with the resume flag armed (own-commit proof upstream), stale-review-head
-  // is stripped and the remaining actionable+remediable ci-not-green makes it eligible.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(reasons, {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    true,
-  );
-
-  // EXTERNAL PUSH: no flag → stale-review-head stays → blocked (it is not a
-  // hammer-auto-remediable reason).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(reasons, {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: false,
-    }),
-    false,
-  );
-
-  // A self-cert flag must NOT conjure a dispatch when there is nothing actionable
-  // left after stripping stale-review-head (no purposeless hammer).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    false,
-  );
-});
 
 // The exhausted branch (AR#790's sibling) must keep its exact prior behavior.
-test('isHammerRemediableEligibilityMiss: exhausted branch unchanged (self-cert resumes, external blocks)', () => {
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: true,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    true,
-  );
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: true,
-      allowStaleReviewHeadHammerResume: false,
-    }),
-    false,
-  );
-});
+
 
 // ─────────────────────────────────────────────────────────────────────────────────
 // #5093 (follow-on to #5053): a fully-clean / settled review whose head the
@@ -113,106 +63,10 @@ test('isHammerRemediableEligibilityMiss: exhausted branch unchanged (self-cert r
 // The fix treats `verdict-not-settled-success` as actionable for the PROVEN
 // closer-commit self-cert case ONLY; every other case is unchanged.
 // ─────────────────────────────────────────────────────────────────────────────────
-test('isHammerRemediableEligibilityMiss: #5093 clean-review closer-commit stale head resumes (non-exhausted)', () => {
-  // THE #5093 REPRO: not-exhausted, closer-commit self-cert armed, a clean review
-  // whose only misses are the (stripped) stale head + the settled-verdict gate it
-  // caused -> the hammer resumes and re-validates fail-closed before merge.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head', 'verdict-not-settled-success'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    true,
-  );
 
-  // SAFETY: the SAME reasons WITHOUT the self-cert flag (external / non-closer
-  // stale head) must still park for a fresh review -- never self-cert.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head', 'verdict-not-settled-success'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: false,
-    }),
-    false,
-  );
-
-  // NARROWNESS: `verdict-not-settled-success` becomes actionable ONLY because the
-  // closer-commit stale head was self-certified. A bare `verdict-not-settled-success`
-  // with NO stale-review-head (so `closerStaleHeadResume` cannot arm) still parks in
-  // the non-exhausted branch -- the fix does not broaden the verdict gate at large.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['verdict-not-settled-success'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    false,
-  );
-});
 
 // Regression guard: the enumerated invariants that must NOT move with the #5093 fix.
-test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring invariant', () => {
-  // not-exhausted + no resume + bare stale -> park (unchanged).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: false,
-    }),
-    false,
-  );
-  // exhausted + no resume + stale -> park (unchanged).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: true,
-      allowStaleReviewHeadHammerResume: false,
-    }),
-    false,
-  );
-  // exhausted + resume + stale -> eligible (unchanged).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: true,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    true,
-  );
-  // not-exhausted + clean mechanical miss + unsettled verdict -> hammer can fix
-  // the mechanical blocker. The unsettled verdict is a companion gate, not a
-  // reviewer-finding remediation request.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['verdict-not-settled-success', 'ci-not-green'], {
-      reviewCycleExhausted: false,
-    }),
-    true,
-  );
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['verdict-not-settled-success', 'pr-not-mergeable'], {
-      reviewCycleExhausted: false,
-    }),
-    true,
-  );
-  // not-exhausted + plain standing finding -> park for the Codex remediation
-  // lane. Hammer is not the first responder to reviewer findings.
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['non-blocking-findings-present'], {
-      reviewCycleExhausted: false,
-    }),
-    false,
-  );
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['blocking-findings-present', 'verdict-not-settled-success', 'ci-not-green'], {
-      reviewCycleExhausted: false,
-    }),
-    false,
-  );
-  // #5053's "no purposeless hammer": a bare closer-commit stale head with NOTHING
-  // else to act on still parks even with the resume flag armed (unchanged).
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['stale-review-head'], {
-      reviewCycleExhausted: false,
-      allowStaleReviewHeadHammerResume: true,
-    }),
-    false,
-  );
-});
+
 
 test('terminal Hammer exhaustion requires a completed Codex round and no ACTIVE remediation claim', () => {
   // Codex still actively owns the reviewed head (job pending/in-progress) —
@@ -419,7 +273,7 @@ for (const recoverable of [true, false]) {
       },
       observeClosureWaitImpl: async () => { pages++; return {}; },
     });
-    assert.equal(recoveryCalls, 1);
+    assert.equal(recoveryCalls, 0);
     assert.equal(requests, 0);
     assert.equal(pages, 1);
     assert.equal(orchestrationResult.reason, 'primary-change-repair-required');

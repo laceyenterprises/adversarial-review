@@ -15,6 +15,23 @@ import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-contex
 const GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
 const ENV = { ADV_GATE_STATUS_CONTEXT: GATE_CONTEXT };
 
+for (const [name, overrides, repairable] of [
+  ['red CI', { prMetadata: { statusCheckRollup: [{ name: 'synthetic-check', conclusion: 'FAILURE' }] } }, true],
+  ['conflict', { prMetadata: { mergeableState: 'CONFLICTING' } }, true],
+  ['findings', { reviewState: { verdict: 'request-changes', blockingFindingCount: 1 } }, true],
+  ['closed', { prMetadata: { isOpen: false } }, false],
+  ['draft', { prMetadata: { isDraft: true } }, false],
+  ['hold', { prMetadata: { labels: ['do-not-merge'] } }, false],
+  ['risk', { reviewState: { riskClass: 'unknown' } }, false],
+  ['protection', { prMetadata: { branchProtection: { requiredContexts: [] } } }, false],
+  ['disabled', { cfg: { enabled: false } }, false],
+]) test(`repair admission retains existing structural restrictions: ${name}`, () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture(overrides);
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.repairAdmission.ok, repairable);
+  assert.equal(result.eligible, false, 'repair admission never grants merge permission');
+});
+
 /**
  * Default eligible fixture: every gate passes. Each test below mutates ONE
  * gate at a time to verify the predicate fails on exactly that one gate

@@ -153,6 +153,12 @@ async function backgroundFinalRound(t, { dispatchOnly = false, lease = false, ti
 for (const dispatchOnly of [false, true]) {
   test(`HAMCLOSEWAIT-02 200-second background launch dispatches without paging, dispatch-only=${dispatchOnly}`, async t => {
     const f = await backgroundFinalRound(t, { dispatchOnly });
+    if (dispatchOnly) {
+      await assert.rejects(maybeDispatchAmaClosureFor(f.args), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+      assert.equal(f.calls(), 0);
+      assert.deepEqual(f.pages, []);
+      return;
+    }
     const first = await maybeDispatchAmaClosureFor(f.args);
     assert.equal(first.closerProgressAt, new Date(f.launchAt).toISOString());
     f.advance(180_000);
@@ -186,6 +192,12 @@ for (const dispatchOnly of [false, true]) {
 
   test(`HAMCLOSEWAIT-02 undispatched settlement restores original wait and reasons, dispatch-only=${dispatchOnly}`, async t => {
     const f = await backgroundFinalRound(t, { dispatchOnly, lease: !dispatchOnly });
+    if (dispatchOnly) {
+      await assert.rejects(maybeDispatchAmaClosureFor(f.args), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+      assert.equal(f.calls(), 0);
+      assert.deepEqual(f.pages, []);
+      return;
+    }
     if (!dispatchOnly) f.args.runDaemonCleanMergeAttemptImpl = async () => ({
       disposition: 'not-taken', reason: 'not-eligible', reasons: ['pending-required-checks'], ciMergePathPending: true,
     });
@@ -318,14 +330,15 @@ for (const [reason, age, expectedPages] of [
     reason: 'dispatch-pending', pageImpl: async text => pages.push(text) });
   for (let tick = 0; tick < 2; tick++) {
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
-      currentRevisionRef: headSha, labelNames: [], now: () => clock, env: {}, operationTimeoutMs: 10,
+      currentRevisionRef: headSha, labelNames: [], now: () => clock, env: {}, operationTimeoutMs: 1000,
       reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
         reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
       candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
-        mergeable: 'UNKNOWN', statusCheckRollup: [] },
+        mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
       loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
       resolveAmaHammerDispatchModeImpl: () => 'inline',
-      fetchPullRequestMergeabilityImpl: () => new Promise(() => {}),
+      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
       runDaemonCleanMergeAttemptImpl: async () => assert.fail('wait never grants merge authority'),
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason, closerProgressAt,
         closerLaunchAlive: reason === 'existing-dispatch-running' }),
@@ -519,11 +532,11 @@ test('HAMCLOSEWAIT-01 a fixed progress timestamp eventually pages and immediate 
   assert.equal(pages.length, 2);
 });
 for (const operation of ['mergeability', 'live-review', 'stale-proof']) {
-  test(`FINALCLOSE-01 final-round ${operation} timeout reaches dispatch on the same tick without merging`, async t => {
+  test(`FINALCLOSE-01 final-round ${operation} timeout refuses dispatch and merge`, async t => {
     const rootDir = finalRound(t);
     const stall = () => new Promise(() => {});
     let launches = 0, merges = 0;
-    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+    await assert.rejects(maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
       currentRevisionRef: headSha, labelNames: [], operationTimeoutMs: 10,
       reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
         reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
@@ -545,9 +558,8 @@ for (const operation of ['mergeability', 'live-review', 'stale-proof']) {
       },
       observeClosureWaitImpl: async () => ({}),
       logger: { log() {}, warn() {} },
-    });
-    assert.equal(result.dispatched, true);
-    assert.equal(launches, 1);
+    }), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+    assert.equal(launches, 0);
     assert.equal(merges, 0);
   });
 }

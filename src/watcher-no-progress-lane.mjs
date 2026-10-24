@@ -657,10 +657,11 @@ export function evaluateNoProgressLane(ledger, {
     return { ...base, reason: 'head-changed' };
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
-  if (ledger.hammerRouteActive === true) {
+  const selected = ledger.nextAction?.head === head ? ledger.nextAction : null;
+  if (selected ? !['operator-hold', 'done'].includes(selected.action) : ledger.hammerRouteActive === true) {
     return { ...base, noProgressTicks, reason: 'hammer-route-active' };
   }
-  if (!hasOwn(ledger, 'progressClass')) {
+  if (!selected && !hasOwn(ledger, 'progressClass')) {
     return {
       lane: LANE_OPERATOR_BLOCKED,
       due: true,
@@ -671,7 +672,9 @@ export function evaluateNoProgressLane(ledger, {
       reason: 'legacy-progress-class-missing',
     };
   }
-  const progressClass = normalizeProgressClass(ledger.progressClass);
+  const progressClass = selected ? selected.action === 'operator-hold'
+    ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING
+    : normalizeProgressClass(ledger.progressClass);
   if (progressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED) {
     // LANESTARVE-01: the ceiling applies to every lane. Nothing may keep a PR
     // unwalked for longer than it, whatever the per-lane cadence says.
@@ -773,7 +776,8 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   // construction: an unknown head is walked at full speed, every tick.
   if (head === null) return null;
   const selected = nextAction?.head === head ? nextAction : null;
-  if (selected && !operatorHold) {
+  if (selected) {
+    operatorHold = selected.action === 'operator-hold';
     // Alerts and automatic stops retain an automated recovery workflow. Only
     // explicit intent belongs in the operator lane; deadlines never stop work.
     progressClass = selected.action === 'operator-hold'

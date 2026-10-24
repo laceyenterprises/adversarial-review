@@ -21,6 +21,7 @@ function eligibleInputs(rootDir) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const reviewState = {
     verdict: 'comment-only',
+      reviewCycleExhausted: true,
     headSha,
     riskClass: 'low',
     remediationPending: false,

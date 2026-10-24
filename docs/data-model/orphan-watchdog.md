@@ -24,54 +24,21 @@ positive numeric override; invalid values retain the default. `ownership.idleSin
 the first PR-wide observation without a proven owner, across head changes. Poll frequency does not affect
 the bound. Held, draft and terminal PRs do not enter recovery.
 
-HAMATTEST-02 executes an explicit shared `rereview-exact-head` decision before
-the idle bound when the PR has no live owner and ownership reads are certain.
-HAMATTEST-03 also honors `selectedClosureOwner` of review/exact-head-review
-(with `closureOwner` accepted for compatibility). Both this selection and an
-explicit `rereview-exact-head` decision require stale-head evidence matching the
-current head and this row's reviewed head, with those heads distinct.
-This covers a recorded publication bridge whose live verdict is unsettled,
-without overwriting its carry-forward refusal reasons. Coexistence preserves
-that selection separately through bounded waits and invokes recovery before
-returning the wait. `closureOwner` remains wait/page until ownership is certainly
-absent and queueing succeeds, then reports review with `exact-head-review-queued`.
-Live or uncertain ownership and queue refusal retain wait/page. The selection
-is an in-memory projection; the durable store shape is unchanged.
-The existing `heads.rereview` reservation permits one successful request per
-head. Local queue failures refund that reservation. The request uses the
-existing `system-orphan-head-review:<head>` marker, which the watcher honors
-through closer-tip and old review-budget suppression, while exact-head deduplication
-and live-owner checks remain in force. `heads.evidence` records
-`{ action: "review", reason: "rereview-exact-head", reasons: [...] }`; the watcher
-also logs the reasons. The immediate request starts both `ownership.idleSince` and `heads.idleSince`,
-even if queueing fails or the current-head review is already failed. At the idle
-bound, an unowned head retains the review route for the existing two recovery
-attempts and one exhaustion page. A new head has its own reservation. Authenticated pushed
-and validated App edges share the stale-head predicate; neither historical
-hammer identity nor a closed review budget overrides an explicit review decision.
-Drafts, terminal PRs, operator holds, live owners and uncertain ownership retain
-their existing admission behavior.
+A head-bound shared reviewer dispatch can execute before the idle bound after
+proving ownership absent. The existing `heads.rereview` reservation permits one
+successful immediate request per head; a local refusal refunds the reservation.
+The request retains `system-orphan-head-review:<head>`, exact-head deduplication
+and the review-state CAS. Live or uncertain ownership never permits a request.
+The selected actor remains visible even while physical admission waits.
 
-Without that explicit shared decision, after the bound, current-head review evidence chooses the next action: request
-review if absent and re-review remains open, otherwise request a hammer.
-HAMNOREREVIEW-01 carries `ownerProofFacts.liveHeadCloserAuthored` from closure
-orchestration, bound by `ownerProofFacts.headSha`. Recognized current-head hammer
-work selects the hammer even without an exact-head review; older-head evidence
-cannot select that route. This changes ownership only, preserving merge gates. Recovery
-shares review admission's settled Comment-only predicate (captured completed
-passes and follow-up jobs), and reads the terminal final-round ledger even when
-the reviewed head is older. If the readonly captured-pass query fails (including
-an unmigrated database), it logs a warning and falls back to filesystem review
-evidence without migrating the database. Closed final-round and exhausted-cycle facts also
-select the hammer; historical verdicts alone do not close review on a new head.
-Historical dispatch stops and
-retry counters are set aside for this bounded recovery. The hammer and merge
-agent retain their live merge predicates, quota admission and operator holds.
-Pending/failed review rows visit the watchdog before ordinary retry admission;
-posted rows visit it through closure orchestration. Live PR reads guard both
-paths against already merged or closed targets. A daemon merge completed during
-closure settles the PR as terminal before recovery, even when the earlier live
-read still reported OPEN.
+After the idle bound, only the same head's selected reviewer or hammer dispatch
+can reserve an action, and drain/capacity deferral remains effective. The watchdog
+no longer derives eligibility from review verdicts, reason sets, closer identity,
+final-round ledgers or historical stops. Those facts enter the shared snapshot.
+Automatic stops, exhausted retries and unknown descendants retain recovery
+ownership. There is no separate rescue policy. Pending/failed and posted caller
+paths retain their terminal PR guards; a daemon's confirmed merge settles before
+recovery even if the earlier candidate was OPEN.
 
 A review request cannot reset a `reviewing` delivery row, including a claim
 whose child has not yet acquired a process group. It returns `review-in-flight`
@@ -112,7 +79,6 @@ recovery uses the shared two-attempt budget; execution of an explicit
 `rereview-exact-head` decision uses the existing per-head `rereview` reservation.
 
 Every recovery emits one `ownerless-recovery` log line containing repo, PR,
-head, elapsed idle minutes, last reason and action. Separate diagnostics record
-that historical stops were set aside. Store failures retain the existing
+head, elapsed idle minutes, last reason and action. Store failures retain the existing
 store-error page behavior. All tests use fixture state and injected dispatch,
 ledger and pager functions.

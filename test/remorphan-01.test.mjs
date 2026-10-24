@@ -8,6 +8,7 @@ import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS, isOrphanRecoveryWait } from '../src/ama/orphan-watchdog.mjs';
 import Database from 'better-sqlite3';
+import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdict, requestReviewRereview } from '../src/review-state.mjs';
@@ -15,13 +16,25 @@ import { openReviewStateDb, ensureReviewStateSchema, hasSettledCommentOnlyVerdic
 // Simulated timestamps exercise the idle policy independently of fleet host load.
 mock.method(os, 'loadavg', () => [0, 0, 0]);
 
+function syntheticDecision(head) {
+  return nextAction(deriveNextActionSnapshot({ subjectKey: 'subject-orphan-07', head,
+    observedAt: '2026-10-11T16:00:00.000Z', anchors: { firstActionableAt: '2026-10-11T16:00:00.000Z' },
+    observations: {
+      pr: { state: 'OPEN', headSha: head, mergeable: 'MERGEABLE' },
+      reviews: { headSha: head, verdict: 'request-changes', blockingFindingState: 'known', blockingFindingCount: 1,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      checks: { conclusion: 'SUCCESS' }, remediation: { roundsLeft: false },
+      leases: { closer: null }, launches: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
+    } }));
+}
+
 function setup(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const calls = { launches: [], reviews: [], pages: [], logs: [] };
   const args = { rootDir, repo: 'example/repo', prNumber: 8086, headSha: 'current',
     candidate: { prState: 'open', headSha: 'current' }, labels: [],
-    result: { amaEnabled: true, reason: 'lease-held' },
+    result: { amaEnabled: true, reason: 'lease-held', nextAction: syntheticDecision('current') },
     reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'current' },
     hasOwnerImpl: async () => ({ owned: false }),
     dispatchHammer: async evidence => { calls.launches.push(evidence); return { dispatched: true, reason: 'launched' }; },
@@ -29,7 +42,9 @@ function setup(t) {
     pageImpl: async (...page) => calls.pages.push(page),
     logger: { log: line => calls.logs.push(line), info() {}, warn() {} } };
   const tick = (minutes, overrides = {}) => recoverOrphan({ ...args,
-    now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(), ...overrides });
+    now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(), ...overrides,
+    result: { ...args.result, ...overrides.result, nextAction: overrides.result?.nextAction
+      || syntheticDecision(overrides.headSha || args.headSha) } });
   const record = (bucket, value) => {
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
     mkdirSync(dir, { recursive: true });
@@ -45,120 +60,21 @@ function recoveryState(rootDir) {
   finally { db.close(); }
 }
 
-test('ORPHANACTION-01: settled Comment-only final round selects hammer after a newer push', async t => {
-  const { tick, calls, record } = setup(t);
-  record('completed', { status: 'completed', revisionRef: 'old', finalRound: 'comment-only',
-    reviewBody: '## Non-blocking issues\n- Clarify the example.\n## Verdict\nComment only',
-    reReview: { suppressed: 'comment-only-final-round' },
-    completion: { workerPushedHeadSha: 'a'.repeat(40) } });
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
-    result: { amaEnabled: true, ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only' } } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 1);
-  assert.equal(calls.reviews.length, 0);
-});
 
-test('ORPHANACTION-01: review admission and recovery share captured-pass settlement evidence', async t => {
-  const { args, tick, calls } = setup(t);
-  const db = openReviewStateDb(args.rootDir);
-  try {
-    ensureReviewStateSchema(db);
-    db.prepare(`INSERT INTO reviewer_passes
-      (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, head_sha, body_md)
-      VALUES (?, ?, 1, 'codex', 'first-pass', '2026-10-01T00:00:00Z', 'completed', ?, ?)`)
-      .run(args.repo, args.prNumber, args.headSha, '## Verdict\nComment only');
-  } finally { db.close(); }
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 1);
-  assert.equal(calls.reviews.length, 0);
-});
 
-test('ORPHANACTION-01: an older Comment-only verdict without a settled final round leaves review open', async t => {
-  const { tick, calls, record } = setup(t);
-  record('completed', { status: 'completed', revisionRef: 'old', reviewBody: '## Verdict\nComment only' });
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
-    result: { amaEnabled: true, ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only' } } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 0);
-  assert.equal(calls.reviews.length, 1);
-  assert.equal(calls.reviews[0].targetRevisionRef, 'current');
-});
+
+
+
 
 // LAC-2072: these facts select dispatch admission only. False or absent
 // terminal evidence on an unreviewed current head must retain exact-head review.
-for (const facts of [
-  {},
-  { reviewCycleExhausted: false, commentOnlyFinalRoundCompleted: false },
-  { reviewCycleExhausted: true, commentOnlyFinalRoundCompleted: false },
-  { reviewCycleExhausted: false, commentOnlyFinalRoundCompleted: true },
-  { reviewCycleExhausted: true, commentOnlyFinalRoundCompleted: true },
-  { reviewCycleExhausted: 'false', commentOnlyFinalRoundCompleted: 'true' },
-]) test(`LAC-2072: recovery respects terminal owner facts: ${JSON.stringify(facts)}`, async t => {
-  const { tick, calls } = setup(t);
-  const overrides = {
-    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
-    result: { amaEnabled: true, ownerProofFacts: {
-      headSha: 'current', reviewedHeadSha: 'old', verdict: 'comment-only', ...facts,
-    } },
-  };
-  await tick(0, overrides); await tick(15, overrides);
-  const closed = facts.reviewCycleExhausted === true || facts.commentOnlyFinalRoundCompleted === true;
-  assert.equal(calls.launches.length, closed ? 1 : 0);
-  assert.equal(calls.reviews.length, closed ? 0 : 1);
-  if (!closed) assert.equal(calls.reviews[0].targetRevisionRef, 'current');
-  assert.equal(calls.pages.length, 0);
-});
 
-for (const evidence of [
-  { reviewStateRow: { rereview_reason: 'system-review-ceiling-closure' } },
-  { dispatchJob: { reviewCycleCapReached: true } },
-  { dispatchJob: { remediationStopCode: 'max-rounds-reached' } },
-]) test(`ORPHANACTION-01: closed re-review evidence selects hammer: ${JSON.stringify(evidence)}`, async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' }, ...evidence };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 1);
-  assert.equal(calls.reviews.length, 0);
-});
 
-for (const reason of [undefined, null, 42, {}, '']) {
-  test(`HAM: partial retry reason settles without throwing: ${JSON.stringify(reason)}`, async t => {
-    const { args, tick, calls } = setup(t);
-    await tick(0);
-    await tick(15, { dispatchHammer: async () => ({ reason }) });
-    const state = recoveryState(args.rootDir);
-    assert.equal(state.attempts, 1);
-    assert.equal(JSON.parse(state.outcomes)[0].reason, String(reason || ''));
-    assert.equal(calls.pages.length, 0);
-  });
-}
 
-for (const settled of [false, true]) {
-  test(`HAM: unmigrated review database falls back without mutation (settled=${settled})`, async t => {
-    const { args, record, tick, calls } = setup(t);
-    const dir = join(args.rootDir, 'data');
-    mkdirSync(dir, { recursive: true });
-    const db = new Database(join(dir, 'reviews.db'));
-    db.close();
-    if (settled) record('completed', { status: 'completed', revisionRef: args.headSha,
-      reviewBody: '## Verdict\nComment only' });
-    const warnings = [];
-    assert.equal(hasSettledCommentOnlyVerdict(args.rootDir, args, { warn: message => warnings.push(message) }), settled);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /no such table: reviewer_passes/);
-    const readonly = new Database(join(dir, 'reviews.db'), { readonly: true });
-    try { assert.deepEqual(readonly.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(), []); }
-    finally { readonly.close(); }
-    if (settled) assert.equal(hasSettledCommentOnlyVerdict(args.rootDir,
-      { ...args, automaticMalformedRecovery: true }, { warn() {} }), false);
-    const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' } };
-    await tick(0, overrides); await tick(15, overrides);
-    assert.equal(calls.launches.length, settled ? 1 : 0);
-    assert.equal(calls.reviews.length, settled ? 0 : 1);
-    assert.equal(calls.pages.length, 0);
-  });
-}
+
+
+
+
 
 for (const hold of [
   { holdReason: 'fleet-quota-status-unavailable' },
@@ -218,26 +134,9 @@ for (const hold of [
   assert.equal(calls.pages.length, 1);
 });
 
-test('ORPHANACTION-01: explicit hold reason takes precedence over the harness reason suffix', async t => {
-  const { args, tick } = setup(t);
-  await tick(0);
-  await tick(15, { dispatchHammer: async () => ({
-    reason: 'harness-hold:all-fallbacks-grounded', holdReason: 'quota-exhausted',
-  }) });
-  const state = recoveryState(args.rootDir);
-  assert.equal(JSON.parse(state.outcomes)[0].holdReason, 'quota-exhausted');
-  assert.equal(JSON.parse(state.evidence).holdReason, 'quota-exhausted');
-});
 
-test('ORPHANACTION-01: exhausted page text names both outcome reasons and underlying hold', async t => {
-  const { tick, calls } = setup(t);
-  await tick(0);
-  await tick(15, { dispatchHammer: async () => ({ reason: 'all-fallbacks-grounded', holdReason: 'quota-exhausted' }) });
-  await tick(16, { dispatchHammer: async () => ({ reason: 'launch-refused' }) });
-  await tick(17);
-  assert.match(calls.pages[0][0], /attempt 1: all-fallbacks-grounded \(quota-exhausted\); attempt 2: launch-refused/);
-  assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason), ['all-fallbacks-grounded', 'launch-refused']);
-});
+
+
 
 test('one elapsed-time bound, with a positive environment override', () => {
   assert.equal(OWNERLESS_BOUND_MS, 900000);
@@ -245,49 +144,11 @@ test('one elapsed-time bound, with a positive environment override', () => {
   assert.equal(ownerlessBoundMs({ OWNERPROOF_IDLE_MINUTES: '2' }), 120000);
   for (const value of ['0', '-1', 'bad']) assert.equal(ownerlessBoundMs({ OWNERPROOF_IDLE_MINUTES: value }), 900000);
 });
-test('PR 8086: terminal lease on current head cannot prove ownership', async t => {
-  const { args, calls, tick } = setup(t);
-  const dir = join(args.rootDir, 'data', 'ama-closer-leases');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'example__repo-pr-8086-current.json'), JSON.stringify({ status: 'terminal', terminalOutcome: 'failed-without-merge' }));
-  const overrides = { hasOwnerImpl: probeOrphanOwnership };
-  await tick(0, overrides);
-  await tick(14, overrides);
-  assert.equal(calls.launches.length, 0);
-  await tick(15, overrides);
-  assert.deepEqual(calls.launches, [{ ownerProof: true, headSha: 'current' }]);
-  assert.match(calls.logs[0], /^\[watcher\] ownerless-recovery repo=example\/repo pr=8086 head=current idle_minutes=15 last_reason=lease-held action=hammer$/);
-});
-test('PR 8089: closer-authored stale head and not-eligible hammer requests current review', async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
-    result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 0);
-  assert.equal(calls.reviews[0].targetRevisionRef, 'current');
-  assert.equal(calls.reviews[0].ownerlessRecovery, true);
-});
-test('PR 8088: settled comment-only review with findings and conflict launches hammer', async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { candidate: { prState: 'open', mergeable: 'CONFLICTING' },
-    result: { amaEnabled: true, reason: 'not-eligible', ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'current', verdict: 'comment-only', checks: [], mergeable: 'CONFLICTING' } },
-    dispatchJob: { nonBlockingFindingCount: 10, remediationStopCode: 'comment-only-final-round' } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 1); assert.equal(calls.reviews.length, 0);
-});
-test('PR 8085: exhausted re-arm counter requests undispatched review', async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { reviewStateRow: { review_status: 'pending', revision_ref: 'current', rereview_requested_at: '2026-10-11T15:00:00Z', watchdog_rearm_count: 100 },
-    result: { amaEnabled: true, reason: 'watchdog-rearm-cap-exhausted' } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.reviews.length, 1);
-});
-test('arbitrary new refusal reasons do not strand PRs', async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { result: { amaEnabled: true, reason: 'a-future-stop', reasons: ['unrecognized'] } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.launches.length, 1);
-});
+
+
+
+
+
 test('live ledger run prevents recovery and resets the idle timer', async t => {
   const { args, record, tick, calls } = setup(t);
   record('ama-closer-dispatches', { launchRequestId: 'lrq' });
@@ -315,13 +176,13 @@ test('third recovery pages once with both outcomes and never launches', async t 
   assert.equal(payload.headSha, 'current'); assert.equal(payload.prNumber, 8086);
   assert.deepEqual(payload.outcomes.map(a => a.reason), ['launched', 'launched']);
 });
-test('unknown ledger evidence becomes ownerless after the same bound', async t => {
+test('unknown ledger evidence retains reconciliation after the idle bound', async t => {
   const { args, record, tick, calls } = setup(t);
   record('ama-closer-dispatches', { launchRequestId: 'lrq' });
   const unknown = await probeOrphanOwnership({ ...args, readStatusImpl: async () => ({ ok: false, reason: 'ledger-unavailable' }) });
   assert.equal(unknown.owned, false); assert.equal(unknown.uncertain, true);
   await tick(0, { hasOwnerImpl: async () => unknown }); await tick(14, { hasOwnerImpl: async () => unknown });
-  assert.equal(calls.launches.length, 0); await tick(15, { hasOwnerImpl: async () => unknown }); assert.equal(calls.launches.length, 1);
+  assert.equal(calls.launches.length, 0); await tick(15, { hasOwnerImpl: async () => unknown }); assert.equal(calls.launches.length, 0);
 });
 test('queue row, remediation flag and reviewing status alone are not ownership', async t => {
   const { args, record } = setup(t);
@@ -400,39 +261,7 @@ test('head movement cannot restart the PR-wide absence-of-owner bound', async t 
   await tick(15, next); assert.equal(calls.launches.length, 1);
 });
 
-for (const reason of ['lease-held', 'not-eligible', 'dispatch-status-unknown']) {
-  test(`closure routes ownerless ${reason} through elapsed recovery and its two-attempt budget`, async t => {
-    const { args, calls } = setup(t);
-    const observations = [];
-    const run = minutes => resolveMergeAgentCoexistenceForWatcher({
-      rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
-      currentRevisionRef: args.headSha, candidate: args.candidate,
-      reviewStateRow: args.reviewStateRow, labelNames: [], logger: args.logger,
-      maybeDispatchAmaClosureForImpl: async options => {
-        if (options.orphanRecovery) {
-          observations.push(options.orphanRecovery);
-          return { dispatched: false, reason: 'test-admission-refused' };
-        }
-        return { amaEnabled: true, skipMergeAgent: true, reason };
-      },
-      recoverAmaAutomationImpl: () => assert.fail('ownerless watchdog retains this tick'),
-      orphanOptions: { hasOwnerImpl: args.hasOwnerImpl, pageImpl: args.pageImpl,
-        now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(), env: {} },
-    });
-    for (let poll = 0; poll < 8; poll += 1) assert.equal((await run(0)).outcome, 'ama-pending');
-    await run(14);
-    assert.equal(observations.length, 0, 'frequent polls cannot shorten the grace');
-    await run(15); await run(16);
-    assert.deepEqual(observations, [
-      { ownerProof: true, headSha: args.headSha }, { ownerProof: true, headSha: args.headSha },
-    ]);
-    assert.equal((await run(17)).outcome, 'recovery-exhausted');
-    await run(18);
-    assert.equal(calls.pages.length, 1);
-    assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason),
-      ['test-admission-refused', 'test-admission-refused']);
-  });
-}
+
 
 test('REVIEWALERT-01 pending ownership defaults to the current timestamp when now is omitted', async t => {
   const { args } = setup(t);
@@ -514,18 +343,7 @@ test('ORPHANPAGE-01: dead-letter page is terminal and warns once across later po
   assert.deepEqual(warnings, ['Orphan recovery page is dead-lettered; operator action required']);
 });
 
-for (const conclusion of ['FAILURE', 'PENDING']) {
-  test(`HAMROUTE-01: ${conclusion} external CI selects hammer recovery, never review reset`, async t => {
-    const { tick, calls } = setup(t);
-    const overrides = { reviewStateRow: { review_status: 'pending', reviewer_head_sha: 'old' },
-      candidate: { prState: 'open', headSha: 'current',
-        statusCheckRollup: [{ name: 'external-test', conclusion }] } };
-    await tick(0, overrides);
-    await tick(15, overrides);
-    assert.equal(calls.launches.length, 1);
-    assert.equal(calls.reviews.length, 0);
-  });
-}
+
 
 test('HAMROUTE-01: waits retain idle time and refund attempts; two real launch failures page', async t => {
   const { tick, calls } = setup(t);
@@ -552,14 +370,7 @@ test('HAMROUTE-01: waits retain idle time and refund attempts; two real launch f
   assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason), ['launch-failed', 'launch-failed']);
 });
 
-test('HAMROUTE-01: CI-blocked ownership selects hammer even with no check rollup', async t => {
-  const { tick, calls } = setup(t);
-  const overrides = { reviewStateRow: { review_status: 'ci-blocked', reviewer_head_sha: 'old' },
-    dispatchJob: { ciBlockedHammerOwner: true } };
-  await tick(0, overrides); await tick(15, overrides);
-  assert.equal(calls.reviews.length, 0);
-  assert.equal(calls.launches.length, 1);
-});
+
 
 test('HAMROUTE-01: observing a proof wait never adds a live ownership read to the serial phase', async t => {
   const { tick, calls } = setup(t);
@@ -571,155 +382,12 @@ test('HAMROUTE-01: observing a proof wait never adds a live ownership read to th
   assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
 });
 
-for (const factHead of ['current', 'prior']) {
-  test(`HAMNOREREVIEW-01 ownerless hammer head stays with hammer when evidence names ${factHead}`, async t => {
-    const { tick, calls } = setup(t);
-    const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
-      result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head'],
-        ownerProofFacts: { headSha: factHead, reviewedHeadSha: 'reviewed', verdict: 'comment-only',
-          liveHeadCloserAuthored: true } } };
-    await tick(0, overrides);
-    await tick(31, overrides);
-    assert.equal(calls.launches.length, factHead === 'current' ? 1 : 0);
-    assert.equal(calls.reviews.length, factHead === 'current' ? 0 : 1);
-  });
-}
-
-
-for (const mismatch of ['current-head', 'reviewed-head', 'missing-heads', 'same-head']) {
-  test(`exact-head watchdog rejects ${mismatch} before bypassing a proof wait`, async t => {
-    const { tick, calls } = setup(t);
-    const stale = { decision: 'rereview-exact-head', currentHead: 'current', reviewedHead: 'reviewed' };
-    if (mismatch === 'current-head') stale.currentHead = 'foreign';
-    if (mismatch === 'reviewed-head') stale.reviewedHead = 'foreign';
-    if (mismatch === 'missing-heads') { delete stale.currentHead; delete stale.reviewedHead; }
-    if (mismatch === 'same-head') stale.reviewedHead = 'current';
-    await tick(0, { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
-      result: { amaEnabled: true, recoveryWait: true, closerAuthoredStale: stale },
-      hasOwnerImpl: () => assert.fail('a foreign decision cannot bypass the proof wait') });
-    assert.equal(calls.reviews.length, 0);
-    assert.equal(calls.launches.length, 0);
-  });
-}
-
-test('HAMATTEST-02: watcher executes an unproven-head decision once, before its idle bound', async t => {
-  const { args, tick, calls } = setup(t);
-  const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'reviewed', currentHead: 'current',
-    // A hammer tip above a foreign commit cannot bridge the reviewed head.
-    comments: [{ author: 'hammer-worker', body: 'HAM-Base-Head: foreign\nHAM-Pushed-Head: current' }] });
-  const decision = closerAuthoredStaleEligible({ headProof });
-  assert.equal(decision.decision, 'rereview-exact-head');
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
-    result: { amaEnabled: true, reason: 'not-eligible', closerAuthoredStale: decision,
-      ownerProofFacts: { headSha: 'current', liveHeadCloserAuthored: true, reviewCycleExhausted: true } } };
-  const first = await tick(0, overrides);
-  assert.equal(first.amaClosureResult.reviewRequest.triggered, true);
-  await tick(1, overrides);
-  await tick(10, overrides);
-  assert.equal(calls.reviews.length, 1);
-  assert.equal(calls.launches.length, 0, 'historical hammer evidence cannot override the shared decision');
-  const request = calls.reviews[0];
-  assert.equal(request.targetRevisionRef, 'current');
-  assert.equal(request.ownerlessRecovery, true);
-  assert.equal(isOrphanHeadReviewRequested({ rereview_requested_at: '2026-10-22T00:00:00Z',
-    revision_ref: request.targetRevisionRef, rereview_reason: request.reason }, 'current'), true,
-  'the durable request bypasses closer-tip suppression in real watcher admission');
-  const state = recoveryState(args.rootDir);
-  assert.equal(state.rereview, 1);
-  assert.deepEqual(JSON.parse(state.evidence), { action: 'review', reason: 'rereview-exact-head',
-    reasons: ['hammer-app-attestation-missing'] });
-  assert.equal(state.attempts, 0);
-  assert.equal(state.idleSince, '2026-10-11T16:00:00.000Z');
-  assert.match(calls.logs.join('\n'), /requested exact-head re-review.*hammer-app-attestation-missing/);
-});
-
-for (const failure of ['failed-review', 'queue-refused']) {
-  test(`HAMATTEST-02: exact-head ${failure} accumulates idle time and exhausts recovery`, async t => {
-    const { args, tick, calls } = setup(t);
-    const overrides = { reviewStateRow: { review_status: failure === 'failed-review' ? 'failed' : 'posted',
-      reviewer_head_sha: 'reviewed' },
-    result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head',
-      currentHead: 'current', reviewedHead: 'reviewed' },
-      ownerProofFacts: { headSha: 'current', liveHeadCloserAuthored: true, reviewCycleExhausted: true } },
-    requestRereviewImpl: async options => { calls.reviews.push(options); return { triggered: false, reason: 'queue-refused' }; } };
-    await tick(0, overrides);
-    const pending = await tick(10, overrides);
-    assert.equal(pending.amaClosureResult.ownerlessIdleMs, 600000);
-    assert.equal(calls.pages.length, 0);
-    await tick(15, overrides);
-    await tick(16, overrides);
-    const exhausted = await tick(17, overrides);
-    await tick(18, overrides);
-    assert.equal(exhausted.outcome, 'recovery-exhausted');
-    assert.equal(recoveryState(args.rootDir).attempts, 2);
-    assert.equal(calls.pages.length, 1);
-    assert.equal(calls.launches.length, 0, 'unproven heads retain the review route');
-  });
-}
-
-for (const ownership of [{ owned: true }, { owned: false, uncertain: true }]) {
-  test(`HAMATTEST-02: shared re-review decision respects ownership ${JSON.stringify(ownership)}`, async t => {
-    const { tick, calls } = setup(t);
-    await tick(0, { hasOwnerImpl: async () => ownership,
-      reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
-      result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head',
-        currentHead: 'current', reviewedHead: 'reviewed' } } });
-    assert.equal(calls.reviews.length, 0);
-    assert.equal(calls.launches.length, 0);
-  });
-}
-
-test('HAMATTEST-02: local request failure remains retryable, while later heads get their own request', async t => {
-  const { tick, calls } = setup(t);
-  let attempts = 0;
-  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
-    result: { amaEnabled: true, closerAuthoredStale: { currentHead: 'current', reviewedHead: 'reviewed',
-    decision: 'rereview-exact-head', reasons: ['hammer-app-attestation-missing'] } },
-  requestRereviewImpl: async options => {
-    if (++attempts === 1) throw new Error('synthetic local database busy');
-    calls.reviews.push(options);
-    return { triggered: true };
-  } };
-  await tick(0, overrides);
-  await tick(1, overrides);
-  await tick(2, overrides);
-  assert.equal(attempts, 2);
-  await tick(3, { ...overrides, headSha: 'next', candidate: { prState: 'open', headSha: 'next' },
-    result: { ...overrides.result, closerAuthoredStale: { ...overrides.result.closerAuthoredStale, currentHead: 'next' } } });
-  assert.deepEqual(calls.reviews.map(request => request.targetRevisionRef), ['current', 'next']);
-});
-
-
-test('HAMATTEST-02: watcher coexistence durably queues the shared review decision once', async t => {
+test('orphan review request normalizes an absent diagnostic reason', async t => {
   const { args, calls } = setup(t);
-  const db = openReviewStateDb(args.rootDir);
-  t.after(() => db.close());
-  ensureReviewStateSchema(db);
-  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
-    review_status,reviewer_head_sha,revision_ref) VALUES (?,?,'2026-10-22','codex','open','posted','reviewed','current')`)
-    .run(args.repo, args.prNumber);
-  const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'reviewed', currentHead: 'current', comments: [] });
-  let requests = 0;
-  const run = () => resolveMergeAgentCoexistenceForWatcher({ rootDir: args.rootDir,
-    repoPath: args.repo, prNumber: args.prNumber, candidate: args.candidate, labelNames: [],
-    currentRevisionRef: args.headSha, logger: args.logger,
-    reviewStateRow: db.prepare('SELECT * FROM reviewed_prs').get(),
-    maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
-      skipMergeAgent: true, reason: 'not-eligible', closerAuthoredStale: closerAuthoredStaleEligible({ headProof }) }),
-    orphanOptions: { hasOwnerImpl: async () => ({ owned: false }), pageImpl: args.pageImpl,
-      requestRereviewImpl: options => {
-        requests++;
-        return requestReviewRereview({ ...options, db });
-      } },
-    recoverAmaAutomationImpl: () => assert.fail('shared review decision already has an actor'),
-  });
-  await run();
-  const first = db.prepare('SELECT * FROM reviewed_prs').get();
-  assert.equal(first.review_status, 'pending');
-  assert.equal(isOrphanHeadReviewRequested(first, 'current'), true);
-  await run();
-  assert.equal(requests, 1);
-  assert.equal(db.prepare('SELECT rereview_requested_at FROM reviewed_prs').get().rereview_requested_at,
-    first.rereview_requested_at);
-  assert.equal(calls.launches.length, 0);
+  const decision = { ...syntheticDecision(args.headSha), action: 'review', actor: 'reviewer', reason: undefined };
+  const result = await recoverOrphan({ ...args, result: { amaEnabled: true, nextAction: decision },
+    now: '2026-10-11T16:00:00.000Z' });
+  assert.equal(result.amaClosureResult.reviewRequest.triggered, true);
+  assert.equal(calls.reviews.length, 1);
+  assert.deepEqual(JSON.parse(recoveryState(args.rootDir).evidence).reasons, []);
 });

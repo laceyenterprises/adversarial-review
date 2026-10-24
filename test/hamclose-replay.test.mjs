@@ -122,16 +122,16 @@ test('HAMCLOSE-03 replay C: a clean handoff drains in one follow-up tick and mer
   assert.equal(store.merged, true);
 });
 
-test('HAMCLOSE-03 unproven reversal pages once, keeps the hammer stopped and makes rescue refuse merge', async t => {
+test('HAMCLOSE-03 unproven reversal retains shared repair ownership without permitting merge', async t => {
   const rootDir = root(t), evidence = await history(), pages = [], store = { merged: false };
   const bad = { ...evidence, reversalAuthorizations: [] };
   for (let tick = 0; tick < 2; tick++) await watcherTick({ rootDir, prNumber: 8132, headSha: bad.headSha,
-    evidence: bad, store, pageImpl: async text => pages.push(text),
+    evidence: bad, store, closerImpl: async () => ({ dispatched: false, skipMergeAgent: true }), pageImpl: async text => pages.push(text),
     row: { review_status: 'posted', reviewer_head_sha: bad.headSha, reviewer: 'gemini', review_body: cleanBody } });
-  assert.equal(store.merged, false); assert.equal(pages.length, 1);
-  assert.match(pages[0], /PR 8132.*src\/a\.mjs.*no verified/);
-  assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
-  assert.equal(classifyClosureOwnership({ primaryChange: bad, currentHead: bad.headSha }).decision, 'page-required');
+  assert.equal(store.merged, false); assert.equal(pages.length, 0);
+  assert.equal(checkPrimaryChange(bad, bad.headSha).ok, false);
+  assert.equal(store.lastClosure.nextAction.actor, 'hammer');
+  assert.equal(classifyClosureOwnership(store.lastClosure.nextAction, bad.headSha).decision, 'hammer-eligible');
 });
 
 for (const status of ['succeeded', 'failed', 'cancelled', 'completed', 'terminal']) {
@@ -165,23 +165,24 @@ test('capped routing refuses posted passes without any usable reviewed head', t 
 });
 
 for (const options of [{ rebasedAdded: '+different()' }, { parentExtraHunk: true }]) {
-  test(`altered parent proof pages once without merge: ${JSON.stringify(options)}`, async t => {
+  test(`altered parent proof retains repair ownership without merge: ${JSON.stringify(options)}`, async t => {
     const rootDir = root(t), evidence = await history(options), pages = [], store = { merged: false };
     for (let tick = 0; tick < 2; tick++) await watcherTick({ rootDir, prNumber: 1, headSha: evidence.headSha,
-      evidence, store, pageImpl: async text => pages.push(text),
+      evidence, store, closerImpl: async () => ({ dispatched: false, skipMergeAgent: true }), pageImpl: async text => pages.push(text),
       row: { review_status: 'posted', reviewer_head_sha: evidence.headSha, reviewer: 'gemini', review_body: cleanBody } });
-    assert.equal(store.merged, false); assert.equal(pages.length, 1);
-    assert.equal(store.lastClosure.closureOwner.actor, 'closure-recovery');
+    assert.equal(store.merged, false); assert.equal(pages.length, 0);
+    assert.equal(store.lastClosure.nextAction.actor, 'hammer');
   });
 }
 
-test('unknown primary evidence uses the production reason mapping and pages', async t => {
+test('unknown primary evidence retains shared ownership and refuses merge', async t => {
   const rootDir = root(t), headSha = 'a'.repeat(40), store = { merged: false }, pages = [];
-  await watcherTick({ rootDir, prNumber: 2, headSha, evidence: { headSha, hasHammerCommits: null }, store,
+  await watcherTick({ rootDir, prNumber: 2, headSha, evidence: { headSha, hasHammerCommits: null }, store, closerImpl: async () => ({ dispatched: false, skipMergeAgent: true }),
     pageImpl: async text => pages.push(text),
     row: { review_status: 'posted', reviewer_head_sha: headSha, reviewer: 'gemini', review_body: cleanBody } });
-  assert.equal(store.merged, false); assert.equal(pages.length, 1);
-  assert.ok(store.lastClosure.daemonCleanMerge.reasons.includes('primary-change-unknown'));
+  assert.equal(store.merged, false); assert.equal(pages.length, 0);
+  assert.equal(checkPrimaryChange({ headSha, hasHammerCommits: null }, headSha).ok, false);
+  assert.equal(store.lastClosure.nextAction.actor, 'hammer');
 });
 
 test('empty sibling closes once and a closed candidate cannot dispatch a hammer', async t => {

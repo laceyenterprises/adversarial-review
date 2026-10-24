@@ -1,6 +1,4 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
-import { summarizeExternalChecks } from '../remediation-ci-regression.mjs';
-import { REREVIEW_CI_BLOCKED_STATUS } from '../review-statuses.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
 import Database from 'better-sqlite3';
@@ -12,8 +10,6 @@ import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-a
 import { launchRequestOwned, launchRequestMeaning } from './launch-request-status.mjs';
 import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
-import { summarizePRRemediationLedger } from '../follow-up-jobs.mjs';
-import { hammerOwnerRouteOf } from './review-cycle-cap-route.mjs';
 import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
@@ -28,17 +24,10 @@ const text = value => String(value || '').slice(0, 300);
 
 // A proven publication chain can still lack a settled live verdict. Preserve
 // that rejection while executing the separately selected, head-bound owner.
-export function hasExactHeadReviewDecision(result, headSha, reviewStateRow) {
+export function hasExactHeadReviewDecision(result, headSha) {
   const selected = result?.nextAction;
-  if (headSha && selected?.head === headSha && selected.action === 'review'
-    && selected.actor === 'reviewer' && selected.queue?.intent === 'dispatch') return true;
-  const stale = result?.closerAuthoredStale;
-  const isHeadBound = Boolean(headSha && stale?.reviewedHead)
-    && stale.currentHead === headSha && stale.reviewedHead === reviewStateRow?.reviewer_head_sha
-    && stale.reviewedHead !== headSha;
-  const selectedOwner = result?.selectedClosureOwner || result?.closureOwner;
-  return Boolean(isHeadBound && (stale.decision === 'rereview-exact-head'
-    || (selectedOwner?.owner === 'review' && selectedOwner.reason === 'exact-head-review')));
+  return Boolean(headSha && selected?.head === headSha && selected.action === 'review'
+    && selected.actor === 'reviewer' && selected.queue?.intent === 'dispatch' && !selected.queue.deferredBy);
 }
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
@@ -171,17 +160,6 @@ async function defaultRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
 }
-async function rereviewClosed({ rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger }) {
-  if (facts?.reviewCycleExhausted === true || facts?.commentOnlyFinalRoundCompleted === true
-    || hammerOwnerRouteOf(dispatchJob)
-    || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure'
-    || (dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') return true;
-  // Final-round ownership survives later head movement. Read the same terminal
-  // job ledger as closure orchestration, rather than inferring it from a verdict.
-  if (summarizePRRemediationLedger(rootDir, { repo, prNumber })?.commentOnlyFinalRoundRevisionRefs?.length) return true;
-  const { hasSettledCommentOnlyVerdict } = await import('../review-state.mjs');
-  return hasSettledCommentOnlyVerdict(rootDir, { repo, prNumber, headSha }, logger);
-}
 export function isOrphanRecoveryWait(result) {
   const reason = String(result?.reason || result?.code || result?.message || '');
   const holdReason = result?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
@@ -231,7 +209,7 @@ export async function recoverOrphan(options) {
 }
 
 async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate,
-  labels = candidate?.labels || [], result, reviewStateRow, dispatchJob, dispatchHammer,
+  labels = candidate?.labels || [], result, reviewStateRow, dispatchHammer,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = loadAwareTimeoutMs(5000),
   onOwnershipObserved = null,
@@ -295,7 +273,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       if (idleMs < ownerlessBoundMs(env)) {
         const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
           reviewStateRow, requestRereviewImpl, logger, db,
-          decisionReasons: result.closerAuthoredStale.reasons || [] });
+          decisionReasons: [result?.nextAction?.reason].filter(Boolean) });
         return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
       }
     }
@@ -336,25 +314,20 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     // Reserve and record an unknown outcome before any external call. A crash or
     // unknown outcome spends the attempt. A proven wait below refunds the
     // reservation; a missing receipt never implies that no launch happened.
-    const facts = result?.ownerProofFacts;
-    const hasReview = facts ? facts.headSha === headSha && facts.reviewedHeadSha === headSha && Boolean(facts.verdict)
-      : reviewStateRow?.reviewer_head_sha === headSha && reviewStateRow?.review_status === 'posted';
-    const rollup = facts?.headSha === headSha ? facts.checks : candidate?.statusCheckRollup;
-    const external = Array.isArray(rollup) ? summarizeExternalChecks(rollup, { env }) : null;
-    const reviewerRefused = dispatchJob?.ciBlockedHammerOwner === true
-      || reviewStateRow?.review_status === REREVIEW_CI_BLOCKED_STATUS
-      || (external && (external.conclusion !== 'SUCCESS'
-        || external.failedChecks.length > 0 || external.pendingChecks.length > 0));
-    const hammerHead = facts?.headSha === headSha && facts.liveHeadCloserAuthored === true;
-    const action = !exactHeadReview && (hammerHead || hasReview || reviewerRefused || await rereviewClosed({
-      rootDir, repo, prNumber, headSha, reviewStateRow, dispatchJob, facts, logger,
-    })) ? 'hammer' : 'review';
+    // Ownership probes and durable retry reservations remain physical fences.
+    // The successor itself is always the generation selected by nextAction.
+    const selected = result?.nextAction;
+    if (ownership?.uncertain || selected?.head !== headSha
+      || selected.queue?.intent !== 'dispatch' || selected.queue?.deferredBy
+      || !((selected.action === 'review' && selected.actor === 'reviewer')
+        || (selected.action === 'hammer' && selected.actor === 'hammer'))) return pending;
+    const action = selected.action;
     const attempt = { action, reason: 'outcome-unknown', at: now };
     outcomes.push(attempt);
     db.prepare('UPDATE heads SET attempts=attempts+1, outcomes=?, evidence=? WHERE head=?')
       .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
     logger?.log?.(`[watcher] ownerless-recovery repo=${repo} pr=${prNumber} head=${headSha} idle_minutes=${Math.floor(idleMs / 60000)} last_reason=${text(result?.reason || 'unknown').replace(/\s+/g, '_')} action=${action}`);
-    logger?.info?.(`OWNERPROOF-01 setting aside historical dispatch stops for ${repo} PR ${prNumber}@${headSha}: terminal lease, hammer stop hold, re-arm/retry counters, prior eligibility outcome`);
+    logger?.info?.(`OWNERPROOF-01 executing shared decision ${selected.decisionKey} for ${repo} PR ${prNumber}@${headSha}`);
     let retry;
     try {
       if (signal?.aborted) throw signal.reason || new Error('orphan recovery aborted');

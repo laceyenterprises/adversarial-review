@@ -12,7 +12,6 @@ import {
   isReclaimableDispatchedAmaCloserLeaseAsync as reclaimAsync,
 } from '../src/ama/closer-lease.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from '../src/worker-execution-limits.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { reapStaleCloserLeases, selectReleasableCloserLeases } from '../src/recovery-reaper.mjs';
 
 const probes = JSON.parse(readFileSync(new URL('./fixtures/closer-launch-liveness.json', import.meta.url)));
@@ -31,7 +30,6 @@ for (const status of ['requested', 'admitted', 'leased', 'starting', 'running'])
       const lease = leaseAt(age);
       assert.equal(reclaim(lease, { now, readLaunchRequestStatusImpl: reader }), false);
       assert.equal(await reclaimAsync(lease, { now, readLaunchRequestStatusImpl: async args => reader(args) }), false);
-      assert.equal(decideClosureOwner({ lease, now, readLaunchRequestStatusImpl: reader }).reason, 'in-flight:synthetic-launch');
     }
   });
 }

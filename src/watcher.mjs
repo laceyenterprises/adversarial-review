@@ -164,7 +164,6 @@ import {
   syncPRLifecycle,
 } from './pr-lifecycle-sync.mjs';
 import {
-  isDaemonFailClosedHammerRemediable,
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
   writeAutonomousMergeDisabledAudit,
@@ -1946,7 +1945,6 @@ export {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
   maybeInlineFinalHammerAfterReview,
-  isDaemonFailClosedHammerRemediable,
   runDaemonCleanMergeAttempt,
   resolveOperatorMergeAccountability,
   writeAutonomousMergeDisabledAudit,

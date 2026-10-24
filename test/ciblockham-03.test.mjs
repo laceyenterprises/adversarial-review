@@ -6,14 +6,13 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
-import { hammerWakeEligibility, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
+import { requestEligibleHammerWake } from "../src/hammer-wake.mjs";
 import { amaCloserDispatchFilePath, maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   settleRefusedHammerWake, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';
@@ -202,34 +201,6 @@ test('CEILINGPUSH-01: an unavailable closure records its reason and pages once w
   assert.ok(observations.every(reason => reason.includes('branch-protection-missing-gate')));
 });
 
-test('CEILINGPUSH-01: same-head and ordinary wakes retain their existing review admission semantics', () => {
-  const eligibility = { eligible: false, reasons: ['verdict-not-eligible', 'stale-head'] };
-  const options = { dispatchReason: 'exhausted-final-hammer', reviewCeilingReached: true,
-    reviewState: { headSha: reviewed, reviewCycleExhausted: true }, headSha: head };
-  const ceilingOptions = [options, { ...options, dispatchReason: null },
-    { ...options, dispatchReason: 'review-ceiling-terminal-remediation',
-      reviewState: { headSha: reviewed, reviewCycleExhausted: false } }];
-  for (const input of ceilingOptions) {
-    assert.equal(hammerWakeEligibility(eligibility, input).eligible, true);
-    for (const reason of ['ci-not-green', 'branch-protection-missing-gate', 'label-do-not-merge',
-      'labels-unavailable', 'primary-change-reverted', 'lease-not-held']) {
-      const held = { eligible: false, reasons: [...eligibility.reasons, reason] };
-      assert.equal(hammerWakeEligibility(held, input), held);
-    }
-  }
-  for (const changed of [{ headSha: reviewed }, { reviewCeilingReached: false },
-    { reviewCeilingReached: false, dispatchReason: null },
-    { reviewCeilingReached: false, reviewState: { headSha: reviewed, reviewCycleExhausted: false } },
-    { reviewState: { ...options.reviewState, remediationPending: true } }]) {
-    assert.equal(hammerWakeEligibility(eligibility, { ...options, ...changed }), eligibility);
-  }
-  const record = { headSha: head, reason: 'remediation-closeout', requestedAt: '2026-01-01T00:00:00Z' };
-  const row = { review_status: 'posted', rereview_reason: 'system-review-ceiling-closure',
-    reviewer_head_sha: head, posted_at: '2026-01-01T00:01:00Z' };
-  assert.equal(classifyRereviewWakeOutcome({ record, reviewRow: row, currentHeadSha: head }).reason, 'rereview-posted');
-  assert.equal(classifyRereviewWakeOutcome({ record, reviewRow: { ...row, reviewer_head_sha: reviewed },
-    currentHeadSha: 'c'.repeat(40) }).reason, 'head-superseded');
-});
 
 for (const mode of ['native', 'agentos']) {
   for (const conclusion of failedConclusions) test(`${mode}: exhausted ${conclusion} unreviewed head wakes and launches its final hammer in one pass`, async t => {
@@ -271,29 +242,6 @@ test('the CI handoff derives exhaustion before constructing the wake and closer 
   assert.equal(launches.length, 1);
 });
 
-test('native wake keeps current-head blocking verdicts and every other gate ineligible', () => {
-  const context = { dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
-    reviewState: { headSha: reviewed, reviewCycleExhausted: true }, headSha: head,
-    checksConclusion: 'FAILURE' };
-  const stale = { eligible: false, reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] };
-  assert.equal(hammerWakeEligibility(stale, context).eligible, true);
-  const current = { eligible: false, reasons: ['verdict-not-eligible', 'ci-not-green'] };
-  assert.equal(hammerWakeEligibility(current, { ...context,
-    reviewState: { ...context.reviewState, headSha: head, verdict: '' } }), current,
-  'an empty verdict alone does not prove this head is unreviewed');
-  assert.equal(hammerWakeEligibility(current, { ...context,
-    reviewState: { ...context.reviewState, headSha: head, blockingFindingCount: 1 } }), current);
-  for (const reason of ['label-no-merge', 'branch-protection-missing-gate', 'primary-change-unknown', 'lease-not-held']) {
-    const blocked = { eligible: false, reasons: [...stale.reasons, reason] };
-    assert.equal(hammerWakeEligibility(blocked, context), blocked);
-  }
-  for (const patch of [{ ciBlockedHammerOwner: false }, { dispatchReason: null },
-    { checksConclusion: 'PENDING' }, { reviewState: { ...context.reviewState, remediationPending: true } },
-    { reviewState: { ...context.reviewState, headSha: '' } },
-    { reviewState: { ...context.reviewState, reviewCycleExhausted: false } }]) {
-    assert.equal(hammerWakeEligibility(stale, { ...context, ...patch }), stale);
-  }
-});
 
 for (const parkedHead of [reviewed, head]) test('shared CI-repair ownership preserves executor safety: ' + parkedHead[0], async t => {
   const { args, wakes } = fixture(t);
@@ -367,26 +315,6 @@ test('a missing reviewed head cannot adopt and settle a headless dispatch record
   await maybeDispatchAmaClosureFor(args);
   assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
   assert.equal(readAmaCloserLease(args.rootDir, { repo, prNumber, headSha: head }).status, 'pending');
-});
-
-test('rescue ownership preserves explicit review handoff, active remediation and hammer caps', () => {
-  const input = { reviewState: { verdict: 'comment-only', headSha: reviewed }, currentHead: head,
-    checks: 'FAILURE', roundsLeft: false, ciBlockedHammerOwner: true };
-  assert.equal(decideClosureOwner(input).owner, 'hammer');
-  assert.deepEqual(decideClosureOwner({ ...input,
-    reviewState: { headSha: head, verdict: '' } }),
-  { owner: 'page', reason: 'review-rounds-exhausted' },
-  'a missing same-head verdict cannot establish an unreviewed repair head');
-  assert.equal(decideClosureOwner({ ...input, lease: { status: 'handed-to-review' },
-    reviewCeilingReached: true }).owner, 'review');
-  assert.equal(decideClosureOwner({ ...input, retryExhausted: true }).reason, 'hammer-retry-cap');
-  assert.equal(decideClosureOwner({ ...input, lifetimeExhausted: true }).reason, 'hammer-lifetime-cap');
-  assert.notEqual(decideClosureOwner({ ...input, reviewState: { ...input.reviewState,
-    remediationPending: true } }).owner, 'hammer');
-  assert.equal(decideClosureOwner({ ...input, roundsLeft: true }).owner, 'review');
-  for (const checks of ['SUCCESS', 'PENDING', 'IN_PROGRESS', null, 'UNKNOWN']) {
-    assert.notEqual(decideClosureOwner({ ...input, checks }).owner, 'hammer', String(checks));
-  }
 });
 
 test('selected repair reconciles an interrupted closer intent before a successor', async t => {

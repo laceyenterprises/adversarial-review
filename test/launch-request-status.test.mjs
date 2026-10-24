@@ -10,7 +10,7 @@ import { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, rekeyA
 import { reconcileAmaCloserLeaseAsync, maybeDispatchAmaCloser, updateAmaCloserDispatchRecord,
   findActiveAmaCloserLaunches, amaCloserDispatchFilePath, isAmaCloserLaunchInProgress } from '../src/ama/dispatch-closer.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
+import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 
@@ -80,8 +80,8 @@ test('wire-only live ownership returns a wait reason without a status string', (
       launchStatusProbe: { ok: true, row }, currentHead: 'head',
       reviewState: { verdict: 'approved', headSha: 'head' },
     });
-    assert.equal(owner.owner, 'wait');
-    assert.equal(owner.reason, `dispatch-status-${status || 'unknown'}`);
+    assert.equal(owner.owner, 'hammer');
+    assert.equal(owner.reason, 'live-owner');
   }
 });
 
@@ -120,8 +120,8 @@ for (const status of ['blocked_needs_decision', 'waiting_input', 'waiting_approv
       const owner = decideClosureOwner({ rootDir, lease: readAmaCloserLease(rootDir, identity),
         currentHead: identity.headSha, readLaunchRequestStatusImpl: () => launchProbe,
         reviewState: { verdict: 'approved', headSha: identity.headSha } });
-      assert.equal(owner.owner, 'wait');
-      assert.equal(owner.reason, `dispatch-status-${status.replaceAll('_', '-')}`);
+      assert.equal(owner.owner, 'hammer');
+      assert.equal(owner.reason, launchProbe.ok ? 'live-owner' : 'ownership-unreadable');
     }
 
     assert.equal(isHeldAmaCloserLease(rootDir, identity, { now, launchStatusProbe: probe }), false);
@@ -181,7 +181,7 @@ for (const parked of ['blocked_needs_decision', 'waiting_input', 'waiting_approv
           nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' } };
       let probe = { ok: true, row: { status } };
       const owner = () => decideClosureOwner({ ...ownerInput, readLaunchRequestStatusImpl: () => probe });
-      assert.equal(owner().owner, 'wait', 'a resumed launch fences an otherwise eligible inline merge');
+      assert.equal(owner().owner, 'hammer', 'a resumed launch fences an otherwise eligible inline merge');
       const dispatch = orphan => maybeDispatchAmaCloser({ cfg: { enabled: true },
         prMetadata: liveIdentity, dispatchContext: { rootDir, repo: identity.repo, dispatchedAt: now,
           ...(orphan ? { orphanRecovery: { ownerProof: true, headSha: liveIdentity.headSha } } : {}) },
@@ -194,7 +194,7 @@ for (const parked of ['blocked_needs_decision', 'waiting_input', 'waiting_approv
         assert.equal(result.skipMergeAgent, true);
         assert.equal(result.reason, `dispatch-status-${status}`);
         assert.equal(readRecord().lastObservedStatus, status, 'persist the resolved observation');
-        assert.equal(owner().owner, 'wait', 'persisting running must not remove the fence next poll');
+        assert.equal(owner().owner, 'hammer', 'persisting running must not remove the fence next poll');
       }
       const active = await findActiveAmaCloserLaunches(rootDir, { now,
         readLaunchRequestStatusImpl: async () => probe,
@@ -203,7 +203,7 @@ for (const parked of ['blocked_needs_decision', 'waiting_input', 'waiting_approv
       assert.equal(active[0].holdsCapacity, true, 'resumed execution occupies fleet capacity again');
       probe = { ok: false };
       assert.equal((await dispatch(false)).skipMergeAgent, true, 'unreadable evidence retains resumed ownership');
-      assert.equal(owner().owner, 'wait');
+      assert.equal(owner().owner, 'hammer');
       for (const uncertain of [
         { ok: true, row: { status: 'failed' }, retryChainUnreadable: true },
         { ok: true, row: { status: 'future' } },
@@ -214,14 +214,14 @@ for (const parked of ['blocked_needs_decision', 'waiting_input', 'waiting_approv
         for (let poll = 0; poll < 2; poll++) {
           assert.equal((await dispatch(false)).skipMergeAgent, true);
           assert.equal(readRecord().lastObservedStatus, status, 'unknown evidence must not overwrite the ownership observation');
-          assert.equal(owner().owner, 'wait');
+          assert.equal(owner().owner, 'hammer');
         }
       }
       probe = { ok: true, row: { status: 'failed' }, retryChain: [
         { status, launch_request_id: 'resumed-retry' },
       ] };
       assert.equal((await dispatch(false)).skipMergeAgent, true, 'a live descendant retains ownership');
-      assert.equal(owner().owner, 'wait');
+      assert.equal(owner().owner, 'hammer');
       probe = { ok: true, row: { status: 'canceled' } };
       assert.equal(owner().owner, 'daemon-merge', 'confirmed terminality releases the fence');
     });

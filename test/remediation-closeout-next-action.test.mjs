@@ -265,6 +265,12 @@ for (const policy of [{ drain: { active: true } }, { capacity: { hammer: { inFli
 for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null, 1]]) {
   for (const state of (finalRound ? ['pending', 'green', 'failed'] : ['pending', 'green', 'failed', 'head-moved'])) test(`normal completion delegate: ${finalRound || 'blocking'} round ${currentRound} / ${state}`, async t => {
     const f = fixture(t, finalRound);
+    const originalDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
+    process.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.rootDir, 'fixture-deploy-checkout');
+    t.after(() => {
+      if (originalDeployCheckout === undefined) delete process.env.AGENT_OS_DEPLOY_CHECKOUT;
+      else process.env.AGENT_OS_DEPLOY_CHECKOUT = originalDeployCheckout;
+    });
     f.job.remediationPlan.currentRound = currentRound;
     f.job.remediationPlan.rounds[0].round = currentRound;
     const workspace = f.job.workspaceDir;

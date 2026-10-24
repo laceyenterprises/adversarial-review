@@ -42,7 +42,10 @@ export function runHammerProtectionFetch({ stdout = '', stderr = '', exitCode = 
     chmodSync(ghStub, 0o755);
     const protectionPath = join(dir, 'protection.json');
     const script = [
-      `ham_gh() { "${process.execPath}" "${REPO_ROOT}/bin/metered-gh.mjs" exec "$@"; }`,
+      // Exercise the protection loop against the stub directly. Inheriting the
+      // worker's credential-refresh wrapper would make this offline fixture
+      // refresh real credentials on its deliberate HTTP 401 response.
+      'ham_gh() { gh "$@"; }',
       `HAM_RUN_DIR='${dir}'`,
       'base_enc=main',
       'ham_release_merge_lease() { :; }',

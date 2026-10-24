@@ -642,7 +642,7 @@ ham_base_touches_pr_files() {
 # the rebased head atomically; fetch that exact result into the scratch checkout.
 ham_rebase_head() {
   local ham_rebase_from="$POST_REMEDIATION_SHA" ham_rebase_base ham_async_result=0 ham_rebase_ci_deadline=""
-  if [ "${1:-}" = --ci-retry ]; then ham_rebase_ci_deadline="$HAM_REMOTE_CI_DEADLINE"; fi
+  if [ "${1:-}" = --ci-retry ]; then ham_rebase_ci_deadline="${HAM_REMOTE_CI_DEADLINE:-}"; fi
   if ! ham_capture_current_base_sha; then
     HAM_PHASE_OUTCOME=rebase-base-unavailable
     ham_release_merge_lease || return 1
@@ -650,9 +650,10 @@ ham_rebase_head() {
   fi
   ham_rebase_base="$HAM_CAPTURED_BASE_SHA"
   HAM_REBASED_ONTO_BASE_SHA="$ham_rebase_base"
-  if [ "${1:-}" = --ci-retry ] && [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+  if [ -n "$ham_rebase_ci_deadline" ] && [ "$(date +%s)" -ge "$ham_rebase_ci_deadline" ]; then
     export HAM_REMOTE_CI_STATUS=remote-ci-timeout
     HAM_PHASE_OUTCOME=github-gate-timeout
+    ham_release_merge_lease || return 1
     return 20
   fi
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ] && [ "${1:-}" != --ci-retry ]; then
@@ -667,6 +668,7 @@ ham_rebase_head() {
   if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 3 ]; then
     export HAM_REMOTE_CI_STATUS=remote-ci-timeout
     HAM_PHASE_OUTCOME=github-gate-timeout
+    ham_release_merge_lease || return 1
     return 20
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then

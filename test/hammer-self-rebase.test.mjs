@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { recordPendingAttestation } from '../src/ama/hammer-pending-attestation.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
@@ -12,6 +13,10 @@ const root = resolve(import.meta.dirname, '..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
+
+// The synchronous shell fixtures can otherwise starve the test reporter until
+// the whole file finishes, tripping a bounded runner's no-output deadline.
+test.beforeEach(() => setImmediate());
 
 function fixture(t, scenario) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-self-rebase-'));

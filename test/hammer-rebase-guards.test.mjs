@@ -37,6 +37,32 @@ ham_settle_rebase_snapshot "$FROM" "$EXPECTED_BASE" 1 || exit $?
 });
 
 for (const [name, deadline] of [['unset', undefined], ['empty', ''], ['future', '20'], ['expired', '5']]) {
+  for (const updateResult of [0, 3]) {
+    test(`rebase retry handles ${name} deadline and update result ${updateResult} with lease cleanup`, () => {
+      const source = read('hammer-verify-head.sh').match(/^ham_rebase_head\(\) \{\n[\s\S]*?^\}/m)?.[0];
+      assert.ok(source, 'exercise the production rebase function');
+      const result = run(`
+unset HAM_REMOTE_CI_DEADLINE
+${deadline === undefined ? '' : `HAM_REMOTE_CI_DEADLINE='${deadline}'`}
+POST_REMEDIATION_SHA=fixture-head
+HAM_REBASE_ATTEMPTS=0
+HAM_REBASE_ATTEMPT_CAP=3
+date() { echo 10; }
+ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=fixture-base; }
+ham_release_merge_lease() { echo release; }
+ham_update_branch_with_retries() { echo update; HAM_REBASE_PUBLISHED_HEAD="$POST_REMEDIATION_SHA"; return ${updateResult}; }
+ham_settle_rebase_snapshot() { return 40; }
+${source.replaceAll(/<<[A-Z_]+>>/g, 'fixture')}
+ham_rebase_head --ci-retry
+`);
+      const expired = name === 'expired';
+      const timedOut = expired || updateResult === 3;
+      assert.equal(result.status, timedOut ? 20 : 40, result.stdout + result.stderr);
+      assert.equal(result.stdout.trim(), expired ? 'release' : timedOut ? 'update\nrelease' : 'update');
+      assert.equal(result.stderr, '');
+    });
+  }
+
   test(`post-reacquisition rebase deadline handles ${name} values without arithmetic diagnostics`, () => {
     const source = read('hammer-merge.sh');
     const start = source.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files validated-head');

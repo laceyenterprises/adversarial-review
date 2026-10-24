@@ -4260,7 +4260,9 @@ expiry allows the full window; renewal never extends the CI deadline. The
 single retry is independent of the initial rebase-attempt cap. Reacquisition,
 base-policy probing and pre-mutation base capture recheck the original deadline;
 an exhausted run that needs new validation releases without starting another
-rebase or CI cycle. An unchanged already-green head that still satisfies the
+rebase or CI cycle. Rebase retries tolerate unset or empty deadline variables
+without shell diagnostics; both pre-mutation and update-branch deadline expiry
+release the lease before returning the timeout outcome. An unchanged already-green head that still satisfies the
 base policy may close after a longer queue wait, with the fresh in-lease live
 gate and exact-head merge CAS; CI patience is not a new veto on ready heads.
 

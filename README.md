@@ -2403,3 +2403,18 @@ The probe resolves the durable adapter against real schema and reports ack
 counts. Zero means organic evidence is pending. Availability does not assert
 live evidence-reader composition, lane routing or a running watcher's build.
 See the [handoff contract](docs/data-model/finalization-ledger.md#durable-closer-handoff-mgq-02).
+
+### Shadow replay policy and parsing (OSG-11)
+
+`src/osg-reviewer-replay.mjs` exposes read-only `replayRouteAllowed` and
+`parseReplayReview`; `bin/osg-reviewer-replay.mjs` accepts bounded private JSON
+stdin operations `route`, `parse`, and `ranges`. It imports the existing routing
+and finding parsers, with no production reviewer, store, GitHub writer or
+attestation path. Native recommendations follow the canonical builder route;
+unknown/same-family models are refused, including models concealed behind a
+third-party harness. DeepSeek through Pi can run diagnostically when the known
+builder family differs; that diagnostic permission cannot recommend a route.
+The caller owns pinned diff extraction, authorized read-only execution, budget
+reservations, quota measurement and score evidence. This bridge does not launch
+reviewers or change any live routing configuration. Synthetic tests exercise
+parsing/routing with network, process execution and publication writes forbidden.

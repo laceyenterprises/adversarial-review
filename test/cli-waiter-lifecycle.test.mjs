@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
   acquireMergeLease, inspectMergeLease, readMergeLeaseWaiters, upsertMergeLeaseWaiter,
   mergeLeaseFilePath, readMergeLeaseAttempts, releaseMergeLease,
@@ -139,18 +140,48 @@ for (const mode of ['SIGINT', 'SIGTERM', 'SIGHUP', 'timeout', 'exception']) {
   });
 }
 
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  test(`LAC-2098 ${signal} aborts a pending poll timer before refund and cleanup`, { timeout: 3000 }, async t => {
+    const args = fixture(t);
+    const first = abandoned(args, { acquisitionPid: 1190 }).waiter;
+    const deps = cliDeps();
+    let sleeps = 0;
+    deps.sleep = async (_ms, value, options) => {
+      sleeps++;
+      assert.ok(options?.signal instanceof AbortSignal);
+      assert.equal(options.signal.aborted, false);
+      const pending = sleep(60000, value, { ...options, ref: false });
+      queueMicrotask(() => {
+        deps.signalSource.emit(signal);
+        deps.signalSource.emit('SIGTERM'); // Preserve the first signal.
+      });
+      return pending;
+    };
+    assert.equal(await main(cliArgs(args), deps), 75);
+    assert.equal(sleeps, 1);
+    assert.equal(JSON.parse(deps.output()).signal, signal);
+    assert.equal(JSON.parse(deps.output()).reason, 'lease-wait-interrupted');
+    assert.equal(readMergeLeaseAttempts(args.rootDir, lane)[0].attempts, 0);
+    assert.deepEqual(readMergeLeaseWaiters(args.rootDir, lane), [first]);
+    assert.doesNotMatch(deps.errors(), /warning:|retryable runtime failure|AbortError/);
+    for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(deps.signalSource.listenerCount(name), 0);
+  });
+}
+
 test('LAC-2098 cleanup retries a contended mutation lock within a fixed bound', async t => {
   const args = fixture(t);
   abandoned(args, { acquisitionPid: 1190 });
   const lockPath = `${mergeLeaseFilePath(args.rootDir, lane)}.mutation.lock`;
   const deps = cliDeps();
   let sleeps = 0;
-  deps.sleep = async () => {
+  deps.sleep = async (ms, _value, options) => {
     sleeps++;
     if (sleeps === 1) {
       writeFileSync(lockPath, JSON.stringify({ holderPid: process.pid, holderHost: hostname(), acquiredAt: '2999-01-01T00:00:00.000Z' }));
       throw Error('injected failure while lock held');
     }
+    assert.equal(ms, 250);
+    assert.equal(options, undefined); // Cleanup must not inherit poll cancellation.
     rmSync(lockPath);
   };
   assert.equal(await main(cliArgs(args), deps), 75);
@@ -211,12 +242,14 @@ test('LAC-2098 failed cleanup is bounded and dead-acquirer pruning recovers its 
   const lockPath = `${mergeLeaseFilePath(args.rootDir, lane)}.mutation.lock`;
   const deps = cliDeps();
   let sleeps = 0;
-  deps.sleep = async () => {
+  deps.sleep = async (ms, _value, options) => {
     sleeps++;
     if (sleeps === 1) {
       writeFileSync(lockPath, JSON.stringify({ holderPid: process.pid, holderHost: hostname(), acquiredAt: '2999-01-01T00:00:00.000Z' }));
       throw Error('runtime failure');
     }
+    assert.equal(ms, 250);
+    assert.equal(options, undefined);
   };
   assert.equal(await main(cliArgs(args), deps), 75);
   assert.equal(sleeps, 3); // initial wait plus exactly two cleanup retry waits

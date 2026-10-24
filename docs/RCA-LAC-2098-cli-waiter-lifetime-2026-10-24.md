@@ -64,14 +64,16 @@ hosts cannot authorize early pruning. Existing arrival deadlines still bound
 these reservations. The resulting holder continues to belong to the caller,
 with all existing lease-ID/head/acquired-at fences intact.
 
-CLI poll sleeps now yield to signal handlers. SIGINT/SIGTERM/SIGHUP return
+CLI poll sleeps are aborted by signal handlers. SIGINT/SIGTERM/SIGHUP return
 retryable exit 75, identify the signal and refund the provisional gate attempt.
 Timeouts and runtime exceptions also enter `finally`; cleanup removes only the
 invocation's exact ID through the canonical API, with an optional
 `expectedAcquisition` PID/host fence rechecked under the mutation lock. If an
 older CLI adopted that ID and removed or changed its metadata, cleanup preserves
 that uncertain owner. It retries mutation contention
-at most three times with two 250ms sleeps and warns if cleanup cannot complete.
+at most three times with two fixed 250ms sleeps, independent of the poll interval,
+and warns if cleanup cannot complete. Poll cancellation does not cancel refund
+or cleanup retry waits.
 Dead-acquirer pruning recovers SIGKILL or failed cleanup on the next contender.
 Successful acquisition already removes its waiter while holding the existing
 per-base lock. Recovery that returns a matching pre-existing holder still cleans

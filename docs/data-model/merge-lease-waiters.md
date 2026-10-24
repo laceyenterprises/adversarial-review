@@ -20,8 +20,9 @@ including adoption by an older CLI. Canonical callers omitting this fence retain
 exact-ID removal. This invocation cleans up on timeout, interruption or runtime
 failure. SIGINT, SIGTERM and SIGHUP return
 retryable exit 75 with `reason: "lease-wait-interrupted"` and `signal`, refund the
-provisional gate attempt, and run cleanup in `finally`. Poll sleeps yield to
-signal handlers. Cleanup attempts the canonical removal under the per-base
+provisional gate attempt, and run cleanup in `finally`. Handled signals abort
+the pending poll timer; refund and cleanup waits remain uncanceled. Cleanup
+attempts the canonical removal under the per-base
 mutation lock at most three times, separated by 250ms waits. A failed cleanup
 warns; dead-acquirer pruning recovers after an uncatchable exit or lock failure.
 Successful acquisition already removes its waiter under the holder lock.

@@ -155,8 +155,11 @@ parent/deadline rules: an encoded CLI PID is uncertain because older invocations
 could adopt that ID. Timeout, runtime failure and SIGINT/SIGTERM/SIGHUP run
 bounded canonical cleanup for only the invocation's exact waiter ID, fenced by
 its acquisition PID/host under the mutation lock; missing or rebound metadata
-remains protected. Handled
-signals return retryable exit 75 and refund the provisional attempt; SIGKILL
+remains protected. Cleanup makes at most three attempts with two fixed 250ms
+retry waits, independent of the acquisition polling interval. Handled signals
+abort the pending poll timer, return retryable exit 75 and refund the provisional
+attempt. Refund and cleanup retries retain their bounded waits despite poll
+cancellation; SIGKILL
 recovery uses dead-acquirer pruning. Returning an existing matching holder still
 cleans an unserved request without releasing that holder.
 

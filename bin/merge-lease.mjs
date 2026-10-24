@@ -47,6 +47,7 @@ const EXIT_USAGE = 64;
 const EXIT_PARKED = 70;
 const EXIT_TIMEOUT = 75;
 const DEFAULT_SLEEP_MS = 250;
+const CLEANUP_RETRY_SLEEP_MS = 250;
 const DEFAULT_RELEASE_RETRY_MS = 1000;
 const DEFAULT_MAX_GATE_ATTEMPTS = 5;
 
@@ -276,7 +277,7 @@ async function cleanupAcquireWaiter(args, deps) {
       return;
     } catch (err) {
       if (isMutationLockBusyError(err) && attempt < 3) {
-        await deps.sleep(DEFAULT_SLEEP_MS);
+        await deps.sleep(CLEANUP_RETRY_SLEEP_MS);
         continue;
       }
       // A dead-acquirer prune is the fallback if shutdown cannot take the lock.
@@ -459,8 +460,12 @@ async function runAcquire(argv, deps) {
   let attempt = 1;
   let waiterServed = false;
   let interrupted = null;
+  const pollAbort = new AbortController();
   const handlers = new Map(['SIGINT', 'SIGTERM', 'SIGHUP'].map(signal => {
-    const handler = () => { interrupted ??= signal; };
+    const handler = () => {
+      interrupted ??= signal;
+      pollAbort.abort();
+    };
     deps.signalSource.on(signal, handler);
     return [signal, handler];
   }));
@@ -555,7 +560,12 @@ async function runAcquire(argv, deps) {
       }
 
       attempt += 1;
-      await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+      try {
+        await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())),
+          undefined, { signal: pollAbort.signal });
+      } catch (err) {
+        if (!pollAbort.signal.aborted || err?.name !== 'AbortError') throw err;
+      }
     }
   } finally {
     try {

@@ -8,12 +8,22 @@ tries local Git objects first, and bounds unique files at 25. Missing, unreadabl
 or over-budget evidence demotes the finding with a recorded reason. The shared
 prompt fragment covers all reviewer families and stages, including Argus model
 findings; the deterministic security rubric keeps its separate existing policy.
+Absent repository metadata or an absent/malformed 40-character head SHA skips
+grounding in both PR and Argus reviews, preserving blockers and the verdict.
+Grounding retains raw card Markdown, including fenced reproductions and wrapped
+explanations. Argus model verdicts change from `block` to `approve` when no high
+model findings remain; final composition still enforces rubric findings and
+required verification independently. Reviewer evidence guidance is not appended
+to remediator stage prompts.
 
 A worker can disprove a blocker using `pushback[].evidence`: the reviewed head,
 original citation, and either code/reproduction/output or test/output. The worker
 runs the proof; daemons never execute worker-supplied commands or call a model to
 judge it. All-blocker factual disputes on an independently observed unchanged
 open head complete without another review. Ordinary pushback does not do so.
+The citation can include comma- or semicolon-separated ranges, for example
+`src/worker.mjs:10-15; 20-25, 30`; its path and complete ordered range list must
+match the original finding.
 The existing withdrawal table caches completion admission, and the shared gate,
 closer and review-dismissal paths consume it with exact-head and body checks.
 There is no new polling path, CI gate, config key or merge permission.

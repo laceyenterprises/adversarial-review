@@ -1702,6 +1702,11 @@ existing merge gates. The offline regression uses real SQLite and a Node
 reproduction (`test/review-evidence.test.mjs`). Existing smoke coverage and merge
 safety remain; SRE samples 20 deployed reviews and repeats the noise audit as
 recorded in `post-merge-verify.json` and the closure runbook.
+Missing repository metadata or an absent/malformed head SHA preserves blockers;
+grounding retains fenced reproductions and wrapped card explanations. Factual
+dispute citations accept complete comma- or semicolon-separated range lists.
+Focused evidence fixtures cover these cases; lifecycle states and deployed
+smoke promises are unchanged.
 
 
 The shared consumer records every step, pages once with module/step/commit on

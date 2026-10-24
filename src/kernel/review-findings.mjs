@@ -325,7 +325,7 @@ function hasFailingBehaviour(problem) {
 
 function findingEvidenceLocation(finding) {
   const raw = String(finding?.file || '').replace(/`/g, '').trim();
-  const citation = /^(.*?):(\d+(?:[-–]\d+)?)$/.exec(raw);
+  const citation = /^(.*?):(\d+(?:\s*[-–]\s*\d+)?(?:\s*[,;]\s*\d+(?:\s*[-–]\s*\d+)?)*)$/.exec(raw);
   const path = citation ? citation[1] : raw;
   if (!path || path.startsWith('/') || path.split('/').some(p => ['..', '.', ''].includes(p))) return null;
   const ranges = findingLineRanges(finding?.lines || citation?.[2], path);

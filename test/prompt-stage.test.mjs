@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   loadStagePrompt,
+  REVIEW_EVIDENCE_GUIDANCE,
   pickReviewerStage,
   pickRemediatorStage,
 } from '../src/kernel/prompt-stage.mjs';
@@ -17,7 +18,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 function readPrompt(...parts) {
   const prompt = readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
   return parts.at(-1).startsWith('reviewer.')
-    ? `${prompt}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
+    ? `${prompt}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
 }
 
 function renderReviewerViaStage(args) {
@@ -222,7 +223,7 @@ test('loadStagePrompt reads shared reviewer guidance from the supplied root', (t
   for (const stage of ['first', 'middle', 'last']) {
     writeFileSync(join(rootDir, 'prompts', 'fixture', `reviewer.${stage}.md`), ` Fixture ${stage}.\n`);
     assert.equal(loadStagePrompt({ rootDir, promptSet: 'fixture', actor: 'reviewer', stage }),
-      `Fixture ${stage}.\n\nFixture guidance.`);
+      `Fixture ${stage}.\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\nFixture guidance.`);
   }
   rmSync(join(rootDir, 'prompts', 'shared'), { recursive: true });
   assert.throws(() => loadStagePrompt({ rootDir, promptSet: 'fixture', actor: 'reviewer', stage: 'first' }),

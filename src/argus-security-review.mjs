@@ -90,11 +90,15 @@ export function loadArgusReviewPromptTemplate(rootDir = ROOT) {
 }
 
 export async function groundArgusReviewEvidence(review, options) {
+  if (!String(options?.repo || '').trim() || !/^[a-f0-9]{40}$/i.test(options?.headSha || '')) return review;
   const read = createHeadContentReader(options);
   for (const finding of review.findings) {
     if (finding.severity !== 'high') continue;
     const reason = await blockingEvidenceReason({ file: finding.path, problem: finding.detail }, read);
     if (reason) Object.assign(finding, { severity: 'medium', demotedFrom: 'high', evidenceDowngradeReason: reason });
+  }
+  if (review.verdict === ARGUS_VERDICTS.BLOCK && !review.findings.some(finding => finding.severity === 'high')) {
+    review.verdict = ARGUS_VERDICTS.APPROVE;
   }
   return review;
 }

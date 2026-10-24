@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { loadStagePrompt } from '../src/kernel/prompt-stage.mjs';
+import { loadStagePrompt, REVIEW_EVIDENCE_GUIDANCE } from '../src/kernel/prompt-stage.mjs';
 import { buildPromptForReviewerModel } from '../src/reviewer-prompt.mjs';
 import * as argusReview from '../src/argus-security-review.mjs';
 const { loadArgusReviewPromptTemplate, parseArgusReviewOutput } = argusReview;
@@ -23,6 +23,11 @@ test('REVIEWEVIDENCE-01: every reviewer family and stage requires exact-head fai
     assert.match(prompt, /Input or state:[\s\S]*Wrong outcome:/);
     assert.match(prompt, /PR head/);
     assert.match(prompt, /record it as non-blocking/);
+  }
+  for (const stage of ['first', 'middle', 'last']) {
+    for (const promptSet of ['code-pr', 'code-pr-security', 'research-finding']) {
+      assert.ok(!loadStagePrompt({ rootDir: ROOT, promptSet, actor: 'remediator', stage }).includes(REVIEW_EVIDENCE_GUIDANCE));
+    }
   }
 });
 
@@ -50,6 +55,63 @@ function gitFixture(t) {
   return { root, git, head: git('rev-parse', 'HEAD') };
 }
 
+test('REVIEWEVIDENCE-01: absent or malformed head metadata preserves blockers in both grounding paths', async () => {
+  const body = review(card('Empty input throws'));
+  for (const requireEvidence of [false, true]) {
+    for (const metadata of [
+      {}, { repo: 'synthetic/project' }, { headSha: 'a'.repeat(40) },
+      { repo: '', headSha: 'a'.repeat(40) }, { repo: ' ', headSha: 'a'.repeat(40) },
+      ...['', ' ', 'abc123', 'g'.repeat(40), 'a'.repeat(41)].map(headSha => ({ repo: 'synthetic/project', headSha })),
+    ]) {
+      const options = { ...metadata, requireEvidence,
+        fetchFileAtRefImpl: () => assert.fail('invalid metadata must not fetch') };
+      const result = await groundBlockingFindingsAtHead(body, options);
+      assert.equal(result.reviewText, body);
+      assert.equal(result.grounding.skipped, 'missing-input');
+      assert.deepEqual(result.grounding.demoted, []);
+      const argus = { verdict: 'block', findings: [{ severity: 'high', path: 'input.mjs:1', detail: 'A concern.' }] };
+      const expected = structuredClone(argus);
+      await argusReview.groundArgusReviewEvidence(argus, options);
+      assert.deepEqual(argus, expected);
+    }
+  }
+});
+
+test('REVIEWEVIDENCE-01: grounding retains raw Markdown for kept and demoted cards', async () => {
+  for (const style of ['bullet', 'h3', 'mixed']) {
+    const header = title => style === 'h3' || (style === 'mixed' && title === 'No behaviour') ? `### ${title}` : `- **${title}**`;
+    const kept = [header('Valid'), '  - **File:** input.mjs', '  - **Lines:** 1',
+      '  - **Problem:** Input or state: input is empty; Wrong outcome: the call throws.',
+      '    A wrapped explanation with **formatting**.',
+      '### Reproduction',
+      '    ````js', '## Blocking issues', '### Synthetic heading', '- **Synthetic card**',
+      '```', '    console.log(count(null));', '    ````',
+      '  - **Why it matters:** Callers lose their result.',
+      '    Preserve this continuation too.'].join('\n');
+    const demoted = [header('No behaviour'), '  - **File:** input.mjs', '  - **Lines:** 1',
+      '  - **Problem:** A concern.', '    ~~~js', '- A reproduction bullet', '    ~~~'].join('\n');
+    const body = review(`${kept}\n\n${demoted}`);
+    const options = { repo: 'synthetic/project', headSha: 'a'.repeat(40), requireEvidence: true,
+      fetchFileAtRefImpl: async () => 'export const count = input => input?.length ?? 0;\n' };
+    assert.equal((await groundBlockingFindingsAtHead(review(kept), options)).reviewText, review(kept));
+    const result = await groundBlockingFindingsAtHead(body, options);
+    assert.ok(result.reviewText.includes(kept), result.reviewText);
+    assert.ok(result.reviewText.includes('    ~~~js\n- A reproduction bullet\n    ~~~'));
+    assert.deepEqual(result.grounding.demoted.map(f => f.title), ['No behaviour']);
+    assert.equal(parseReviewFindings(result.reviewText).blocking.count, 1);
+    assert.match(result.reviewText, /## Verdict\nRequest changes/);
+  }
+});
+
+test('REVIEWEVIDENCE-01: unstructured unsupported text is retained when demoted', async () => {
+  const text = 'This change might fail.\n\nA second paragraph with reproduction context.';
+  const result = await groundBlockingFindingsAtHead(review(text), { repo: 'synthetic/project',
+    headSha: 'a'.repeat(40), requireEvidence: true });
+  assert.equal(result.grounding.demoted.length, 1);
+  assert.match(result.reviewText, /A second paragraph with reproduction context/);
+  assert.match(result.reviewText, /## Verdict\nComment only/);
+});
+
 test('REVIEWEVIDENCE-01: unresolvable citations and absent behaviour are persisted as non-blocking with reasons', async t => {
   const { root, head } = gitFixture(t);
   const body = review([card('Valid'), card('Missing file', 'absent.mjs'), card('Past head', 'input.mjs', '1-9'),
@@ -67,6 +129,7 @@ test('REVIEWEVIDENCE-01: unresolvable citations and absent behaviour are persist
   await argusReview.groundArgusReviewEvidence(argus, { repo: 'synthetic/project', headSha: head, checkoutDir: root });
   assert.equal(argus.findings[0].severity, 'medium');
   assert.equal(argus.findings[0].evidenceDowngradeReason, 'missing-behaviour');
+  assert.equal(argus.verdict, 'approve');
   const key = { repo: 'synthetic/project', prNumber: 7, attemptNumber: 1, passKind: 'first-pass' };
   beginReviewerPass(root, { ...key, reviewerClass: 'codex', headSha: head });
   updateReviewerPassBodyCapture(root, { ...key, bodyMd: result.reviewText, verdict: 'request-changes' });
@@ -85,6 +148,42 @@ import * as remediationKernel from '../src/kernel/remediation-reply.mjs';
 import { dismissWithdrawnReviews } from '../src/ama/withdrawn-review-dismissal.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { readReviewFindings } from '../src/review-finding-records.mjs';
+
+test('REVIEWEVIDENCE-01: factual disputes require matching complete multi-range citations', () => {
+  const head = 'a'.repeat(40);
+  const body = review(card('Multi-range failure', 'input.mjs', '10-15; 20-25, 30'));
+  const finding = parseReviewFindings(body).blocking.findings[0];
+  const evidence = { headSha: head, test: 'node --test input.test.mjs', output: 'pass' };
+  for (const citation of ['input.mjs:10-15; 20-25, 30', 'input.mjs:10-15, 20-25; 30', 'input.mjs:10–15;20–25;30']) {
+    const entry = { title: 'Multi-range failure', evidence: { ...evidence, citation } };
+    assert.deepEqual(remediationKernel.disputeEvidenceForFinding(entry, finding, head), entry.evidence);
+    assert.equal(remediationKernel.allBlockingDisputed({ revisionRef: head, reviewBody: body },
+      { outcome: 'completed', pushback: [entry] }, head), true);
+  }
+  for (const citation of ['other.mjs:10-15;20-25;30', 'input.mjs:10-15', 'input.mjs:10-15;20-26;30',
+    'input.mjs:10-15;20-25;30;', 'input.mjs:10-15;bogus;30', 'input.mjs:10-15;25-20;30',
+    'input.mjs:0;20-25;30', 'input.mjs:10-15;20-25;30 trailing prose']) {
+    assert.equal(remediationKernel.disputeEvidenceForFinding({ evidence: { ...evidence, citation } }, finding, head), null);
+  }
+});
+
+test('REVIEWEVIDENCE-01: Argus retains real blockers and verification holds after demotion', async () => {
+  const valid = { severity: 'high', path: 'input.mjs:1', detail: 'Input or state: empty input; Wrong outcome: a throw.' };
+  const unsupported = { severity: 'high', path: 'input.mjs:1', detail: 'A concern.' };
+  const options = { repo: 'synthetic/project', headSha: 'a'.repeat(40), fetchFileAtRefImpl: async () => 'code\n' };
+  const mixed = { verdict: 'block', findings: [structuredClone(valid), structuredClone(unsupported)] };
+  await argusReview.groundArgusReviewEvidence(mixed, options);
+  assert.equal(mixed.verdict, 'block');
+  assert.deepEqual(mixed.findings.map(f => f.severity), ['high', 'medium']);
+  const hold = { verdict: 'needs_verification', findings: [structuredClone(unsupported)] };
+  await argusReview.groundArgusReviewEvidence(hold, options);
+  assert.equal(hold.verdict, 'needs_verification');
+  const advisory = { verdict: 'block', findings: [structuredClone(unsupported)] };
+  await argusReview.groundArgusReviewEvidence(advisory, options);
+  assert.equal(advisory.verdict, 'approve');
+  assert.equal(argusReview.composeArgusVerdict({ modelReview: advisory, rubricFindings: [valid] }).verdict, 'block');
+  assert.equal(argusReview.composeArgusVerdict({ modelReview: advisory, verification: { required: true, satisfied: false } }).verdict, 'needs_verification');
+});
 
 test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head without re-review', async t => {
   const { root, head } = gitFixture(t);

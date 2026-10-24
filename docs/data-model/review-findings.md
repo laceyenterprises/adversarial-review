@@ -9,6 +9,9 @@ Unsupported cards become non-blocking and retain an `Evidence downgrade:` reason
 in their parsed Problem; pass metadata retains the grounding reason too. JSON
 model findings use path/detail and retain `evidenceDowngradeReason`. Historical
 bodies retain their original interpretation; the corpus does not fetch files.
+Missing repository metadata or an absent/malformed head SHA preserves the
+original blockers and verdict. Grounding retains raw card Markdown and fenced
+reproductions rather than rebuilding cards from parsed fields.
 
 Completed, validated replies retain optional `pushback[].evidence` with the
 reviewed `headSha`, original `citation`, and either `code`, `reproduction`,
@@ -18,6 +21,9 @@ is retained in `review_finding_replies.payload_json`; linked remediation records
 return only `dispute_evidence_json`, avoiding repeated full-reply payloads. Its historical status is `withdrawn`. Ordinary pushback
 remains unaddressed. A completed reply can close individual disputed findings
 while other findings still require repair.
+Evidence citations accept comma- and semicolon-separated line ranges, such as
+`src/worker.mjs:10-15; 20-25, 30`, and must match the original path and complete
+ordered range list. This changes no persistent schema or payload fields.
 
 The same completion transaction caches admitted evidence in the existing
 withdrawal table, keyed by repository, PR and finding identity. It binds the

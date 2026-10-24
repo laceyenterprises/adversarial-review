@@ -28,6 +28,7 @@ import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { beginReviewerPass } from './reviewer-pass-tokens.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { maskReviewFences } from './kernel/review-markdown.mjs';
 import { blockingEvidenceReason, findingEvidenceLocation, parseBlockingFindingsSection } from './kernel/review-findings.mjs';
 import { execFileSync } from 'node:child_process';
 
@@ -47,14 +48,9 @@ function isNoneLine(line) {
 function splitSections(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const sections = [{ heading: null, lines: [] }];
-  let fence = null;
-  for (const line of lines) {
-    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (fenceMatch) {
-      if (!fence) fence = fenceMatch[1][0];
-      else if (fenceMatch[1][0] === fence) fence = null;
-    }
-    if (!fence && /^##\s+\S/.test(line) && !/^###/.test(line)) {
+  const visible = maskReviewFences(lines.join('\n')).split('\n');
+  for (const [index, line] of lines.entries()) {
+    if (/^##\s+\S/.test(visible[index]) && !/^###/.test(visible[index])) {
       sections.push({ heading: line, lines: [] });
     } else {
       sections[sections.length - 1].lines.push(line);
@@ -73,16 +69,29 @@ function findSection(sections, pattern) {
   return sections.findIndex((section) => pattern.test(section.heading || ''));
 }
 
-// Split a section body into a preamble and cards. H3 cards (`### Title`) use
-// unindented `- **File:**` sub-bullets, so when any H3 is present only H3
-// lines start a card; otherwise every unindented bullet does.
+// Split raw cards without treating fenced examples or field bullets as titles.
+// H3 reproduction subheadings stay inside their card unless followed by fields.
 function splitCards(lines) {
-  const useH3 = lines.some((line) => /^###\s+\S/.test(line));
-  const isBoundary = useH3 ? (line) => /^###\s+\S/.test(line) : (line) => /^[-*+]\s+/.test(line);
+  const visible = maskReviewFences(lines.join('\n')).split('\n');
+  const isBoldTitle = (line) => {
+    const title = /^-\s+\*\*(.+?)\*\*/.exec(line)?.[1].replace(/:\s*$/, '');
+    return title && !/^(Category|File|Lines|Problem|Why it matters|Recommended fix)$/i.test(title);
+  };
+  const isH3 = (line) => /^###\s+\S/.test(line);
+  const useStructuredTitles = visible.some(line => isBoldTitle(line) || isH3(line));
+  const h3HasFields = (index) => {
+    for (let next = index + 1; next < visible.length; next++) {
+      if (isBoldTitle(visible[next]) || isH3(visible[next])) break;
+      if (/^\s*(?:[-*+]\s+)?\*\*(?:File|Lines|Problem)(?::\*\*|\*\*\s*:)/i.test(visible[next])) return true;
+    }
+    return false;
+  };
   const preamble = [];
   const cards = [];
-  for (const line of lines) {
-    if (isBoundary(line)) {
+  for (const [index, line] of lines.entries()) {
+    const current = visible[index];
+    if (isBoldTitle(current) || (isH3(current) && (cards.length === 0 || h3HasFields(index)))
+      || (!useStructuredTitles && /^[-*+]\s+/.test(current))) {
       cards.push([line]);
     } else if (cards.length > 0) {
       cards[cards.length - 1].push(line);
@@ -289,20 +298,19 @@ async function groundBlockingFindingsAtHead(reviewText, {
 } = {}) {
   const grounding = { headSha: headSha || null, checked: 0, kept: 0, demoted: [] };
   const original = String(reviewText ?? '');
-  if (!original || ((!repo || !String(headSha || '').trim()) && !requireEvidence)) {
+  if (!original || !String(repo || '').trim() || !/^[a-f0-9]{40}$/i.test(headSha || '')) {
     return { reviewText: original, grounding: { ...grounding, skipped: 'missing-input' } };
   }
   try {
     const sections = splitSections(original);
     const blockingIndex = findSection(sections, /^##\s+Blocking issues\b/i);
     if (blockingIndex < 0) return { reviewText: original, grounding };
-    const { preamble, cards } = requireEvidence
-      ? { preamble: [], cards: (parseBlockingFindingsSection(original, { includeIncompleteCards: true }) || []).map(f => [
-          `- **${f.title || 'Unstructured finding'}**`,
-          ...Object.entries({ Category: f.category, File: f.file, Lines: f.lines, Problem: f.problem,
-            'Why it matters': f.whyItMatters, 'Recommended fix': f.recommendedFix })
-            .filter(([, value]) => value).map(([key, value]) => `  - **${key}:** ${value}`),
-        ]) } : splitCards(sections[blockingIndex].lines);
+    let { preamble, cards } = splitCards(sections[blockingIndex].lines);
+    // Unstructured prose still needs evidence checks, but retain its raw text.
+    if (requireEvidence && cards.length === 0 && preamble.some(line => line.trim())) {
+      cards = [trimTrailingBlank(preamble)];
+      preamble = [];
+    }
     if (cards.length === 0) return { reviewText: original, grounding };
 
     const diffFiles = indexDiff(diff);

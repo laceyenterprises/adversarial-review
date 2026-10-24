@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createQueueRebaseService, REBASE_DIVERGENCE_WARNING } from '../src/finalization/queue-rebase.mjs';
+import { createQueueAdmissionService } from '../src/finalization/queue-admission.mjs';
 import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
 import { probeQueueOwner } from '../src/finalization/queue-probe.mjs';
 import { foldQueue } from '../src/finalization/ledger-fold.mjs';
@@ -260,4 +261,96 @@ for (const state of ['closed', 'merged']) test(`authoritative ${state} cannot re
   const result = await run(service(f, a, { git: { ...f.adapter,
     verify: async () => { throw new Error('workspace unavailable'); }, push: async () => { throw new Error('terminal must not push'); } } }), a);
   assert.equal(result.phase, 'closed-observed'); assert.equal(result.reason, `live-${state}`);
+});
+
+for (const failure of ['hold', 'permission-in-lock', 'unavailable', 'remote-refusal']) {
+  test(`parked persisted candidate readmits and publishes once: ${failure}`, async t => {
+    const f = gitFixture(t), a = await admitted(f);
+    let reads = 0, pushes = 0, preparations = 0;
+    const git = { ...f.adapter,
+      prepare: async request => { preparations++; return f.adapter.prepare(request); },
+      push: async request => {
+        if (failure === 'remote-refusal' && reads === 3) return { outcome: 'not-applied', sourceRef: 'fixture:refused' };
+        pushes++; return f.adapter.push(request);
+      } };
+    const parked = await run(service(f, a, { git, read: async () => {
+      reads++;
+      if (failure === 'hold' && reads === 2) a.live.subject.labels = ['no-merge-hold'];
+      if (failure === 'permission-in-lock' && reads === 3) a.live.permission.canForcePush = false;
+      if (failure === 'unavailable' && reads === 2) return null;
+      return structuredClone(a.live);
+    } }), a);
+    assert.match(parked.phase, /^parked-/); assert.ok(parked.candidate);
+    assert.equal(pushes, 0); assert.equal(f.store.operations(a.h.lane).length, 0);
+    a.live.subject.labels = []; a.live.permission.canForcePush = true;
+    const ready = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+      liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+    assert.equal(ready.phase, 'ready'); assert.ok(ready.readinessSeq > parked.readinessSeq);
+    const result = await run(service(f, a, { git }), a);
+    assert.equal(result.phase, 'waiting-checks'); assert.equal(pushes, 1); assert.equal(preparations, 1);
+    assert.equal(result.candidate, parked.candidate); assert.deepEqual(result.patience, parked.patience);
+    assert.deepEqual(foldQueue(f.store.readEvents(a.h.lane)).entries[result.entryId], result);
+  });
+}
+
+for (const corrupt of [false, true]) test(`admission re-proves queue-published head after hold: corrupt=${corrupt}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const first = await run(service(f, a), a);
+  f.g(['checkout', 'main']); f.file('upstream', 'next base\n'); f.base = f.commit('next base');
+  f.g(['push', f.remote, 'main']); a.live.subject.baseSha = f.base;
+  a.live.subject.labels = ['no-merge-hold'];
+  const parked = await run(service(f, a), a);
+  assert.equal(parked.phase, 'parked-hold'); assert.equal(parked.candidate, first.candidate);
+  a.live.subject.labels = [];
+  let verifications = 0;
+  const ready = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+    gitAdapter: { ...f.adapter, verify: async request => { verifications++; return corrupt ? null : f.adapter.verify(request); } },
+    liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+  assert.equal(verifications, 1);
+  assert.equal(ready.phase, corrupt ? 'returned-to-closer' : 'ready');
+  if (!corrupt) {
+    assert.ok(ready.readinessSeq > parked.readinessSeq);
+    const result = await run(service(f, a), a);
+    assert.equal(result.phase, 'waiting-checks'); assert.notEqual(result.candidate, first.candidate);
+    assert.deepEqual(result.patience, first.patience);
+  }
+});
+
+for (const unavailable of [false, true]) test(`successful Git push settles despite lagging/unavailable API: unavailable=${unavailable}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  let reads = 0, pushes = 0;
+  const git = { ...f.adapter, push: async request => { pushes++; return f.adapter.push(request); } };
+  const result = await run(service(f, a, { git, read: async () => {
+    reads++;
+    return unavailable && reads === 4 ? null : structuredClone(a.live);
+  } }), a);
+  assert.equal(result.phase, unavailable ? 'parked-infrastructure' : 'waiting-checks');
+  assert.equal(f.store.operations(a.h.lane).length, 0);
+  const operation = f.store.db.prepare('SELECT result_json FROM finalization_queue_operation').get();
+  assert.equal(JSON.parse(operation.result_json).outcome, 'succeeded');
+  assert.match(JSON.parse(operation.result_json).sourceRef, /^git:push:/);
+  if (!unavailable) assert.equal(result.rebase.publication.head, result.candidate);
+  else {
+    a.live.subject.head = result.candidate; a.live.eligibility.primaryChange.headSha = result.candidate;
+    const ready = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+      liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+    assert.equal(ready.phase, 'ready');
+  }
+  const resumed = await run(service(f, a, { git }), a);
+  assert.equal(resumed.phase, 'waiting-checks'); assert.equal(pushes, 1);
+});
+
+for (const applied of [false, true]) test(`unknown push response requires candidate observation or drain: applied=${applied}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const operation = run(service(f, a, { git: { ...f.adapter, push: async request => {
+    if (applied) await f.adapter.push(request);
+    throw new Error('lost response');
+  } } }), a);
+  if (applied) {
+    assert.equal((await operation).phase, 'waiting-checks');
+    assert.equal(f.store.operations(a.h.lane).length, 0);
+  } else {
+    await assert.rejects(operation, /publication-requires-drain-reconciliation/);
+    assert.equal(f.store.operations(a.h.lane).length, 1);
+  }
 });

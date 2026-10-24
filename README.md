@@ -2711,11 +2711,13 @@ the setting in a host overlay.
 
 ### V2 mechanical rebase (MGQ-04)
 
-`createQueueRebaseService` prepares conflict-free rebases in isolated repositories,
+`createQueueRebaseService` prepares conservative rebases in isolated repositories,
 proves every ordered change including binary data, whitespace, paths, modes,
 symlinks and gitlinks, and persists the candidate/base/source before the fenced
 expected-old-head push. Empty commits, unsupported histories and unprovable
-preservation return to the closer. Generated files receive no exception.
+preservation return to the closer. Full-index patches must match byte for byte:
+even conflict-free edits to a file changed upstream fail proof. Disjoint-file
+rebases are the supported case. Generated files receive no exception.
 Original signed evidence stays at its source head; author warning and permission
 notice intents remain durable for the delivery composition.
 
@@ -2725,6 +2727,17 @@ for author changes or failed proof. Restart verifies the persisted candidate and
 reconciles outstanding operations before retry. A published candidate resumes
 checks without repushing. A no-op keeps the SHA with explicit proof. Outside base
 movement keeps the original absolute deadline and records the derivation chain.
+Admission re-proves a queue-published candidate against its immutable receipt
+before readmission; retained candidates resume via rebasing → publishing. Explicit
+Git push success settles the intent despite API lag, with a Git-sourced publication
+reference. Explicit single-ref remote refusals settle as not-applied; unknown
+transport outcomes still require drain recovery. Failed preparation removes its
+unreturned workspace. Successful workspaces remain for restart proof and require
+operator retention cleanup; no automatic retention sweep is wired. Rewritten
+commits default to `Queue Rebase <queue@example.invalid>` as committer, with the
+original author and message preserved. Full prior proofs and live snapshots are
+still duplicated in progress events; compact evidence storage remains follow-up
+work before production routing.
 These seams remain unwired until lane routing. Network Git requires the existing
 entitled credential mechanism through an injected runner; ambient SSH fallback
 is refused. The existing execution brake applies before preparation and push.

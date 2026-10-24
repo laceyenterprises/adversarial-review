@@ -352,18 +352,29 @@ runner; it never borrows the runtime owner's ambient SSH credentials. The existi
 execution brake remains a separate resolved finalization-policy input.
 
 When organically available after a later authorized route promotion, observe a
-conflict-free publication with its original signed receipt, complete ordered
+disjoint-file publication with its original signed receipt, complete ordered
 proof, leased old/new pair, source signatures, author notice delivery and durable
-live publication observation. Recovery evidence must identify prior operation
+publication reference (Git-sourced on explicit push success, even during API
+lag) and subsequent live observation. Same-file upstream edits remain
+conservatively unprovable even when Git rebases without conflict. Recovery evidence must identify prior operation
 stop/drain, authoritative remote head and unchanged candidate/base/deadline.
 Never simulate crashes, holds or force-pushes against production for this probe.
 
 For a parked permission entry, inspect the named author/operator notice intent
 and actual repository/fork/rules rights. Revalidation/readmission belongs to the
-existing admission service and rejoins the tail; do not edit the queue row.
+existing admission service and rejoins the tail; a queue-published candidate is
+re-proved against its immutable receipt before derived-head readmission, and a
+retained candidate resumes through rebasing/publishing without recreation. Do not
+edit the queue row. Explicit single-ref remote refusals settle not-applied; an
+explicit drained push success settles without immediate API consistency.
 Ambiguous operations require the existing explicit drain/reconciliation adapter;
 lease expiry or an old-head read alone is insufficient. Keep isolated candidate
 repositories until reconciliation and evidence retention permit operator cleanup.
+Failed preparation removes its unreturned workspace; successful workspaces have
+no automatic retention sweep. Crash orphans and duplicated full prior proofs/live
+snapshots in progress events require retention/compaction follow-up before
+production queue routing. The default synthetic committer is
+`Queue Rebase <queue@example.invalid>`; it does not attest service identity.
 Rollback retains receipts, proof, candidates and unresolved intents. No change to
 the emergency execution brake or the existing smoke promises is part of this slice.
 

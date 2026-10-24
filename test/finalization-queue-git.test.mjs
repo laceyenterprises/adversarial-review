@@ -3,6 +3,7 @@ import test from 'node:test';
 import { resolveQueueGitAdapter, runQueueGit } from '../src/finalization/queue-git.mjs';
 import { gitFixture, localGit, idle } from './helpers/queue-rebase-fixture.mjs';
 import { handoffTime } from './helpers/queue-handoff-fixture.mjs';
+import { readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // An unsafe control uses only disposable local refs, to demonstrate the race
@@ -62,3 +63,35 @@ test('network Git has no ambient credential fallback and consumes an injected ru
   assert.equal(calls[0].options.repository, f.entry.lane.repository);
   assert.equal(calls[0].args[0], 'fetch');
 });
+
+for (const failure of ['conflict', 'proof', 'fetch']) test(`failed preparation reclaims workspace: ${failure}`, async t => {
+  const f = gitFixture(t, { conflict: failure === 'conflict', sharedFile: failure === 'proof' });
+  if (failure === 'fetch') f.base = 'f'.repeat(40);
+  await assert.rejects(f.prepare(), failure === 'proof' ? /rebase-preservation-unproven/ : undefined);
+  assert.deepEqual(readdirSync(join(f.root, 'data/finalization-git')), []);
+});
+
+test('remote non-fast-forward refusal settles as not-applied without removing successful workspace', async t => {
+  const f = gitFixture(t), p = await f.prepare();
+  f.g(['--git-dir', f.remote, 'config', 'receive.denyNonFastForwards', 'true']);
+  const entry = { ...f.entry, ...p, rebase: { workspace: p.workspace, headRepository: 'example/review', headRef: 'topic' } };
+  const result = await f.adapter.push({ entry, intent: { expectedOldHead: f.oldHead, candidate: p.candidate,
+    deadline: handoffTime(1800), timeoutMs: 30_000 } });
+  assert.equal(result.outcome, 'not-applied'); assert.match(result.sourceRef, /^git:/);
+  assert.equal(f.g(['--git-dir', f.remote, 'rev-parse', 'topic']), f.oldHead);
+  assert.deepEqual(readdirSync(join(f.root, 'data/finalization-git')), [p.workspace]);
+});
+
+for (const status of ['[rejected] (stale info)', '[remote rejected] (protected branch hook declined)',
+  '[remote rejected] (pre-receive hook declined)', '[remote failure] (remote failed to report status)', 'unreadable']) {
+  test(`only explicit single-ref porcelain refusal proves non-application: ${status}`, async t => {
+    const f = gitFixture(t), bin = join(f.root, 'bin'); mkdirSync(bin);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' 'To fixture' '!\told:refs/heads/topic\t${status}' 'Done'\nexit 1\n`, { mode: 0o755 });
+    await assert.rejects(runQueueGit(['push', '--porcelain'], { cwd: f.root, timeoutMs: 5000,
+      env: { PATH: `${bin}:/usr/bin:/bin` } }), e => {
+      assert.equal(e.reason, 'git-command-refused');
+      assert.equal(e.publicationRefused, /^\[(?:remote rejected|rejected)\]/.test(status));
+      return true;
+    });
+  });
+}

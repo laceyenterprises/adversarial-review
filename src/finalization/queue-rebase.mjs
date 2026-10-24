@@ -97,6 +97,12 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
         }
       }
       if (Date.parse(now()) >= Date.parse(entry.patience.deadline)) return progress(entry, fence, 'parked-infrastructure', 'rebase-deadline-expired');
+      if (entry.phase === 'ready' && verified) {
+        // Admission retains the proven candidate and rejoins the FIFO tail.
+        // Resume through legal execution phases without preparing another SHA.
+        entry = progress(entry, fence, 'rebasing', 'persisted-candidate-resumed');
+        entry = progress(entry, fence, 'publishing', 'candidate-preservation-proven');
+      }
       const s = live?.subject;
       if (entry.rebase?.workspace && s?.sourceRef && isDeepStrictEqual(s.lane, entry.lane) && s.prNumber === entry.prNumber
         && (s.headRepository !== entry.rebase.headRepository || s.headRef !== entry.rebase.headRef)) {
@@ -191,23 +197,31 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
         catch { /* A failed/lost response is still ambiguous until observed. */ }
         const observed = await read(entry);
         const subject = observed?.subject;
+        // Drained, explicit Git results settle the intent even if the API is
+        // unavailable or still exposes the old ref. Unknown transport outcomes
+        // continue to require authoritative observation or drain reconciliation.
+        if (['succeeded', 'not-applied'].includes(result?.outcome) && result.sourceRef) {
+          return { ...result, observation: observed };
+        }
         if (!subject?.sourceRef || !isDeepStrictEqual(subject.lane, entry.lane) || subject.prNumber !== entry.prNumber) {
           throw new Error('publication-outcome-unavailable');
         }
         // Live old head alone does not prove a timed-out remote request drained.
-        // A successful push is authoritative at candidate. Any other outcome is
-        // left unresolved for the explicit stop/drain reconciliation contract.
+        // Without an explicit result only a live candidate proves success.
         if (subject.head !== entry.candidate) {
-          if (result?.outcome === 'not-applied' && result.sourceRef) return { ...result, observation: observed };
           throw new Error('publication-requires-drain-reconciliation');
         }
         return { outcome: 'succeeded', sourceRef: subject.sourceRef, observation: observed };
       } });
       if (!issued.ok) return store.readEntry(entryId);
       current(entry, fence);
-      const observed = issued.result.observation?.subject;
+      const subject = issued.result.observation?.subject;
+      const observed = subject?.sourceRef && isDeepStrictEqual(subject.lane, entry.lane) && subject.prNumber === entry.prNumber ? subject : null;
       if (issued.result.disposition) return parkOrReturn(entry, fence, issued.result.disposition, issued.result.observation);
       if (issued.result.outcome === 'not-applied') {
+        if (!observed) {
+          return progress(entry, fence, 'parked-infrastructure', 'publication-observation-unavailable');
+        }
         if (observed?.head !== entry.expectedOldHead) return progress(entry, fence, 'returned-to-closer', 'external-head-change',
           { rebase: { ...entry.rebase, lastObservation: issued.result.observation } });
         return progress(entry, fence, 'parked-infrastructure', 'publication-not-applied',
@@ -216,9 +230,13 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
       if (['closed', 'merged'].includes(observed?.state)) return progress(entry, fence, 'closed-observed', `live-${observed.state}`,
         { rebase: { ...entry.rebase, lastObservation: issued.result.observation } });
       if (observed?.state !== 'open') return progress(entry, fence, 'parked-infrastructure', 'publication-lifecycle-unavailable');
+      if (observed.head !== entry.candidate && observed.head !== entry.expectedOldHead) {
+        return progress(entry, fence, 'returned-to-closer', 'external-head-change',
+          { rebase: { ...entry.rebase, lastObservation: issued.result.observation } });
+      }
       if (!observed || observed.baseSha !== entry.exactBase) return progress(entry, fence, 'rebasing', 'external-base-change', { checks: null });
       return progress(entry, fence, 'waiting-checks', 'candidate-published', { rebase: { ...entry.rebase,
-        publication: { head: observed.head, base: observed.baseSha, sourceRef: observed.sourceRef, observedAt: now() },
+        publication: { head: entry.candidate, base: entry.exactBase, sourceRef: issued.result.sourceRef, observedAt: now() },
         lastObservation: issued.result.observation } });
     },
   };

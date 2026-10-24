@@ -9,6 +9,8 @@ import { resolveCleanReviewStore } from './queue-clean-review.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
+import { resolveQueueGitAdapter } from './queue-git.mjs';
+import { handoffDigest } from './queue-handoff.mjs';
 
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
@@ -94,7 +96,7 @@ export function resolveQueueAdmissionAdapters(store) {
  * terminal adjudications use the immutable MGQ-02 exception without re-review.
  * No default credentials, production routing, model judgement or mutation.
  */
-export function createQueueAdmissionService({ store, liveAdapter, now = () => new Date().toISOString(), load } = {}) {
+export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, now = () => new Date().toISOString(), load } = {}) {
   const adapters = resolveQueueAdmissionAdapters(store);
   return { adapterName: adapters.name, order: adapters.order,
     async reconcile({ fence, entryId, deadline }) {
@@ -114,9 +116,21 @@ export function createQueueAdmissionService({ store, liveAdapter, now = () => ne
           live = await readQueueEvidence(liveAdapter, { entry, kind: receipt?.kind ?? null }, wait);
         } catch { /* Unknown evidence parks, never dispatches. */ }
       }
+      let derivation = null;
+      if (live?.subject?.state === 'open' && entry.candidate && !sameSha(entry.candidate, entry.head)
+        && sameSha(live.subject.head, entry.candidate) && entry.proof && receipt
+        && entry.rebase?.sourceReceiptDigest === handoffDigest(receipt.input ?? receipt.handoff)) {
+        // A saved proof is not authority by itself. Recompute it from the
+        // isolated objects before treating our own rewrite as the admission head.
+        try {
+          const git = gitAdapter ?? resolveQueueGitAdapter({ rootDir: store.rootDir, now, load });
+          const proof = await git.verify({ entry: structuredClone(entry), deadline });
+          if (proof && isDeepStrictEqual(proof, entry.proof)) derivation = { head: entry.candidate };
+        } catch { /* Unknown derivations cannot authorize readmission. */ }
+      }
       const at = queueTime(now());
       if (Date.parse(at) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
-      else decision = classifyQueueAdmission(entry, receipt, live);
+      else decision = classifyQueueAdmission(entry, receipt, live, derivation);
       // Snapshot CAS spans the await: a late recovery cannot overwrite a newer
       // hold, terminal observation, or recovery, even after an ABA phase cycle.
       const priorWait = store.db.pragma('busy_timeout', { simple: true });

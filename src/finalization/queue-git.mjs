@@ -2,7 +2,7 @@
 // repair, hook, generated-output regeneration or credential persistence.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, statSync, rmSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { queueWaitMs } from './queue-wait.mjs';
 import { proveQueueRebase, isQueueSha, QUEUE_REBASE_PROOF } from './queue-rebase-proof.mjs';
@@ -30,11 +30,14 @@ export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
     child.on('error', () => { clearTimeout(timer); reject(error('git-unavailable')); });
     child.on('close', code => {
       clearTimeout(timer);
+      const porcelain = Buffer.concat(output).toString('latin1');
+      const statuses = porcelain.split('\n').filter(line => /^[ =*+!\-]\t/.test(line));
       if (code !== 0 || failed) reject(Object.assign(error(failed ? 'git-deadline-or-output-limit' : 'git-command-refused'),
-        { leaseRefused: args[0] === 'push' && /!\t[^\n]+\t\[rejected\] \(stale info\)/.test(Buffer.concat(output).toString('latin1')) }));
+        { publicationRefused: args[0] === 'push' && !failed && statuses.length === 1
+          && /^!\t[^\t\n]+\t\[(?:remote rejected|rejected)\] [^\n]+$/.test(statuses[0]) }));
       // latin1 is a bijection over bytes. UTF-8 replacement would let distinct
       // invalid source bytes compare equal in an otherwise textual Git patch.
-      else resolveResult(Buffer.concat(output).toString('latin1'));
+      else resolveResult(porcelain);
       output = [];
     });
   });
@@ -75,30 +78,38 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
       resolveLaneKey({ repository: headRepository, base: headRef });
       mkdirSync(parent, { recursive: true, mode: 0o700 });
       const cwd = mkdtempSync(join(parent, key(entry) + '-'));
-      const g = git(cwd, deadline);
-      await g(['init', '--quiet', '--template=']);
-      // Fetch immutable objects; shallow or missing histories cannot prove.
-      await transport(entry.lane.repository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, exactBase], cwd, deadline);
-      await transport(headRepository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, oldHead], cwd, deadline);
-      await g(['checkout', '--detach', '--quiet', oldHead]);
-      const fork = (await g(['merge-base', '--all', oldHead, exactBase])).trim();
-      if (!isQueueSha(fork)) throw error('unsupported-rebase-history');
-      const sourceProof = await proveQueueRebase({ oldHead, candidate: oldHead, exactBase: fork, git: g });
-      if (!sourceProof) throw error('unsupported-rebase-history');
-      if (fork !== exactBase) {
-        try {
-          await g(['-c', 'user.name=Queue Rebase', '-c', 'user.email=queue@example.invalid', 'rebase',
-            '--no-autostash', '--no-autosquash', '--no-rebase-merges', '--reapply-cherry-picks', '--keep-empty', '--empty=keep',
-            '--onto', exactBase, fork, oldHead]);
-        } catch {
-          // Never resolve a conflict or continue from a partially replayed tree.
-          throw error('rebase-conflict-or-unsupported');
+      let prepared = false;
+      try {
+        const g = git(cwd, deadline);
+        await g(['init', '--quiet', '--template=']);
+        // Fetch immutable objects; shallow or missing histories cannot prove.
+        await transport(entry.lane.repository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, exactBase], cwd, deadline);
+        await transport(headRepository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, oldHead], cwd, deadline);
+        await g(['checkout', '--detach', '--quiet', oldHead]);
+        const fork = (await g(['merge-base', '--all', oldHead, exactBase])).trim();
+        if (!isQueueSha(fork)) throw error('unsupported-rebase-history');
+        const sourceProof = await proveQueueRebase({ oldHead, candidate: oldHead, exactBase: fork, git: g });
+        if (!sourceProof) throw error('unsupported-rebase-history');
+        if (fork !== exactBase) {
+          try {
+            await g(['-c', 'user.name=Queue Rebase', '-c', 'user.email=queue@example.invalid', 'rebase',
+              '--no-autostash', '--no-autosquash', '--no-rebase-merges', '--reapply-cherry-picks', '--keep-empty', '--empty=keep',
+              '--onto', exactBase, fork, oldHead]);
+          } catch {
+            // Never resolve a conflict or continue from a partially replayed tree.
+            throw error('rebase-conflict-or-unsupported');
+          }
         }
+        const candidate = (await g(['rev-parse', 'HEAD'])).trim();
+        const proof = await proveQueueRebase({ oldHead, candidate, exactBase, git: g });
+        if (!proof) throw error('rebase-preservation-unproven');
+        prepared = true;
+        return { candidate, exactBase, expectedOldHead: oldHead, proof, workspace: cwd.slice(parent.length + 1) };
+      } finally {
+        // Only unreturned workspaces are disposable. Persisted candidates must
+        // remain available for restart proof and unresolved-operation recovery.
+        if (!prepared) rmSync(cwd, { recursive: true, force: true });
       }
-      const candidate = (await g(['rev-parse', 'HEAD'])).trim();
-      const proof = await proveQueueRebase({ oldHead, candidate, exactBase, git: g });
-      if (!proof) throw error('rebase-preservation-unproven');
-      return { candidate, exactBase, expectedOldHead: oldHead, proof, workspace: cwd.slice(parent.length + 1) };
     },
     async verify({ entry, deadline }) {
       const cwd = workspace(entry, entry.rebase.workspace);
@@ -113,12 +124,12 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
         await transport(entry.rebase.headRepository, target => ['push', '--porcelain',
           `--force-with-lease=refs/heads/${entry.rebase.headRef}:${intent.expectedOldHead}`,
           '--', target, `${intent.candidate}:refs/heads/${entry.rebase.headRef}`], cwd, intent.deadline, intent.timeoutMs);
-        return { outcome: 'succeeded' };
+        return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}` };
       } catch (failure) {
-        // Only the explicit remote lease refusal is safe to retry after drain.
+        // Explicit single-ref porcelain refusals prove non-application.
         // Transport/timeout failures remain ambiguous; do not expose diagnostics.
-        if (failure.reason === 'git-command-refused' && failure.leaseRefused) {
-          return { outcome: 'not-applied', sourceRef: 'git:expected-old-head-lease-refused' };
+        if (failure.reason === 'git-command-refused' && failure.publicationRefused) {
+          return { outcome: 'not-applied', sourceRef: 'git:publication-refused' };
         }
         throw error('git-publication-ambiguous');
       }

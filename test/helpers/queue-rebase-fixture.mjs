@@ -19,7 +19,7 @@ export function localGit(cwd, args, input) {
       GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' },
   }).trimEnd();
 }
-export function gitFixture(t, { second = false, conflict = false, noop = false, empty = false } = {}) {
+export function gitFixture(t, { second = false, conflict = false, noop = false, empty = false, sharedFile = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mgq-rebase-'));
   const source = join(root, 'source'), remote = join(root, 'remote.git');
   mkdirSync(source);
@@ -27,15 +27,16 @@ export function gitFixture(t, { second = false, conflict = false, noop = false, 
   g(['init', '-b', 'main']);
   const file = (name, data) => writeFileSync(join(source, name), data);
   const commit = message => { g(['add', '--all']); g(['commit', '-m', message]); return g(['rev-parse', 'HEAD']); };
-  file('content', 'initial\n'); file('base', 'initial\n'); file('INDEX.md', 'initial\n');
+  const lines = Array.from({ length: 20 }, (_, i) => `line ${i}\n`);
+  file('content', sharedFile ? lines.join('') : 'initial\n'); file('base', 'initial\n'); file('INDEX.md', 'initial\n');
   const fork = commit('initial');
-  g(['checkout', '-b', 'topic']); file('content', 'reviewed\n');
+  g(['checkout', '-b', 'topic']); file('content', sharedFile ? ['reviewed\n', ...lines.slice(1)].join('') : 'reviewed\n');
   let oldHead = commit('reviewed change\n\nWorker-Class: builder');
   if (second) { file('another', 'second\n'); oldHead = commit('second change'); }
   if (empty) { g(['commit', '--allow-empty', '-m', 'empty']); oldHead = g(['rev-parse', 'HEAD']); }
   g(['checkout', 'main']);
   let base = fork;
-  if (!noop) { file(conflict ? 'content' : 'base', 'upstream\n'); base = commit('base advanced'); }
+  if (!noop) { file(sharedFile || conflict ? 'content' : 'base', sharedFile ? [...lines.slice(0, -1), 'upstream\n'].join('') : 'upstream\n'); base = commit('base advanced'); }
   g(['init', '--bare', remote]);
   g(['push', remote, 'main', 'topic']);
   let store = openFinalizationQueueStore({ rootDir: root });

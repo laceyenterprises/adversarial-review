@@ -24,6 +24,8 @@ const exportLines = (entitled, token, { expiresAt = new Date(Date.now() + 60_000
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-token-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Extensionless fake executables must not inherit a temporary parent's ESM mode.
+  writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}\n');
   const refreshes = join(dir, 'refreshes');
   const command = join(dir, 'refresh.cjs');
   writeFileSync(command, `const fs = require('node:fs');

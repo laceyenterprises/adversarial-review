@@ -78,6 +78,7 @@ function refFromPR(repoPath, pr) {
 function normalizePRSnapshot(repoPath, pr) {
   const ref = refFromPR(repoPath, pr);
   const builderClass = builderClassFromTitle(pr?.title);
+  const reviewRequests = pr?.reviewRequests;
   return {
     ...ref,
     repo: repoPath,
@@ -90,6 +91,10 @@ function normalizePRSnapshot(repoPath, pr) {
     headRefName: pr?.head?.ref || pr?.headRefName || undefined,
     baseRefName: pr?.base?.ref || pr?.baseRefName || undefined,
     baseSha: pr?.base?.sha || pr?.baseRefOid || undefined,
+    requested_reviewers: pr?.requested_reviewers ?? (Array.isArray(reviewRequests)
+      ? reviewRequests.filter(request => request?.__typename !== 'Team') : reviewRequests),
+    requested_teams: pr?.requested_teams ?? (Array.isArray(reviewRequests)
+      ? reviewRequests.filter(request => request?.__typename === 'Team') : reviewRequests),
     labelsKnown: Array.isArray(pr?.labels),
     labels: Array.isArray(pr?.labels)
       ? pr.labels
@@ -123,6 +128,8 @@ function stateFromSnapshot(snapshot, {
     builderClass: snapshot.builderClass || undefined,
     labels: snapshot.labels,
     labelsKnown: snapshot.labelsKnown,
+    requested_reviewers: snapshot.requested_reviewers,
+    requested_teams: snapshot.requested_teams,
     createdAt: snapshot.createdAt,
     updatedAt: snapshot.updatedAt,
     headSha: snapshot.headSha,
@@ -337,7 +344,7 @@ function createGitHubPRSubjectAdapter({
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,labels,createdAt,updatedAt,author,isCrossRepository',
+        'number,title,state,headRefOid,baseRefOid,baseRefName,labels,createdAt,updatedAt,author,isCrossRepository,reviewRequests',
       ], {
         maxBuffer: 10 * 1024 * 1024,
       }));
@@ -366,7 +373,16 @@ function createGitHubPRSubjectAdapter({
         const seenSubjectExternalIds = new Set();
         const appendSnapshot = async (pr) => {
           const snapshot = normalizePRSnapshot(repoPath, pr);
-          if (seenSubjectExternalIds.has(snapshot.subjectExternalId)) return;
+          if (seenSubjectExternalIds.has(snapshot.subjectExternalId)) {
+            const previous = snapshotBySubjectExternalId.get(snapshot.subjectExternalId);
+            // The existing REST supplement supplies immutable base identity and
+            // review requests omitted by older adapters, without another read.
+            if (previous?.headSha === snapshot.headSha && snapshot.baseSha) {
+              setCache({ ...previous, baseSha: snapshot.baseSha, baseRefName: snapshot.baseRefName,
+                requested_reviewers: snapshot.requested_reviewers, requested_teams: snapshot.requested_teams });
+            }
+            return;
+          }
           // Untrusted is not marked seen: a later, richer source re-evaluates it.
           const trust = await trustGate.evaluatePr(repoPath, pr);
           if (!trust.trusted) {

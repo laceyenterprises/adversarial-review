@@ -19,7 +19,6 @@ fi
 
 declare -a LABELS=(
   "fast-merge:spec-hash-rebind|Spec-hash rebind PR (no code diff).|0E8A16"
-  "fast-merge:docs|Documentation-only changes.|0E8A16"
   "fast-merge:test-fixtures|Additive test fixture data only.|0E8A16"
   "fast-merge:submodule-bump|Submodule pointer bump.|0E8A16"
   "fast-merge-veto|Operator override: forces normal adversarial review.|D93F0B"

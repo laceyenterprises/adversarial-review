@@ -367,6 +367,16 @@ new PR
   active, open session's timeout and lease, before its parent timer is extended.
   Deadlines measure total time from process start, are scaled once through the
   per-call budgets, and cannot exceed the unscaled chunk cap or timer limit.
+  LAC-2100 allocates each chunk the smaller of the requested load-scaled call
+  budget and its static equal share of the cap after existing chunk/process slack.
+  Explicit call allocations clamp agy print time to allocation minus 30 seconds
+  (one-second CLI floor); the call abort timer still bounds preparation/retries
+  and allocations below 31 seconds. Unused shares are not redistributed, and
+  preparation consumes the fixed five-minute preparation/posting reserve.
+  The unconstrained `requiredMs` remains diagnostic; `timeoutMs` is the allocated
+  chunk-loop budget. A cap too small for one millisecond per chunk and both
+  slacks retains terminal `reviewer-chunk-budget-exceeded` (exit 77), with
+  `minimumCapMs` sizing evidence. No reviewer, verdict or merge gate is waived.
   Orphan reconciliation and detached reservation expiry read the persisted plan
   budget; no lifecycle state or recovery cap changes.
   Detached reservation expiry uses this database budget only for Gemini;
@@ -804,6 +814,38 @@ required-check, identity, arming and shared-lease checks. The compatibility owne
 projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
+DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
+inline daemon merge lane, before reviewer admission or closer dispatch. Every
+old and new changed path must be under `docs/` and end in `.md` or an image
+extension (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `ico`, `bmp`, `tif`,
+`tiff`). Agent instruction filenames and prompt/persona/identity directories
+(matched case-insensitively) stay on the full path. Empty, unreadable or
+potentially capped inventories also take the full path. Classification is cached
+by PR revision; immutable base/head
+comparison prevents a moving PR from lending its classification to another head.
+
+`request-review`, `retrigger-review`, `fast-merge-veto`, a native requested
+reviewer/team, or a retained operator retrigger selects full review. Merge holds
+remain holds. The daemon records a signed `docs-fast-path` attestation through
+`hq attest sign`/`record` while holding the existing merge lease. Before recording
+on each merge attempt, a live read revalidates classification, review requests,
+base branch, exact head and merge gates. A base tip advance is accepted only after
+the new base/head range classifies as docs-only; retargeting the base branch
+invalidates the lease's authority. Terminal audit metadata retains the refreshed
+eligible range. Recording failure releases the lease and retries on a later poll;
+`--match-head-commit` fences the merge itself. Required contexts use the shared
+check classifier, including the pipeline gate, which records the docs waiver as
+success as a review waiver, independently of external CI. A late review request
+withdraws that waiver with a pending status and selects full review. Requests
+already visible at poll admission or classification do the same; failed status
+withdrawal keeps the PR waiting for a later retry. Kill switch,
+primary-change policy, protection, capability, protective
+predecessors, stop holds and audit remain authoritative. No reviewer result or
+finding count is invented. Pending/red checks wait without reviewer or closer.
+
+The former `fast-merge:docs` label shortcut is retired; it cannot waive review
+for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.
+
 
 LAC-2093 bounds local validation under the shared lease with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
@@ -1520,7 +1562,6 @@ The label alone is never the authority. The watcher may set
   authorized head SHA by pairing the most recent allowlisted-operator label
   event with the live PR head from `pulls.get`.
 - The changed-file list matches the allowlisted category shape. For example,
-  `fast-merge:docs` is limited to documentation file extensions,
   `fast-merge:submodule-bump` is limited to known gitlink paths, and
   `fast-merge:spec-hash-rebind` only allows a tiny spec-lock/spec-hash rebind.
 - Any commit, force-push, or head-restore event at or after the label

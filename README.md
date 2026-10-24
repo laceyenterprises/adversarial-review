@@ -959,10 +959,23 @@ GEMTIMEOUT-01: a Gemini claim starts with one load-scaled call budget plus
 five minutes for preparation and posting (25 minutes at idle defaults). Once
 its chunk plan exists, local IPC extends the parent's process timer and the
 matching session's persisted timeout and lease to that plan plus process slack.
-The load multiplier applies only to each call budget; neither composed deadlines
-nor the refusal cap are scaled again. Both process deadlines are bounded by the
+The load multiplier applies only to each requested call budget; neither composed deadlines
+nor the aggregate cap are scaled again. LAC-2100 bounds each chunk to the smaller
+of that requested budget and `floor((cap - 120000 - 300000) / chunks)` ms,
+reserving two minutes of chunk slack and five minutes of process slack. Shares
+are static; a fast chunk does not increase a later chunk's allocation. Explicit
+call allocations also clamp agy's print timeout to the smaller of its configured
+value and the allocation minus 30 seconds, with a one-second CLI floor. Below
+31 seconds the call abort timer remains authoritative. Preparation and retries
+consume the call budget too. Plans retain `requestedPerChunkTimeoutMs`, unconstrained `requiredMs`, prompt bytes
+and the allocated deadline in diagnostics. An envelope unable to fit even one
+millisecond per chunk plus both slacks still refuses with exit 77 and a sized
+`minimumCapMs`; source/prompt sizing must be corrected within existing limits.
+Both process deadlines are bounded by the
 unscaled chunk cap (six hours by default) and Node's timer limit. Deadlines stay
-anchored to process start, and stale or terminal claims cannot be extended.
+anchored to process start: preparation consumes the same five-minute reserve
+as posting, so four minutes of preparation leaves about one minute for posting
+when chunks exhaust the plan. Stale or terminal claims cannot be extended.
 Offline regressions cover single/multiple chunks, maximum load, timer expiry,
 lease fencing and orphan recovery:
 `node test/run-tests.mjs reviewer-timeout.test.mjs reviewer-chunk-timeout.test.mjs reviewer-process-deadline.test.mjs process-group-spawn.test.mjs watcher-reviewer-pool.test.mjs`.
@@ -1026,6 +1039,13 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.
+Current-head review, cross-model selection, verdict validation and merge gates
+remain required. Lifecycle states and disposable smoke promises are unchanged;
+focused offline fixtures cover observed sizing, saturation, allocated agy print
+timeouts, parent/lease budgets and ownership fencing. Read-only organic acceptance after normal deployment is
+declared in `post-merge-verify.json`; see the [RCA](docs/RCA-LAC-2100-chunk-budget-2026-10-24.md).
+
 FINDINGSBATCH-01 retains non-blocking findings in the existing SQLite review
 store. Findings move from pending to applied or dropped with a reason; daily
 batches move from prepared to launched to completed, with one active batch per
@@ -1047,6 +1067,22 @@ backing up config, disabling strict mode and bouncing the watcher, then confirms
 next-day batch PRs and complete applied/dropped coverage. Read per-area size,
 age and batch errors through `pipeline-health` JSON (`nonBlockingBacklog`) or
 `node bin/review-findings.mjs backlog --db <existing-review-db>`.
+
+DOCSFASTPATH-01 sends Markdown/image-only changes under `docs/` to the existing
+daemon merge lane, with a signed docs-fast-path attestation and green exact-head
+checks. Under the merge lease, every attempt revalidates live gates before
+recording an attestation. Base tip advancement requires a fresh docs-only range
+on the same base branch; terminal audit metadata records that refreshed range.
+Explicit review requests keep full review, withdrawing the waiver with a pending
+gate status at admission, classification or live merge checks. Failed withdrawal
+retains the fast-path wait for retry. No durable review status or smoke promise is added; offline
+regressions are in `test/docs-fast-path.test.mjs` and
+`test/ama-daemon-merge.test.mjs`. Deploy the companion signer/ledger migration first.
+SRE separately observes the next three docs-only merges within about ten minutes
+of green checks, without reviewer/closer and with recorded attestations, plus a
+non-docs change receiving review. See the
+[closure runbook](docs/RUNBOOK-ama-closure.md#docs-only-daemon-merge-docsfastpath-01).
+
 
 REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
 observational applied flag to existing remediation completions/audit text.
@@ -1280,6 +1316,25 @@ force. The handoff smoke checks selected ownership through drain/capacity and
 safety-stop observations. Live operator/SRE acceptance remains pending; no live
 operation or rollout is performed by this change. See the
 [caller adoption procedure](docs/RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
+
+NXA-06: daemon selection and decline handoff consume that same generation.
+Live head/check/source-proof changes re-decide before mutation. Live facts
+returned in `liveGate` survive adoption of `nextActionShared`. Same-head
+daemon retry exhaustion selects capped hammer repair before operator approval;
+existing ownership, holds and safety refusals retain priority. Confirmed terminal
+and explicit hold decisions return before alternate admission. Unknown reads
+retain recovery ownership, and command success retains receipt reconciliation
+until remote termination is confirmed. The shared lease, strict/domain policy,
+HCP/identity and exact-head merge safety remain authoritative. Legacy decline
+classifiers/counters remain source-rollback helpers. Focused offline evidence:
+`node test/run-tests.mjs test/daemon-next-action.test.mjs
+ test/closer-next-action.test.mjs test/ama-daemon-merge.test.mjs
+ test/watcher-daemon-clean-merge.test.mjs test/daemon-route-disagreement.test.mjs`.
+The handoff smoke checks changed daemon CI evidence, operator-approved retry
+exhaustion, live hammer ownership and unconfirmed merge receipts. Operator/SRE
+observation of the first natural daemon candidate and first decline-routed hammer remains pending; an unneeded hammer
+observation stays explicitly pending. See the
+[daemon adoption procedure](docs/RUNBOOK-ama-closure.md#daemon-decisions-and-decline-recovery-nxa-06--cidedupe-01).
 
 NXA-04: normal and recovered remediation closeout use one shared successor.
 `reReview.nextAction` supplies suppression and comments with one owner, reason,
@@ -1614,7 +1669,7 @@ poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
-<a id="smv-handoff"></a>**smv-handoff:** NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and deterministic automatic stops retain
 closure-recovery ownership. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission
@@ -2283,6 +2338,13 @@ or concurrency algorithm changed.
 
 ### OSG configuration declarations
 
+OSG-16 adds inert `osg.double_blind` declarations for the dispatch owner:
+`enabled: false`, empty `window_start`/`window_end`, `sample_rate: 0.05` and
+`weekly_cap: 10`. Both optional numeric controls have strict bounds, and a null
+subtree is rejected in top, module and local layers. The shared synthetic vectors
+cover the same inputs in Node, Python and shell. This loader does not launch
+paired work or enable the experiment.
+
 OSG-13 adds the shared `osg.sample_rate` declaration: a number from 0 through
 1, defaulting to 0.5. The dispatch owner consumes it; this loader preserves
 Python/shell parity and leaves all modes off by default.
@@ -2515,3 +2577,62 @@ matching the shared Python/shell acceptance vectors. This reader-only addition
 performs no routing or artifact access, grants no activation approval, and changes
 no review/merge authority or service lifecycle. Allocation and offline evaluation
 belong to the companion worker-pool owner; activation follows its config-writer runbook.
+
+LVR-08 provides two bounded evidence commands for observe-mode activation:
+`node src/activation-check.mjs hammer-token` forces the existing in-process
+hammer refresh/parser, without held-token fallback or a GitHub operation, and
+emits only `{parsed, source, expiresInSeconds}`. It requires the caller's
+existing entitled refresh-command environment; absent launch entitlement or
+transport failure exits nonzero (inconclusive), never a healthy-token fallback.
+The module's `checkRefresh(now)` accepts an epoch-millisecond timestamp or a
+clock function returning milliseconds; it defaults to `Date.now`.
+Invalid parser output emits `parsed:false` for the activation expectation to
+fail. No raw command, child stream, token or exception is printed or persisted.
+`node src/activation-check.mjs daemon-reservation` reads the watcher's poll
+interval and calls `daemonMergeReservationSeconds` with that effective value;
+its evidence is `{reservationSeconds, pollSeconds}`. Activation YAML lives in
+the consuming superproject and remains observe-only. Normal deployment must
+make both repository revisions available before that consumer declares success.
+Both commands also execute when the script is invoked through a symbolic link.
+Importing the module's helpers does not require a real filesystem path in
+the host's `process.argv[1]` and does not execute either command.
+
+Evidence-read failures use exit 126 (the consuming activation contract's
+`check_error`), making missing entitlement and transport/read failures
+inconclusive. Exit zero means evidence was collected; the declaration evaluates
+that evidence for pass or fail.
+
+### V2 FIFO admission (MGQ-03)
+
+`createCleanReviewService` admits signed, complete zero-finding exact-head reviews
+through the same transactional readiness counter as terminal closer handoffs.
+`createQueueAdmissionService` reads live subject/head/base, complete labels,
+identity, write rights and shared structural policy. Clean work retains its final
+current-head review read; complete terminal adjudication needs no re-review.
+Live/unknown holds park outside actionable FIFO. Closed/merged observations
+reconcile without dispatch. External author changes return for fresh adjudication.
+Parked recovery and repairs join the tail with fresh evidence, retaining history;
+duplicate wakes and restarts preserve position and the original absolute deadline.
+Snapshot comparison prevents late recovery reads from overwriting a newer hold.
+Terminal structural returns record the matching reversion/conflict reason even
+when infrastructure also fails. Progress events retain the phase before mutation;
+legacy events remain replayable. Live SHA casing and numeric/string review IDs
+do not change identity, and complete labels are passed as names to shared policy.
+
+The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
+returned-to-closer, or closed-observed. These seams remain uncomposed until lane
+routing; readiness alone grants no merge authority. Focused offline
+`finalization-queue-admission.test.mjs` exercises mixed-source process contention,
+read/recovery races, holds, current-head reads, bounded waits and probe immutability.
+Regressions also cover mixed infrastructure/conflict diagnostics, equivalent head
+and review identities, label objects and durable prior-phase audit/replay.
+Existing smoke promises gain no new live action, CI check or promotion gate.
+
+After normal source deployment and all three queue migrations, the operator runs
+`node src/finalization/queue-probe.mjs --capability admission --json` from the
+deployed checkout under its runtime account with the existing bounded load-aware
+supervisor. Require `.capabilities.admission.available == true` and
+`.runtime.build != null`; record actual source/disposition/observation counts.
+Empty organic evidence and live-reader/routing composition remain pending.
+See the [store contract](docs/data-model/finalization-ledger.md#fifo-admission-and-clean-reviews-mgq-03)
+and [operator observation procedure](docs/finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).

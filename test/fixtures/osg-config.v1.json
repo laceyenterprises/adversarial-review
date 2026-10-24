@@ -599,6 +599,142 @@
       "valid": false
     },
     {
+      "name": "double-blind-defaults",
+      "config": {
+        "double_blind": {}
+      },
+      "valid": true
+    },
+    {
+      "name": "double-blind-window",
+      "config": {
+        "double_blind": {
+          "enabled": true,
+          "window_start": "2026-10-22T00:00:00Z",
+          "window_end": "2026-10-25T00:00:00Z",
+          "sample_rate": 0.05,
+          "weekly_cap": 10
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "double-blind-zero",
+      "config": {
+        "double_blind": {
+          "sample_rate": 0,
+          "weekly_cap": 0
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "double-blind-invalid-enabled-1",
+      "config": {
+        "double_blind": {
+          "enabled": 1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-window_start-None",
+      "config": {
+        "double_blind": {
+          "window_start": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-window_end-23",
+      "config": {
+        "double_blind": {
+          "window_end": 23
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-sample_rate-True",
+      "config": {
+        "double_blind": {
+          "sample_rate": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-sample_rate--0.1",
+      "config": {
+        "double_blind": {
+          "sample_rate": -0.1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-sample_rate-1.01",
+      "config": {
+        "double_blind": {
+          "sample_rate": 1.01
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-weekly_cap-True",
+      "config": {
+        "double_blind": {
+          "weekly_cap": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-weekly_cap--1",
+      "config": {
+        "double_blind": {
+          "weekly_cap": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-weekly_cap-1.5",
+      "config": {
+        "double_blind": {
+          "weekly_cap": 1.5
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-weekly_cap-10001",
+      "config": {
+        "double_blind": {
+          "weekly_cap": 10001
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-invalid-extra-1",
+      "config": {
+        "double_blind": {
+          "extra": 1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "double-blind-null",
+      "config": {
+        "double_blind": null
+      },
+      "valid": false
+    },
+    {
       "name": "router-off",
       "config": {
         "router": {

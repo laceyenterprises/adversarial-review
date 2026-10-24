@@ -30,6 +30,7 @@ import {
 // boundary is inside a single test, not between tests.
 import '../helpers/role-config-cache-reset.mjs';
 import { resetRoleConfigCache } from '../../src/role-config.mjs';
+import { docsReviewRequested } from '../../src/docs-only.mjs';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -582,7 +583,10 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
             octokitListCalls += 1;
             assert.equal(`${owner}/${repo}`, fixture.repo);
             assert.equal(state, 'open');
-            return { data: [octokitNewPull, octokitDuplicatePull] };
+            return { data: [octokitNewPull, octokitDuplicatePull, {
+              ...adapterPull, base: { sha: 'b'.repeat(40), ref: 'main' },
+              requested_reviewers: [{ login: 'example-reviewer' }], requested_teams: [],
+            }] };
           },
         },
       },
@@ -619,6 +623,9 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
 
   const state = await adapter.fetchState(refs[0]);
   assert.equal(state.headSha, 'adapter-head');
+  assert.equal(state.baseSha, 'b'.repeat(40));
+  assert.equal(state.baseRefName, 'main');
+  assert.deepEqual(state.requested_reviewers, [{ login: 'example-reviewer' }]);
 });
 
 test('github-pr subject adapter supplements stale adapter discovery with gh when Octokit fails', async () => {
@@ -675,7 +682,7 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,labels,createdAt,updatedAt,author,isCrossRepository',
+        'number,title,state,headRefOid,baseRefOid,baseRefName,labels,createdAt,updatedAt,author,isCrossRepository,reviewRequests',
       ]);
       return { stdout: JSON.stringify([ghNewPull, adapterPull]) };
     },
@@ -704,6 +711,32 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
     ['/fixture/github-adapter', 'open-pull-requests'],
     ['gh', 'pr', 'list', '--repo'],
   ]);
+});
+
+test('gh discovery preserves requested users and teams for docs review admission', async () => {
+  const user = { __typename: 'User', login: 'example-reviewer' };
+  const team = { __typename: 'Team', name: 'Docs reviewers', slug: 'docs-reviewers' };
+  for (const reviewRequests of [[], [user], [team], [user, team]]) {
+    const adapter = createGitHubPRSubjectAdapter({
+      repos: [fixture.repo], rootDir: NO_AUTO_ADAPTER_ROOT, env: {},
+      octokit: { rest: { pulls: { list: async () => { throw new Error('fixture REST outage'); } } } },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        assert.ok(args[args.indexOf('--json') + 1].split(',').includes('reviewRequests'));
+        return { stdout: JSON.stringify([{
+          number: 484, title: '[codex] Update guide', state: 'OPEN',
+          headRefOid: 'a'.repeat(40), baseRefOid: 'b'.repeat(40), baseRefName: 'main',
+          labels: [], author: { login: 'codex-worker' }, author_association: 'OWNER',
+          isCrossRepository: false, reviewRequests,
+        }]) };
+      },
+    });
+    const [ref] = await adapter.discoverSubjects();
+    const state = await adapter.fetchState(ref);
+    assert.deepEqual(state.requested_reviewers, reviewRequests.includes(user) ? [user] : []);
+    assert.deepEqual(state.requested_teams, reviewRequests.includes(team) ? [team] : []);
+    assert.equal(docsReviewRequested(state), reviewRequests.length > 0);
+  }
 });
 
 test('github-pr subject adapter fails loud when adapter discovery may be partial and supplements fail', async () => {

@@ -258,6 +258,7 @@ export function daemonMergeBackoffMs(
 
 function normalizeGateState(live = {}) {
   return {
+    docsFastPath: live.docsFastPath,
     primaryChange: live.primaryChange,
     requirePrimaryChange: live.requirePrimaryChange,
     strictNonBlockingRemediation: live.strictNonBlockingRemediation,
@@ -351,6 +352,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {(lease: object) => any} args.releaseLeaseImpl
  * @param {(ctx: object) => Promise<{exitCode:number, stdout?:string, stderr?:string}>} args.runMergeImpl
  * @param {(ctx: object) => Promise<object>} [args.dismissStaleRequestChangesImpl]
+ * @param {(ctx: {liveGate: object}) => Promise<void>} [args.beforeMergeImpl] Runs after live eligibility, before each merge transport attempt.
  * @param {Function} [args.evaluateEligibilityImpl]
  * @param {Function} [args.writeAuditImpl]
  * @param {Function} [args.appendAuditImpl]
@@ -369,6 +371,8 @@ async function attemptDaemonCleanMergeInner({
   base,
   validatedHead,
   verdict,
+  docsFastPath = null,
+  beforeMergeImpl = null,
   operatorApprovedEvidence = null,
   operatorLogins = [],
   operatorLabelActorEnforcement = 'observe',
@@ -395,6 +399,8 @@ async function attemptDaemonCleanMergeInner({
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
   fetchLiveGateImpl,
+  getNextAction = () => null,
+  onGateEvidenceImpl = null,
   verifyNoCiConfiguredImpl,
   acquireLeaseImpl,
   onEligibleImpl = null,
@@ -542,6 +548,7 @@ async function attemptDaemonCleanMergeInner({
     operatorLabelActorEnforcement,
   }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
   if (
+    !docsFastPath &&
     !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
     !headCloserCertifiedBypass &&
     !initialOperatorOverride &&
@@ -554,6 +561,7 @@ async function attemptDaemonCleanMergeInner({
   const preLease = normalizeGateState(liveGate);
   let noCiEvidence = null;
   const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
+    docsFastPath: gate.docsFastPath,
     primaryChange: gate.primaryChange,
     requirePrimaryChange: gate.requirePrimaryChange,
     strictNonBlockingRemediation: gate.strictNonBlockingRemediation,
@@ -615,9 +623,12 @@ async function attemptDaemonCleanMergeInner({
     }
     preEligibility = evaluateGate(preLease, noCiEvidence);
   }
+  if (noCiEvidence) onGateEvidenceImpl?.({ ...preLease, requiredChecks: true });
   if (!preEligibility.eligible) {
     return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
   }
+  const selected = getNextAction();
+  if (selected && (selected.action !== 'daemon-merge' || selected.actor !== 'daemon' || selected.queue?.intent !== 'daemon')) return notTaken(selected.reason);
   // ── Gate 3: preserve the original order for the general path. ─────────────
   if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
     return notTaken('prior-daemon-terminal-failure');
@@ -819,6 +830,7 @@ async function attemptDaemonCleanMergeInner({
       }
       elig = evaluateGate(live, noCiEvidence);
     }
+    if (noCiEvidence) onGateEvidenceImpl?.({ ...live, requiredChecks: true });
     guardReversals = elig.guardReversals || [];
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
@@ -853,6 +865,9 @@ async function attemptDaemonCleanMergeInner({
       };
       break;
     }
+
+    const selected = getNextAction();
+    if (selected && (selected.action !== 'daemon-merge' || selected.actor !== 'daemon' || selected.queue?.intent !== 'daemon')) return notTaken(selected.reason, { liveGate: live });
 
     const mergeCapability = evaluateMergeCapabilityEnforcement({
       enforcement: mergeCapabilityEnforcement,
@@ -917,6 +932,33 @@ async function attemptDaemonCleanMergeInner({
             : [],
           failOpenForMerge: true,
         }));
+      }
+    }
+
+    // Attest only after this attempt's live eligibility/capability checks. A
+    // retry must pass those checks again before reusing the recorded envelope.
+    if (docsFastPath) {
+      auditMetadataDoc.docsFastPath = live.docsFastPath;
+      // Append preserves top-level provenance, so refresh it through the
+      // metadata writer before recording authority or attempting the merge.
+      try {
+        writeAuditImpl({ ...auditKeys, metadata: auditMetadataDoc, now: now(),
+          attempt: { outcome: 'in_progress', path: closureAuthority,
+            attemptPhase: 'daemon-pre-merge', validatedHead, mergeMethod } });
+      } catch (error) {
+        return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+          reason: 'audit-init-failed', merged: false, attempts, leaseAcquired: true,
+          auditWritten: false, error: String(error.message) };
+      }
+    }
+    if (beforeMergeImpl) {
+      try { await beforeMergeImpl({ liveGate: live }); }
+      catch (error) {
+        appendAuditImpl({ ...auditKeys, now: now(),
+          attempt: { outcome: 'failed-without-merge', reason: 'attestation-record-failed',
+            permanent: false, error: String(error.message) } });
+        return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+          reason: 'attestation-record-failed', merged: false, error: String(error.message) };
       }
     }
 
@@ -1108,6 +1150,7 @@ export const __testables__ = Object.freeze({
 // (disabled authority, held leases, another merger) do not claim an automation action.
 export async function attemptDaemonCleanMerge(args = {}) {
   let ownMergeExecuted = false;
+  let remoteMergedConfirmed = false;
   let executedAt;
   const result = await attemptDaemonCleanMergeInner({ ...args,
     runMergeImpl: async (target) => {
@@ -1120,11 +1163,12 @@ export async function attemptDaemonCleanMerge(args = {}) {
     },
   });
   const writer = args.writeMergeActionImpl || recordMergeActionBestEffort;
-  if (result.merged && ownMergeExecuted) {
+  if (result.merged) {
     try {
       const live = normalizeGateState(await args.fetchLiveGateImpl());
       if (live.merged && live.candidateHead === args.validatedHead) {
-        writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
+        remoteMergedConfirmed = true;
+        if (ownMergeExecuted) writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
           headSha: args.validatedHead, merged: true, executedAt,
           producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
       }
@@ -1135,5 +1179,5 @@ export async function attemptDaemonCleanMerge(args = {}) {
       headSha: args.validatedHead, merged: false, reason: result.reason,
       producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
   }
-  return result;
+  return { ...result, remoteMergedConfirmed };
 }

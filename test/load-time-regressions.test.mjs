@@ -79,7 +79,10 @@ for (const maxMultiplier of [6, 20]) {
     assert.equal(resolveGeminiReviewerProcessTimeoutMs(env, { plan }), plan.timeoutMs + REVIEWER_PROCESS_SLACK_MS);
     assertTimerCeiling(plan.timeoutMs, { ceilingMs: capMs });
     assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: { timeoutMs: capMs } }), capMs);
-    assert.throws(() => resolveAgyChunkTimeoutPlan({ chunkCount: 1000, env }), /chunk-budget-exceeded/);
+    const saturated = resolveAgyChunkTimeoutPlan({ chunkCount: 18, env: {} });
+    assert.ok(saturated.perChunkTimeoutMs < saturated.requestedPerChunkTimeoutMs);
+    assert.ok(resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }) <= capMs);
+    assert.ok(capMs - resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }) < saturated.chunkCount);
     const huge = { ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(MAX_TIMER_DELAY_MS + 1000) };
     assert.equal(resolveAgyChunkTimeoutCapMs(huge), MAX_TIMER_DELAY_MS);
     assert.equal(resolveGeminiReviewerProcessTimeoutMs(huge, { plan: { timeoutMs: MAX_TIMER_DELAY_MS } }), MAX_TIMER_DELAY_MS);

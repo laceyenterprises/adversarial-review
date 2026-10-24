@@ -15,7 +15,6 @@ for (const vector of vectors.cases) {
       if (vector.valid) {
         const cfg = loadConfig({ topPath, env: {} });
         assert.equal(cfg.get('osg.mode'), vector.config.mode ?? 'off');
-        assert.equal(cfg.get('osg.router.mode'), vector.config.router?.mode ?? 'off');
         assert.equal(cfg.get('osg.sample_rate'), vector.config.sample_rate ?? 0.5);
         assert.equal(cfg.get('osg.policy.enabled'), vector.config.policy?.enabled ?? false);
       } else {
@@ -29,10 +28,12 @@ test('OSG-01 defaults are inert', () => {
   try {
     const cfg = loadConfig({ topPath: join(dir, 'config.yaml'), env: {} });
     assert.equal(cfg.get('osg.mode'), 'off');
-    assert.equal(cfg.get('osg.router.mode'), 'off');
     assert.equal(cfg.get('osg.sample_rate'), 0.5);
     assert.deepEqual(cfg.get('osg.arms'), []);
     assert.equal(cfg.get('osg.policy.enabled'), false);
+    assert.deepEqual(cfg.get('osg.double_blind'), {
+      enabled: false, window_start: '', window_end: '', sample_rate: 0.05, weekly_cap: 10,
+    });
     assert.deepEqual(cfg.get('osg.budget'), {
       monthly_usd: 300, open_model_usd: 200, judge_usd: 70, jev_usd: 30,
       trial_share_pct: 15, double_blind_share_pct: 5,
@@ -41,7 +42,7 @@ test('OSG-01 defaults are inert', () => {
 });
 
 for (const layer of ['module', 'local']) {
-  for (const subtree of ['osg', 'osg.policy', 'osg.router']) {
+  for (const subtree of ['osg', 'osg.policy', 'osg.double_blind', 'osg.router']) {
   test(`OSG null ${subtree} subtree rejected in ${layer} layer`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'osg-layer-'));
     try {

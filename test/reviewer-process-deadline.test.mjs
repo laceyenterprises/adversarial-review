@@ -5,6 +5,8 @@ import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-di
 import { REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from '../src/reviewer-outcomes.mjs';
 import { dispatchReviewerModel } from '../src/reviewer-harness.mjs';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { resolveAgyChunkTimeoutPlan, resolveGeminiReviewerProcessTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { underMaxLoad } from './helpers/load-time-kit.mjs';
 
 function fakeClock() {
   let nowMs = 1_000_000;
@@ -31,6 +33,28 @@ function fakeClock() {
 }
 
 const quietLog = { error() {} };
+
+test('LAC-2100: saturated actual plan preserves process-start anchoring and parent budget', t => {
+  underMaxLoad(t);
+  const clock = fakeClock();
+  const reports = [];
+  const wiring = createGeminiReviewerProcessDeadline({ env: {}, ...clock, log: quietLog,
+    reportPlan: plan => reports.push(plan), exitImpl: () => assert.fail('dispose before grace') });
+  const startedAt = clock.now();
+  const armed = wiring.arm();
+  clock.advance(60_000);
+  const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 6, env: {} });
+  wiring.extendForPlan(plan);
+  const processMs = resolveGeminiReviewerProcessTimeoutMs({}, { plan });
+  assert.deepEqual(reports, [plan]);
+  assert.equal(processMs, plan.capMs);
+  assert.equal(armed.deadlineAt, startedAt + processMs);
+  clock.advance(processMs - 60_000 - 1);
+  assert.equal(wiring.signal.aborted, false);
+  clock.advance(1);
+  assert.equal(wiring.signal.aborted, true);
+  wiring.dispose();
+});
 
 test('WATCHERTIMER-01: process deadline clamps initial and extended chunk budgets after slack', () => {
   const clock = fakeClock();

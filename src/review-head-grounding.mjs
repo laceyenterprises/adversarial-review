@@ -25,6 +25,8 @@ import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { beginReviewerPass } from './reviewer-pass-tokens.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { blockingEvidenceReason, findingEvidenceLocation, parseBlockingFindingsSection } from './kernel/review-findings.mjs';
+import { execFileSync } from 'node:child_process';
 
 const HEAD_GROUNDING_TAG = 'unverified at head (quoted code absent)';
 const DEFAULT_MAX_HEAD_FILES = 25;
@@ -188,7 +190,7 @@ function quotePresent(quote, compactContent) {
 
 function isMissingFileError(err) {
   const text = `${err?.stderr || ''}\n${err?.message || ''}`;
-  return /\bHTTP\s+404\b/i.test(text) || /\bnot found\b/i.test(text);
+  return /\bHTTP\s+404\b|\bnot found\b|does not exist|exists on disk, but not in/i.test(text);
 }
 
 function demotedCard(cardLines, reason, headSha) {
@@ -201,13 +203,18 @@ function demotedCard(cardLines, reason, headSha) {
     ? 'the quoted code appears only on the removed side of the diff'
     : reason === 'lines-beyond-head'
       ? 'every cited line is past the end of the file at head'
-      : 'the quoted code is not present in the cited file at head';
+      : ['absent', 'removed-side'].includes(reason) ? 'the quoted code is not present in the cited file at head' : reason;
   const indent = /^\s*###\s+/.test(first) ? '' : '  ';
-  return [
+  const result = [
     header,
     ...rest,
     `${indent}- **Head grounding:** ${HEAD_GROUNDING_TAG} — ${detail} (head ${String(headSha).slice(0, 12)}); demoted from blocking.`,
   ];
+  // Keep the reason in the parsed finding as well as the rendered review.
+  const problemIndex = result.findIndex(line => /\*\*Problem(?::\*\*|\*\*\s*:)/i.test(line));
+  if (problemIndex >= 0) result[problemIndex] += ` Evidence downgrade: ${reason}.`;
+  else result.push(`${indent}- **Problem:** Evidence downgrade: ${reason}.`);
+  return result;
 }
 
 function insertNonBlocking(sections, cards) {
@@ -234,12 +241,45 @@ function rewriteVerdictToCommentOnly(sections) {
   return true;
 }
 
+export function createHeadContentReader({ repo, headSha, checkoutDir = null, fetchFileAtRefImpl = fetchRepoFileAtRef,
+  maxFiles = DEFAULT_MAX_HEAD_FILES, deletedFiles = new Set() } = {}) {
+  const contentCache = new Map();
+  const headContent = (path) => {
+      if (!contentCache.has(path)) {
+        if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
+        const read = async () => {
+          if (checkoutDir && /^[a-f0-9]{40}$/i.test(headSha)) {
+            try {
+              return execFileSync('git', ['--no-replace-objects', '-C', checkoutDir, 'show', `${headSha}:${path}`],
+                { encoding: 'utf8', timeout: 2000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+            } catch (error) {
+              if (isMissingFileError(error)) throw error;
+              /* The checkout may lack the PR object; use the existing exact-ref reader. */
+            }
+          }
+          return fetchFileAtRefImpl(repo, path, headSha);
+        };
+        contentCache.set(path, read().then(
+          (content) => ({ ok: true, content: String(content ?? '') }),
+          (err) => (isMissingFileError(err) && deletedFiles.has(path)
+            ? { ok: true, content: '' }
+            : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
+        ));
+      }
+      return contentCache.get(path);
+    };
+
+  return headContent;
+}
+
 async function groundBlockingFindingsAtHead(reviewText, {
   repo,
   headSha,
   diff = '',
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   maxFiles = DEFAULT_MAX_HEAD_FILES,
+  requireEvidence = false,
+  checkoutDir = null,
   log = console,
 } = {}) {
   const grounding = { headSha: headSha || null, checked: 0, kept: 0, demoted: [] };
@@ -251,27 +291,35 @@ async function groundBlockingFindingsAtHead(reviewText, {
     const sections = splitSections(original);
     const blockingIndex = findSection(sections, /^##\s+Blocking issues\b/i);
     if (blockingIndex < 0) return { reviewText: original, grounding };
-    const { preamble, cards } = splitCards(sections[blockingIndex].lines);
+    const { preamble, cards } = requireEvidence
+      ? { preamble: [], cards: (parseBlockingFindingsSection(original) || []).map(f => [
+          `- **${f.title || 'Unstructured finding'}**`,
+          ...Object.entries({ Category: f.category, File: f.file, Lines: f.lines, Problem: f.problem,
+            'Why it matters': f.whyItMatters, 'Recommended fix': f.recommendedFix })
+            .filter(([, value]) => value).map(([key, value]) => `  - **${key}:** ${value}`),
+        ]) } : splitCards(sections[blockingIndex].lines);
     if (cards.length === 0) return { reviewText: original, grounding };
 
     const diffFiles = indexDiff(diff);
-    const contentCache = new Map();
-    const headContent = (path) => {
-      if (!contentCache.has(path)) {
-        if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
-        contentCache.set(path, fetchFileAtRefImpl(repo, path, headSha).then(
-          (content) => ({ ok: true, content: String(content ?? '') }),
-          (err) => (isMissingFileError(err) && diffFiles.get(path)?.deleted
-            ? { ok: true, content: '' }
-            : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
-        ));
-      }
-      return contentCache.get(path);
-    };
+    const headContent = createHeadContentReader({ repo, headSha, checkoutDir, fetchFileAtRefImpl, maxFiles,
+      deletedFiles: new Set([...diffFiles.values()].filter(f => f.deleted).map(f => f.path)) });
 
     const keptCards = [];
     const demotedCards = [];
     for (const card of cards) {
+      if (isNoneLine(card.join('\n').trim())) continue;
+      const parsed = parseBlockingFindingsSection(`## Blocking issues\n${card.join('\n')}`)?.[0];
+      const location = findingEvidenceLocation(parsed);
+      let evidenceReason = null;
+      if (requireEvidence) {
+        evidenceReason = await blockingEvidenceReason(parsed, headContent);
+        if (evidenceReason) {
+          grounding.checked++;
+          grounding.demoted.push({ title: cardTitle(card), files: location ? [location.path] : [], reason: evidenceReason });
+          demotedCards.push(demotedCard(card, evidenceReason, headSha));
+          continue;
+        }
+      }
       const quotes = cardQuotes(card);
       const lineNumbers = citedLineNumbers(card);
       const files = cardFiles(card, diffFiles);

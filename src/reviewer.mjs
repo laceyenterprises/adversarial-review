@@ -2258,7 +2258,8 @@ async function main() {
     );
   }
   // REVIEWCHUNK-01: demote blocking cards whose quoted code is absent at head (never adds a gate).
-  const headGrounding = await groundBlockingFindingsAtHead(reviewText, { repo, headSha: reviewerHeadSha, diff, log: console });
+  const headGrounding = await groundBlockingFindingsAtHead(reviewText, { repo, headSha: reviewerHeadSha, diff,
+    checkoutDir: reviewerCheckoutDir, requireEvidence: true, log: console });
   reviewText = headGrounding.reviewText;
   persistReviewGroundingMetadata({ rootDir: ROOT, repo, prNumber, reviewDbAttemptNumber, reviewAttemptNumber, reviewerClass: effectiveModel,
     passKind, headSha: reviewerHeadSha, execution: reviewerExecution, headGrounding: headGrounding.grounding, reviewDiffScope });

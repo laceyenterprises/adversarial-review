@@ -92,18 +92,20 @@ test('code-pr-security resolves to its own prompt set (never falls back to code-
   const domainConfig = loadDomainConfig(ROOT, DOMAIN_ID);
   const promptSet = resolvePromptSet({ rootDir: ROOT, domainConfig, domainId: DOMAIN_ID });
   assert.equal(promptSet, DOMAIN_ID);
+  const guidance = readPrompt('shared', 'simplicity-and-cost.md');
 
   for (const actor of ['reviewer', 'remediator']) {
     for (const stage of ['first', 'middle', 'last']) {
       const selected = loadStagePrompt({ rootDir: ROOT, promptSet, actor, stage });
+      const withGuidance = (prompt) => actor === 'reviewer' ? `${prompt}\n\n${guidance}` : prompt;
       assert.equal(
         selected,
-        readPrompt(DOMAIN_ID, `${actor}.${stage}.md`),
+        withGuidance(readPrompt(DOMAIN_ID, `${actor}.${stage}.md`)),
         `${actor}.${stage} must come from the code-pr-security prompt set`,
       );
       assert.notEqual(
         selected,
-        readPrompt('code-pr', `${actor}.${stage}.md`),
+        withGuidance(readPrompt('code-pr', `${actor}.${stage}.md`)),
         `${actor}.${stage} must not fall back to the code-pr prompt set`,
       );
     }

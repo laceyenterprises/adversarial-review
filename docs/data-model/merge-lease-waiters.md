@@ -125,9 +125,12 @@ snapshot so a fenced non-terminal release can reinsert a daemon reservation at
 its new arrival time. CLI reservations are never reinserted: the acquiring
 process has exited. The next invocation registers a fresh identity but restores
 its PR's original closer arrival from the attempt record, including across a
-head change. Its `notBefore` respects both exact-head and remembered-release
-backoff. Restored closer waiters carry optional `registeredAt`, preserved on
-refresh, so their invocation deadline starts at registration rather than the
+head change, if it registers before the release's `nextEligibleAt` plus one
+configured watcher poll interval. Later invocations join at the tail; a live
+registered waiter keeps its FIFO position. Daemon releases preserve closer memory
+and its fixed expiry on any head. Its `notBefore` respects both exact-head and
+remembered-release backoff. Restored closer waiters carry optional `registeredAt`,
+preserved on refresh, so their invocation deadline starts at registration rather than the
 older FIFO arrival. Ordinary fresh waiters and daemon expiry are unchanged.
 Terminal/merged releases and parking clear remembered arrivals across heads;
 terminal/merged releases do not requeue. The daemon preserves transient retry
@@ -136,8 +139,10 @@ draft, closed, terminal, moved-head or declined reservations on its next pass.
 Parking removes the reservation; retry evidence survives withdrawal.
 
 CLI status/list projects `position` (one-based arrival order), `role`
-(`daemon` or `closer`) and the stored `arrivedAt`. Polling starts at 250ms,
-doubles to a fixed 15-second ceiling independent of host load or wait budget,
+(`daemon` or `closer`) and the stored `arrivedAt`. `ageSeconds` measures FIFO age;
+`registeredAt` is included for restored invocations, and `invocationAgeSeconds`
+measures age since registration (falling back to arrival for ordinary waiters).
+Polling starts at 250ms, doubles to a fixed 15-second ceiling independent of host load or wait budget,
 and clamps each sleep to the remaining caller/stall budget. The explicit wait,
 progress stall interval and six-hour nominal ceiling retain their existing sizing.
 HAMLEASE-01 progress

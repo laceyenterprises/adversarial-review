@@ -764,13 +764,22 @@ function attemptExpired(attempt, nowIso) {
 }
 
 // Arrival belongs to the PR, while gate charges and failure caps remain head-scoped.
+// Persist the deadline so unrelated daemon releases cannot extend closer memory.
+function closerArrivalExpiry(record) {
+  return record.queueArrivalExpiresAt
+    || new Date(Date.parse(record.nextEligibleAt) + WATCHER_POLL_INTERVAL_MS).toISOString();
+}
+
 function closerArrival(attempts, pr, now) {
-  return attempts.find(r => Number(r.pr) === Number(pr) && r.queueArrivedAt && !attemptExpired(r, now));
+  return attempts.find(r => Number(r.pr) === Number(pr) && r.queueArrivedAt
+    && Number.isFinite(Date.parse(r.queueArrivalExpiresAt || r.nextEligibleAt))
+    && Date.parse(closerArrivalExpiry(r)) > Date.parse(now) && !attemptExpired(r, now));
 }
 
 function withoutCloserArrival(record) {
   const next = { ...record };
   delete next.queueArrivedAt;
+  delete next.queueArrivalExpiresAt;
   return next;
 }
 
@@ -1190,9 +1199,16 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
       noMergeLeaseId: lease.leaseId, noMergeReleases, consecutiveNoMergeReleases, noMergeReason: reason, parkedReason,
       reenteredAt: at, nextEligibleAt: new Date(Date.parse(at) + backoffMs).toISOString(),
       lastAttemptAt: at }, at);
-    if (isCloser && !parkedReason) next.queueArrivedAt = arrival?.queueArrivedAt
-      || lease.waiter?.arrivedAt || lease.grantedAt || lease.acquiredAt;
-    else delete next.queueArrivedAt;
+    if (isCloser && !parkedReason) {
+      next.queueArrivedAt = lease.waiter?.arrivedAt || arrival?.queueArrivedAt || lease.acquiredAt;
+      next.queueArrivalExpiresAt = new Date(Date.parse(next.nextEligibleAt) + WATCHER_POLL_INTERVAL_MS).toISOString();
+    } else if (!parkedReason && arrival && arrival === previous) {
+      // A daemon keeps same-head closer memory without renewing its deadline.
+      next.queueArrivalExpiresAt = closerArrivalExpiry(previous);
+    } else {
+      delete next.queueArrivedAt;
+      delete next.queueArrivalExpiresAt;
+    }
     const attempts = sortedAttempts([
       ...(isCloser || parkedReason ? clearCloserArrivals(doc.attempts, lease.holderPr) : doc.attempts)
         .filter(r => Number(r.pr) !== lease.holderPr || r.head !== lease.holderHead), next,

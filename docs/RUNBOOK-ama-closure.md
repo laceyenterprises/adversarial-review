@@ -4302,9 +4302,14 @@ reservation before selection. Queue selection, holder creation and served-waiter
 removal share one lock. The current holder always finishes under its fence.
 
 A non-terminal closer no-merge release remembers the PR's original arrival
-across heads. Its fresh invocation restores that order with the existing release
-backoff; ready waiters proceed while it is delayed. Daemon no-merge releases
-continue to re-enter behind all existing arrivals with PR/head backoff. The delay
+across heads. A fresh invocation restores that order only before the release's
+`nextEligibleAt` plus one configured watcher poll interval (unscaled), stored as
+`queueArrivalExpiresAt`; older records derive that deadline from `nextEligibleAt`.
+An absent closer returning later joins at the tail. A live registered invocation
+keeps its FIFO order until its own deadline. Daemon releases preserve same-head
+closer memory and its fixed expiry, just as memory on other heads is preserved.
+Restoration retains the existing release backoff; ready waiters proceed while
+it is delayed. Daemon no-merge releases continue to re-enter behind all existing arrivals with PR/head backoff. The delay
 doubles from one second to the existing watcher poll interval, load-scaled once.
 Consecutive chargeable failures through the existing
 attempt cap parks the head with `repeated-no-merge-release`. Only chargeable
@@ -4314,8 +4319,9 @@ Yields retain the gate charge; retryable aborts refund it atomically with releas
 accounting. Non-permanent daemon failures use the yield outcome. Grants alone
 do not prove gate success and preserve failure evidence. Repeated-failure parks
 use the same audit, closing-status comment and page path as gate-attempt parks. Inspect
-`status`/`list` for arrival time, role, position and retry evidence; inspect
-history for `requeue`/`park` with the release reason. Recovery uses a new head
+`status`/`list` for arrival time, role, position and retry evidence. `ageSeconds`
+measures FIFO age; `registeredAt` and `invocationAgeSeconds` distinguish a restored
+invocation from its older arrival. Inspect history for `requeue`/`park` with the release reason. Recovery uses a new head
 or the existing `reset-attempts` command while that head is not holding the lease.
 Only daemon reservations requeue; CLI invocations return with fresh IDs and
 restore their remembered arrival without retaining an exited process's waiter.

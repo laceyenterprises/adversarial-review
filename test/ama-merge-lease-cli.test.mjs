@@ -895,6 +895,7 @@ test('merge-lease status reports holder and waiter ages', async () => {
     assert.equal(out.waiters.length, 1);
     assert.equal(out.waiters[0].waiterId, 'w-status');
     assert.equal(out.waiters[0].ageSeconds, 50);
+    assert.equal(out.waiters[0].invocationAgeSeconds, 50);
     assert.equal(out.waiters[0].position, 1);
     assert.equal(out.waiters[0].role, 'closer');
     assert.equal(out.waiters[0].arrivedAt, '2026-06-20T18:00:10.000Z');
@@ -931,6 +932,28 @@ test('six planned CLI yields retain charges without failure parking or stale CLI
   assert.equal(retry.parkedReason, null);
   assert.equal(retry.queueArrivedAt, '2026-06-20T18:00:00.000Z');
 });
+
+for (const command of ['status', 'list']) {
+  test(`merge-lease ${command} distinguishes restored FIFO age from invocation age`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const first = acquireFixture(rootDir, { holderPr: 401, registerWaiter: true, waiterId: 'first',
+      now: '2026-06-20T18:00:00.000Z' });
+    releaseMergeLease({ rootDir, ...first.lease, now: '2026-06-20T18:00:10.000Z', yielded: true });
+    acquireFixture(rootDir, { holderPr: 403, now: '2026-06-20T18:00:20.000Z' });
+    acquireFixture(rootDir, { holderPr: 401, registerWaiter: true, waiterId: 'restored',
+      now: '2026-06-20T18:00:50.000Z' });
+    const { code, io } = await runCli(rootDir, [command, '--repo', REPO, '--base', BASE], {
+      startMs: Date.parse('2026-06-20T18:01:00Z'),
+    });
+    assert.equal(code, 0);
+    const waiter = jsonOutput(io).waiters[0];
+    assert.equal(waiter.arrivedAt, '2026-06-20T18:00:00.000Z');
+    assert.equal(waiter.registeredAt, '2026-06-20T18:00:50.000Z');
+    assert.equal(waiter.ageSeconds, 60);
+    assert.equal(waiter.invocationAgeSeconds, 10);
+  });
+}
 
 test('repeated-failure CLI park supplies a closing status and reset instruction', async t => {
   const rootDir = freshRoot();

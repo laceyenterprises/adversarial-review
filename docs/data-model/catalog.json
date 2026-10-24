@@ -368,7 +368,8 @@
       "cliWaiterLifecycle": "unique-invocation-id; same-host-confirmed-dead-acquirer-pruning; bounded-finally-cleanup",
       "daemonReservationSeconds": "2 * pollIntervalMs / 1000, load-scaled once and capped at floor((2^31 - 1) / 1000)",
       "servedWaiterRemoval": "under-holder-acquisition-lock",
-      "releaseRequeue": "daemon-only; CLI returns with fresh invocation ID and PR-scoped remembered arrival across heads",
+      "releaseRequeue": "daemon-only; CLI restores PR arrival across heads before nextEligibleAt plus one poll interval; daemon preserves the fixed closer deadline",
+      "cliWaiterAges": "ageSeconds measures FIFO arrival; invocationAgeSeconds measures registeredAt or arrivedAt",
       "progressReportGap": "25 seconds plus once-scaled polling ceiling, excluding synchronous I/O",
       "softDeadlineCleanupOwner": "concrete-coexistence-operation-including-pre-closure-exits",
       "queuePosition": "one-based-or-null-if-absent",
@@ -398,7 +399,7 @@
       ],
       "owner": "AMA daemon and hammer merge lane",
       "releaseAccounting": "atomic refund and release identity; yielded/retryable reset consecutive failures, preserve existing park",
-      "optionalRetryFields": ["queueArrivedAt", "noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
+      "optionalRetryFields": ["queueArrivedAt", "queueArrivalExpiresAt", "noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
     },
     {
       "id": "finalization-ledger",

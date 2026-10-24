@@ -1079,8 +1079,11 @@ guards still apply, and an already captured prompt path must remain unchanged.
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
 A closer's non-terminal no-merge release retains the PR's original arrival
-across heads, with existing backoff; delayed requests yield to ready waiters.
-Daemon releases still rejoin at the tail. Parking and merged/closed releases
+across heads for restoration before `nextEligibleAt` plus one configured watcher
+poll interval (unscaled). A later absent closer joins at the tail; a continuously
+registered waiter keeps its position through its invocation deadline. Existing
+backoff lets delayed requests yield to ready waiters. Daemon releases preserve
+closer memory with its fixed expiry while their reservations rejoin at the tail. Parking and merged/closed releases
 clear remembered arrivals across heads. Fresh closer invocations restore the
 arrival while measuring their expiry from registration. Consecutive chargeable
 failures through the existing attempt cap park that head with

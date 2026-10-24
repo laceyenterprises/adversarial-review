@@ -22,7 +22,8 @@ each `attempts[]` entry by `(pr, head)`.
 | `attempts[].attempts` | non-negative integer | Charged acquisitions; the cap uses this count. |
 | `attempts[].retryable` | non-negative integer | Refunded retryable aborts, retained for diagnosis. Legacy entries without this field read as zero. |
 | `attempts[].firstAttemptAt` | ISO timestamp | First attempt on this PR/head. |
-| `attempts[].queueArrivedAt` | optional ISO timestamp | Original closer queue arrival, looked up by PR across heads within this repo/base. |
+| `attempts[].queueArrivedAt` | optional ISO timestamp | Original closer queue arrival, looked up by PR across heads within this repo/base while its restoration deadline is live. |
+| `attempts[].queueArrivalExpiresAt` | optional ISO timestamp | Closer restoration deadline: release `nextEligibleAt` plus one configured watcher poll interval. Daemon releases preserve this deadline. Legacy arrival records derive it from `nextEligibleAt`. |
 | `attempts[].lastAttemptAt` | ISO timestamp | Latest attempt or refund; entries expire after 30 days. |
 
 ```mermaid
@@ -89,9 +90,15 @@ waiter (or original grant when there was no waiter). This scheduling identity is
 fresh CLI waiter restores the arrival even after rebase, and observes both its
 exact-head backoff and the remembered release's `nextEligibleAt`. Later ready
 waiters proceed during that delay. Each subsequent closer release carries the
-arrival onto its current head's record and clears it from older heads. Daemon
-requeue timing is unchanged. Merged, closed or explicit terminal release, and
-either parking cap, clear the PR's remembered arrival across heads without
+arrival onto its current head's record and clears it from older heads. Restoration
+is allowed only before `queueArrivalExpiresAt`: the closer release's `nextEligibleAt`
+plus one configured watcher poll interval (unscaled). A continuously registered
+waiter retains its order through its invocation deadline; without re-registration
+within that window, a returning closer joins at the tail. Legacy records without
+the deadline derive it from `nextEligibleAt`; missing/invalid timing cannot restore
+priority. Daemon releases preserve same-head closer memory and its fixed deadline,
+without moving cross-head memory or renewing it. Daemon requeue timing is unchanged.
+Merged, closed or explicit terminal release, and either parking cap, clear the PR's remembered arrival across heads without
 erasing gate counts or refund evidence. Attempt expiry and explicit reset
 retain their existing behavior. Legacy records without the field use a fresh
 arrival. No history format change or migration is required.

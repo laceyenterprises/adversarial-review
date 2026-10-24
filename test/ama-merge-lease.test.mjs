@@ -477,6 +477,90 @@ for (const newHead of [false, true]) {
   });
 }
 
+for (const legacy of [false, true]) {
+  test(`long-absent closer rejoins behind a continuously queued waiter (${legacy ? 'legacy' : 'explicit'} deadline)`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+    const args = { registerWaiter: true, pidAliveFn: () => true };
+    const first = acquire(rootDir, { ...args, waiterId: 'first' });
+    const released = releaseMergeLease({ rootDir, ...first.lease, now: at(1), yielded: true,
+      reason: 'required-checks-wait' });
+    assert.ok(Date.parse(released.retry.queueArrivalExpiresAt) > Date.parse(released.retry.nextEligibleAt));
+    if (legacy) {
+      const path = mergeLeaseAttemptsFilePath(rootDir, IDENTITY);
+      const doc = JSON.parse(fs.readFileSync(path, 'utf8'));
+      delete doc.attempts[0].queueArrivalExpiresAt;
+      writeFileSync(path, JSON.stringify(doc));
+    }
+    const blocker = acquire(rootDir, { holderPr: 200, now: at(2 * 86400 - 2401), pidAliveFn: () => true,
+      deadlineSeconds: 3600 });
+    acquire(rootDir, { ...args, holderPr: 202, waiterId: 'continuous', now: at(2 * 86400 - 2400),
+      waiterDeadlineSeconds: 3600 });
+    releaseMergeLease({ rootDir, ...blocker.lease, now: at(2 * 86400), merged: true });
+    const returned = acquire(rootDir, { ...args, waiterId: 'returned', now: at(2 * 86400) });
+    assert.equal(returned.acquired, false);
+    assert.equal(returned.waiter.arrivedAt, at(2 * 86400));
+    assert.equal(acquire(rootDir, { ...args, holderPr: 202, waiterId: 'continuous',
+      now: at(2 * 86400), waiterDeadlineSeconds: 3600 }).acquired, true);
+  });
+}
+
+for (const sameHead of [true, false]) {
+  test(`daemon release preserves closer memory without extending it on ${sameHead ? 'the same' : 'another'} head`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = { registerWaiter: true, pidAliveFn: () => true };
+    const first = acquire(rootDir, { ...args, waiterId: 'first' });
+    const released = releaseMergeLease({ rootDir, ...first.lease, now: first.lease.acquiredAt, yielded: true });
+    const daemonArgs = { rootDir, ...IDENTITY, holderPr: first.lease.holderPr,
+      holderHead: sameHead ? first.lease.holderHead : 'daemon-head', holderPid: process.pid,
+      holderHost: hostname(), pidAliveFn: () => true };
+    const daemon = acquireDaemonMergeLease({ ...daemonArgs, now: released.retry.nextEligibleAt });
+    assert.equal(daemon.acquired, true);
+    releaseMergeLease({ rootDir, ...daemon.lease, now: released.retry.nextEligibleAt, yielded: true });
+    const memory = readMergeLeaseAttempts(rootDir, IDENTITY).find(r => r.queueArrivedAt);
+    assert.equal(memory.queueArrivedAt, first.waiter.arrivedAt);
+    assert.equal(memory.queueArrivalExpiresAt, released.retry.queueArrivalExpiresAt);
+    removeMergeLeaseWaiter({ rootDir, ...IDENTITY, waiterId: daemon.waiter.waiterId });
+    const restored = upsertMergeLeaseWaiter({ rootDir, ...IDENTITY, pr: first.lease.holderPr,
+      head: first.lease.holderHead, waiterId: 'restored', updatedAt: '2026-06-20T18:00:04Z',
+      holderPid: process.pid, holderHost: hostname() });
+    assert.equal(restored.waiter.arrivedAt, first.waiter.arrivedAt);
+    removeMergeLeaseWaiter({ rootDir, ...IDENTITY, waiterId: 'restored' });
+    const fresh = upsertMergeLeaseWaiter({ rootDir, ...IDENTITY, pr: first.lease.holderPr,
+      head: first.lease.holderHead, waiterId: 'expired', updatedAt: memory.queueArrivalExpiresAt,
+      holderPid: process.pid, holderHost: hostname() });
+    assert.equal(fresh.waiter.arrivedAt, memory.queueArrivalExpiresAt, 'daemon release cannot renew closer priority');
+  });
+}
+
+test('restored delayed closer wakes and yields to a ready daemon, then regains FIFO order', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  const args = { registerWaiter: true, holderPid: process.pid, holderHost: hostname() };
+  const first = acquire(rootDir, { ...args, waiterId: 'first' });
+  releaseMergeLease({ rootDir, ...first.lease, now: at(4), yielded: true });
+  const blocker = acquire(rootDir, { ...args, holderPr: 200, waiterId: 'blocker', now: at(4) });
+  const closer = { ...args, waiterId: 'restored' };
+  assert.equal(acquire(rootDir, { ...closer, now: at(4) }).acquired, false);
+  const daemonArgs = { rootDir, ...IDENTITY, holderPr: 202, holderHead: 'daemon-head',
+    holderPid: process.pid, holderHost: hostname() };
+  const reservation = acquireDaemonMergeLease({ ...daemonArgs, now: at(4) });
+  const wakes = [];
+  releaseMergeLease({ rootDir, ...blocker.lease, now: at(4), merged: true,
+    requestWatcherWakeImpl: request => wakes.push(request) });
+  assert.deepEqual(wakes.map(w => [w.prNumber, w.headSha]), [[202, reservation.waiter.head]]);
+  const daemon = acquireDaemonMergeLease({ ...daemonArgs, now: at(4) });
+  assert.equal(daemon.acquired, true);
+  const laterDaemon = { ...daemonArgs, holderPr: 203, holderHead: 'later-daemon' };
+  acquireDaemonMergeLease({ ...laterDaemon, now: at(4.5) });
+  releaseMergeLease({ rootDir, ...daemon.lease, now: at(5), merged: true });
+  assert.equal(acquireDaemonMergeLease({ ...laterDaemon, now: at(5) }).acquired, false);
+  assert.equal(acquire(rootDir, { ...closer, now: at(5) }).acquired, true);
+});
+
 test('restored closer arrival does not expire a fresh invocation or extend its deadline on refresh', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -495,7 +579,7 @@ test('restored closer arrival does not expire a fresh invocation or extend its d
     'refresh does not extend the invocation deadline');
 });
 
-test('arrival memory is isolated by repository, base and PR and legacy holders use their grant', t => {
+test('arrival memory is isolated by repository, base and PR and legacy holders use their acquisition time', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const held = acquire(rootDir);

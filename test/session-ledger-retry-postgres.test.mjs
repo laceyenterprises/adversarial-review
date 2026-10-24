@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestByIdempotencyKeyAsync } from '../src/session-ledger-read-adapter.mjs';
-import { closerLaunchMatches } from '../src/ama/pre-receipt-intent.mjs';
+import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsync, readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
+import { closerLaunchMatches, reconcilePreReceiptIntent } from '../src/ama/pre-receipt-intent.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { amaCloserDispatchFilePath, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+import { main as settleIntent } from '../bin/settle-legacy-closer-intent.mjs';
 
 function reserveLoopbackPort() {
   const reserve = spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -147,8 +151,189 @@ function isolatedPostgres(t) {
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   }
-  return { sql, spawnSyncImpl, explainLastRead, responseBytes: () => responseBytes };
+  return { root, sql, spawnSyncImpl, explainLastRead, responseBytes: () => responseBytes };
 }
+
+test('LAC-2096: production-shaped Postgres identity and real operator recovery stay offline and fenced', async t => {
+  const fixture = isolatedPostgres(t);
+  if (!fixture) return;
+  fixture.sql(`DELETE FROM launch_requests;
+    ALTER TABLE launch_requests DROP COLUMN ticket_ref;
+    ALTER TABLE launch_requests ADD COLUMN idempotency_key text, ADD COLUMN requested_at timestamptz,
+      ADD COLUMN target_repo text, ADD COLUMN request_payload_json jsonb DEFAULT '{}',
+      ADD COLUMN lineage_json jsonb DEFAULT '{}';
+    CREATE TABLE launch_request_logical_job_claims (launch_request_id text REFERENCES launch_requests,
+      ticket_ref text, target_repo text);
+    CREATE TABLE worker_runs (run_id text PRIMARY KEY, launch_request_id text REFERENCES launch_requests,
+      task_key text, target_repo text, status text);
+    CREATE INDEX ON worker_runs (launch_request_id);
+    GRANT SELECT ON worker_runs, launch_request_logical_job_claims TO ledger_reader;`);
+  const started = '2026-10-22T10:18:18Z';
+  const identity = { repo: 'fixture/repo', prNumber: 8, headSha: 'a'.repeat(40) };
+  const args = { env: {}, ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
+    spawnSyncImpl: fixture.spawnSyncImpl };
+  const ticketRead = () => readLaunchRequestsForTicketSinceAsync({ ...args,
+    ticketRef: 'AMA-PR-8', requestedAtOrAfter: started });
+  const keyRead = () => readLaunchRequestByIdempotencyKeyAsync({ ...args, idempotencyKey: 'synthetic-key' });
+  const seed = (payload = '{}', lineage = '{}', status = 'running') => fixture.sql(`
+    DELETE FROM worker_runs; DELETE FROM launch_request_logical_job_claims; DELETE FROM launch_requests;
+    INSERT INTO launch_requests (launch_request_id, idempotency_key, status, requested_at,
+      target_repo, request_payload_json, lineage_json)
+    VALUES ('lrq_synthetic', 'synthetic-key', '${status}', '${started}', 'repo', '${payload}', '${lineage}');`);
+  function operator(key = 'synthetic-key') {
+    const rootDir = mkdtempSync(join(fixture.root, 'intent-'));
+    const record = { ...identity, state: 'dispatching', dispatchPhase: 'submitting',
+      dispatchIdempotencyKey: key, lastAttemptedAt: started, dispatchTimeoutMs: 600_000,
+      retryCount: 2, workerClass: 'hammer' };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => record);
+    acquireAmaCloserLease({ rootDir, ...identity, now: started, watcherPid: 12345 });
+    const path = amaCloserDispatchFilePath(rootDir, identity);
+    const before = readFileSync(path, 'utf8');
+    const lease = readAmaCloserLease(rootDir, identity);
+    const options = { ...args, now: '2026-10-22T14:00:00Z', print() {},
+      readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+      processKillImpl() { throw Object.assign(Error('synthetic dead owner'), { code: 'ESRCH' }); },
+      deliverAlertImpl() { throw Error('offline operator must not page'); } };
+    const cliArgs = ['--root-dir', rootDir, '--hq-root', rootDir, '--ledger-target', 'postgres://unused/synthetic',
+      '--repo', identity.repo, '--pr', '8', '--head', identity.headSha];
+    // Pass the actual CLI target/resolver; only the child executor maps it to
+    // our SELECT-only disposable cluster. No injected ledger result rows.
+    const check = () => {
+      assert.equal(readFileSync(path, 'utf8'), before);
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
+      assert.equal(readHammerRetryCapLedger(rootDir, identity), null);
+    };
+    return { rootDir, options, cliArgs, check };
+  }
+  // The executor must replace the explicitly synthetic CLI DSN as well.
+  const execute = args.spawnSyncImpl;
+  args.spawnSyncImpl = (command, argv, options) => execute(command,
+    argv.map(value => value === 'postgres://unused/synthetic' ? 'synthetic' : value), options);
+
+  for (const source of ['payload', 'lineage', 'work-item', 'claim', 'worker']) {
+    await t.test(`positive matching ${source} identity without ticket_ref`, async () => {
+      seed(source === 'payload' ? '{"ticketRef":"AMA-PR-8"}'
+        : source === 'work-item' ? '{"launchProvenance":{"ticketId":"AMA-PR-8","prHeadSha":"' + identity.headSha + '","repoFullName":"fixture/repo"}}' : '{}',
+      source === 'lineage' ? '{"ticketRef":"AMA-PR-8"}' : '{}');
+      if (source === 'claim') fixture.sql("INSERT INTO launch_request_logical_job_claims VALUES ('lrq_synthetic', 'AMA-PR-8', 'repo');");
+      if (source === 'worker') fixture.sql("INSERT INTO worker_runs VALUES ('run', 'lrq_synthetic', 'AMA-PR-8', 'repo', 'running');");
+      const byTicket = await ticketRead();
+      assert.equal(byTicket.ok, true, JSON.stringify(byTicket));
+      assert.equal(byTicket.rows[0].launch_request_id, 'lrq_synthetic');
+      const keyed = await keyRead();
+      assert.equal(keyed.ok, true, JSON.stringify(keyed));
+      assert.equal(closerLaunchMatches(identity, keyed.rows[0]), true);
+      const status = await readLaunchRequestStatusFromLedgerAsync({ ...args, launchRequestId: 'lrq_synthetic', includeRetryChain: true });
+      assert.equal(status.row.ticket_ref, 'AMA-PR-8');
+      assert.deepEqual(status.retryChain, []);
+      const op = operator();
+      await assert.rejects(settleIntent(op.cliArgs, op.options), /closer-receipt-exists/);
+      op.check();
+      const legacy = operator(null);
+      await assert.rejects(settleIntent(legacy.cliArgs, legacy.options), /legacy-launch-in-range/);
+      legacy.check();
+      if (source === 'work-item') {
+        const native = operator();
+        const recovered = await reconcilePreReceiptIntent(native.rootDir, identity, native.options);
+        assert.equal(recovered.status, 'receipt-recovered');
+        assert.equal(recovered.record.launchRequestId, 'lrq_synthetic');
+        assert.equal(recovered.record.retryCount, 2);
+        assert.equal(readAmaCloserLease(native.rootDir, identity).lrqId, 'lrq_synthetic');
+        assert.equal(readHammerRetryCapLedger(native.rootDir, identity).lifetimeAttemptCount, 1);
+        await reconcilePreReceiptIntent(native.rootDir, identity, native.options);
+        assert.equal(readHammerRetryCapLedger(native.rootDir, identity).lifetimeAttemptCount, 1);
+      }
+    });
+  }
+  await t.test('whole ticket query includes other repo/head, null time, and exact boundary', async () => {
+    seed('{"ticketRef":"AMA-PR-8","launchProvenance":{"prHeadSha":"' + 'b'.repeat(40) + '"}}');
+    fixture.sql("UPDATE launch_requests SET target_repo = 'other/repo', requested_at = NULL;");
+    assert.equal((await ticketRead()).rows.length, 1);
+    const op = operator('missing-key');
+    await assert.rejects(settleIntent(op.cliArgs, op.options), /submission-absence-unproven/);
+    op.check();
+    fixture.sql("UPDATE launch_requests SET requested_at = '2026-10-22T10:18:17.999Z';");
+    assert.deepEqual((await ticketRead()).rows, []);
+    fixture.sql("UPDATE launch_requests SET requested_at = '2026-10-22T10:18:18Z';");
+    assert.equal((await ticketRead()).rows.length, 1);
+  });
+  await t.test('terminal receipt on another head remains ambiguous; no intent/lease/budget writes', async () => {
+    seed('{"ticketRef":"AMA-PR-8","launchProvenance":{"prHeadSha":"' + 'b'.repeat(40) + '"}}', '{}', 'succeeded');
+    const op = operator();
+    updateAmaCloserDispatchRecord(op.rootDir, { ...identity, headSha: 'b'.repeat(40) }, () => ({
+      ...identity, headSha: 'b'.repeat(40), state: 'dispatched', launchRequestId: 'lrq_synthetic',
+    }));
+    await assert.rejects(settleIntent(op.cliArgs, op.options), /receipt-identity-ambiguous/);
+    op.check();
+    const native = await reconcilePreReceiptIntent(op.rootDir, identity, { ...op.options, dryRun: true });
+    assert.equal(native.status, 'unknown');
+    assert.equal(native.record.preReceiptReconciliation.reason, 'receipt-identity-ambiguous');
+    op.check();
+  });
+  await t.test('contradictory canonical identities cannot be coalesced into a valid receipt or absence', async () => {
+    seed('{"ticketRef":"CONFLICT-8"}', '{"ticketRef":"AMA-PR-8"}');
+    const keyed = await keyRead();
+    assert.equal(keyed.rows[0].identity_ambiguous, true);
+    assert.equal(closerLaunchMatches(identity, keyed.rows[0]), false);
+    assert.equal((await ticketRead()).rows.length, 1);
+    const op = operator();
+    await assert.rejects(settleIntent(op.cliArgs, op.options), /receipt-identity-ambiguous/);
+    op.check();
+    seed('{"ticketRef":"AMA-PR-8","launchProvenance":{"prHeadSha":"' + identity.headSha + '","repoFullName":"foreign/repo"}}');
+    assert.equal(closerLaunchMatches(identity, (await keyRead()).rows[0]), false);
+    fixture.sql('ALTER TABLE launch_requests ADD COLUMN head_sha text;');
+    fixture.sql(`UPDATE launch_requests SET head_sha = '${'b'.repeat(40)}';`);
+    assert.equal(closerLaunchMatches(identity, (await keyRead()).rows[0]), false);
+    fixture.sql('ALTER TABLE launch_requests DROP COLUMN head_sha;');
+    seed('{"ticketRef":"AMA-PR-8"}');
+    fixture.sql("UPDATE launch_requests SET target_repo = 'fixture/repo';");
+    fixture.sql("INSERT INTO worker_runs VALUES ('foreign', 'lrq_synthetic', 'AMA-PR-8', 'foreign/repo', 'running');");
+    assert.equal((await keyRead()).rows[0].identity_ambiguous, true);
+  });
+  await t.test('unidentified rows block absence; empty key plus failed ticket read cannot settle', async () => {
+    seed('{}', '{}', 'succeeded');
+    assert.equal((await ticketRead()).rows.length, 1);
+    const op = operator();
+    await assert.rejects(settleIntent(op.cliArgs, op.options), /receipt-identity-ambiguous/);
+    op.check();
+    fixture.sql('DELETE FROM launch_requests; REVOKE SELECT ON worker_runs FROM ledger_reader;');
+    // A query over an empty relation may never evaluate the subselect at all;
+    // revoked permission must still fail at parse/planning, not prove absence.
+    const missing = operator('missing-key');
+    await assert.rejects(settleIntent(missing.cliArgs, missing.options), /receipt-lookup-unreadable/);
+    missing.check();
+    fixture.sql('GRANT SELECT ON worker_runs TO ledger_reader;');
+    const failedTicket = operator('missing-key');
+    await assert.rejects(settleIntent(failedTicket.cliArgs, { ...failedTicket.options,
+      readLegacyIntentLaunchesImpl: () => ({ ok: false, reason: 'ledger-read-failed' }) }), /submission-absence-unproven/);
+    failedTicket.check();
+  });
+  await t.test('true empty results authorize only disposable dry-run/apply with unchanged retry policy', async () => {
+    assert.deepEqual((await ticketRead()).rows, []);
+    assert.deepEqual((await keyRead()).rows, []);
+    for (const key of [null, 'synthetic-key']) {
+      const op = operator(key);
+      assert.equal((await settleIntent(op.cliArgs, op.options)).conclusive, true);
+      op.check();
+      const applied = await settleIntent([...op.cliArgs, '--apply', '--reason', 'isolated fixture'], op.options);
+      assert.equal(applied.conclusive, true);
+      assert.equal(readAmaCloserLease(op.rootDir, identity).terminalOutcome, 'deferred');
+      const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(op.rootDir, identity), 'utf8'));
+      assert.equal(record.retryCount, 1);
+      assert.equal(record.state, 'no-dispatch');
+      assert.equal(readHammerRetryCapLedger(op.rootDir, identity), null);
+    }
+  });
+  await t.test('malformed legacy text payload cannot become absence or a receipt', async () => {
+    seed('{"ticketRef":"AMA-PR-8"}');
+    fixture.sql("ALTER TABLE launch_requests ALTER COLUMN request_payload_json DROP DEFAULT; ALTER TABLE launch_requests ALTER COLUMN request_payload_json TYPE text; UPDATE launch_requests SET request_payload_json = '{broken';");
+    assert.equal((await ticketRead()).ok, false);
+    assert.equal((await keyRead()).ok, false);
+    const op = operator();
+    await assert.rejects(settleIntent(op.cliArgs, op.options), /receipt-lookup-unreadable/);
+    op.check();
+  });
+});
 
 test('native PostgreSQL keyed receipt tolerates optional identity columns and refuses explicit mismatches', async t => {
   const fixture = isolatedPostgres(t);

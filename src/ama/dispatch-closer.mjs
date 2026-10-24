@@ -7916,6 +7916,7 @@ async function maybeDispatchAmaCloserAttempt({
       || (launchHead && launchHead !== targetRemediationSha);
     if (!mismatch && ticket && closerLaunchMatches(expected, {
       ticket_ref: ticket, target_repo: targetRepo || repo, head_sha: launchHead || targetRemediationSha,
+      identity_ambiguous: row?.identity_ambiguous,
     })) return null;
     logger?.warn?.(JSON.stringify({ event: mismatch ? 'ama_closer.launch_identity_mismatch' : 'ama_closer.launch_receipt_unverified', repo, prNumber,
       headSha: targetRemediationSha, launchRequestId: payload.launchRequestId,

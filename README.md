@@ -1756,6 +1756,15 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
+LAC-2096: closer recovery reads canonical Postgres request/lineage work-item and
+logical-job identity without assuming launch ticket/head columns. Conflicting
+or unidentified evidence preserves ownership; operator settlement requires its
+ticket-wide absence proof. SQLite compatibility, lifecycle states and smoke
+steps remain unchanged. After normal deployment, the runtime owner can record an
+owner-qualified dry-run with the explicit canonical target as described in the
+[closure runbook](docs/RUNBOOK-ama-closure.md) and `post-merge-verify.json`.
+Source validation does not authorize apply or incident recovery.
+
 REVIEWEVIDENCE-01: new PR blockers need a resolvable head file/line and a concrete
 input/state plus wrong outcome. Unsupported findings remain visible as
 non-blocking with a reason. Evidence-backed fixer disputes close on an unchanged

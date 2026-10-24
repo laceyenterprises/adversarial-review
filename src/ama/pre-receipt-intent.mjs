@@ -72,7 +72,7 @@ function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
 
 // Match the exact closer ticket; a generic HAM or conflict worker is not this PR's closer.
 export function closerLaunchMatches(record, row) {
-  return row?.ticket_ref === `AMA-PR-${record.prNumber}`
+  return row?.identity_ambiguous !== true && row?.ticket_ref === `AMA-PR-${record.prNumber}`
     && (row.target_repo == null || [record.repo, record.repo.split('/').at(-1)].includes(row.target_repo))
     && (!row.head_sha || row.head_sha === (record.targetRemediationSha || record.headSha));
 }
@@ -203,10 +203,17 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         headSha: receipt.head_sha || null,
       } };
     }
+    const foreignReceipt = receipt?.identity_ambiguous !== true
+      && typeof receipt?.ticket_ref === 'string' && receipt.ticket_ref.length > 0
+      && receipt.ticket_ref !== `AMA-PR-${record.prNumber}`;
+    // The operator's broader recovery contract requires its ticket-wide proof.
+    // Empty keys cannot bypass a failed supplemental read, and a terminal but
+    // unidentified/multiply identified receipt is never negative evidence.
+    const keyedAbsenceAllowed = !options.operatorSettlement || (deadlinePassed && operatorAbsence
+      && (rows == null || rows.length === 0 || foreignReceipt));
     const misattributedLease = options.operatorSettlement && operatorAbsence && promotedLease
       && record.launchRequestId === lease.lrqId && receipt?.launch_request_id === lease.lrqId
-      && typeof receipt.ticket_ref === 'string' && receipt.ticket_ref.length > 0
-      && receipt.ticket_ref !== `AMA-PR-${record.prNumber}`;
+      && foreignReceipt;
     if (misattributedLease) evidence = { ...evidence, misattributedLeaseLaunchRequestId: lease.lrqId };
     let budgetUnreadable = false;
     const recoverableReceipt = !foreignLease && matchingReceipt
@@ -244,9 +251,10 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
         lastObservedStatus: 'unknown', lastObservedAt: now, lastError: null,
         preReceiptReconciliation: { status, observedAt: now, query: evidence } };
     } else if (!foreignLease && ((legacy && rows?.length === 0 && Number.isFinite(started))
-      || (!legacy && (!promotedLease || misattributedLease) && deadlinePassed && (rows?.length === 0 || operatorAbsence))
-      || (!legacy && deadSubmitter && rows?.length === 0)
-      || (!legacy && matchingLease && (localDead || settledNoLaunch)
+      || (!legacy && keyedAbsenceAllowed && (!promotedLease || misattributedLease) && deadlinePassed
+        && (rows?.length === 0 || operatorAbsence))
+      || (!legacy && keyedAbsenceAllowed && deadSubmitter && rows?.length === 0)
+      || (!legacy && keyedAbsenceAllowed && matchingLease && (localDead || settledNoLaunch)
         && record.dispatchPhase === 'prepared' && rows?.length === 0))) {
       status = 'no-launch';
       const reason = legacy ? 'legacy-no-launch-proven' : operatorAbsence ? 'closer-ticket-no-launch-proven'

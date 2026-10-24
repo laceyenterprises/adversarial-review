@@ -890,13 +890,85 @@ const postgresLaunchProjection = `json_build_object(
   'failure_detail', :launch_detail, 'ticket_ref', :launch_ticket,
   'target_repo', :launch_repo, 'head_sha', :launch_head`;
 
+// LAC-2096: ticket_ref/head_sha are not launch_requests columns in the
+// producer schema. Read the immutable request/lineage work-item identity and
+// linked logical jobs, never infer a ticket from an LRQ, key or branch name.
+// Catalog-selected expressions also support older/minimal offline ledgers.
+const postgresIdentityColumns = `
+  SELECT
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'request_payload_json' AND NOT attisdropped)
+      THEN 'request.request_payload_json::jsonb' ELSE '''{}''::jsonb' END AS identity_payload,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
+      AND attname = 'lineage_json' AND NOT attisdropped)
+      THEN 'request.lineage_json::jsonb' ELSE '''{}''::jsonb' END AS identity_lineage,
+    CASE WHEN to_regclass('launch_request_logical_job_claims') IS NOT NULL
+      THEN 'ARRAY(SELECT ticket_ref FROM launch_request_logical_job_claims WHERE launch_request_id = request.launch_request_id)'
+      ELSE 'ARRAY[]::text[]' END AS identity_claims,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('worker_runs')
+      AND attname = 'task_key' AND NOT attisdropped)
+      THEN 'ARRAY(SELECT task_key FROM worker_runs WHERE launch_request_id = request.launch_request_id)'
+      ELSE 'ARRAY[]::text[]' END AS identity_tasks,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('launch_request_logical_job_claims')
+      AND attname = 'target_repo' AND NOT attisdropped)
+      THEN 'ARRAY(SELECT target_repo FROM launch_request_logical_job_claims WHERE launch_request_id = request.launch_request_id)'
+      ELSE 'ARRAY[]::text[]' END AS identity_claim_repos,
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('worker_runs')
+      AND attname = 'target_repo' AND NOT attisdropped)
+      THEN 'ARRAY(SELECT target_repo FROM worker_runs WHERE launch_request_id = request.launch_request_id)'
+      ELSE 'ARRAY[]::text[]' END AS identity_worker_repos
+  \\gset
+`;
+
+function postgresIdentityValues(kind) {
+  const paths = kind === 'ticket' ? [['ticketRef'], ['taskKey'], ['launchProvenance', 'ticketId']]
+    : kind === 'head' ? [['launchProvenance', 'prHeadSha']] : [['launchProvenance', 'repoFullName'], ['launchProvenance', 'repo']];
+  const direct = kind === 'ticket' ? ':launch_ticket' : kind === 'head' ? ':launch_head' : ':launch_repo';
+  const values = [direct];
+  for (const doc of [':identity_payload', ':identity_lineage']) {
+    for (const path of paths) {
+      const selector = `(${doc}) #> '{${path.join(',')}}'`;
+      values.push(`CASE WHEN jsonb_typeof(${selector}) = 'string' THEN (${doc}) #>> '{${path.join(',')}}' END`);
+    }
+  }
+  const jobs = kind === 'ticket' ? ' || :identity_claims || :identity_tasks'
+    : kind === 'repo' ? ' || :identity_claim_repos || :identity_worker_repos' : '';
+  return `ARRAY(SELECT DISTINCT value FROM unnest(ARRAY[${values.join(', ')}]::text[]${jobs}) value
+    WHERE value IS NOT NULL AND value != '' ORDER BY value)`;
+}
+
+const postgresIdentityJoin = `CROSS JOIN LATERAL (SELECT
+  ${postgresIdentityValues('ticket')} AS tickets,
+  ${postgresIdentityValues('head')} AS heads,
+  ${postgresIdentityValues('repo')} AS repos
+) identity`;
+const postgresIdentityAmbiguous = `(cardinality(identity.tickets) > 1 OR cardinality(identity.heads) > 1
+  OR EXISTS (SELECT FROM unnest(identity.repos) a, unnest(identity.repos) b
+    WHERE a != b AND a != regexp_replace(b, '^.*/', '') AND b != regexp_replace(a, '^.*/', '')))`;
+// A basename projection must not hide an owner-qualified canonical repository.
+const postgresCanonicalRepo = `COALESCE((SELECT value FROM unnest(identity.repos) value
+  WHERE strpos(value, '/') > 0 ORDER BY value LIMIT 1), :launch_repo, identity.repos[1])`;
+const postgresIdentityProjection = `CASE WHEN cardinality(identity.tickets) = 1 THEN identity.tickets[1] END AS ticket_ref,
+  ${postgresCanonicalRepo} AS target_repo,
+  CASE WHEN cardinality(identity.heads) = 1 THEN identity.heads[1] END AS head_sha,
+  ${postgresIdentityAmbiguous} AS identity_ambiguous`;
+const postgresCanonicalLaunchProjection = postgresLaunchProjection
+  .replace(':launch_ticket', 'CASE WHEN cardinality(identity.tickets) = 1 THEN identity.tickets[1] END')
+  .replace(':launch_repo', postgresCanonicalRepo)
+  .replace(':launch_head', 'CASE WHEN cardinality(identity.heads) = 1 THEN identity.heads[1] END');
+const postgresIdentityDiagnostic = ` || CASE WHEN ${postgresIdentityAmbiguous}
+  THEN '{"identity_ambiguous":true}'::jsonb ELSE '{}'::jsonb END`;
+
 // Only text on pre-16 needs the historical application-side fallback. Native
 // jsonb always joins the indexed expression directly, on every server version.
 // LATERAL/OFFSET keeps lookups parameterized by the current parent: a flattened
 // join can choose a whole-table hash scan when it misestimates retry fan-out.
 function postgresRetryReadSql({ snapshot = false } = {}) {
   const seed = snapshot ? "SELECT jsonb_array_elements_text(:'launch_ids'::jsonb)" : "SELECT :'lrq'::text";
-  const projection = `${postgresLaunchProjection}${snapshot ? ", 'metadata_json', request.metadata_json" : ''})`;
+  const projection = `${postgresLaunchProjection
+    .replace(':launch_ticket', 'request.ticket_ref').replace(':launch_repo', 'request.target_repo')
+    .replace(':launch_head', 'request.head_sha')}${snapshot ? ", 'metadata_json', request.metadata_json" : ''})::jsonb
+    || CASE WHEN request.identity_ambiguous THEN '{"identity_ambiguous":true}'::jsonb ELSE '{}'::jsonb END`;
   const recursive = edge => `
     WITH RECURSIVE retry_chain(launch_request_id) AS (
       ${seed}
@@ -912,14 +984,14 @@ function postgresRetryReadSql({ snapshot = false } = {}) {
     FROM retry_chain chain
     JOIN LATERAL (
       SELECT launch_request_id, status, updated_at, terminal_at, failure_class,
-        :launch_detail AS failure_detail, :launch_ticket AS ticket_ref,
-        :launch_repo AS target_repo, :launch_head AS head_sha${snapshot ? ', metadata_json' : ''}
-      FROM launch_requests request WHERE request.launch_request_id = chain.launch_request_id
+        :launch_detail AS failure_detail, ${postgresIdentityProjection}${snapshot ? ', metadata_json' : ''}
+      FROM launch_requests request ${postgresIdentityJoin}
+      WHERE request.launch_request_id = chain.launch_request_id
       LIMIT 1
     ) request ON true
     ${snapshot ? '' : "WHERE request.launch_request_id != :'lrq'"}
     ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;`;
-  return `${postgresLaunchColumns}
+  return `${postgresLaunchColumns}${postgresIdentityColumns}
     \\if :retry_has_metadata
       \\if :retry_jsonb
         ${recursive("child.metadata_json ->> 'retryOf' = parent.launch_request_id\n        AND CASE WHEN child.metadata_json IS NULL THEN NULL::boolean ELSE true END\n        AND jsonb_typeof(child.metadata_json->'retryOf') = 'string'")}
@@ -929,13 +1001,14 @@ function postgresRetryReadSql({ snapshot = false } = {}) {
         \\if :retry_native_parser
           ${recursive("CASE WHEN pg_input_is_valid(child.metadata_json::text, 'jsonb')\n        THEN CASE WHEN jsonb_typeof(child.metadata_json::jsonb->'retryOf') = 'string'\n          THEN child.metadata_json::jsonb->>'retryOf' END END = parent.launch_request_id")}
         \\else
-          SELECT ${postgresLaunchProjection}, 'metadata_json', request.metadata_json)
-          FROM launch_requests request
+          SELECT ${postgresCanonicalLaunchProjection}, 'metadata_json', request.metadata_json)::jsonb${postgresIdentityDiagnostic}
+          FROM launch_requests request ${postgresIdentityJoin}
           ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;
         \\endif
       \\endif
     \\else
-      ${snapshot ? `SELECT ${postgresLaunchProjection}) FROM launch_requests request
+      ${snapshot ? `SELECT ${postgresCanonicalLaunchProjection})::jsonb${postgresIdentityDiagnostic}
+        FROM launch_requests request ${postgresIdentityJoin}
         WHERE request.launch_request_id IN (${seed});` : 'SELECT NULL WHERE false;'}
     \\endif`;
 }
@@ -966,7 +1039,7 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
       columns += probe.exists ? `, ${column}` : `, NULL AS ${column}`;
     }
   } else {
-    columns += ', :launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha';
+    columns += `, ${postgresIdentityProjection}`;
   }
   if (resolution.target.backend === 'sqlite') {
     return querySqliteRows(resolution.target,
@@ -975,8 +1048,9 @@ function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget,
   }
   if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
   return yield* queryPostgresRowsSteps(resolution.target,
-    `${postgresLaunchColumns}
+    `${postgresLaunchColumns}${postgresIdentityColumns}
      SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests request
+       ${postgresIdentityJoin}
        WHERE idempotency_key = :'intent_key' LIMIT 2) receipt`,
     { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['intent_key', idempotencyKey]] });
 }
@@ -1007,9 +1081,12 @@ function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
   }
   if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
   return yield* queryPostgresRowsSteps(resolution.target,
-    `SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests
-       WHERE ticket_ref = :'ticket_ref'
-         AND (requested_at >= :'since'::timestamptz OR requested_at IS NULL) LIMIT 1) receipt`,
+    `${postgresLaunchColumns}${postgresIdentityColumns}
+     SELECT row_to_json(receipt) FROM (SELECT request.launch_request_id, request.requested_at,
+       ${postgresIdentityProjection}
+       FROM launch_requests request ${postgresIdentityJoin}
+       WHERE (:'ticket_ref' = ANY(identity.tickets) OR cardinality(identity.tickets) = 0)
+         AND (request.requested_at >= :'since'::timestamptz OR request.requested_at IS NULL) LIMIT 1) receipt`,
     { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
 }
 
@@ -1131,9 +1208,9 @@ function* readLaunchRequestStatusFromLedgerSteps({
   } else if (resolution.target.backend === 'postgres') {
     queried = yield* queryPostgresRowsSteps(
       resolution.target,
-      `${postgresLaunchColumns}
-       SELECT ${postgresLaunchProjection})
-       FROM launch_requests request
+      `${postgresLaunchColumns}${postgresIdentityColumns}
+       SELECT ${postgresCanonicalLaunchProjection})::jsonb${postgresIdentityDiagnostic}
+       FROM launch_requests request ${postgresIdentityJoin}
        WHERE request.launch_request_id = :'lrq'
        LIMIT 1`,
       {

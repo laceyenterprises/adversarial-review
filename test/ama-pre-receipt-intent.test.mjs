@@ -217,7 +217,8 @@ test('Postgres receipt lookup uses read-only parameterized bounded SQL', async (
       assert.equal(options.timeout, 240_000);
       assert.match(options.input, /BEGIN READ ONLY/);
       assert.match(options.input, /idempotency_key = :'intent_key' LIMIT 2/);
-      assert.match(options.input, /:launch_ticket AS ticket_ref, :launch_repo AS target_repo, :launch_head AS head_sha/);
+      assert.match(options.input, /cardinality\(identity.tickets\) = 1 THEN identity.tickets\[1\] END AS ticket_ref/);
+      assert.match(options.input, /identity_ambiguous/);
       assert.doesNotMatch(options.input, /key'quote/);
       return { status: 0, stdout: JSON.stringify(receipt) + '\n' };
     } });
@@ -501,8 +502,8 @@ test('legacy Postgres query is read-only, bounded and parameterized across the w
       assert.equal(options.timeout, 240_000);
       assert.ok(args.includes('since=2026-10-22T10:18:18.000Z'));
       assert.match(options.input, /BEGIN READ ONLY/);
-      assert.match(options.input, /ticket_ref = :'ticket_ref'/);
-      assert.match(options.input, /requested_at >= :'since'::timestamptz/);
+      assert.match(options.input, /:'ticket_ref' = ANY\(identity.tickets\)/);
+      assert.match(options.input, /request.requested_at >= :'since'::timestamptz/);
       assert.match(options.input, /LIMIT 1/);
       assert.doesNotMatch(options.input, /AMA-PR-8|target_repo =|head_sha =/);
       return { status: 0, stdout: '' };
@@ -862,6 +863,21 @@ for (const keyReadable of [true, false]) test(`CLOSERINTENT-01: keyed misattribu
   assert.deepEqual(audit.map(x => x.outcome), ['settlement-authorized', 'settled-no-dispatch']);
   assert.deepEqual(audit[0].evidence, applied.evidence);
 });
+
+for (const patch of [{ ticket_ref: null }, { head_sha: 'b'.repeat(40) },
+  { ticket_ref: 'FOREIGN', identity_ambiguous: true }]) {
+  test(`LAC-2096: empty supplemental ticket evidence cannot settle terminal ambiguity ${JSON.stringify(patch)}`, async t => {
+    const f = fixture(t);
+    const lease = readAmaCloserLease(f.rootDir, identity);
+    await assert.rejects(settleLegacyIntent(operatorArgs(f), { ...f.options, print() {},
+      readIntentReceiptImpl: () => ({ ok: true, rows: [{ ...receipt, status: 'succeeded', ...patch }] }),
+      readLegacyIntentLaunchesImpl: () => ({ ok: true, rows: [] }),
+    }), /receipt-identity-ambiguous/);
+    assert.equal(f.read().state, 'dispatching');
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), lease);
+    assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
+  });
+}
 
 for (const mode of ['before-deadline', 'closer-exists', 'unreadable', 'audit-failure']) {
   test(`CLOSERINTENT-01: keyed operator settlement refuses ${mode}`, async t => {

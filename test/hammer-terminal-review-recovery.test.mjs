@@ -11,13 +11,14 @@ import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
+import { amaHammerBackgroundKey, createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 
 const reviewed = 'a'.repeat(40), published = 'b'.repeat(40), intermediate = 'c'.repeat(40);
 const repo = 'fixture/project', prNumber = 7;
 const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only';
 const quiet = { log() {}, info() {}, warn() {} };
 
-async function fixture(t, { bridge = false } = {}) {
+async function fixture(t, { bridge = false, background = false } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-terminal-review-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const db = openReviewStateDb(rootDir);
@@ -36,6 +37,15 @@ async function fixture(t, { bridge = false } = {}) {
       return comment;
     } });
   let status = 'succeeded', requests = 0, dispatches = 0;
+  const refusal = { dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] };
+  const queue = createAmaHammerBackgroundQueue({ logger: quiet });
+  if (background) {
+    queue.submit({ key: amaHammerBackgroundKey({ repo, prNumber, headSha: published }),
+      run: async () => refusal });
+    await queue.drain();
+  }
+  t.after(() => queue.drain());
   updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: intermediate }, () => ({
     repo, prNumber, headSha: intermediate, state: 'dispatched', launchRequestId: 'synthetic-launch',
   }));
@@ -45,10 +55,13 @@ async function fixture(t, { bridge = false } = {}) {
   const row = () => ({ ...db.prepare('SELECT * FROM reviewed_prs').get(), review_body: body });
   const args = { rootDir, repoPath: repo, prNumber, currentRevisionRef: published, candidate,
     labelNames: [], logger: quiet };
-  const tick = (extra = {}) => resolveMergeAgentCoexistenceForWatcher({ ...args, reviewStateRow: row(),
+  const tick = (extra = {}, closureOverrides = {}) => resolveMergeAgentCoexistenceForWatcher({ ...args, reviewStateRow: row(),
     maybeDispatchAmaClosureForImpl: options => maybeDispatchAmaClosureFor({ ...options,
       loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true,
         branchProtection: { required: false } }), getOrchestrationMode: () => 'native' }),
+      resolveAmaHammerDispatchModeImpl: () => background ? 'background' : 'inline',
+      amaHammerBackgroundQueueImpl: () => queue,
+      fetchCurrentPrStateImpl: async () => ({ state: 'OPEN', headSha: published, mergeable: 'MERGEABLE' }),
       proveCloserAuthoredStaleHeadImpl: options => proveCloserAuthoredStaleHead({ ...options, comments }),
       resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true, reason: 'closer-commit-trailer' }),
       resolveHamTerminalRemediationEvidenceImpl: async () => ({ validated: false }),
@@ -60,10 +73,10 @@ async function fixture(t, { bridge = false } = {}) {
         ciMergePathPending: true, reasons: ['ci-not-green'] }),
       maybeDispatchAmaCloserImpl: async () => {
         dispatches++;
-        return { dispatched: false, reason: 'not-eligible',
-          reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] };
+        return refusal;
       },
       observeClosureWaitImpl: async () => ({ exhausted: false, reason: 'required-checks-pending', retryAfterMs: 30000 }),
+      ...closureOverrides,
     }),
     orphanOptions: {
       hasOwnerImpl: options => probeOrphanOwnership({ ...options,
@@ -73,7 +86,7 @@ async function fixture(t, { bridge = false } = {}) {
     },
     ...extra,
   });
-  return { rootDir, comments, row, tick, setStatus: value => { status = value; },
+  return { rootDir, comments, row, tick, args, setStatus: value => { status = value; },
     counts: () => ({ requests, dispatches }) };
 }
 
@@ -86,6 +99,8 @@ test('HAMATTEST-03 settles: a recorded pushed edge without a reviewed-head bridg
   assert.equal(f.row().review_status, 'pending');
   assert.equal(isOrphanHeadReviewRequested(f.row(), published), true);
   assert.equal(result.amaClosureResult.closureOwner.owner, 'review');
+  assert.equal(result.amaClosureResult.reason, 'exact-head-review-queued');
+  assert.equal(result.amaClosureResult.boundedWait.reason, 'required-checks-pending');
 });
 
 test('HAMATTEST-03 no early re-review: running launch suppresses review until its terminal poll', async t => {
@@ -108,4 +123,56 @@ test('HAMATTEST-03 executed once: repeated terminal observations preserve one du
   assert.equal(f.counts().requests, 1);
   assert.ok(requestedAt);
   assert.equal(f.row().rereview_requested_at, requestedAt);
+});
+
+test('HAMATTEST-03 consumes a real background refusal and queues review on the same poll', async t => {
+  const f = await fixture(t, { background: true });
+  const result = await f.tick();
+  assert.equal(f.counts().requests, 1);
+  assert.equal(f.counts().dispatches, 0, 'apply the settled outcome without another dispatch');
+  assert.equal(result.amaClosureResult.reason, 'exact-head-review-queued');
+});
+
+for (const stop of ['uncertain', 'held', 'foreign-head', 'operator']) {
+  test(`HAMATTEST-03 does not take review ownership under ${stop} evidence`, async t => {
+    const f = await fixture(t);
+    const result = { amaEnabled: true, dispatched: false, reason: 'not-eligible',
+      boundedWait: { exhausted: false, reason: 'required-checks-pending' },
+      closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: reviewed,
+        currentHead: stop === 'foreign-head' ? intermediate : published },
+      ...(stop === 'operator' ? { needsOperator: true, operatorReason: 'primary-change-needs-operator' } : {}) };
+    await f.tick({ maybeDispatchAmaClosureForImpl: async () => result,
+      labelNames: stop === 'held' ? ['no-merge'] : [],
+      orphanOptions: { hasOwnerImpl: async () => ({ owned: false, uncertain: stop === 'uncertain' }),
+        requestRereviewImpl: () => assert.fail('refused evidence cannot queue review'),
+        pageImpl: () => assert.fail('fixture must not page') } });
+    assert.equal(f.counts().requests, 0);
+    assert.equal(f.row().review_status, 'posted');
+  });
+}
+
+test('HAMATTEST-03 a complete authenticated bridge preserves the reviewed verdict and live-head checks', async t => {
+  const f = await fixture(t, { bridge: true });
+  let merges = 0;
+  const result = await f.tick({}, { runDaemonCleanMergeAttemptImpl: async options => {
+    merges++;
+    assert.equal(options.reviewState.verdict, 'comment-only');
+    assert.equal(options.currentPrHeadSha, published);
+    assert.equal(options.candidate.statusCheckRollup[0].conclusion, 'SUCCESS');
+    return { disposition: 'merged', reason: 'fixture-merged' };
+  } });
+  assert.equal(result.terminalReason, 'merged');
+  assert.equal(result.amaClosureResult.closerAuthoredStale.carryForward, true);
+  assert.equal(f.counts().requests, 0);
+  assert.equal(merges, 1);
+});
+
+for (const exhausted of [false, true]) test(`HAMATTEST-03 a recorded bridge with unsettled evidence executes the shared review owner, exhausted=${exhausted}`, async t => {
+  const f = await fixture(t, { bridge: true });
+  const result = await f.tick({}, { fetchLatestHeadReviewBodiesImpl: async () => [],
+    resolveReviewCycleExhaustionImpl: () => ({ reviewCycleExhausted: exhausted,
+      commentOnlyFinalRoundRevisionRefs: exhausted ? [reviewed] : [] }) });
+  assert.equal(result.amaClosureResult.closerAuthoredStale.carryForward, false);
+  assert.ok(result.amaClosureResult.closerAuthoredStale.reasons.includes('verdict-not-settled-success'));
+  assert.equal(f.counts().requests, 1);
 });

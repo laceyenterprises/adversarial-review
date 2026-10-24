@@ -334,8 +334,9 @@ change or new check is required.
 policy for "who acts next on this open PR". It is pure and total. It reads one
 NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
 round?, evidenceRefs, decisionKey}`. NXA-03 adopts this decision for hammer wake
-routing only; `decideClosureOwner` and other caller routes keep their legacy
-effects. The decision grants no merge authority. The exact-head, provenance,
+routing; HAMATTEST-03 also executes its head-bound exact-head review decision
+through the ownerless watchdog, including after the old review-round ceiling.
+Other caller routes keep their legacy effects. The decision grants no merge authority. The exact-head, provenance,
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
@@ -4951,6 +4952,25 @@ drafts and operator holds retain their existing protections. Queue failures
 remain retryable. After deployment, inspect an ownerless synthetic replay's
 request marker and per-head evidence, and confirm pushed edges never satisfy
 `exactHammerValidation`. No configuration, CI status or merge gate is added.
+
+HAMATTEST-03 fixes the coexistence return order: a head-bound exact-head review
+decision visits the watchdog before a bounded closure wait can return. This
+includes applying a background dispatch refusal. Live or uncertain ownership
+still fences review; successful queueing reports `exact-head-review-queued`
+and `closureOwner.owner=review`, preserving the wait reason and durable request
+marker. A publication edge starting after an unreviewed intermediate head cannot
+carry an older verdict; the exact-head review is the safe recovery in that case.
+A complete bridge with unsettled live review evidence also retains its selected
+exact-head review owner through the wait wrapper. Its rejected verdict remains
+visible; only a new authoritative review or valid carried verdict can settle it.
+Pending exact-head CI already records `required-checks-pending`, `resumeOwed`
+and `resumeHead` in the hammer terminal audit. Neither that receipt nor pushed
+provenance certifies CI or authorizes merge.
+
+After deployment, SRE observes the next hammer that publishes and stops without
+merging. Within one watcher poll it must merge or queue an exact-head review,
+without manual rescue. Confirm the request marker and next owner, and that
+suppressed auto-refresh plus stale-review-head refusals do not repeat.
 
 ## Closer credential refresh (HAMTOKEN-05)
 

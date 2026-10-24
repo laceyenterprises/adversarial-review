@@ -1060,6 +1060,15 @@ watcher queues that review once per head immediately and records why. The
 existing pending-review transition and orphan reservation execute the decision;
 no new lifecycle states or merge authority are introduced.
 
+HAMATTEST-03 executes that head-bound decision before coexistence returns a
+bounded closure wait, including a consumed background `not-eligible` outcome.
+The watchdog checks live/uncertain ownership before requesting review. Successful
+queueing reports `exact-head-review-queued` with review as the next owner; the
+durable per-head reservation and original wait reason remain available. A live
+hammer still suppresses re-review. No verdict or required-check predicate changes.
+The review owner also survives when a complete publication bridge cannot carry
+an unsettled live verdict; the original refusal reasons remain diagnostic evidence.
+
 Historical `exact-head-review-required` and bare `stale-review-head` stops release
 with `hammer-responsibility` without a new review. Mixed safety refusals retain
 their holds. Recognized closer-head evidence is bound to the current head and

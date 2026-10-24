@@ -1186,8 +1186,9 @@ terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
-successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing; other
-closure consumers retain legacy authority and observational shadow.
+successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing;
+HAMATTEST-03 executes its head-bound exact-head review decision through the
+ownerless watchdog. Other closure consumers retain legacy authority and observational shadow.
 Disagreements and overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
 path only with `AMA_NEXT_ACTION_OVERDUE_ALERTS=1`. The
 [shadow runbook](docs/RUNBOOK-ama-closure.md#shared-next-action-shadow-nxa-02) and
@@ -1461,6 +1462,11 @@ transport response, failed release stays retryable, and live leases renew until
 process drain is confirmed, independently of delivery rows. An approved
 exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
+HAMATTEST-03 exercises production coexistence with a bounded closure wait:
+a live hammer suppresses re-review; after it stops, an ownerless head-bound
+review decision queues in the same poll, once per head. SRE verifies the next
+deployed hammer that publishes and stops without merging reaches merge or an
+exact-head review within one poll without manual rescue.
 
 <a id="smv-handoff"></a>**smv-handoff:** NXA-03 verifies shared immutable
 decision wake routing, live-owner suppression and one wake per reconciled

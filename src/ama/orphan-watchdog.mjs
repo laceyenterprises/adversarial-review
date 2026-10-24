@@ -26,6 +26,17 @@ export function ownerlessBoundMs(env = process.env) {
 }
 const text = value => String(value || '').slice(0, 300);
 
+// A proven publication chain can still lack a settled live verdict. Preserve
+// that rejection while executing the separately selected, head-bound owner.
+export function hasExactHeadReviewDecision(result, headSha, reviewStateRow) {
+  const stale = result?.closerAuthoredStale;
+  return stale?.decision === 'rereview-exact-head'
+    || (result?.closureOwner?.owner === 'review' && result.closureOwner.reason === 'exact-head-review'
+      && Boolean(headSha && stale?.reviewedHead)
+      && stale.currentHead === headSha && stale.reviewedHead === reviewStateRow?.reviewer_head_sha
+      && stale.reviewedHead !== headSha);
+}
+
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
 export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
   readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = loadAwareTimeoutMs(5000), signal = null, reservationStartedAt = null,
@@ -235,7 +246,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const idleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let ownership;
-    if (isOrphanRecoveryWait(result) && result?.closerAuthoredStale?.decision !== 'rereview-exact-head') {
+    const exactHeadReview = hasExactHeadReviewDecision(result, headSha, reviewStateRow);
+    if (isOrphanRecoveryWait(result) && !exactHeadReview) {
       // A proof timeout must return at its serial deadline. Observing this
       // wait only needs the clock; no ownership probe or recovery can run.
       ownership = { owned: false };
@@ -260,7 +272,6 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (!Number.isFinite(idleMs)) throw new Error('orphan watchdog ownership clock is malformed');
     pending.amaClosureResult = { ...pending.amaClosureResult, ownerlessIdleMs: idleMs,
       ownerlessSince: idleSince || now };
-    const exactHeadReview = result?.closerAuthoredStale?.decision === 'rereview-exact-head';
     // HAMATTEST-02: execute the shared decision on this pass, before historical
     // hammer ownership or the idle timer can leave an unprovable head actorless.
     // Unknown ownership is a read wait, never permission to race a live closer.

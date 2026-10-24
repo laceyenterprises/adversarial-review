@@ -14,7 +14,7 @@ import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
-import { recoverOrphan, isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -915,9 +915,25 @@ async function maybeDispatchAmaClosureForInner({
         ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
     } catch (error) { options.logger?.warn?.(`[watcher] final-round wait observation failed: ${error.message}`); }
   }
+  // The wake already chose this review from the immutable pass snapshot. Do
+  // not discard it at an old review-round ceiling or in the wait projection.
+  // Execution still requires the watchdog's independent live-ownership probe.
+  const sharedReview = closureOwnerSink.shared;
+  const reviewHead = options.candidate?.headSha || options.currentRevisionRef;
+  if (sharedReview?.decision?.action === 'review' && sharedReview.decision.actor === 'reviewer'
+    && ['exact-head-review', 'stale-verdict'].includes(sharedReview.decision.reason)
+    && sharedReview.decision.queue?.intent === 'dispatch'
+    && sharedReview.decision.head === reviewHead && sharedReview.snapshot?.head === reviewHead
+    && sharedReview.snapshot.subjectKey === `${options.repoPath}#${options.prNumber}`) {
+    closureOwnerSink.value = { owner: 'review', reason: 'exact-head-review' };
+  }
   if (result && closureOwnerSink.value) result = { ...result,
     closureOwner: result.dispatched ? { owner: 'hammer', reason: result.reason || 'dispatched' }
       : result.reason === 'daemon-merged' ? { owner: 'daemon-merge', reason: 'daemon-merged' }
+      : closureOwnerSink.value.owner === 'review' && closerAuthoredStaleSink.value?.currentHead
+        && closerAuthoredStaleSink.value.reviewedHead
+        && closerAuthoredStaleSink.value.currentHead !== closerAuthoredStaleSink.value.reviewedHead
+        ? closureOwnerSink.value
       : result.boundedWait ? { owner: result.boundedWait.exhausted ? 'page' : 'wait',
         reason: result.boundedWait.reason, boundedMs: result.boundedWait.boundedMs,
         retryAfterMs: result.boundedWait.retryAfterMs }
@@ -3027,6 +3043,51 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   if (amaClosureResult?.reason === 'daemon-merged') {
     return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult };
   }
+  const mergeAgentRequestedScoped = !labelNames?.some((label) =>
+    [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
+      'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
+    && !reviewStateRow?.remediation_pending
+    && labelNames?.includes('merge-agent-requested')
+    && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    });
+  // HAMATTEST-03: execute a head-bound review decision before a closure wait
+  // can hide it. The watchdog still proves absence of live/uncertain owners and
+  // reserves the existing once-per-head request; this grants no merge authority.
+  const recoverOwnerless = async () => {
+    const orphan = await recoverOrphanImpl({
+      rootDir, repo: repoPath, prNumber,
+      headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
+      candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
+      dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
+        rootDir, reviewStateRow, reviewStateDb, dispatchJob, candidate, labelNames,
+        operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
+        repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
+        operationTimeoutMs, operationTracker, orphanRecovery,
+        priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
+      }),
+      ownershipOperation: (fn) => runTimedCoexistenceOperation(
+        'orphan-ownership', fn, { timeoutMs: operationTimeoutMs, parentSignal: signal,
+          operationTracker, logger, repoPath, prNumber }),
+      ownershipTimeoutMs: operationTimeoutMs,
+      ...orphanOptions,
+    });
+    if (orphan?.amaClosureResult?.reviewRequest?.triggered === true) {
+      return { ...orphan, amaClosureResult: { ...orphan.amaClosureResult,
+        reason: 'exact-head-review-queued', closureOwner: { owner: 'review', reason: 'exact-head-review' } } };
+    }
+    return orphan;
+  };
+  const reviewDecision = amaClosureResult?.closerAuthoredStale;
+  if (!mergeAgentRequestedScoped && amaClosureResult?.boundedWait
+    && hasExactHeadReviewDecision(amaClosureResult, candidate?.headSha || currentRevisionRef, reviewStateRow)
+    && reviewDecision.currentHead === (candidate?.headSha || currentRevisionRef)
+    && reviewDecision.reviewedHead === reviewStateRow?.reviewer_head_sha
+    && !isSafetyRecoveryHold(amaClosureResult)) {
+    const orphan = await recoverOwnerless();
+    if (orphan) return orphan;
+  }
   if (amaClosureResult?.boundedWait) {
     // This route already owns its bounded wait and its one page. Do not let
     // orphan/recovery accounting create a second owner or a second alert.
@@ -3065,15 +3126,6 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   const operatorHold = operatorHoldPath === 'daemon-clean-merge'
     ? amaClosureResult.daemonCleanMerge : amaClosureResult;
   const amaClosureOperatorPreemptable = operatorHoldPath !== null;
-  const mergeAgentRequestedScoped = !labelNames?.some((label) =>
-    [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
-      'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
-    && !reviewStateRow?.remediation_pending
-    && labelNames?.includes('merge-agent-requested')
-    && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
-      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
-      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
-    });
   // Scan leases only before taking over a settled primary-change refusal.
   // Terminal results and other safety holds keep their normal recovery routing.
   const liveLease = amaEnabled && mergeAgentRequestedScoped && amaClosureOperatorPreemptable
@@ -3108,23 +3160,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }
   if (!mergeAgentRequestedScoped) {
-    const orphan = await recoverOrphanImpl({
-      rootDir, repo: repoPath, prNumber,
-      headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
-      candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
-      dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
-        rootDir, reviewStateRow, reviewStateDb, dispatchJob, candidate, labelNames,
-        operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
-        repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
-        operationTimeoutMs, operationTracker, orphanRecovery,
-        priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
-      }),
-      ownershipOperation: (fn) => runTimedCoexistenceOperation(
-        'orphan-ownership', fn, { timeoutMs: operationTimeoutMs, parentSignal: signal,
-          operationTracker, logger, repoPath, prNumber }),
-      ownershipTimeoutMs: operationTimeoutMs,
-      ...orphanOptions,
-    });
+    const orphan = await recoverOwnerless();
     if (orphan) return orphan;
   }
   if (isOrphanRecoveryWait(amaClosureResult)) return { outcome: 'ama-pending', amaClosureResult };

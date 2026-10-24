@@ -9,6 +9,9 @@ import { resolveCleanReviewStore } from './queue-clean-review.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
+import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
+import { resolveQueueGitAdapter } from './queue-git.mjs';
+import { handoffDigest } from './queue-handoff.mjs';
 
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
@@ -17,7 +20,10 @@ const terminal = phase => ['merged', 'closed-observed', 'returned-to-closer'].in
 const parked = phase => phase.startsWith('parked-');
 const disposition = (phase, reason) => ({ phase, reason });
 
-export function classifyQueueAdmission(entry, receipt, live) {
+// Execution may supply a mechanically verified derivation from the immutable
+// admission head. It reuses structural policy without inventing a new review
+// or rebinding the signed current-head review to the derived SHA.
+export function classifyQueueAdmission(entry, receipt, live, derivation = null) {
   const s = live?.subject;
   if (!text(s?.sourceRef) || !isDeepStrictEqual(s.lane, entry.lane) || s.prNumber !== entry.prNumber) {
     return disposition('parked-infrastructure', 'subject-unavailable');
@@ -25,14 +31,14 @@ export function classifyQueueAdmission(entry, receipt, live) {
   // Lifecycle reconciliation needs no review, labels, closer, or merge call.
   if (['closed', 'merged'].includes(s.state)) return disposition('closed-observed', `live-${s.state}`);
   if (s.state !== 'open' || !sha(s.head) || !sha(s.baseSha)) return disposition('parked-infrastructure', 'subject-unavailable');
-  if (!sameSha(s.head, entry.head)) return disposition('returned-to-closer', 'external-head-change');
+  if (!sameSha(s.head, derivation?.head ?? entry.head)) return disposition('returned-to-closer', 'external-head-change');
   if (!Array.isArray(s.labels) || s.labels.some(l => !text(typeof l === 'string' ? l : l?.name))) {
     return disposition('parked-hold', 'labels-unavailable');
   }
   const labels = s.labels.map(l => typeof l === 'string' ? l : l.name);
   if (isOperatorHeld(labels)) return disposition('parked-hold', 'operator-hold');
   if (!receipt) return disposition('parked-infrastructure', 'admission-receipt-unavailable');
-  if (receipt.kind === 'clean' || receipt.handoff.dispositions.length === 0) {
+  if (!derivation && (receipt.kind === 'clean' || receipt.handoff.dispositions.length === 0)) {
     const review = live.currentReview;
     if (review?.complete !== true || !text(review.sourceRef)) return disposition('parked-infrastructure', 'current-head-review-unavailable');
     if (String(review.id) !== String((receipt.input ?? receipt.handoff).sourceReview.id) || !sameSha(review.commitId, s.head)
@@ -91,7 +97,7 @@ export function resolveQueueAdmissionAdapters(store) {
  * terminal adjudications use the immutable MGQ-02 exception without re-review.
  * No default credentials, production routing, model judgement or mutation.
  */
-export function createQueueAdmissionService({ store, liveAdapter, now = () => new Date().toISOString(), load } = {}) {
+export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, now = () => new Date().toISOString(), load } = {}) {
   const adapters = resolveQueueAdmissionAdapters(store);
   return { adapterName: adapters.name, order: adapters.order,
     async reconcile({ fence, entryId, deadline }) {
@@ -111,9 +117,22 @@ export function createQueueAdmissionService({ store, liveAdapter, now = () => ne
           live = await readQueueEvidence(liveAdapter, { entry, kind: receipt?.kind ?? null }, wait);
         } catch { /* Unknown evidence parks, never dispatches. */ }
       }
+      let derivation = null, proofUnavailable = false;
+      if (Date.parse(now()) < Date.parse(deadline) && live?.subject?.state === 'open' && entry.candidate && !sameSha(entry.candidate, entry.head)
+        && !sameSha(live.subject.head, entry.head)
+        && [entry.candidate, entry.expectedOldHead].some(head => sameSha(live.subject.head, head)) && entry.proof && receipt
+        && entry.rebase?.sourceReceiptDigest === handoffDigest(receipt.input ?? receipt.handoff)) {
+        // A saved proof is not authority by itself. Recompute it from the
+        // isolated objects before treating our own rewrite as the admission head.
+        try {
+          const git = gitAdapter ?? resolveQueueGitAdapter({ rootDir: store.rootDir, now, load });
+          if (await verifyQueueDerivation({ entry: structuredClone(entry), git, deadline })) derivation = { head: live.subject.head };
+        } catch { proofUnavailable = true; }
+      }
       const at = queueTime(now());
       if (Date.parse(at) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
-      else decision = classifyQueueAdmission(entry, receipt, live);
+      else if (proofUnavailable) decision = disposition('parked-infrastructure', 'rebase-git-unavailable');
+      else decision = classifyQueueAdmission(entry, receipt, live, derivation);
       // Snapshot CAS spans the await: a late recovery cannot overwrite a newer
       // hold, terminal observation, or recovery, even after an ABA phase cycle.
       const priorWait = store.db.pragma('busy_timeout', { simple: true });

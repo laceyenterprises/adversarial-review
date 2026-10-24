@@ -314,3 +314,97 @@ correction rejected all 20/20 under the same reproduction. The final selected
 suite passed 116/116, including the deployed CLI fixture, with 10 consecutive
 mixed-source process trials and 20 consecutive asynchronous recovery refusals. Touched JavaScript lint, contract
 typecheck and whitespace checks also passed. No live service was exercised.
+
+## Mechanical rebase observation (MGQ-04; no activation)
+
+Deploy through the existing review-service deployment path. This source change
+adds no route, config key, service or migration. The three existing queue schema
+migrations must already be present. Production promotion and any runtime-owner
+system service restart remain operator work: identify the owner/domain and
+restart entry through the existing `scripts/os-restart.sh` deployment procedure,
+then verify the running watcher revision separately. Workers must not restart
+services or manufacture queue activity.
+
+From the deployed checkout as its runtime owner, use the existing load-aware
+bounded supervisor to run:
+
+```sh
+node src/finalization/queue-probe.mjs --capability rebase --json
+```
+
+Require `.capabilities.rebase.available == true` and `.runtime.build != null`.
+The probe opens the actual store read-only, checks the shipped queue schema and
+receipt adapters, resolves the same default isolated Git/proof adapter as the
+execution service, and reads the installed Git version with a nominal 1-second
+wait capped at 5 seconds. It hashes the shipped runtime modules, including the
+Git/proof code. This digest identifies the probe process bytes; record the actual
+watcher build/route independently before promotion.
+
+The bounded sample is ordered by publication observedAt, falling back to entry
+updatedAt, with acknowledgement order used only to break ties.
+
+Record prepared/published counts, the bounded recent observation sample, old
+head, candidate, exact base and publication source references. The sample is at
+most 100 entries and does not attest every historical proof. Empty publication
+observations mean pending organic evidence. A missing store/schema/Git adapter
+reports unavailable and performs no migration, claim, workspace creation,
+fetch, push or lane mutation. Availability alone does not assert that the live
+reader, per-operation credentials, recovery drain adapter or routing is composed.
+The default adapter refuses network operations without an injected entitled
+runner; it never borrows the runtime owner's ambient SSH credentials. The existing
+execution brake remains a separate resolved finalization-policy input.
+
+When organically available after a later authorized route promotion, observe a
+disjoint-file publication with its original signed receipt, complete ordered
+proof, leased old/new pair, source signatures, author notice delivery and durable
+publication reference (Git-sourced on explicit push success, even during API
+lag) and subsequent live observation. Same-file upstream edits remain
+conservatively unprovable even when Git rebases without conflict. Recovery evidence must identify prior operation
+stop/drain, authoritative remote head and unchanged candidate/base/deadline.
+Never simulate crashes, holds or force-pushes against production for this probe.
+
+For a parked permission entry, inspect the named author/operator notice intent
+and actual repository/fork/rules rights. Revalidation/readmission belongs to the
+existing admission service and rejoins the tail; a queue-published candidate is
+re-proved against its immutable receipt before derived-head readmission, and a
+retained candidate resumes through rebasing/publishing without recreation. Do not
+edit the queue row. Explicit single-ref remote refusals settle not-applied; an
+explicit drained push success settles without immediate API consistency.
+Ambiguous operations require the existing explicit drain/reconciliation adapter;
+lease expiry or an old-head read alone is insufficient. Keep isolated candidate
+repositories until reconciliation and evidence retention permit operator cleanup.
+Failed preparation removes its unreturned workspace; successful workspaces have
+no automatic retention sweep. Crash orphans and duplicated full prior proofs/live
+snapshots in progress events require retention/compaction follow-up before
+production queue routing. The default synthetic committer is
+`Queue Rebase <queue@example.invalid>`; it does not attest service identity.
+Rollback retains receipts, proof, candidates and unresolved intents. No change to
+the emergency execution brake or the existing smoke promises is part of this slice.
+
+Source validation used only bounded offline fixtures and disposable stores/Git
+repositories under the existing test runner and network guard. The seven selected
+files passed 187/187 cases; after final isolation/source-signature hardening the
+three touched suites passed 42/42, and the terminal-state refinement passed 25/25
+executor cases. These runs cover 190 distinct cases across seven files. The
+unsafe disposable force-push control overwrote author updates in 5/5 trials;
+expected-old-head publication retained author updates in 10/10 consecutive
+trials, and overlapping wakes issued one push in 5/5 consecutive trials. No
+intermediate production concurrency implementation or production experiment was
+used. Sibling owner/admission/handoff and original rebase-proof regressions stayed
+green. Touched-file ESLint, contract typecheck, catalog and whitespace checks
+passed. Deployed runtime-owner probe, actual watcher build, composed transports,
+notice delivery and organic publication evidence remain pending operator work.
+
+
+Recovery verifies every contiguous derivation from the admission head, including
+prior workspaces, before accepting either the current candidate or its proven
+expected old head. This includes a park after a second candidate was prepared
+but before publication. A computed proof mismatch returns to the closer;
+unavailable Git execution parks as infrastructure, and expired patience parks
+before proof execution. Both already-published paths recheck live holds and
+permissions before advancing to checks. Deterministic workspace, remote, runner
+or deadline refusals before transport invocation settle `not-applied` with
+`git:push-not-spawned`; failures after invocation still require authoritative
+results or drain reconciliation. Ambient author/committer environment variables
+and `EMAIL` are removed from local Git execution so replay retains the source
+author and uses the synthetic committer.

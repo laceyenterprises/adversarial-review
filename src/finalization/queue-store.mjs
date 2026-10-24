@@ -109,7 +109,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     progress({ fence, entryId, phase, patch = {}, at, readmit = false, recoveryObservation, expectedEntry }) {
       at = queueTime(at);
       if (!QUEUE_PHASES.includes(phase)) throw new TypeError('invalid queue phase');
-      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission'];
+      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission', 'rebase'];
       if (Object.keys(patch).some(key => !allowed.includes(key))) throw new TypeError('immutable queue entry field');
       return tx(() => {
         assertFence(fence, at);

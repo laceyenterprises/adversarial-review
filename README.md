@@ -2708,3 +2708,63 @@ service does not dispatch incidents or change merge authority through this knob.
 `test/config-loader-incident-dispatch.test.mjs` covers default, explicit booleans
 and invalid values with synthetic configs only. Deploy the reader before enabling
 the setting in a host overlay.
+
+### V2 mechanical rebase (MGQ-04)
+
+`createQueueRebaseService` prepares conservative rebases in isolated repositories,
+proves every ordered change including binary data, whitespace, paths, modes,
+symlinks and gitlinks, and persists the candidate/base/source before the fenced
+expected-old-head push. Empty commits, unsupported histories and unprovable
+preservation return to the closer. Full-index patches must match byte for byte:
+even conflict-free edits to a file changed upstream fail proof. Disjoint-file
+rebases are the supported case. Generated files receive no exception.
+Original signed evidence stays at its source head; author warning and permission
+notice intents remain durable for the delivery composition.
+
+The execution lifecycle is ready → rebasing → publishing → waiting-checks,
+with permission/hold/infrastructure parking outside FIFO and terminal returns
+for author changes or failed proof. Restart verifies the persisted candidate and
+reconciles outstanding operations before retry. A published candidate resumes
+checks without repushing. A no-op keeps the SHA with explicit proof. Outside base
+movement keeps the original absolute deadline and records the derivation chain.
+Admission re-proves a queue-published candidate against its immutable receipt
+before readmission; retained candidates resume via rebasing → publishing. Explicit
+Git push success settles the intent despite API lag, with a Git-sourced publication
+reference. Explicit single-ref remote refusals settle as not-applied; unknown
+transport outcomes still require drain recovery. Failed preparation removes its
+unreturned workspace. Successful workspaces remain for restart proof and require
+operator retention cleanup; no automatic retention sweep is wired. Rewritten
+commits default to `Queue Rebase <queue@example.invalid>` as committer, with the
+original author and message preserved. Full prior proofs and live snapshots are
+still duplicated in progress events; compact evidence storage remains follow-up
+work before production routing.
+
+Recovery verifies every contiguous derivation from the admission head, including
+prior workspaces, before accepting either the current candidate or its proven
+expected old head. This includes a park after a second candidate was prepared
+but before publication. A computed proof mismatch returns to the closer;
+unavailable Git execution parks as infrastructure, and expired patience parks
+before proof execution. Both already-published paths recheck live holds and
+permissions before advancing to checks. Deterministic workspace, remote, runner
+or deadline refusals before transport invocation settle `not-applied` with
+`git:push-not-spawned`; failures after invocation still require authoritative
+results or drain reconciliation. Ambient author/committer environment variables
+and `EMAIL` are removed from local Git execution so replay retains the source
+author and uses the synthetic committer.
+
+These seams remain unwired until lane routing. Network Git requires the existing
+entitled credential mechanism through an injected runner; ambient SSH fallback
+is refused. The existing execution brake applies before preparation and push.
+No new CI or smoke step is added.
+
+Focused offline fixtures are `finalization-queue-rebase-proof.test.mjs`,
+`finalization-queue-rebase.test.mjs` and `finalization-queue-git.test.mjs`.
+After normal deployment, the runtime owner runs
+`node src/finalization/queue-probe.mjs --capability rebase --json` under the
+existing bounded load-aware supervisor. Require
+`.capabilities.rebase.available == true` and `.runtime.build != null` and record
+the Git/proof adapter and actual publication observations. Missing organic
+publications and live-adapter/routing composition remain pending. The probe
+checks the real schema and Git executable and never creates a workspace or
+mutates a lane. See the [operator procedure](docs/finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
+and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).

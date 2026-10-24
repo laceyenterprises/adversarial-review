@@ -44,6 +44,7 @@ import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
 import { CHUNK_HEAD_LEGEND, annotateRemovedDiffLines, buildPostImageContext, splitHunkPostImages } from './reviewer-chunk-context.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
+  AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   resolveAgyPrintTimeoutMs,
   resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
@@ -2917,6 +2918,11 @@ async function reviewWithGemini(diff, extraContext = '', {
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
           timeout: callTimeoutMs,
+          // Leave agy's graceful timeout plus subprocess slack inside an
+          // explicit allocation. The CLI has a one-second floor; allocations
+          // below 31s still rely on the authoritative call timer.
+          ...(timeoutMs != null ? { printTimeoutMs: Math.min(resolveAgyPrintTimeoutMs(reviewEnv),
+            Math.max(1000, callTimeoutMs - AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS)) } : {}),
           signal,
           maxBuffer: 10 * 1024 * 1024,
           ...(identityRun ? { identity: identityRun } : {}),
@@ -3639,7 +3645,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   // plan-derived deadline, shared by all calls and in-call retries.
   const timeoutPlan = reviewerModel === 'gemini'
     ? resolveAgyChunkTimeoutPlan({ chunkCount: split.chunks.length, promptBytes, env }) : null;
-  if (timeoutPlan) console.error(`[reviewer] agy-chunk-plan chunks=${timeoutPlan.chunkCount} perChunkTimeoutMs=${timeoutPlan.perChunkTimeoutMs} timeoutMs=${timeoutPlan.timeoutMs} capMs=${timeoutPlan.capMs} diffBytes=${agyPromptBytes(diff)} contextBytes=${agyPromptBytes(extraContext)} promptBytes=${promptBytes ?? 'unknown'}`);
+  if (timeoutPlan) console.error(`[reviewer] agy-chunk-plan chunks=${timeoutPlan.chunkCount} perChunkTimeoutMs=${timeoutPlan.perChunkTimeoutMs} timeoutMs=${timeoutPlan.timeoutMs} capMs=${timeoutPlan.capMs} diffBytes=${agyPromptBytes(diff)} contextBytes=${agyPromptBytes(extraContext)} promptBytes=${promptBytes ?? 'unknown'} requestedPerChunkTimeoutMs=${timeoutPlan.requestedPerChunkTimeoutMs} requiredMs=${timeoutPlan.requiredMs}`);
   onChunkPlan?.(timeoutPlan);
   const controller = new AbortController();
   const chunkSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;

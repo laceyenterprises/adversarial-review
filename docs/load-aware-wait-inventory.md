@@ -365,11 +365,11 @@ polls. Age comparisons and persisted expiry values do not arm a timer.
 | --- | --- | --- |
 | `reviewer-harness.mjs:2269` — fallback lock `waitMs` | No; lock deadline comparison, fixed short retry sleeps | Once; centrally clamped |
 | `argus-security-verdict.mjs:265` — stall deadline | No; elapsed-age comparison | Once; centrally clamped |
-| `reviewer-timeout.mjs:28` — chunk cap | Yes, through accepted chunk plan and process deadline | Once; cap clamped, over-cap plans refuse, process slack clamped |
+| `reviewer-timeout.mjs:28` — chunk cap | Yes, through accepted chunk plan and process deadline | Requested call scales once; unscaled cap bounds equal chunk shares after chunk/process slack (LAC-2100); infeasible positive allocations refuse |
 | `reviewer-timeout.mjs:64` — reviewer timeout | Yes; subprocess, wall-clock and poll watchdog budgets | Once; centrally clamped, poll no longer re-scales |
 | `reviewer-timeout.mjs:75` — progress timeout | Yes; subprocess idle timer | Once; centrally clamped |
 | `reviewer-timeout.mjs:91` — first-output timeout | Yes when enabled; zero remains disabled | Once; centrally clamped |
-| `reviewer-timeout.mjs:102` — agy print timeout | Yes through agy subprocess budget; also passed to CLI | Once; centrally clamped, added subprocess slack clamped |
+| `reviewer-timeout.mjs:102` — agy print timeout | Yes through agy subprocess budget; also passed to CLI | Once; explicit call allocations clamp print time to allocation minus 30s (1s CLI floor); call abort remains authoritative; added subprocess slack clamped |
 | `codex-oauth-responses.mjs:172` — direct response wall timeout | Yes; `setTimeout` | Once; centrally clamped, passed unchanged to consumer |
 | `recovery-reaper.mjs:120` — running reviewer threshold | No; elapsed-age comparison | Once; centrally clamped |
 | `recovery-reaper.mjs:132` — stale closer threshold | No; elapsed-age comparison | Once; centrally clamped |

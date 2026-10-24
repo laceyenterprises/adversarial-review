@@ -367,6 +367,16 @@ new PR
   active, open session's timeout and lease, before its parent timer is extended.
   Deadlines measure total time from process start, are scaled once through the
   per-call budgets, and cannot exceed the unscaled chunk cap or timer limit.
+  LAC-2100 allocates each chunk the smaller of the requested load-scaled call
+  budget and its static equal share of the cap after existing chunk/process slack.
+  Explicit call allocations clamp agy print time to allocation minus 30 seconds
+  (one-second CLI floor); the call abort timer still bounds preparation/retries
+  and allocations below 31 seconds. Unused shares are not redistributed, and
+  preparation consumes the fixed five-minute preparation/posting reserve.
+  The unconstrained `requiredMs` remains diagnostic; `timeoutMs` is the allocated
+  chunk-loop budget. A cap too small for one millisecond per chunk and both
+  slacks retains terminal `reviewer-chunk-budget-exceeded` (exit 77), with
+  `minimumCapMs` sizing evidence. No reviewer, verdict or merge gate is waived.
   Orphan reconciliation and detached reservation expiry read the persisted plan
   budget; no lifecycle state or recovery cap changes.
   Detached reservation expiry uses this database budget only for Gemini;

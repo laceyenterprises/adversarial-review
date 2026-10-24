@@ -113,3 +113,19 @@ historical round explicitly. Without `--workspace`, reply links are retained
 with `missing-history` rather than guessed commit evidence. Run migrations and
 backfill through the normal deployment/maintenance lane after merge; no live
 database, service or configuration change is part of a coding test.
+
+## Non-blocking backlog (FINDINGSBATCH-01)
+
+`finding_backlog` references the existing finding records, retaining repository,
+PR, reviewed head, content hash, reviewer family and top-level cited path as its
+area (`_uncited` for absent paths). The final posted review is selected by capture
+time, end time, start time and pass ID, matching the captured-review resolver.
+A merge-state transition enrolls its non-blocking findings in the same SQLite
+transaction. Ready-to-merge capture additionally binds the exact head, body digest
+and parsed count; failure must defer the strict-off merge. Enrollment is
+idempotent across retries and duplicate passes on a head by repository, PR,
+head and content hash. Late finding inserts on an already merged PR also enroll.
+No historical full-corpus scan runs at deployment. Records are never pruned.
+
+The migration is `migrations/20261024_findings_backlog.sql`, installed by the
+existing review-state migration runner. All storage remains in `data/reviews.db`.

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
-import { declaredGeneratedBlocks, proveGeneratedBlocks, runDerivedGenerator, withDerivedCheckout } from '../src/ama/derived-artifacts.mjs';
+import { declaredGeneratedBlocks, generatedBlock, proveGeneratedBlocks, runDerivedGenerator, withDerivedCheckout } from '../src/ama/derived-artifacts.mjs';
 
 const start = '<!-- smv:state-machines:start -->';
 const end = '<!-- smv:state-machines:end -->';
@@ -16,14 +16,15 @@ const declaration = { path: 'docs/*.md', start, end, cwd: '.', command: [process
 function fixture(t, { handEdit = false, outside = false, failure = false, noop = false, duplicate = false,
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
   authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false,
-  additionalDeclarations = [], declarationLast = false } = {}) {
+  additionalDeclarations = [], declarationLast = false, paragraphBoundary = false,
+  prosePrefix = '', baseRow = 'Base row', tail = 'Tail' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_AUTHOR_NAME: 'Fixture Builder', GIT_AUTHOR_EMAIL: 'builder@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture Builder', GIT_COMMITTER_EMAIL: 'builder@example.invalid' } }).trimEnd();
-  const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows ? rows + '\n' : ''}${end}\nTail\n`;
+  const document = (rows, prose = 'Base prose') => `${prosePrefix}${prose}\n${start}\n${rows ? rows + '\n' : ''}${end}\n${paragraphBoundary ? '\n' : ''}${tail}\n`;
   const baseProse = authorShift < 0 ? 'Base prose\nBase second line\nBase third line' : 'Base prose';
   const authorProse = authorShift > 0 ? 'Base prose\nAuthor introduction\nAuthor details'
     : authorShift < 0 ? 'Base prose' : outside ? 'Author prose' : 'Base prose';
@@ -33,7 +34,7 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
   mkdirSync(join(root, 'docs'));
   const entries = declarationLast ? [...additionalDeclarations, entry] : [entry, ...additionalDeclarations];
   writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: entries }));
-  writeFileSync(join(root, 'inventory.txt'), emptyBase ? '' : 'Base row\n');
+  writeFileSync(join(root, 'inventory.txt'), emptyBase ? '' : baseRow + '\n');
   writeFileSync(join(root, 'render.mjs'), failure ? 'process.exit(1);' : noop ? '' : `
 import fs from 'node:fs';
 const path = ${JSON.stringify(generatorCwd === '.' ? 'docs/guide.md' : 'guide.md')};
@@ -41,7 +42,7 @@ const text = fs.readFileSync(path, 'utf8');
 fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${start.length}) + '\\n'
   + fs.readFileSync(${JSON.stringify(generatorCwd === '.' ? 'inventory.txt' : '../inventory.txt')}, 'utf8') + text.slice(text.indexOf(${JSON.stringify(end)})));
 `);
-  writeFileSync(join(root, 'docs/guide.md'), document(emptyBase ? '' : 'Base row', baseProse));
+  writeFileSync(join(root, 'docs/guide.md'), document(emptyBase ? '' : baseRow, baseProse));
   git('add', 'package.json', 'inventory.txt', 'render.mjs', 'docs/guide.md');
   git('commit', '-qm', 'Fixture base');
   const base = git('rev-parse', 'HEAD');
@@ -52,7 +53,7 @@ fs.writeFileSync(path, text.slice(0, text.indexOf(${JSON.stringify(start)}) + ${
   const builder = git('rev-parse', 'HEAD');
   // Keep the inventory input unchanged in this fixture so the documentation is
   // the sole primary change and its final compare entry can disappear entirely.
-  let finalText = document(handEdit ? 'Base row\nHand edited row' : emptyBase ? '' : 'Base row', outside ? baseProse : authorProse);
+  let finalText = document(handEdit ? `${baseRow}\nHand edited row` : emptyBase ? '' : baseRow, outside ? baseProse : authorProse);
   if (repairedInventory) {
     writeFileSync(join(root, 'inventory.txt'), 'Base row\nDerived row\n');
     finalText = document('Base row\nDerived row');
@@ -116,6 +117,37 @@ test('regenerated author rows are preserved, including a file absent from the fi
   assert.equal(result.generatedBlockProofs.length, 1);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
   assert.equal(readFileSync(join(f.root, 'docs/guide.md'), 'utf8').includes('Base row'), true);
+});
+
+test('generated block offsets slice UTF-8 bytes including Unicode markers and CRLF', () => {
+  const markers = { start: '<!-- début 😀 -->', end: '<!-- fin 漢字 -->' };
+  for (const newline of ['\n', '\r\n']) {
+    for (const interior of ['', `café — 😀${newline}`]) {
+      const prefix = `Préface — 😀${newline}${markers.start}${newline}`;
+      const suffix = `${markers.end}${newline}Après 漢字${newline}`;
+      const bytes = Buffer.from(prefix + interior + suffix);
+      const block = generatedBlock(bytes, markers);
+      assert.equal(block.startOffset, Buffer.byteLength(prefix));
+      assert.equal(block.endOffset, Buffer.byteLength(prefix + interior));
+      assert.deepEqual(bytes.subarray(block.startOffset, block.endOffset), Buffer.from(interior));
+      assert.deepEqual(block.bytes, Buffer.from(markers.start + newline + interior + markers.end + newline));
+    }
+  }
+});
+
+test('UTF-8 regeneration clears only the interior and refuses edits to either exterior', async t => {
+  const prosePrefix = 'Préface — 😀 ', baseRow = 'Base row — café 漢字 😀', tail = 'Tail — fin 😀';
+  const f = fixture(t, { prosePrefix, baseRow, tail });
+  for (const edit of [null, 'Préface', 'fin']) {
+    const result = await prove(f, { runGeneratorImpl: async args => {
+      const path = join(args.scratch, args.cwd, 'docs/guide.md');
+      assert.equal(readFileSync(path, 'utf8'), `${prosePrefix}Base prose\n${start}\n${end}\n${tail}\n`);
+      await offlineGenerator(args);
+      if (edit) writeFileSync(path, readFileSync(path, 'utf8').replace(edit, 'changed'));
+    } });
+    assert.equal(result.generatedBlockProofs.length, edit ? 0 : 1);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).ok, !edit);
+  }
 });
 
 test('shared globs skip missing or ambiguous markers before and after valid declarations', async t => {
@@ -463,4 +495,24 @@ test('real generator sandbox denies network and outside writes; bounds hung gene
   } });
   assert.ifError(generatorFailure);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+});
+
+test('LAC-2101 #9110: reproduced interior cannot erase a paragraph boundary or prose outside markers', async t => {
+  const saved = JSON.parse(readFileSync(new URL('./fixtures/lac-2101-preservation.json', import.meta.url)))['9110'];
+  assert.ok(saved.nativeFailure.baseRegion[1] < saved.nativeFailure.reviewedRange[0]);
+  assert.ok(saved.finding.includes('`3762-3765`'));
+  for (const outsideChange of [text => text.replace(`${end}\n\n`, `${end}\n`), text => text.replace('Tail', 'Changed tail')]) {
+    const f = fixture(t, { paragraphBoundary: true });
+    const result = await prove(f, { runGeneratorImpl: async args => {
+      await offlineGenerator(args);
+      const path = join(args.scratch, args.cwd, 'docs/guide.md');
+      writeFileSync(path, outsideChange(readFileSync(path, 'utf8')));
+    } });
+    assert.deepEqual(result.generatedBlockProofs, []);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  }
+  // Historical #9110 had no declaration. A generated file name or review of
+  // adjacent lines cannot introduce block authority retroactively.
+  const legacy = fixture(t, { noDeclarations: true, outside: true });
+  assert.deepEqual((await prove(legacy)).generatedBlockProofs, []);
 });

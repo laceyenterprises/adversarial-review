@@ -1776,6 +1776,17 @@ repository's existing `package.json` manifest and must be unchanged from the
 merge base. A bounded, network-denied scratch generator must reproduce the block
 exactly; marker lines and changes outside the block remain protected. See
 DERIVEDBLOCK-01 in the [AMA closure runbook](docs/RUNBOOK-ama-closure.md).
+LAC-2101 additionally rejects a generator that changes surrounding bytes,
+including paragraph separators. Explicit secondary finding locations and literal
+brace path lists retain per-path line coverage; prose does not grant authority.
+Legacy npm archives can use an owner-registered exact-head fixed-pack receipt,
+followed by fresh sandbox reproduction. See the
+[receipt procedure](docs/RUNBOOK-ama-closure.md#legacy-review-required-npm-rebuilds-lac-2101)
+and [RCA with residual renderer scope](docs/INCIDENT-2026-10-24-legacy-artifact-and-finding-preservation.md).
+Offline regressions are `primary-change-lines`, `primary-change-store`,
+`derived-artifacts` and `primary-change-generated-blocks` under `test/`.
+Lifecycle states, transitions and existing smoke promises are unchanged; native
+receipt registration and live recovery are separate operator work.
 
 [post-merge-verify.json](post-merge-verify.json) is the SMV-01 declaration for the
 registered `tools/adversarial-review` repository integration. Parent discovery

@@ -1583,7 +1583,7 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
       risk_class: 'low',
       remediation_pending: 0,
       reviewer: 'claude',
-      reviewer_login: 'claude-reviewer-lacey',
+      reviewer_login: 'reviewer-06',
       // The closer resolves blocking/non-blocking findings from the SAME authoritative
       // current-head body it resolves the verdict from
       // (`resolveSettledReviewVerdict`), NOT from an injected
@@ -1612,12 +1612,12 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     labelNames: ['adversarial-merge-requested'],
     operatorApprovalEvent: null,
     adversarialMergeRequestedEvent: {
-      actor: 'VirtualPaul',
+      actor: 'operator-06',
       createdAt: '2026-06-11T23:20:00.000Z',
       nodeId: 'LE_adversarial_merge_requested',
       headSha: 'abc123',
     },
-    repoPath: 'laceyenterprises/adversarial-review',
+    repoPath: 'subject-06',
     prNumber: 265,
     currentRevisionRef: 'abc123',
     logger: { warn() {} },
@@ -1632,6 +1632,8 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
         return { enabled: true };
       },
     }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'failed-closed',
+      reason: 'merge-retry-budget-exhausted', attempts: 2 }),
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
       return {
@@ -1663,7 +1665,7 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
   assert.deepEqual(observed.options.adversarialMergeRequested, {
     applied: true,
     observedRevisionRef: 'abc123',
-    actor: 'VirtualPaul',
+    actor: 'operator-06',
     eventId: 'LE_adversarial_merge_requested',
     observedAt: '2026-06-11T23:20:00.000Z',
   });
@@ -2387,7 +2389,7 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer di
       review_body: '## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
     }),
     dispatchJob: {
-      repo: 'laceyenterprises/adversarial-review',
+      repo: 'subject-06',
       prNumber: 53,
       headSha: 'abc123',
       prUpdatedAt: '2026-05-07T12:05:00.000Z',
@@ -2406,7 +2408,7 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer di
     },
     labelNames: [],
     mergeAgentRequestEvent: null,
-    repoPath: 'laceyenterprises/adversarial-review',
+    repoPath: 'subject-06',
     prNumber: 53,
     currentRevisionRef: 'abc123',
     logger: { log() {}, warn: (m) => warnings.push(String(m)), error() {} },
@@ -2433,6 +2435,8 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer di
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: 'not-taken',
         reason: 'not-eligible',
+        liveGate: { candidateHead: 'abc123', prState: 'OPEN', mergeable: 'MERGEABLE',
+          requiredChecks: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] },
       }),
       resolveReviewCycleExhaustionImpl: () => ({
         reviewCycleExhausted: true,

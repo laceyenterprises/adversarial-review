@@ -7,7 +7,7 @@ import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mj
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop } from './ama/hammer-stop-hold.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
-import { bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
+import { bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { closureOwnerShadowEvidence, shadowNextActionLater } from './pr-next-action-consumer.mjs';
@@ -75,8 +75,6 @@ import {
 } from './daemon-merge-park-log.mjs';
 import {
   clearDaemonRouteDisagreement,
-  daemonRouteDisagreementForcesHammer,
-  observeDaemonRouteDisagreement,
 } from './daemon-route-disagreement.mjs';
 import {
   findLiveAmaCloserLease,
@@ -661,7 +659,8 @@ export const DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5_000;
 // before the wait stops being exempt from the retain-loop cap.
 export const FINAL_ROUND_CI_WAIT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 
-// Deliverable 2 — daemon-fail-closed hammer fallback classification.
+// Retained source-rollback classifiers. Runtime ownership uses nextAction;
+// these exports do not select or force a daemon-decline successor.
 //
 // When the daemon clean-path fails closed on a REMEDIABLE gate, a fleet-worker
 // (identity-resolved) clean PR should be handed to the SAME capped hammer the
@@ -1776,6 +1775,14 @@ async function dispatchAmaClosureFor({
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
   if (closureOwnerSink) closureOwnerSink.shadowInput = { input: closureOwnerInput, autonomousMergeExecutionEnabled };
+  if (shared.decision.action === 'done') {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, prTerminal: true,
+      reason: shared.decision.reason }, { amaEnabled: true });
+  }
+  if (shared.decision.action === 'operator-hold' && autonomousMergeExecutionEnabled) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: shared.decision.reason }, { amaEnabled: true });
+  }
   const wouldUseDaemonPath = isDaemonMergeReviewAllowed(reviewState, { strictMode });
   const disabledEligibility = evaluateMergeEligibility({
     verdict: settledVerdict,
@@ -2242,10 +2249,12 @@ async function dispatchAmaClosureFor({
   if (closureOwnerSink) closureOwnerSink.shadowInput = { input: { ...closureOwnerInput, attested: hamTerminalRemediationValidated },
     autonomousMergeExecutionEnabled };
 
-  const terminalHeadPreflight = hamTerminalRemediationValidated || (liveHeadCloserAuthored
-    && allowStaleReviewHeadHammerResume && reviewState.blockingFindingState === 'known'
-    && reviewState.blockingFindingCount === 0);
-  if (['review', 'remediate'].includes(shared.decision.action) && !terminalHeadPreflight) {
+  const terminalEvidenceProbe = liveHeadCloserAuthored && allowStaleReviewHeadHammerResume
+    && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
+    && shared.decision.queue.intent === 'dispatch'
+    && ['review', 'hammer'].includes(shared.decision.action)
+    && reviewState.attestation !== 'invalid';
+  if (['review', 'remediate'].includes(shared.decision.action) && !terminalEvidenceProbe) {
     const decision = shared.decision;
     let boundedWait = null;
     try {
@@ -2292,32 +2301,14 @@ async function dispatchAmaClosureFor({
       eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
       sloMs: cfg.closureLagSloMs, logger });
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
-  const handoffReviewHasFindings = handoffLease?.status === 'handed-to-review'
-    && reviewState.headSha === currentPrHeadSha
-    && (reviewState.blockingFindingCount > 0 || (strictMode && reviewState.nonBlockingFindingCount > 0));
-  const observeDaemonGate = live => {
-    const primary = live.primaryChange ? checkPrimaryChange(live.primaryChange, live.candidateHead,
-      { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }) : null;
-    shared = reviseClosureNextAction(shared, {
-      pr: { ...shared.snapshot.observations.pr.value, headSha: live.candidateHead,
-        state: live.prState, mergeable: live.mergeable, mergeStateStatus: live.mergeStateStatus,
-        ...(Array.isArray(live.labels) ? { labels: live.labels } : {}) },
-      checks: { ...shared.snapshot.observations.checks?.value,
-        conclusion: live.requiredChecks === true ? 'SUCCESS' : summarizeChecksConclusion(live.requiredChecks, { env, cfg }),
-        ...(Array.isArray(live.requiredChecks) ? { rollup: live.requiredChecks } : {}) },
-      ...(primary || live.terminalReviewValidated ? { progress: { ...shared.snapshot.observations.progress?.value,
-        ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason } } : {}),
-        ...(live.terminalReviewValidated ? { terminalReview: { validated: true,
-          headSha: live.candidateHead, reviewedHeadSha: reviewState.headSha } } : {}),
-      } } : {}),
-    }, passSnapshot);
+  const observeDaemonGate = (live, observed = null) => {
+    shared = observed || reviseDaemonGate(shared, live, passSnapshot);
     if (closureOwnerSink) closureOwnerSink.shared = shared;
   };
-  const daemonCleanMerge = shared.decision.action === 'hammer' && !terminalHeadPreflight
+  const daemonSelected = (shared.decision.action === 'daemon-merge' && shared.decision.actor === 'daemon')
+    || shared.decision.action === 'wait-for-CI' || terminalEvidenceProbe;
+  const daemonCleanMerge = !daemonSelected
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: shared.decision.reason }
-    : handoffReviewHasFindings
-    ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'review-handoff-findings',
-      reasons: [reviewState.blockingFindingCount > 0 ? 'blocking-findings-present' : 'non-blocking-findings-present'] }
     : orphanRecovery?.ownerProof
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'ownerless-hammer-recovery' }
     : priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
@@ -2344,6 +2335,8 @@ async function dispatchAmaClosureFor({
       authoritativeReviewerLogins,
       dismissStaleRequestChangesOnResolved,
       hamTerminalRemediationValidated,
+      sharedNextAction: shared,
+      passSnapshot,
       onGateSnapshot: observeDaemonGate,
       emitProtectivePredecessorFindingImpl: emitProtectivePredecessorFindingImpl
         || ((finding) => emitProtectivePredecessorFindingToLog(logger, finding)),
@@ -2360,6 +2353,10 @@ async function dispatchAmaClosureFor({
   );
   throwIfAborted(signal);
   if (daemonCleanMerge?.liveGate) observeDaemonGate(daemonCleanMerge.liveGate);
+  if (daemonSelected && !orphanRecovery?.ownerProof) {
+    shared = daemonCleanMerge?.nextActionShared || observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
+  }
+  if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonCleanMerge?.reason)) {
     return withAmaDispatchMetadata({ ...daemonCleanMerge, dispatched: false, skipMergeAgent: true }, { amaEnabled: true });
   }
@@ -2387,16 +2384,6 @@ async function dispatchAmaClosureFor({
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
       needsOperator: true, missingEvidence, daemonCleanMerge }, { amaEnabled: true });
   }
-  const cleanReviewMergePath = () => {
-    const reasons = daemonCleanMerge?.reasons || [];
-    if (settledVerdict !== 'settled-success'
-      || !isDaemonMergeReviewAllowed(reviewState, { strictMode })
-      || daemonCleanMerge?.reason === 'stale-head'
-      || reasons.some(reason => reason !== 'ci-not-green')) return false;
-    // Only fresh daemon evidence can distinguish recovery from an empty
-    // candidate snapshot hiding a real failure or a route disagreement.
-    return daemonCleanMerge?.ciMergePathPending === true;
-  };
 
   if (!orphanRecovery?.ownerProof && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
@@ -2425,26 +2412,13 @@ async function dispatchAmaClosureFor({
         reason: daemonCleanMerge.reason || 'failed-closed',
       });
     }
-    // Deliverable 2 — daemon-fail-closed hammer fallback. When the daemon
-    // clean-path fails closed on a REMEDIABLE gate (ci-not-green, pr-not-mergeable
-    // conflict, or stale-head) for an attributed fleet-worker PR, DO NOT park:
-    // fall through to the SAME capped `maybeDispatchAmaCloser` hammer dispatch the
-    // `not-taken` path uses. That hammer re-validates the required gate at the
-    // post-remediation head and merges under its own lease, and every hammer
-    // dispatch is bounded by the per-PR hammer-retry-cap (loud GBI operator alert
-    // at the ceiling — never an uncapped re-dispatch). NON-remediable gates
-    // (worker-identity-unresolved, lease-not-held) and permanent/transient
-    // merge failures still hold below.
-    const daemonFailedClosed =
-      daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED;
-    const hammerRemediableFallback =
-      daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
+    // The common decision owns handoff after live execution observations.
+    // Safety refusals and unreadable evidence cannot be repair shortcuts.
+    const hammerRemediableFallback = hasHammerDispatchIntent(shared, {
+      repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    });
     if (hammerRemediableFallback) {
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
-      if (cleanReviewMergePath()) {
-        return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
-          reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
-      }
       const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,
@@ -2520,13 +2494,6 @@ async function dispatchAmaClosureFor({
   }
 
   const [owner, name] = repoPath.split('/');
-  // Preserve all daemon protective holds above. Once the merge lane declined
-  // no-CI or cancelled-recovery work, a clean mergeable head can wait here.
-  // Conflicts, stale heads and real CI failures retain capped HAM repair.
-  if (cleanReviewMergePath()) {
-    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
-      reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
-  }
   if (['review', 'remediate', 'wait-for-CI'].includes(shared.decision.action)) {
     const decision = shared.decision;
     let boundedWait = null;
@@ -2642,37 +2609,9 @@ async function dispatchAmaClosureFor({
       })
     : [];
 
-  // CIDEDUPE-01: past this point the daemon declined (`not-taken`) or failed
-  // closed on a hammer-remediable gate. If the closer has already answered
-  // `daemon-clean-route` on this head more times than the bound allows, stop
-  // re-selecting a daemon that keeps declining and hand over to the capped hammer.
-  const daemonDeclined = !daemonCleanMerge?.disposition
-    || daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN;
-  const routeDisagreementHead = currentPrHeadSha || reviewState.headSha || null;
-  const daemonDeclineHammerRemediable = isDaemonNotTakenHammerRemediable(daemonCleanMerge);
-  const daemonDeclineTransientRead = isDaemonNotTakenTransientRead(daemonCleanMerge);
-  const forceHammerAfterRouteDisagreement = daemonDeclined && daemonRouteDisagreementForcesHammer({
-    rootDir,
-    repo: repoPath,
-    prNumber,
-    headSha: routeDisagreementHead,
-    daemonCleanMerge,
-    hammerRemediable: daemonDeclineHammerRemediable,
-    logger,
-  });
-  if (shared.decision.action === 'daemon-merge'
-    && (isDaemonFailClosedHammerRemediable(daemonCleanMerge) || forceHammerAfterRouteDisagreement)) {
-    shared = reviseClosureNextAction(shared, { progress: {
-      ...shared.snapshot.observations.progress?.value,
-      daemonRepair: { admitted: true, headSha: currentPrHeadSha },
-    } }, passSnapshot);
-    if (closureOwnerSink) closureOwnerSink.shared = shared;
-  }
   const dispatchContext = {
     orphanRecovery,
     automatedRecovery,
-    forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge)
-      || forceHammerAfterRouteDisagreement,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),
@@ -3011,34 +2950,6 @@ async function dispatchAmaClosureFor({
     return withAmaDispatchMetadata(result, { amaEnabled: true });
   }
 
-  // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined
-  // it this tick. Never silent: log the daemon's reason, count it per head, and
-  // past the bound park for the operator when the hammer cannot take over.
-  if (result?.reason === 'daemon-clean-route' && daemonDeclined) {
-    const disagreement = observeDaemonRouteDisagreement({
-      rootDir,
-      repo: repoPath,
-      prNumber,
-      headSha: routeDisagreementHead,
-      daemonCleanMerge,
-      hammerRemediable: daemonDeclineHammerRemediable,
-      transientRead: daemonDeclineTransientRead,
-      recordParkImpl: recordDaemonMergePark,
-      logger,
-    });
-    if (disagreement.parkResult) {
-      return withAmaDispatchMetadata(disagreement.parkResult, { amaEnabled: true });
-    }
-  }
-  if (!result?.dispatched && !result?.needsOperator && !result?.boundedWait
-    && (isDaemonNotTakenTransientRead(daemonCleanMerge) || daemonCleanMerge?.ciMergePathPending === true)) {
-    const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
-      headSha: currentPrHeadSha, reason: backgroundSettled
-        ? result?.reasons?.join(', ') || result?.reason || 'closure-pending'
-        : daemonCleanMerge.reasons?.join(',') || 'pending-required-checks', env });
-    result = { ...result, recoveryWait: true, boundedWait, retryAfterMs: boundedWait.retryAfterMs,
-      ...(boundedWait.exhausted ? { needsOperator: true } : {}) };
-  }
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
@@ -3160,8 +3071,13 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   }
   // A merge completed during closure makes this tick's OPEN candidate stale.
   // Settle before the ownerless watchdog can retain or redrive that PR.
+  if (amaClosureResult?.nextAction?.action === 'done') {
+    return { outcome: 'pr-terminal', terminalReason: amaClosureResult.nextAction.reason, amaClosureResult };
+  }
   if (amaClosureResult?.reason === 'daemon-merged') {
-    return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult };
+    return amaClosureResult.daemonCleanMerge?.remoteMergedConfirmed === true
+      ? { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult }
+      : { outcome: 'ama-pending', amaClosureResult };
   }
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
     [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
@@ -3216,6 +3132,9 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   }
   if (['remediate', 'wait-for-CI'].includes(amaClosureResult?.nextAction?.action)) {
     return { outcome: 'ama-pending', amaClosureResult };
+  }
+  if (amaClosureResult?.nextAction?.action === 'operator-hold') {
+    return { outcome: 'await-operator', amaClosureResult };
   }
   if (amaClosureResult?.boundedWait) {
     // This route already owns its bounded wait and its one page. Do not let

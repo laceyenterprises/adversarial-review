@@ -634,7 +634,7 @@ if (scenario === 'clean') {
   assert.equal(wakes, 2);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
-  const { closureOwnerFromDecision, observeClosureResult } = await import('../../src/ama/closure-next-action.mjs');
+  const { closureOwnerFromDecision, observeClosureResult, reviseClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
   for (const result of [{ reason: 'deferred-by-drain', drainEpoch: 'epoch-05' },
     { capacity: { inFlight: 7, cap: 7, workerClass: 'hammer' } }]) {
     const constrained = observeClosureResult(wakeShared, result);
@@ -659,6 +659,24 @@ if (scenario === 'clean') {
   assert.equal(held.action, 'hold');
   assert.equal(held.nextActionShared.decision.actor, 'closure-recovery');
   assert.equal(held.nextActionShared.decision, stopPage.payload.nextAction);
+
+  const { observeDaemonGate, observeDaemonResult } = await import('../../src/ama/closure-next-action.mjs');
+  const daemonSnapshot = deriveNextActionSnapshot({ base: wakeShared.snapshot,
+    observations: { leases: { closer: null }, launches: { closer: null } } });
+  const daemonShared = { snapshot: daemonSnapshot, decision: nextAction(daemonSnapshot) };
+  assert.equal(daemonShared.decision.actor, 'daemon');
+  const redDaemon = observeDaemonGate(daemonShared, { candidateHead: retrySubject.headSha,
+    prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
+  assert.equal(redDaemon.decision.actor, 'hammer');
+  const recoveringCi = observeDaemonResult(daemonShared, { reason: 'not-eligible', ciMergePathPending: true });
+  assert.equal(recoveringCi.decision.actor, 'ci');
+  const liveHammer = reviseClosureNextAction(daemonShared, { launches: {
+    closer: { headSha: retrySubject.headSha, row: { status: 'running' } } } });
+  assert.equal(liveHammer.decision.queue.intent, 'owned');
+  const receipt = observeDaemonResult(daemonShared, { disposition: 'merged', merged: true });
+  assert.equal(receipt.decision.actor, 'closure-recovery');
+  assert.equal(receipt.decision.reason, 'merge-receipt-unconfirmed');
+  assert.equal(daemonShared.decision.actor, 'daemon');
 
   const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
   const closeoutAt = '2026-01-01T00:00:00.000Z';

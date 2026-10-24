@@ -338,6 +338,9 @@ function closureArgs(overrides = {}) {
         return { enabled: true };
       },
     }),
+    // These fixtures exercise an already selected repair workflow.
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'failed-closed',
+      reason: 'merge-retry-budget-exhausted', attempts: 2 }),
     mergeabilitySampleDelayMs: 0,
     ...overrides,
   };
@@ -348,7 +351,7 @@ test('production closure context rechecks a parent merged after candidate inspec
     let checked = 0;
     const args = closureArgs({
       resolveAmaHammerDispatchModeImpl: () => 'inline',
-      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible' }),
+      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'failed-closed', reason: 'merge-retry-budget-exhausted', attempts: 2 }),
       maybeDispatchAmaCloserImpl: payload => {
         assert.equal(payload.dispatchContext.baseBranch, 'feature/parent');
         return maybeDispatchAmaCloser({ ...payload,
@@ -745,7 +748,8 @@ for (const corrupt of [false, true]) {
       const result = await resolveMergeAgentCoexistenceForWatcher({
         ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
         maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
-          skipMergeAgent: true, needsOperator, reason }),
+          skipMergeAgent: true, needsOperator, reason,
+          ...(reason === 'daemon-merged' ? { daemonCleanMerge: { remoteMergedConfirmed: true } } : {}) }),
         recoveryOptions: { pageImpl: async () => assert.fail('terminal/safety results do not page recovery') },
       });
       assert.equal(result.outcome, outcome);
@@ -869,7 +873,7 @@ for (const mode of ['inline', 'background']) {
       [['merge-agent-requested'], scopedEvent(), true],
     ]) {
       const held = await run(labels, event, remediationPending);
-      assert.notEqual(held.outcome, 'dispatch-merge-agent');
+      assert.notEqual(held.outcome, 'dispatch-merge-agent', JSON.stringify({ labels, remediationPending, head: event.headSha }));
       assert.equal(held.dispatchEnv, undefined);
     }
   });

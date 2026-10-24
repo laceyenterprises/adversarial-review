@@ -538,9 +538,9 @@ Clean-head CI observation retains the existing daemon preflight, including
 no-CI bootstrap and cancelled-check recovery. Its bounded live gate reads update
 the shared generation before mutation. Validated terminal-head recovery retains the existing daemon preflight. Its
 head-bound terminal proof updates the decision before mutation; a moved head
-cannot inherit that proof. The existing qualified daemon repair
-fallback is recorded as head-bound admission evidence in the common policy;
-it cannot waive an earlier review, remaining remediation round, stop or cap.
+cannot inherit that proof. Daemon execution observations update the common policy with head-bound facts;
+repair admission cannot waive an earlier review, remaining remediation round,
+stop or cap.
 The existing head-scoped approval lane uses the same actor validator as the
 daemon; unclean review overrides still require its enforced operator allowlist.
 A passed review ceiling remains repair admission, never current-head merge proof.
@@ -2502,104 +2502,44 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   starts no worker within 10 minutes, the PR gets one comment naming the
   refusal (`closer-lease-held`, `max-rounds-reached`, ...).
 
-### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
+### Daemon decisions and decline recovery (NXA-06 / CIDEDUPE-01)
 
-When the daemon clean-path fails closed on a **remediable** gate for an
-**attributed** (identity-resolved) clean PR, the watcher no longer parks it for
-manual close — it hands the PR to the SAME capped hammer the common path uses.
-The hammer re-validates the required gate at the post-remediation head and merges
-under its own lease. Remediable gates:
+The daemon execution adapter consumes the same immutable snapshot/decision as
+closure orchestration. Clean reviews and validated terminal heads use the
+existing merge executor. The adapter's live head, checks and source-content
+reads replace that generation before mutation. A moved head requires a new
+head-bound decision; a missing head or failed read retains its explicit unknown
+or error provenance. Terminal proof never follows a moved head.
 
-The in-lease live gate carries the exact-head terminal predicate's branch
-protection requirement into the shared eligibility check. When that predicate
-has verified the repository's branch protection waiver, green required checks
-can pass; an absent or unresolved predicate decision fails closed.
+A daemon decline supplies evidence to `nextAction(snapshot)`. Confirmed failed
+checks select a remaining remediation round or final hammer; confirmed conflict
+selects hammer; pending checks and UNKNOWN select the bounded observer. A reason
+without readable underlying facts selects snapshot refresh. Existing identity,
+capability, protection and deterministic safety refusals retain closure recovery
+before repair shortcuts. Retryable daemon transport exhaustion selects capped
+repair through the common decision. Lease contention retains daemon ownership
+and cannot steal a hammer's active lease.
 
-| Daemon fail-closed reason | Hammer action |
-|---|---|
-| `stale-head` | the reviewed head moved; a fresh review head gets its own hammer |
-| `gate-not-eligible` with `verdict-not-eligible` | a selected daemon route disagreed with the live verdict gate; the hammer re-validates the verdict before merge |
-| `gate-not-eligible` with `ci-not-green` | the hammer repairs the failing required checks, then merges |
-| `gate-not-eligible` with `pr-not-mergeable` | the hammer rebases onto base / resolves the conflict, then merges |
+The legacy disagreement counter and decline classifiers are retained for a
+caller-local source rollback. They no longer select the runtime owner, count
+polls toward dispatch or park a PR. Both merge paths still use the single
+`classifyCheckRollup` classifier. Its closer scope excludes the service's own
+status context; mutation-time daemon eligibility retains its existing scope.
 
-Every hammer dispatch — including this fallback — is bounded by the per-PR
-hammer-retry-cap (per-reviewed-head 2, lifetime 6). At the ceiling the closer
-fails **loud** via a GBI operator alert and suppresses further dispatch; it is
-never an uncapped re-dispatch. The fallback emits an
-`ama.daemon_clean_fail_closed.hammer_fallback` event.
+The executor still enforces strict mode and domain policy, arming, HCP and
+identity, current-head review/source proof, required CI/protection, the shared
+merge lease, sanitized commit messages, bounded merge subprocesses and durable
+audit/receipt delivery. A zero exit or already-merged transport reply retains
+receipt reconciliation until a remote read confirms termination. Only a remote
+merged read at the validated head produces the daemon merge-action receipt.
+There is no local CI, new check, configuration key or rollout-evidence gate.
 
-**Non-remediable gates still hold** (fail closed — no blind merge-clicker):
-`worker-identity-unresolved` (use the operator-approval lane above),
-`lease-not-held`, and permanent or unclassified merge rejections. Transient
-budget/read exhaustion may retry on a later tick. The watcher emits
-`ama.daemon_clean_park.manual_close_required` only when the daemon marks
-`manualCloseRequired`, a permanent failure, or a non-remediable identity or
-eligibility gate requiring operator action. It also fires once per head when a
-closer→daemon route disagreement on a non-remediable decline passes its bound
-(see the next section). Missing live labels or GitHub's still-computing
-`mergeable=UNKNOWN` (`pr-mergeability-unknown`), alone or together, produce a
-transient `gate-read-failed` with no manual-close marker or page and no
-permanent-failure audit; an UNKNOWN read is first re-sampled within the
-daemon's merge retry budget, and the daemon can retry on a later tick. Beside
-a real gate miss, an UNKNOWN is still re-sampled, and the terminal is a
-non-permanent `gate-not-eligible` without a manual-close marker. A hammer-remediable failure instead emits
-`ama.daemon_clean_fail_closed.hammer_fallback`. A removed `operator-approved`
-label is a protective hold, not a hammer handoff.
-
-### Closer routed to the daemon, daemon declined → logged, then hammer or park (CIDEDUPE-01)
-
-The daemon clean-merge runs first each tick; when it returns `not-taken` the
-tick falls through to the closer. If the closer's own eligibility passes, it
-answers `daemon-clean-route` ("the daemon owns this PR") and dispatches
-nothing. If the daemon keeps declining the same head, nothing acts. That is
-how agent-os#7314 sat `STALLED` (SEV3, 2026-09-28): the closer read CI as
-latest run per check, the daemon as every run, and a superseded cancelled run
-was red to one and not the other. Both now call one classifier
-(`classifyCheckRollup` in `src/checks-summary.mjs`). The backstop below
-(`src/daemon-route-disagreement.mjs`) covers any disagreement that remains.
-
-- **Every disagreement is logged** as an `ama.daemon_route_disagreement` event
-  (plus a `[watcher] AMA closer routed … but the daemon declined …` line). The
-  event carries the daemon's `daemonDisposition`, `daemonReason`,
-  `daemonReasons` (gates), and the per-head `disagreements` count. The count is
-  stored at `data/follow-up-jobs/daemon-route-disagreement/<repo>-pr-<n>.json`.
-  A new head restarts it, and a daemon merge deletes it.
-- **Transient-read declines are logged but never counted** (DIRTYOWN-01). A
-  `not-eligible` decline whose gates are all transient GitHub reads
-  (`pr-mergeability-unknown`, `labels-unavailable`; the daemon's
-  `TRANSIENT_GATE_READ_REASONS`) logs the event with `transientRead: true` and
-  `escalation: null`, and leaves the count unchanged. It cannot reach the
-  hammer or park escalation, so a moving `main` that keeps GitHub recomputing
-  mergeability never pages for a manual close. The closer also reads a raw
-  `mergeable=UNKNOWN` as `UNKNOWN` whatever `mergeStateStatus` says, as the
-  daemon does (`closureGateMergeability`), and its bounded re-sampling uses the
-  same classifier, so an `UNKNOWN`+`CLEAN` read is re-sampled and then waits a
-  tick on both sides instead of the closer routing it to the daemon. A
-  transient-read decline reports the caller's current head and a count of 0
-  when the stored series belongs to another head.
-- **A transient read beside a hammer-remediable gate still reaches the hammer**
-  (DIRTYOWN-01). `pr-mergeability-unknown` next to `ci-not-green`,
-  `pr-not-mergeable`, `stale-head`, or `verdict-not-eligible` is judged on the
-  other gates: pre-lease it counts toward the bound and then takes the
-  `hammer_fallback` row below; post-lease the daemon re-samples the UNKNOWN,
-  then fails closed as a NON-permanent `gate-not-eligible` with no
-  manual-close marker, so Gate 3 never locks the head out and the closer's
-  fail-closed hammer fallback takes it. An UNKNOWN beside `lease-not-held` or a
-  non-remediable gate is not remediable.
-- **A head stuck on transient reads is surfaced once** (DIRTYOWN-01). The first
-  transient-read decline on a head is recorded in a
-  `<repo>-pr-<n>.transient.json` sidecar next to the count file. When declines
-  on the same head span more than `MERGEABILITY_UNKNOWN_STUCK_MS` (30 min), the
-  watcher logs one `ama.mergeability_unknown_stuck` event for that head (with
-  `firstObservedAt`, `elapsedMs`, and the daemon gates). It is an operator
-  signal only: it never counts, parks, or pages. A new head restarts the
-  clock, and a daemon merge deletes the sidecar with the count file.
-- **Past the bound** (3 disagreements on one head), the next tick escalates:
-
-| Daemon decline | Escalation |
-|---|---|
-| `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`), optionally with `pr-mergeability-unknown` alongside | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
-| Any other decline (e.g. `duplicate-family-unresolved`, a transient read mixed with a non-remediable gate or `lease-not-held`, `prior-daemon-terminal-failure`, `findings-unknown`) | Keeps the diagnostic `daemon-route-disagreement` park record and enters bounded automated recovery. Safety holds retain adjudication; other exhausted recovery emits a structured SEV1 and one page. |
+After normal deployment, operator/SRE observes the first natural daemon
+candidate and the first hammer selected from a daemon decline through decision,
+admission, lease and final remote outcome. Confirm no lease steal or verdict
+policy change. If no hammer is needed, that observation remains pending.
+Rollback is a caller-local source revert retaining safe execution mechanisms.
+Code-worker validation performs no live observation, dispatch or operation.
 
 ### `merge-agent-skipped-ama-enabled`
 

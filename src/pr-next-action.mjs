@@ -10,7 +10,7 @@
 // protection policy and lease CAS before any mutation. Repair admission (a red
 // or DIRTY head needing a hammer) is not merge permission.
 //
-// NXA-03/04/05 adopt this policy for wake, closeout and closer/recovery
+// NXA-03/04/05/06 adopt this policy for wake, closeout and closer/recovery
 // ownership. `decideClosureOwner` (src/ama/closure-owner.mjs) remains a source
 // rollback adapter. For remaining observational consumers, `fromLegacyClosureOwner` (src/pr-next-action-consumer.mjs)
 // expresses every legacy owner/reason in this vocabulary so the shadow
@@ -23,6 +23,7 @@ import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
 import { launchRequestOwned, withLiveLaunchRetry } from './ama/launch-request-status.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
+import { PROTECTIVE_PREDECESSOR_HOLD_REASONS } from './ama/protective-predecessor.mjs';
 
 export const NEXT_ACTIONS = Object.freeze([
   'wait-for-CI', 'review', 'remediate', 'hammer', 'daemon-merge', 'operator-hold', 'done',
@@ -350,9 +351,20 @@ function selectRow(facts) {
       deadlineKind: 'recovery', queue: 'reconcile' };
   }
   const refusal = plain(controls?.safetyRefusal);
-  if (refusal && refusal.deterministic === true) {
+  const execution = sameHead(progress?.daemonExecution?.headSha, head) ? progress.daemonExecution : null;
+  const executionReasons = execution ? [execution.reason, ...(execution.reasons || [])] : [];
+  // Existing mutation-time refusals are evidence for recovery, never permission
+  // to launch CI/conflict repair around identity, protection or capability rules.
+  const safetyReason = executionReasons.find(reason => [
+    'branch-protection-missing-gate', 'lease-not-held', 'builder-token-merge-refused',
+    'duplicate-family-unresolved', 'operator-approval-no-longer-current',
+    'permanent-merge-rejection', 'unclassified-merge-failure',
+  ].includes(reason) || PROTECTIVE_PREDECESSOR_HOLD_REASONS.has(reason));
+  const identityRefusal = execution?.reason === 'worker-identity-unresolved'
+    && !executionReasons.some(reason => /read-failed|unavailable/.test(reason));
+  if ((refusal && refusal.deterministic === true) || safetyReason || identityRefusal) {
     return { row: 'R05-structural', action: 'hammer', actor: 'closure-recovery', reason: 'safety-refusal',
-      deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal.reason) || 'unnamed'}`] };
+      deadlineKind: 'recovery', queue: 'reconcile', refs: [`refusal:${text(refusal?.reason) || safetyReason || execution?.reason || 'unnamed'}`] };
   }
   const primary = plain(progress?.primaryChange);
   if (primary && primary.ok === false) {
@@ -485,10 +497,16 @@ function selectRow(facts) {
   }
   // R15: a valid clean (or carried terminal-head) review on a green, mergeable
   // head is the daemon's. Execution still re-proves every merge predicate.
-  if (progress?.daemonRepair?.admitted === true && sameHead(progress.daemonRepair.headSha, head)
-    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && review.attestation !== 'unknown') {
-    return { row: 'R15-daemon-repair', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
-      deadlineKind: 'admission', queue: 'dispatch' };
+  if (execution) {
+    if (execution.reason === 'merge-retry-budget-exhausted') {
+      return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
+        deadlineKind: 'admission', queue: 'dispatch' };
+    }
+    // A decline with no changed semantic facts needs refreshed evidence. New
+    // reason strings and unavailable evidence cannot manufacture a launch.
+    if (!['lease-contended', 'lease-acquire-error', 'audit-init-failed', 'findings-capture-pending'].includes(execution.reason)) {
+      return refresh('snapshot-refresh', [`daemon:${text(execution.reason) || 'unknown'}`]);
+    }
   }
   if (checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE' && review.attestation !== 'unknown') {
     return { row: 'R15-daemon', action: 'daemon-merge', actor: 'daemon', reason: carried ? 'carried-clean-head' : 'clean-exact-head',

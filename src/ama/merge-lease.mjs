@@ -449,7 +449,7 @@ function readWaiterDoc(filePath) {
 }
 
 function waiterExpired(waiter, nowIso) {
-  const ageSeconds = ageSecondsFrom(waiter.priority === 'daemon' ? waiter.updatedAt : waiter.arrivedAt, nowIso);
+  const ageSeconds = ageSecondsFrom(waiter.priority === 'daemon' ? waiter.updatedAt : waiter.registeredAt || waiter.arrivedAt, nowIso);
   if (ageSeconds === null) return false;
   const deadlineSeconds = parseDeadlineSeconds(waiter.deadlineSeconds);
   return ageSeconds >= deadlineSeconds;
@@ -763,6 +763,30 @@ function attemptExpired(attempt, nowIso) {
   return ageSeconds >= DEFAULT_ATTEMPT_TTL_SECONDS;
 }
 
+// Arrival belongs to the PR, while gate charges and failure caps remain head-scoped.
+// Persist the deadline so unrelated daemon releases cannot extend closer memory.
+function closerArrivalExpiry(record) {
+  return record.queueArrivalExpiresAt
+    || new Date(Date.parse(record.nextEligibleAt) + WATCHER_POLL_INTERVAL_MS).toISOString();
+}
+
+function closerArrival(attempts, pr, now) {
+  return attempts.find(r => Number(r.pr) === Number(pr) && r.queueArrivedAt
+    && Number.isFinite(Date.parse(r.queueArrivalExpiresAt || r.nextEligibleAt))
+    && Date.parse(closerArrivalExpiry(r)) > Date.parse(now) && !attemptExpired(r, now));
+}
+
+function withoutCloserArrival(record) {
+  const next = { ...record };
+  delete next.queueArrivedAt;
+  delete next.queueArrivalExpiresAt;
+  return next;
+}
+
+function clearCloserArrivals(attempts, pr) {
+  return attempts.map(r => Number(r.pr) === Number(pr) ? withoutCloserArrival(r) : r);
+}
+
 export function readMergeLeaseAttempts(rootDir, identity = {}) {
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, identity);
   return sortedAttempts(readAttemptDoc(attemptsPath).attempts);
@@ -850,7 +874,8 @@ export function recordMergeLeaseGateAttempt({
       lastAttemptAt: updatedAt,
     }, updatedAt);
     attempts.push(next);
-    const sorted = sortedAttempts(attempts);
+    const parked = next.attempts > parseMaxGateAttempts(maxAttempts);
+    const sorted = sortedAttempts(parked ? clearCloserArrivals(attempts, normalizedPr) : attempts);
     writeJsonFile(attemptsPath, {
       schemaVersion: LEASE_SCHEMA_VERSION,
       updatedAt,
@@ -858,10 +883,10 @@ export function recordMergeLeaseGateAttempt({
     });
     return {
       attemptsPath,
-      attempt: next,
+      attempt: parked ? withoutCloserArrival(next) : next,
       attempts: sorted,
       maxAttempts: parseMaxGateAttempts(maxAttempts),
-      parked: next.attempts > parseMaxGateAttempts(maxAttempts),
+      parked,
     };
   });
 }
@@ -891,8 +916,13 @@ export function upsertMergeLeaseWaiter({
     const doc = readWaiterDoc(waitersPath);
     const existing = doc.waiters.find((w) => w.waiterId === waiterId && !waiterExpired(w, now)
       && !waiterProcessDead(w, holderHost || hostname(), pidAliveFn));
-    const retry = readMergeLeaseAttempts(rootDir, { repo, base })
+    const attempts = readMergeLeaseAttempts(rootDir, { repo, base });
+    const arrival = priority === 'daemon' ? null : closerArrival(attempts, pr, now);
+    const retry = attempts
       .find(r => Number(r.pr) === Number(pr) && r.head === head && !attemptExpired(r, now));
+    const notBefore = priority === 'daemon' ? retry?.nextEligibleAt || existing?.notBefore
+      : [retry?.nextEligibleAt, arrival?.nextEligibleAt, existing?.notBefore]
+        .filter(Boolean).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
     const nextWaiter = {
       repo,
       base,
@@ -900,8 +930,10 @@ export function upsertMergeLeaseWaiter({
       head: String(head || ''),
       waiterId,
       ...(priority === 'daemon' ? { priority } : {}),
-      ...((retry?.nextEligibleAt || existing?.notBefore) ? { notBefore: retry?.nextEligibleAt || existing.notBefore } : {}),
-      arrivedAt: existing?.arrivedAt || arrivedAt || now,
+      ...(notBefore ? { notBefore } : {}),
+      arrivedAt: arrival?.queueArrivedAt || existing?.arrivedAt || arrivedAt || now,
+      // A restored FIFO timestamp must not consume the new invocation's wait budget.
+      ...((existing?.registeredAt || arrival) ? { registeredAt: existing?.registeredAt || now } : {}),
       updatedAt: now,
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
@@ -1066,11 +1098,14 @@ export function acquireMergeLease({
       host: holderHost,
       pidAliveFn,
     });
-    const retry = readMergeLeaseAttempts(rootDir, { repo, base })
+    const attempts = readMergeLeaseAttempts(rootDir, { repo, base });
+    const arrival = waiterPriority === 'daemon' ? null : closerArrival(attempts, holderPr, acquiredAt);
+    const retry = attempts
       .find(r => Number(r.pr) === Number(holderPr) && r.head === holderHead && !attemptExpired(r, acquiredAt));
-    if (retry?.parkedReason || Date.parse(retry?.nextEligibleAt) > Date.parse(acquiredAt)) {
-      return { acquired: false, leasePath, waiter, parked: Boolean(retry.parkedReason),
-        reason: retry.parkedReason || 'no-merge-backoff', retry };
+    if (retry?.parkedReason || Date.parse(retry?.nextEligibleAt) > Date.parse(acquiredAt)
+      || Date.parse(arrival?.nextEligibleAt) > Date.parse(acquiredAt)) {
+      return { acquired: false, leasePath, waiter, parked: Boolean(retry?.parkedReason),
+        reason: retry?.parkedReason || 'no-merge-backoff', retry: retry || arrival };
     }
     const waiters = waiterState.waiters;
     const readyWaiters = waiters.filter(w => waiterReady(w, acquiredAt));
@@ -1156,14 +1191,27 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
       ? 'repeated-no-merge-release' : null);
     const backoffMs = loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
       1000 * 2 ** Math.min(noMergeReleases - 1, 20)));
+    const isCloser = lease.holderRole !== 'daemon' && lease.waiter?.priority !== 'daemon';
+    const arrival = closerArrival(doc.attempts, lease.holderPr, at);
     const next = normalizeAttemptRecord({ ...previous, pr: lease.holderPr, head: lease.holderHead,
       ...(refund && previous ? { attempts: Math.max(0, (Number(previous.attempts) || 0) - 1),
         retryable: (Number(previous.retryable) || 0) + 1 } : {}),
       noMergeLeaseId: lease.leaseId, noMergeReleases, consecutiveNoMergeReleases, noMergeReason: reason, parkedReason,
       reenteredAt: at, nextEligibleAt: new Date(Date.parse(at) + backoffMs).toISOString(),
       lastAttemptAt: at }, at);
+    if (isCloser && !parkedReason) {
+      next.queueArrivedAt = lease.waiter?.arrivedAt || arrival?.queueArrivedAt || lease.acquiredAt;
+      next.queueArrivalExpiresAt = new Date(Date.parse(next.nextEligibleAt) + WATCHER_POLL_INTERVAL_MS).toISOString();
+    } else if (!parkedReason && arrival && arrival === previous) {
+      // A daemon keeps same-head closer memory without renewing its deadline.
+      next.queueArrivalExpiresAt = closerArrivalExpiry(previous);
+    } else {
+      delete next.queueArrivedAt;
+      delete next.queueArrivalExpiresAt;
+    }
     const attempts = sortedAttempts([
-      ...doc.attempts.filter(r => Number(r.pr) !== lease.holderPr || r.head !== lease.holderHead), next,
+      ...(isCloser || parkedReason ? clearCloserArrivals(doc.attempts, lease.holderPr) : doc.attempts)
+        .filter(r => Number(r.pr) !== lease.holderPr || r.head !== lease.holderHead), next,
     ]);
     // Refund and release identity commit together. A failed history/waiter write
     // can retry this lease without refunding a second time.
@@ -1221,7 +1269,23 @@ export function releaseMergeLease({
     }
     const releasedAt = now || isoNow();
     let retry = null;
-    if (historyEvent === 'release' && !merged && !terminal && !/^holder-pr-(merged|closed)$/.test(reason)) {
+    const terminalRelease = merged || terminal || /^holder-pr-(merged|closed)$/.test(reason);
+    if (terminalRelease) {
+      const path = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+      if (readAttemptDoc(path).attempts.some(r => Number(r.pr) === currentLease.holderPr && r.queueArrivedAt)) {
+        try {
+          withAttemptMutationLockOnly({ rootDir, repo, base }, () => {
+            const doc = readAttemptDoc(path);
+            writeJsonFile(path, { ...doc, updatedAt: releasedAt,
+              attempts: clearCloserArrivals(doc.attempts, currentLease.holderPr) });
+          });
+        } catch (err) {
+          if (!isMutationLockBusyError(err)) throw err;
+          return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
+        }
+      }
+    }
+    if (historyEvent === 'release' && !terminalRelease) {
       try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded })); }
       catch (err) {
         if (!isMutationLockBusyError(err)) throw err;

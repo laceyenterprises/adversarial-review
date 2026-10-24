@@ -594,14 +594,24 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ## Hammer merge logic
 
-Daemon and closer merge requests share FIFO arrival order. A failed holder
-re-enters at the tail with exponential backoff; consecutive chargeable failures
-park the head with `repeated-no-merge-release` after the existing attempt cap.
+Daemon and closer merge requests share FIFO arrival order. A closer releasing
+without merge retains its PR's original arrival across heads for restoration
+before `nextEligibleAt` plus one configured watcher poll interval (unscaled).
+An absent closer returning later joins at the tail; a live registered waiter
+keeps its order through its invocation deadline. Exponential backoff lets ready
+waiters proceed. Daemon releases preserve closer memory and its fixed expiry
+while their reservations re-enter at the tail. Status/list separates FIFO
+`ageSeconds` from `invocationAgeSeconds`, measured from `registeredAt` when present.
+Consecutive chargeable failures park the head with `repeated-no-merge-release`
+after the existing attempt cap.
 Planned CI-wait yields and retryable aborts retain backoff but reset consecutive
 failure counting; non-permanent daemon failures yield too. Yields retain the
 gate charge; aborts refund it atomically with release identity. Only daemon
-reservations requeue; the next CLI invocation registers a fresh waiter. Both
-parking caps use the existing audit, closing-status and page path.
+reservations requeue; the next CLI invocation registers a fresh waiter with its
+remembered arrival and a fresh invocation deadline. Parking and merged/closed
+releases clear remembered arrivals across heads. Focused offline merge-lease
+fixtures verify bounded retention, daemon preservation, mixed-role backoff, head
+changes, status ages and terminal cleanup. Both parking caps use the existing audit, closing-status and page path.
 Only confirmed dead same-host watcher identities permit early reservation pruning. Closers release
 before the first remote-CI wait, including read retries and UNKNOWN sampling, then
 reacquire and refresh the exact-head gate. LAC-2097 retains the exact validated

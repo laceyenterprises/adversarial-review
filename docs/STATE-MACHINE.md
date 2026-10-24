@@ -1078,8 +1078,15 @@ guards still apply, and an already captured prompt path must remain unchanged.
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
-A non-terminal no-merge release rejoins at the tail with persistent PR/head
-exponential backoff; delayed requests yield to ready waiters. Repeating chargeable failures through the existing attempt cap parks that head with
+A closer's non-terminal no-merge release retains the PR's original arrival
+across heads for restoration before `nextEligibleAt` plus one configured watcher
+poll interval (unscaled). A later absent closer joins at the tail; a continuously
+registered waiter keeps its position through its invocation deadline. Existing
+backoff lets delayed requests yield to ready waiters. Daemon releases preserve
+closer memory with its fixed expiry while their reservations rejoin at the tail. Parking and merged/closed releases
+clear remembered arrivals across heads. Fresh closer invocations restore the
+arrival while measuring their expiry from registration. Consecutive chargeable
+failures through the existing attempt cap park that head with
 `repeated-no-merge-release`; a new head or explicit reset recovers it. Planned
 CI-wait yields and retryable aborts reset the consecutive failure count, retain
 backoff and never create a park. Yields keep the gate charge; aborts refund it

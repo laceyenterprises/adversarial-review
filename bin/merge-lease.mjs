@@ -312,6 +312,7 @@ function statusJson(status) {
       role: waiter.priority === 'daemon' ? 'daemon' : 'closer',
       ...waiter,
       ageSeconds: waiterAge(waiter, status.inspectedAt),
+      invocationAgeSeconds: waiterAge({ arrivedAt: waiter.registeredAt || waiter.arrivedAt }, status.inspectedAt),
     })),
     attempts: status.attempts.map((attempt) => ({
       ...attempt,

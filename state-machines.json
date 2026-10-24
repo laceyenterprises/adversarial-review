@@ -335,7 +335,7 @@
   "sourceProjectionSha256": {
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "07e3061566e42272ba155216bff1a876aaedad760edb7463741f9ceff4ab4ee3",
-    "src/pr-next-action.mjs": "0debfcf0734f20d8fd375063e3724715c89997e858b8cda5982c0b9be1d1cf26",
+    "src/pr-next-action.mjs": "e6c51f1bc2cf9ed85fab2e1c98763f0819a66d2412f1ed2cc6e6832dab54f38d",
     "src/ama/pre-receipt-intent.mjs": "d0a3489becf715a45cd03981e93728bc79c87dc3c6d58af68f9494380321d2d6",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",

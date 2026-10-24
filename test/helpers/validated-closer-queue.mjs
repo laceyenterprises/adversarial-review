@@ -46,22 +46,36 @@ ham_base_touches_pr_files validated-head "$3"
     return result.status === 0;
   };
   const identity = { rootDir, repo: 'fixture/queue', base: 'main', holderPid: process.pid, holderHost: hostname(), registerWaiter: true };
-  let seconds = 0;
-  const now = () => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds++)).toISOString();
+  const epoch = Date.UTC(2026, 0, 1);
+  let milliseconds = 0;
+  const now = () => new Date(epoch + milliseconds++).toISOString();
   const request = pr => ({ ...identity, holderPr: pr, holderHead: heads[pr - 1] || base, waiterId: `closer-${pr}`, now: now() });
   const acquire = pr => acquireMergeLease(request(pr));
-  const release = (lease, outcome = { merged: true }) => assert.equal(releaseMergeLease({ rootDir, ...lease, ...outcome,
-    now: now(), requestWatcherWakeImpl: () => {} }).released, true);
+  const release = (lease, outcome = { merged: true }) => {
+    const result = releaseMergeLease({ rootDir, ...lease, ...outcome,
+      now: now(), requestWatcherWakeImpl: () => {} });
+    assert.equal(result.released, true);
+    return result;
+  };
   const advance = text => { writeFileSync(join(cwd, 'unrelated'), text); commit('unrelated base advance'); git('push', '-q', 'origin', 'main'); };
   const blocker = acquire(99); assert.equal(blocker.acquired, true);
   assert.equal(acquire(1).acquired, false); assert.equal(acquire(2).acquired, false);
   advance('advance before queued validation\n'); release(blocker.lease);
-  // Both already-validated heads take their first lease-free CI wait, then
-  // rejoin FIFO. Neither can overtake the other's existing reservation.
-  const first = acquire(1); assert.equal(first.acquired, true); release(first.lease, { yielded: true, reason: 'required-checks-wait' });
-  assert.equal(acquire(1).acquired, false);
-  const second = acquire(2); assert.equal(second.acquired, true); release(second.lease, { yielded: true, reason: 'required-checks-wait' });
-  assert.equal(acquire(2).acquired, false);
+  // Both validated heads wait for CI without holding the lease. An immediate
+  // re-registration is still in backoff, so the other ready closer can proceed.
+  // Once eligible, the original FIFO arrivals survive both no-merge releases.
+  const first = acquire(1); assert.equal(first.acquired, true);
+  const firstWait = release(first.lease, { yielded: true, reason: 'required-checks-wait' });
+  const firstRetry = acquire(1); assert.equal(firstRetry.acquired, false);
+  assert.equal(firstRetry.waiter.arrivedAt, first.waiter.arrivedAt);
+  const second = acquire(2); assert.equal(second.acquired, true);
+  const secondWait = release(second.lease, { yielded: true, reason: 'required-checks-wait' });
+  const secondRetry = acquire(2); assert.equal(secondRetry.acquired, false);
+  assert.equal(secondRetry.waiter.arrivedAt, second.waiter.arrivedAt);
+  // Advance the explicit clock to both actual policy deadlines. No real sleep
+  // or assumption about the host's load-scaled backoff is needed.
+  milliseconds = Math.max(milliseconds, Date.parse(firstWait.retry.nextEligibleAt) - epoch,
+    Date.parse(secondWait.retry.nextEligibleAt) - epoch);
   const merged = [];
   let sourceMutations = 0, ciRestarts = 0;
   for (const pr of [1, 2]) {

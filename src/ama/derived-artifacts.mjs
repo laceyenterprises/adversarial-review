@@ -303,12 +303,13 @@ export function generatedBlock(bytes, declaration) {
     if (line.replace(/\r$/, '') === declaration.end) ends.push(index);
   });
   if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) throw new Error('ambiguous generated block');
-  const startOffset = lines.slice(0, starts[0] + 1).join('\n').length + 1;
-  const endOffset = lines.slice(0, ends[0]).join('\n').length + 1;
-  const first = lines.slice(0, starts[0]).join('\n').length + (starts[0] ? 1 : 0);
-  const last = endOffset + lines[ends[0]].length + (ends[0] < lines.length - 1 ? 1 : 0);
+  // Offsets index Buffers, so count UTF-8 bytes rather than UTF-16 code units.
+  const startOffset = Buffer.byteLength(lines.slice(0, starts[0] + 1).join('\n')) + 1;
+  const endOffset = Buffer.byteLength(lines.slice(0, ends[0]).join('\n')) + 1;
+  const first = Buffer.byteLength(lines.slice(0, starts[0]).join('\n')) + (starts[0] ? 1 : 0);
+  const last = endOffset + Buffer.byteLength(lines[ends[0]]) + (ends[0] < lines.length - 1 ? 1 : 0);
   return { start: starts[0] + 2, end: ends[0] + 1,
-    startOffset, endOffset, bytes: Buffer.from(bytes.toString('utf8').slice(first, last)) };
+    startOffset, endOffset, bytes: bytes.subarray(first, last) };
 }
 
 async function regularFile(root, path) {
@@ -463,8 +464,9 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           // because the generator leaves its input untouched. Preserve the markers.
           const before = await regularFile(tree, refusal.path);
           const block = generatedBlock(before, declaration);
-          const text = before.toString('utf8');
-          await writeFile(join(tree, refusal.path), text.slice(0, block.startOffset) + text.slice(block.endOffset));
+          await writeFile(join(tree, refusal.path), Buffer.concat([
+            before.subarray(0, block.startOffset), before.subarray(block.endOffset),
+          ]));
           await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
           const after = await regularFile(tree, refusal.path);
           const regenerated = generatedBlock(after, declaration);

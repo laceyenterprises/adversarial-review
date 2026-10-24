@@ -2920,6 +2920,8 @@ interior has a zero-width interval that admits insertions at that boundary,
 without admitting positive-width marker edits. Outside regions and
 other files are still evaluated normally. Regeneration must also leave all bytes
 outside the interior unchanged, including marker lines and paragraph separators.
+Interior removal and exterior comparison use UTF-8 byte offsets, preserving
+multi-byte text in prose, markers and generated content.
 A generator that erodes a surrounding paragraph boundary supplies no proof.
 The proof binds the path, head SHA and merge base. It is collected after history
 cache reuse, so cached refusals can recover without purging history.

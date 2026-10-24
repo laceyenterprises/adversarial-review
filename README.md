@@ -1336,13 +1336,16 @@ and submitter are proven gone, a bounded process scan finds no dispatch key and
 the subsequent exact-key ledger read is empty. New intents record watcher/child
 PID and start time; child identity writes preserve missing, replaced or settled
 intents. Process argument continuation lines remain part of dispatch-key
-matching. Unknown liveness preserves the original deadline. The
+matching. System PID 0 rows are accepted without permitting zero-valued
+process handles. A scanned watcher overrides earlier ESRCH evidence: matching
+identity is live, verified reuse is gone, and unverified identity holds.
+Unknown liveness preserves the original deadline. The
 existing lease and admission gates still control the new launch; no merge
 permission is added. Focused offline regressions are in
 `test/ama-pre-receipt-intent.test.mjs` and
 `test/ama-closer-dispatch-priority.test.mjs`; `smv-ci-blocked` covers early release,
-live-child refusal and unknown-evidence retention. SRE acceptance: at the next
-watcher restart with a pending closer intent whose submitter is proven dead and
+live-child refusal, macOS PID 0 scanning and unverified-watcher retention. SRE
+acceptance: at the next watcher restart with a pending closer intent whose submitter is proven dead and
 key absent, observe hammer dispatch on the first poll. LEGACYINTENT-01 also
 settles a legacy no-key intent when the canonical ticket ledger has no rows at or after its attempt
 time. The audited single-PR command defaults to dry-run and shares automatic
@@ -1556,7 +1559,9 @@ operator dry-run/apply. CLOSERINTENT-01 additionally tests deadline-bound keyed 
 foreign receipt refusal and immediate next-poll readmission in the smoke, plus
 same/moved-head refusal-time retry probe settlement and predecessor preservation,
 missing/null repository compatibility in exact-key and live-retry unit fixtures, scaled timeouts, transient retries, failure detail/deduplication
-and audited keyed settlement. CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
+and audited keyed settlement. CLOSERPENDINGDEAD-01 accepts macOS PID 0 scan rows
+and holds an observed watcher with unverified identity despite earlier ESRCH.
+CLOSERGATE-01 also verifies one inspection page and zero fleet capacity for unresolved intents, and terminal PR intent retirement without paging. Wake and
 ownership agree for `FAILURE`, `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`,
 `ACTION_REQUIRED` and `ERROR`.
 The smoke also verifies foreign-host pending ownership waits without a local PID

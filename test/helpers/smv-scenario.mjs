@@ -914,9 +914,14 @@ if (scenario === 'clean') {
   assert.equal((await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
     processExecFileSyncImpl: () => { throw Error('synthetic unknown'); },
   })).status, 'unknown');
+  const observedWatcher = await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
+    processExecFileSyncImpl: () => '0 Thu Oct 22 10:18:18 2026 kernel_task\n12345 Thu Oct 22 10:18:18 2026 synthetic-watcher\n',
+  });
+  assert.equal(observedWatcher.status, 'unknown');
+  assert.equal(observedWatcher.record.preReceiptReconciliation.processes.watcher.reason, 'watcher-identity-unverified');
   assert.equal(readAmaCloserLease(rootDir, deadIdentity).status, 'pending');
   const reclaimed = await reconcilePreReceiptIntent(rootDir, deadIdentity, { ...deadOptions,
-    processExecFileSyncImpl: () => '99 Thu Oct 22 10:18:18 2026 synthetic-process\nunrelated multiline argument\n',
+    processExecFileSyncImpl: () => '0 Thu Oct 22 10:18:18 2026 kernel_task\n99 Thu Oct 22 10:18:18 2026 synthetic-process\nunrelated multiline argument\n',
   });
   assert.equal(reclaimed.status, 'no-launch');
   assert.equal(reclaimed.record.reason, 'dead-submitter-no-launch-proven');

@@ -3,6 +3,8 @@ import { isAmaCloserPidAlive } from './closer-lease.mjs';
 
 const psOptions = { encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024 };
 const validPid = pid => Number.isInteger(pid) && pid > 0;
+// System process tables can include macOS kernel_task (PID 0).
+const validRowPid = pid => Number.isInteger(pid) && pid >= 0;
 const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
   ? new Date(Date.parse(value)).toISOString() : null;
 const psTimestamp = value => timestamp(`${value} UTC`);
@@ -47,7 +49,7 @@ export function probeCloserSubmitter(record, lease, options = {}) {
         rows.at(-1).command += `\n${line}`;
         continue;
       }
-      if (!validPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
+      if (!validRowPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
       rows.push({ pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] });
     }
   } catch {
@@ -56,11 +58,17 @@ export function probeCloserSubmitter(record, lease, options = {}) {
   }
   const watcherRow = rows.find(row => row.pid === lease.watcherPid);
   const expectedWatcher = record.dispatchWatcher;
-  if (watcherRow && expectedWatcher?.pid === lease.watcherPid && expectedWatcher.startedAt
-    && watcherRow.startedAt !== timestamp(expectedWatcher.startedAt)
-    && timestamp(expectedWatcher.startedAt)) {
-    Object.assign(watcher, { status: 'gone', reason: 'pid-reused',
-      expectedStartedAt: expectedWatcher.startedAt, observedStartedAt: watcherRow.startedAt });
+  if (watcherRow) {
+    const expectedStartedAt = timestamp(expectedWatcher?.startedAt);
+    if (expectedWatcher?.pid !== lease.watcherPid || !expectedStartedAt) {
+      Object.assign(watcher, { status: 'unknown', reason: 'watcher-identity-unverified',
+        observedStartedAt: watcherRow.startedAt });
+    } else if (watcherRow.startedAt !== expectedStartedAt) {
+      Object.assign(watcher, { status: 'gone', reason: 'pid-reused',
+        expectedStartedAt: expectedWatcher.startedAt, observedStartedAt: watcherRow.startedAt });
+    } else {
+      Object.assign(watcher, { status: 'live', reason: 'pid-present', observedStartedAt: watcherRow.startedAt });
+    }
   }
   const child = rows.find(row => row.pid === submitter.pid);
   if (record.dispatchSubmitter && !validPid(submitter.pid)) {

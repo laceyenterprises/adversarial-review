@@ -908,6 +908,40 @@ const processScan = (output = processRow(99, 'ps -axww -o pid= -o lstart= -o arg
   };
 const firstPoll = new Date(Date.parse(started) + 1000).toISOString();
 
+test('CLOSERPENDINGDEAD-01: macOS kernel_task PID 0 permits first-poll recovery', async t => {
+  const f = fixture(t);
+  const result = await f.reconcile({ now: firstPoll,
+    processExecFileSyncImpl: processScan(processRow(0, 'kernel_task') + processRow(99)),
+  });
+  assert.equal(result.status, 'no-launch');
+  assert.equal(f.read().reason, 'dead-submitter-no-launch-proven');
+  assert.equal(f.read().preReceiptReconciliation.processes.key.status, 'absent');
+  assert.equal(f.read().retryCount, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+});
+
+for (const mode of ['missing', 'null-start', 'invalid-start', 'foreign-pid', 'matching']) {
+  test(`CLOSERPENDINGDEAD-01: observed watcher with ${mode} identity overrides ESRCH`, async t => {
+    const dispatchWatcher = mode === 'missing' ? undefined : {
+      pid: mode === 'foreign-pid' ? 54321 : 12345,
+      startedAt: mode === 'null-start' ? null : mode === 'invalid-start' ? 'invalid' : started,
+    };
+    const f = fixture(t, { dispatchWatcher });
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({ now: firstPoll,
+      processExecFileSyncImpl: processScan(processRow(0, 'kernel_task') + processRow(12345)),
+    });
+    const watcher = f.read().preReceiptReconciliation.processes.watcher;
+    assert.equal(result.status, 'unknown');
+    assert.equal(watcher.status, mode === 'matching' ? 'live' : 'unknown');
+    assert.equal(watcher.reason, mode === 'matching' ? 'pid-present' : 'watcher-identity-unverified');
+    assert.equal(watcher.observedStartedAt, '2026-10-22T10:18:18.000Z');
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(f.read().retryCount, 2);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+  });
+}
+
 for (const reused of [false, true]) test(`CLOSERPENDINGDEAD-01: first poll re-takes dead submission (PID reused=${reused})`, async t => {
   const f = fixture(t, { dispatchWatcher: { pid: 12345, startedAt: '2026-10-22T10:18:18.000Z' },
     dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });

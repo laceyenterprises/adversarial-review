@@ -66,6 +66,11 @@ PID start time replaced, no surviving recorded submitter, no process carrying
 the dispatch key, and a subsequent successful empty exact-key ledger query.
 A bounded `ps` scan (one second, 4 MiB, untruncated arguments) runs before the
 ledger read so a launch committed while its submitter exits is still observed.
+The scan accepts system rows such as macOS `kernel_task` (PID 0); recorded
+watcher and submitter handles still require positive PIDs. An observed watcher
+PID overrides an earlier ESRCH: a matching recorded start time is live, a
+different verified start time proves reuse, and missing, invalid or mismatched
+identity stays `unknown` with reason `watcher-identity-unverified`.
 Embedded argument newlines continue the preceding process command, including
 for dispatch-key matching; a continuation before any process row is unreadable.
 New intents record `dispatchWatcher` and `dispatchSubmitter` as `{ pid,

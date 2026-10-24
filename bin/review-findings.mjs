@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import Database from 'better-sqlite3';
+import { summarizeFindingBacklog } from '../src/findings-backlog.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +11,7 @@ import { backfillReviewFindings, linkFindingRemediation, readReviewFindings } fr
 // provider lookup, history fetch or network operation in this command.
 export function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
-  if (!['show', 'backfill', 'link-job'].includes(command)) throw new Error('expected show, backfill or link-job');
+  if (!['show', 'backlog', 'backfill', 'link-job'].includes(command)) throw new Error('expected show, backlog, backfill or link-job');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i];
@@ -24,10 +25,11 @@ export function main(argv = process.argv.slice(2)) {
     if (!/^\d+$/.test(options[key]) || !Number.isSafeInteger(Number(options[key]))) throw new Error(`invalid integer: ${key}`);
     return Number(options[key]);
   };
-  const db = new Database(resolve(options['--db']), { fileMustExist: true, readonly: command === 'show', timeout: 100 });
+  const db = new Database(resolve(options['--db']), { fileMustExist: true, readonly: ['show', 'backlog'].includes(command), timeout: 100 });
   try {
     const filter = { repo: options['--repo'] ?? null, prNumber: integer('--pr', null),
       afterPassId: integer('--after-pass-id', 0), afterOrdinal: integer('--after-ordinal', 0), limit: integer('--limit', 500) };
+    if (command === 'backlog') return summarizeFindingBacklog(db);
     if (command === 'show') {
       const findings = readReviewFindings(db, filter);
       const last = findings.at(-1);

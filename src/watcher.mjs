@@ -1859,11 +1859,14 @@ async function main() {
     }
   }
 
+  const { createFindingBatchTicker } = await import('./findings-batch.mjs');
+  const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
 
   (async function pollLoop() {
     let nextStart = Date.now();
     await runHeartbeatPoll('startup pollOnce');
+    void findingBatchTicker.tick().catch(error => console.warn(`[findings-batch] daily sweep failed: ${error.message}`));
     nextStart += intervalMs;
     while (true) {
       // Fixed-rate cadence: subtract elapsed work from the next
@@ -1881,6 +1884,7 @@ async function main() {
         ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
         : 'scheduled pollOnce';
       await runHeartbeatPoll(source, { wakePayload: wake.payload || null });
+      void findingBatchTicker.tick().catch(error => console.warn(`[findings-batch] daily sweep failed: ${error.message}`));
       if (wake.woken) {
         nextStart = Date.now();
       }

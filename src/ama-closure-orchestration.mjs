@@ -2256,7 +2256,7 @@ async function dispatchAmaClosureFor({
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   const handoffReviewHasFindings = handoffLease?.status === 'handed-to-review'
     && reviewState.headSha === currentPrHeadSha
-    && reviewState.blockingFindingCount + reviewState.nonBlockingFindingCount > 0;
+    && (reviewState.blockingFindingCount > 0 || (strictMode && reviewState.nonBlockingFindingCount > 0));
   const daemonCleanMerge = handoffReviewHasFindings
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'review-handoff-findings',
       reasons: [reviewState.blockingFindingCount > 0 ? 'blocking-findings-present' : 'non-blocking-findings-present'] }
@@ -2330,7 +2330,7 @@ async function dispatchAmaClosureFor({
   const cleanReviewMergePath = () => {
     const reasons = daemonCleanMerge?.reasons || [];
     if (settledVerdict !== 'settled-success'
-      || !isDaemonMergeReviewAllowed(reviewState, { strictMode: true })
+      || !isDaemonMergeReviewAllowed(reviewState, { strictMode })
       || daemonCleanMerge?.reason === 'stale-head'
       || reasons.some(reason => reason !== 'ci-not-green')) return false;
     // Only fresh daemon evidence can distinguish recovery from an empty

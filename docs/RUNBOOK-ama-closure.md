@@ -5231,3 +5231,40 @@ The `expectedHeadSha` diagnostic field names the active comparison head: the
 reviewed head before advancement and the target remediation head afterwards.
 Authoritative live merged state and terminal audit evidence retain their
 existing behavior.
+
+## Daily non-blocking findings batches (FINDINGSBATCH-01)
+
+The final posted review's non-blocking findings enroll in the existing review
+store when the PR is marked merged. With `strict_mode: false`, the ordinary
+non-blocking-only daemon lane additionally requires durable exact-head/body
+capture before its merge attempt. Capture failure returns a retryable
+`findings-capture-pending` hold, without dispatching a hammer. A handed-to-review
+lease respects this policy too. Strict mode on retains its existing hammer path;
+all exact-head, required-check, lease and execution-switch gates still apply.
+
+The watcher performs one successful asynchronous sweep per UTC day. A failed
+startup (for example SQLite lock contention) or a fleet-stop interruption retries
+on the next poll without advancing the UTC deadline; claimed batches retain their
+dispatch keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
+durably recorded and fenced for the next daily sweep; settlement errors retry hourly. It dispatches one
+normal-priority remediation worker per repository/area, using existing classes
+and the existing `hq dispatch` transport. No cron, CI gate or config key is added. Hourly settlement-only passes collect worker outcomes and
+observe batch PR merges without claiming new batches or dispatching workers.
+Dropped findings retain no result PR reference.
+Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
+retrying GitHub transport. Applied findings require a merged batch PR with its
+exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers
+are accepted. Valid manifest and marker evidence clears prior batch errors even
+while the PR awaits merge; finding outcomes remain pending. Missing or foreign
+markers and unreadable PRs remain unresolved.
+See [the store contract](data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
+for outcome validation and restart fencing. Preserve batch artifacts until their
+outcomes are collected. An incomplete batch stays fenced and visible for repair.
+
+After deploy, the SRE session verifies capture on three merged PRs with
+non-blocking findings. Only then, following the operator's “Off once capture
+lands” decision, it backs up host config, sets
+`roles.adversarial.merge_authority.strict_mode: false`, and bounces the watcher.
+The next day's batch PRs must exist, and every captured finding must eventually
+be applied or dropped with a reason. These are deployment activities; source
+changes and offline tests do not alter host configuration or services.

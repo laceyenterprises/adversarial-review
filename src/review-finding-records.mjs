@@ -136,8 +136,10 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
 // reported to the corpus caller; it must not turn missing data into zero findings.
 export function readReviewFindings(db, { repo = null, prNumber = null, afterPassId = 0, afterOrdinal = 0, limit = 500 } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be 1..5000');
-  const rows = db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at FROM review_findings f
-    JOIN reviewer_passes p ON p.pass_id=f.pass_id WHERE f.current_body=1 AND (f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))
+  const rows = db.prepare(`SELECT f.*, p.repo, p.pr_number, p.verdict, p.started_at,
+    b.outcome AS backlog_outcome,b.reason AS backlog_reason,b.batch_id AS backlog_batch_id,b.result_pr AS backlog_result_pr
+    FROM review_findings f JOIN reviewer_passes p ON p.pass_id=f.pass_id
+    LEFT JOIN finding_backlog b ON b.finding_id=f.finding_id WHERE f.current_body=1 AND (f.pass_id>? OR (f.pass_id=? AND f.ordinal>?))
       AND (? IS NULL OR p.repo=?) AND (? IS NULL OR p.pr_number=?)
     ORDER BY f.pass_id, f.ordinal LIMIT ?`).all(afterPassId, afterPassId, afterOrdinal, repo, repo, prNumber, prNumber, limit);
   if (!rows.length) return [];

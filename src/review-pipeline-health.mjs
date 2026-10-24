@@ -1,3 +1,4 @@
+import { summarizeFindingBacklog } from './findings-backlog.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { meteredExecFileSync } from './metered-gh.mjs';
@@ -6345,6 +6346,7 @@ function collectReviewPipelineHealth({
           alarmed: [],
         };
     const snapshot = {
+      nonBlockingBacklog: summarizeFindingBacklog(db, nowMs),
       held: readHeldOpenPrCount(db),
       observedAt,
       rootDir,

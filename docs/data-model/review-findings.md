@@ -113,3 +113,70 @@ historical round explicitly. Without `--workspace`, reply links are retained
 with `missing-history` rather than guessed commit evidence. Run migrations and
 backfill through the normal deployment/maintenance lane after merge; no live
 database, service or configuration change is part of a coding test.
+
+## Non-blocking backlog (FINDINGSBATCH-01)
+
+`finding_backlog` references the existing finding records, retaining repository,
+PR, reviewed head, content hash, reviewer family and top-level cited path as its
+area (`_uncited` for absent paths). The final posted review is selected by capture
+time, end time, start time and pass ID, matching the captured-review resolver.
+A merge-state transition enrolls its non-blocking findings in the same SQLite
+transaction. Ready-to-merge capture additionally binds the exact head, body digest
+and parsed count; failure must defer the strict-off merge. Enrollment is
+idempotent across retries and duplicate passes on a head by repository, PR,
+head and content hash. Late finding inserts on an already merged PR also enroll.
+No historical full-corpus scan runs at deployment. Records are never pruned.
+
+The migration is `migrations/20261024_findings_backlog.sql`, installed by the
+existing review-state migration runner. All storage remains in `data/reviews.db`.
+
+`finding_batches` owns one active batch per repository and area (partial unique
+index), and at most one new batch per UTC date. An immediate SQLite transaction
+assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
+remain visible but cannot dispatch until merged. The watcher checks cached UTC
+midnight and hourly settlement deadlines after its ordinary poll. Only the daily
+sweep claims batches or dispatches workers; hourly settlement-only passes collect
+worker manifests and observe batch PR merges, asynchronously from review admission. The deadline
+advances after successful sweep completion; startup failures and fleet-stop
+interruptions retry on the next poll with the existing claimed batches and dispatch
+keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
+recorded for the next daily sweep; settlement errors retry on the hourly pass.
+
+The sweep reuses `hq dispatch`, the configured remediation worker resolver and
+normal priority. It persists the batch before submission and uses its stable
+idempotency key after a lost receipt. A recorded launch fences further dispatch
+until completion, across days and restarts. The manifest and atomic outcome
+artifact live in `data/finding-batches/<batch-id>/`; retain them until collected.
+Workers re-check current main, drop stale/no-evidence findings with reasons and
+open one normal-review PR per area for valid fixes. An all-dropped batch needs
+no PR. Outcome JSON must cover every manifest ID exactly once. Applied outcomes
+require a merged PR in the same repository with the
+`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
+The collector reads body and merge state via `gh pr view` using the retrying
+GitHub transport. Marker lines accept surrounding whitespace, bold or HTML
+comments, while still requiring the exact batch ID. Normal review may rebase the batch PR;
+completion records the worker outcome and PR merge, without granting merge authority.
+`outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
+`result_pr` (null for dropped findings). Batch failures retain `error` until valid manifest and batch PR
+evidence is confirmed, at which point even an unmerged PR clears the stale error
+without settling findings. Failures never discard findings or launch a second
+worker blindly. Diagnose a missing artifact or failed worker before
+repairing its existing batch; no automatic timeout releases its fence.
+
+`pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is
+`node bin/review-findings.mjs backlog --db <existing-review-db>`. Each unresolved
+repository/area reports `size`, `oldestAt`, `oldestAgeMs`, `waitingForMerge`,
+`inBatch` and `error`. Missing schema/store reports `available: false`, never a
+healthy empty backlog. No new alert transport or per-item provider read is added.
+Ready captures superseded by the final merged review are retained as dropped
+with reason `superseded-final-review`; they cannot inflate a later batch.
+Late posting receipts also enroll findings for already-observed merges.
+Ready captures closed without merge are dropped with `pr-closed-without-merge`;
+if reopened and merged with that same final finding, merge enrollment restores
+its pending outcome. This event-driven cleanup prevents abandoned merge attempts
+from becoming a permanent waiting-for-merge backlog.
+
+The existing `show` CLI/read API also returns `backlog_outcome`, `backlog_reason`,
+`backlog_batch_id` and `backlog_result_pr` on the enrolled source finding. This
+left join adds no per-finding query and leaves historical reply/commit status
+semantics unchanged; use the backlog fields to audit batch application.

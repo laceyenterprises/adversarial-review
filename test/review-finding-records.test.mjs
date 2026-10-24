@@ -332,7 +332,7 @@ test('rescue: findings CLI retains the actionable argument error', () => {
   const result = spawnSync(process.execPath, [command, 'unknown-command'], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.match(result.stderr, /expected show, backfill or link-job/);
+  assert.match(result.stderr, /expected show, backlog, backfill or link-job/);
 });
 
 test('rescue: finding read executes three queries for a populated page', async t => {

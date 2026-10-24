@@ -1,3 +1,4 @@
+import { captureReadyFindings } from './findings-backlog.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -854,7 +855,7 @@ async function runDaemonCleanMergeAttemptInner({
   let ciMergePathPending = false;
   const bootstrapFor = async (rollup) => {
     if ((!(settledVerdict === 'settled-success'
-      && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) && !hamTerminalRemediationHead)
+      && isDaemonMergeReviewAllowed(reviewState, { strictMode })) && !hamTerminalRemediationHead)
       || cfg?.autonomousMergeExecutionEnabled === false
       || String(rollup?.state || '').toUpperCase() !== 'OPEN') return { mode: null };
     try {
@@ -872,7 +873,7 @@ async function runDaemonCleanMergeAttemptInner({
   const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
   let recoveringCancelled = false;
   if (cfg?.autonomousMergeExecutionEnabled !== false
-    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode: true }))
+    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode }))
       || hamTerminalRemediationHead)
     && String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
     try {
@@ -917,6 +918,17 @@ async function runDaemonCleanMergeAttemptInner({
     : certifiedNonCleanHead
       ? hamAuditHead
       : validatedHead;
+  if (!strictMode && reviewState?.nonBlockingFindingCount > 0) {
+    try {
+      captureReadyFindings({ rootDir, repo: repoPath, prNumber, headSha: validatedHead,
+        version: reviewState.refusalReviewVersion || gateSnapshot?.settledReview?.evidenceVersion,
+        count: reviewState.nonBlockingFindingCount });
+    } catch (error) {
+      logger?.warn?.(`[findings-backlog] capture deferred: ${error.message}`);
+      return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, reason: 'findings-capture-pending',
+        merged: false, skipMergeAgent: true, recoveryWait: true, retryAfterMs: 30_000 };
+    }
+  }
   const daemonResult = await attemptDaemonCleanMergeImpl({
     onEligibleImpl: ({ headSha }) => observeClosureLag({ rootDir, repo: repoPath, prNumber,
       headSha, eligible: true, sloMs: cfg.closureLagSloMs, logger }),

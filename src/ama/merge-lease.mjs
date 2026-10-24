@@ -65,7 +65,7 @@ export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLe
 
 // Drop obsolete heads before attempting any gates, and retain a reservation
 // only while the eligible exact head is actually waiting for the merge lane.
-export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head }, attempt) {
+export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head, isAttemptActive = () => false }, attempt) {
   if (!rootDir || !repo || !base || !pr || !head) return attempt();
   const prune = (keepHead) => {
     const obsolete = w => w.priority === 'daemon' && Number(w.pr) === Number(pr) && w.head !== keepHead;
@@ -82,8 +82,13 @@ export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head
     result = await attempt();
     return result;
   } finally {
-    const reason = result?.daemonCleanMerge?.reason || result?.reason;
-    prune(reason === 'lease-contended' ? head : null);
+    // The posted-review boundary includes exits that never invoke closure.
+    const closure = result?.amaClosureResult || result;
+    const reason = closure?.daemonCleanMerge?.reason || closure?.reason;
+    // A soft caller deadline can return while the concrete coexistence promise
+    // is still running. Its reservation scope must own eventual cleanup even
+    // when closure dispatch is never reached.
+    prune(reason === 'lease-contended' || isAttemptActive() ? head : null);
   }
 }
 

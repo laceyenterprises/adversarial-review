@@ -978,6 +978,16 @@ once with a timer-safe ceiling. Ineligibility, head movement and merge completio
 remove it immediately; an absent daemon expires. A holder release (including a
 retryable abort) wakes the first surviving daemon PR at its reserved head through
 the existing capped watcher wake path. No holder is preempted.
+LAC-2087 puts the posted-review candidate exits inside this cleanup lifecycle:
+operator skip and terminal/head-change exits remove abandoned daemon ownership
+even when no next acquire runs. Only eligible daemon contention retains it;
+a concrete in-flight coexistence promise also retains ownership across a soft
+caller deadline until its reservation scope settles, including terminal or
+stacked-base exits before closure dispatch and rejected operations. Watcher PID liveness supplies no acquire
+ownership. Other FIFO waiters and the
+holder fence are unchanged. The clean smoke covers empty-lane progress after a
+hold with a live watcher PID; dedicated fixtures also cover head changes and
+cleanup while a holder remains. No states or merge-authority edges are added.
 The closer releases before its first remote-CI wait, including UNKNOWN/read
 retry waits, and reacquires before merge. At that boundary, the entire current base
 must be contained in the exact CI-validated head; even disjoint base advancement
@@ -1801,6 +1811,16 @@ exhaustion is a retryable deferred audit, never a terminal no-merge; the next
 pass refunds failure charges and resumes without contention backoff. The daemon
 keeps priority. All holder transitions, including LEASEFAIR-02's CI retry hold,
 are retained in the bounded per-base JSONL history.
+
+LAC-2087 serializes posted-review handling per review root/repository/PR within
+the watcher process. A soft caller deadline leaves the guard held until the
+concrete coexistence operation and handler both settle, preventing a later poll
+at any head from pruning an active reservation. Competing polls return
+`posted-review-in-flight`; other PRs continue. Success and rejection release the
+guard for the next poll, and late failures remain logged and rejection-observed
+by the existing step promise race. Candidate cleanup falls back to the stored
+review base when candidate base metadata is absent. No durable states or merge
+authority change.
 
 ## Interrupted dispatch intents (LAC-2081)
 

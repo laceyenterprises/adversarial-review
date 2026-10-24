@@ -21,7 +21,7 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   MERGE_AGENT_REQUESTED_LABEL,
@@ -34,6 +34,7 @@ import { finalReviewHammerLatencySummary, resolveMergeAgentCoexistenceForWatcher
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
+import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import {
   clearPendingAmaHammerDispatch,
   clearPendingAmaHammerDispatchForTerminalPr,
@@ -337,12 +338,37 @@ export async function timePostedReviewStep(
   }
 }
 
+// A soft deadline releases the caller, not the PR's reservation ownership.
+// Exclude newer passes (including moved heads) until both scopes have settled.
+const postedReviewAttempts = new Map();
+
 export async function handlePostedReviewRow(options = {}) {
+  if (typeof options.repoPath !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repoPath)) {
+    throw new TypeError('handlePostedReviewRow requires repoPath in owner/repo form');
+  }
+  if (!['number', 'string'].includes(typeof options.prNumber)
+    || !/^\d+$/.test(String(options.prNumber))
+    || !Number.isSafeInteger(Number(options.prNumber)) || Number(options.prNumber) <= 0) {
+    throw new TypeError('handlePostedReviewRow requires a positive safe-integer prNumber');
+  }
+  const key = JSON.stringify([resolve(options.rootDir || ROOT), options.repoPath, Number(options.prNumber)]);
+  if (postedReviewAttempts.has(key)) {
+    return { handled: true, outcome: 'posted-review-in-flight' };
+  }
   const snapshotPass = createMergeAgentSnapshotPass({ now: options.now });
+  const attempt = { handlerActive: true, coexistenceActive: false,
+    release() {
+      if (!this.handlerActive && !this.coexistenceActive) postedReviewAttempts.delete(key);
+    } };
+  postedReviewAttempts.set(key, attempt);
   try {
     return await withPostedReviewReadCache({ repo: options.repoPath, prNumber: options.prNumber,
-      headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache({ ...options, snapshotPass }));
-  } finally { snapshotPass.close(); }
+      headSha: options.currentRevisionRef }, () => handlePostedReviewRowWithinReadCache({ ...options, snapshotPass, attempt }));
+  } finally {
+    snapshotPass.close();
+    attempt.handlerActive = false;
+    attempt.release();
+  }
 }
 
 async function handlePostedReviewRowWithinReadCache({
@@ -371,6 +397,7 @@ async function handlePostedReviewRowWithinReadCache({
   logGate = postedReviewRowLogGate,
   logger = console,
   snapshotPass,
+  attempt,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
   const retireTerminalHammerIntent = () => {
@@ -562,6 +589,13 @@ async function handlePostedReviewRowWithinReadCache({
         },
       };
     }
+    // Own reservation cleanup outside closure dispatch: operator holds and
+    // terminal/head changes can prevent the next daemon acquire entirely.
+    const reservationBase = candidate?.baseBranch || existing?.base_ref || existing?.baseBranch;
+    return await withDaemonMergeReservation({ rootDir, repo: repoPath, pr: prNumber,
+      base: reservationBase, head: candidate?.headSha || currentRevisionRef,
+      isAttemptActive: () => attempt.coexistenceActive,
+    }, async () => {
     // End advisory reuse before any closure, lease or dispatch freshness read.
     closePostedReviewReadCache();
     const postCandidateReviewState = rereadPostedReviewRow('resolveMergeAgentCoexistence', {
@@ -679,8 +713,17 @@ async function handlePostedReviewRowWithinReadCache({
     let coexistenceDecision;
     try {
       coexistenceDecision = await timePostedReviewStep(
-        'resolveMergeAgentCoexistence', stepKey, logger, ({ signal }) =>
-          resolveMergeAgentCoexistenceForWatcherImpl({
+        'resolveMergeAgentCoexistence', stepKey, logger, async ({ signal }) => {
+          attempt.coexistenceActive = true;
+          // This scope follows the concrete promise past a soft deadline,
+          // including terminal/stacked exits that never enter closure dispatch.
+          // Keep this inner boundary even though the candidate scope also prunes:
+          // the outer scope can exit at its soft deadline while this work lives on.
+          // Each scope must independently settle its reservation ownership.
+          try { return await withDaemonMergeReservation({ rootDir, repo: repoPath,
+            base: reservationBase, pr: prNumber,
+            head: candidate?.headSha || currentRevisionRef,
+          }, () => resolveMergeAgentCoexistenceForWatcherImpl({
             rootDir,
             reviewStateRow: existing,
             reviewStateDb,
@@ -699,7 +742,11 @@ async function handlePostedReviewRowWithinReadCache({
             signal,
             operationTimeoutMs: coexistenceOperationTimeoutMs,
             operationTracker: coexistenceOperationTracker,
-          }),
+          })); } finally {
+            attempt.coexistenceActive = false;
+            attempt.release();
+          }
+        },
         undefined,
         {
           deadlineMs: coexistenceDeadlineMs,
@@ -958,6 +1005,7 @@ async function handlePostedReviewRowWithinReadCache({
       gateDecision,
       amaClosureResult: coexistenceDecision?.amaClosureResult || null,
     };
+    });
   } catch (err) {
     // The augmented error from `dispatchMergeAgentForPR` already
     // inlines stderr+stdout into `err.message`, so just dumping

@@ -12,9 +12,9 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { execFile } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { statSync, watch } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -31,6 +31,7 @@ import {
   readMergeLeaseWaiters,
   readMergeLeaseHistory,
   mergeLeaseHistoryFilePath,
+  mergeLeaseFilePath,
   releaseMergeLease,
   releaseMergeLeaseForRetryableAbort,
   refundMergeLeaseGateAttempt,
@@ -38,8 +39,7 @@ import {
   resetMergeLeaseGateAttempts,
 } from '../src/ama/merge-lease.mjs';
 
-import { WATCHER_POLL_INTERVAL_MS } from '../src/watcher-poll-interval.mjs';
-import { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -48,6 +48,7 @@ const EXIT_USAGE = 64;
 const EXIT_PARKED = 70;
 const EXIT_TIMEOUT = 75;
 const DEFAULT_SLEEP_MS = 250;
+const POLL_CEILING_MS = 15_000;
 const CLEANUP_RETRY_SLEEP_MS = 250;
 const DEFAULT_RELEASE_RETRY_MS = 1000;
 const DEFAULT_MAX_GATE_ATTEMPTS = 5;
@@ -404,15 +405,29 @@ async function runAcquire(argv, deps) {
     ceiling_s: acquisitionSeconds,
   });
 
-  // Scale the nominal ceiling once; exponential polling never rescales a delay.
-  const nominalWaitSeconds = progressWait ? Math.max(6 * 3600, waitSeconds) : waitSeconds;
-  const pollCeilingMs = deps.loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
-    Math.max(30_000, nominalWaitSeconds * 1000 / 60)));
+  // Local queue reads stay cheap under load; only wait budgets are load-scaled.
   let pollDelayMs = DEFAULT_SLEEP_MS;
+  let wakePending = false;
+  let pollSleepAbort = null;
   const waitForNextPoll = async (signal) => {
+    // Latch events between the last acquisition attempt and starting its timer.
+    if (wakePending) {
+      wakePending = false;
+      return;
+    }
     const remaining = Math.min(deadlineMs, lastProgressMs + stallSeconds * 1000) - deps.nowMs();
-    await deps.sleep(Math.min(pollDelayMs, Math.max(1, remaining)), undefined, signal ? { signal } : {});
-    pollDelayMs = Math.min(pollCeilingMs, pollDelayMs * 2);
+    const wakeAbort = new AbortController();
+    pollSleepAbort = wakeAbort;
+    try {
+      await deps.sleep(Math.min(pollDelayMs, Math.max(1, remaining)), undefined,
+        { signal: signal ? AbortSignal.any([signal, wakeAbort.signal]) : wakeAbort.signal });
+    } catch (err) {
+      if (!wakeAbort.signal.aborted || signal?.aborted || err?.name !== 'AbortError') throw err;
+    } finally {
+      pollSleepAbort = null;
+      wakePending = false;
+    }
+    pollDelayMs = Math.min(POLL_CEILING_MS, pollDelayMs * 2);
   };
   let nextProgressMs = startedMs;
   const reportProgress = () => {
@@ -483,7 +498,39 @@ async function runAcquire(argv, deps) {
     return [signal, handler];
   }));
 
+  let leaseWatcher;
   try {
+    // Watch the directory, not the inode: holder files are atomically replaced.
+    // Install before attempting acquisition so release cannot race registration.
+    // Only holder changes wake us; our own waiter/history writes must not spin.
+    const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
+    try {
+      const holderName = basename(leasePath);
+      const directoryName = basename(dirname(leasePath));
+      const holderFingerprint = () => {
+        try {
+          const info = statSync(leasePath);
+          return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+        } catch (err) {
+          return err?.code === 'ENOENT' ? 'absent' : null;
+        }
+      };
+      let observedHolder = holderFingerprint();
+      leaseWatcher = deps.watch(dirname(leasePath), (_event, filename) => {
+        const name = filename == null ? null : String(filename);
+        const namedHolder = name === holderName;
+        if (!namedHolder && name !== null && name !== directoryName) return;
+        // macOS can report an existing holder's removal as a directory event.
+        // Its other directory events include our own queue/lock writes; only
+        // a changed holder fingerprint may wake us for an ambiguous event.
+        const fingerprint = holderFingerprint();
+        if (!namedHolder && (fingerprint === null || fingerprint === observedHolder)) return;
+        observedHolder = fingerprint;
+        wakePending = true;
+        pollSleepAbort?.abort();
+      });
+      leaseWatcher.on('error', () => leaseWatcher.close());
+    } catch { /* Polling remains the fallback when watching is unavailable. */ }
     while (true) {
       const tickNow = deps.nowIso();
       if (!interrupted) {
@@ -590,6 +637,7 @@ async function runAcquire(argv, deps) {
     try {
       if (!waiterServed) await cleanupAcquireWaiter({ rootDir, repo, base, waiterId }, deps);
     } finally {
+      leaseWatcher?.close();
       for (const [signal, handler] of handlers) deps.signalSource.off(signal, handler);
     }
   }
@@ -806,11 +854,11 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     execFileImpl: execFile,
     maxGateAttempts: parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
     pidAliveFn: defaultPidAliveFn,
-    loadAwareTimeoutMs,
     loadAwareTimeoutSeconds,
     nowIso,
     nowMs: () => Date.now(),
     sleep,
+    watch,
     signalSource: process,
     ...overrides,
   };

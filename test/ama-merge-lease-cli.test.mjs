@@ -12,13 +12,13 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
 import { formatHamGateAttemptCapClosingStatus } from '../src/ama/dispatch-closer.mjs';
-import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
-import { WATCHER_POLL_INTERVAL_MS } from '../src/watcher-poll-interval.mjs';
 import {
   acquireMergeLease,
   classifyMergeLeaseGateFailure,
@@ -31,6 +31,7 @@ import {
   recordMergeLeaseGateAttempt,
   readMergeLeaseWaiters,
   releaseMergeLease,
+  releaseMergeLeaseForRetryableAbort,
   upsertMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
 
@@ -80,6 +81,7 @@ function fakeDeps(overrides = {}) {
     pidAliveFn: () => true,
     nowMs: () => nowMs,
     nowIso: () => new Date(nowMs).toISOString(),
+    watch: () => Object.assign(new EventEmitter(), { close() {} }),
     sleep: async (ms) => {
       nowMs += ms;
       if (typeof overrides.onSleep === 'function') {
@@ -1152,7 +1154,7 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
       });
       const out = jsonOutput(io);
       assert.equal(code, releases ? 0 : 75);
-      assert.equal(out.waited_s, releases ? 421 : 900);
+      assert.equal(out.waited_s, releases ? 405 : 900);
       if (!releases) {
         assert.equal(out.configured_s, 900);
         assert.equal(out.timedOut, true);
@@ -1164,8 +1166,7 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
         return Number(line.match(/waited=(\d+)s/)[1]);
       });
       assert.equal(times[0], 0);
-      const pollCeilingSeconds = loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
-        Math.max(30_000, 900_000 / 60))) / 1000;
+      const pollCeilingSeconds = 15;
       for (let i = 1; i < times.length; i++) {
         const gap = times[i] - times[i - 1];
         assert.ok(gap >= 25 && gap <= 25 + pollCeilingSeconds);
@@ -1308,7 +1309,7 @@ test('LEASEFAIR-03 progress ceiling is sized once and cannot be postponed by dae
   assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
 });
 
-test('closer polling uses a once-scaled exponential ceiling and stays in tens', async t => {
+test('closer polling doubles from 250ms to a fixed 15s ceiling under high load', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   acquireFixture(rootDir);
@@ -1316,32 +1317,136 @@ test('closer polling uses a once-scaled exponential ceiling and stays in tens', 
   let polls = 0;
   const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
     '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
-    loadAwareTimeoutMs: n => { scales.push(n); return n * 2; },
+    loadAwareTimeoutMs: n => { scales.push(n); return n * 100; },
     acquireMergeLease: args => { polls++; return acquireMergeLease(args); },
     onSleep: ({ nowMs }) => { delays.push(nowMs); },
   });
   assert.equal(code, 75, io.stderrText);
-  assert.deepEqual(scales, [30_000]);
-  assert.ok(polls < 30, String(polls));
+  assert.deepEqual(scales, []);
+  assert.ok(polls < 70, String(polls));
+  assert.equal(delays[0] - Date.parse('2026-06-20T18:00:00Z'), 250);
   const gaps = delays.slice(1).map((value, index) => value - delays[index]);
-  assert.ok(gaps.includes(60_000));
-  assert.ok(gaps.every(value => value <= 60_000));
+  assert.deepEqual(gaps.slice(0, 6), [500, 1000, 2000, 4000, 8000, 15_000]);
+  assert.ok(gaps.every(value => value <= 15_000));
 });
 
-test('six-hour progress wait also polls in tens through the existing watcher cadence ceiling', async t => {
+test('six-hour progress wait retains its deadline with the fixed polling ceiling', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  acquireFixture(rootDir);
+  const held = acquireFixture(rootDir);
   let polls = 0;
   const scales = [];
   const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
     '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '21600', '--wait-by-progress'], {
     loadAwareTimeoutSeconds: n => n,
     loadAwareTimeoutMs: n => { scales.push(n); return n; },
-    acquireMergeLease: args => { polls++; return acquireMergeLease(args); },
+    acquireMergeLease: () => { polls++; return { acquired: false, existingLease: held.lease }; },
   });
   assert.equal(code, 75, io.stderrText);
-  assert.deepEqual(scales, [300_000]);
-  assert.ok(polls < 90, String(polls));
+  assert.deepEqual(scales, []);
+  assert.ok(polls > 1400 && polls < 1450, String(polls));
   assert.equal(jsonOutput(io).waited_s, 21600);
 });
+
+for (const release of [releaseMergeLease, releaseMergeLeaseForRetryableAbort]) {
+  test(`${release.name} wakes a sleeping head CLI within one second and preserves FIFO`, { timeout: 3000 }, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquireFixture(rootDir);
+    const { deps, io } = fakeDeps();
+    const advanceSleep = deps.sleep;
+    let releasedAt, notify, closed = false;
+    deps.watch = (directory, callback) => {
+      assert.equal(directory, join(rootDir, 'data', 'merge-leases'));
+      notify = callback;
+      return Object.assign(new EventEmitter(), { close() { closed = true; } });
+    };
+    deps.sleep = async (ms, value, options) => {
+      if (ms < 15_000) return advanceSleep(ms);
+      assert.equal(ms, 15_000);
+      setImmediate(() => {
+        releasedAt = performance.now();
+        assert.equal(release({ rootDir, ...held.lease, now: deps.nowIso(), merged: true }).released, true);
+        // Even a newcomer that polls before the wake is delivered must wait.
+        const newer = acquireFixture(rootDir, { holderPr: 204, holderHead: 'newer-head',
+          holderPid: 8204, now: deps.nowIso(), registerWaiter: true, waiterId: 'newer' });
+        assert.equal(newer.acquired, false);
+        assert.equal(newer.queuePosition, 2);
+        notify('rename', held.leasePath.split('/').at(-1));
+      });
+      await sleep(ms, value, { signal: AbortSignal.any([options.signal, AbortSignal.timeout(1000)]) });
+    };
+    const code = await mergeLeaseMain(['acquire', '--root-dir', rootDir,
+      '--repo', REPO, '--base', BASE, '--pr', '203', '--head', 'ready-head',
+      '--owner-pid', '8203', '--wait', '900'], deps);
+    assert.equal(code, 0, io.stderrText);
+    assert.equal(jsonOutput(io).holder, 203);
+    assert.ok(performance.now() - releasedAt < 1000);
+    assert.equal(closed, true);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).map(w => w.pr), [204]);
+  });
+}
+
+for (const failure of ['setup', 'delivery']) {
+  test(`CLI acquires on its next fixed poll after watch ${failure} fails`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquireFixture(rootDir);
+    let watcher, closed = false, releasedAt;
+    const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
+      watch: () => {
+        if (failure === 'setup') throw new Error('synthetic watch failure');
+        watcher = Object.assign(new EventEmitter(), { close() { closed = true; } });
+        return watcher;
+      },
+      onSleep: ({ nowMs }) => {
+        if (releasedAt || nowMs < Date.parse('2026-06-20T18:00:30Z')) return;
+        watcher?.emit('error', new Error('synthetic delivery failure'));
+        assert.equal(releaseMergeLease({ rootDir, ...held.lease,
+          now: new Date(nowMs).toISOString(), merged: true }).released, true);
+        releasedAt = nowMs;
+      },
+    });
+    assert.equal(result.code, 0, result.io.stderrText);
+    assert.equal(jsonOutput(result.io).holder, 203);
+    assert.equal(jsonOutput(result.io).waited_s, 30);
+    assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
+    assert.equal(closed, failure === 'delivery');
+  });
+}
+
+for (const releaseEventName of [null, 'merge-leases', 'holder-buffer']) {
+  test(`watch latches ${releaseEventName} holder changes and ignores unchanged noise`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquireFixture(rootDir);
+    let notify, polls = 0, sleeps = 0, closed = false;
+    const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
+      watch: (_dir, callback) => {
+        notify = callback;
+        return Object.assign(new EventEmitter(), { close() { closed = true; } });
+      },
+      acquireMergeLease: args => {
+        const acquired = acquireMergeLease(args);
+        if (++polls === 1) {
+          notify('rename', null);
+          notify('change', 'merge-leases');
+          notify('rename', 'unrelated.json');
+          notify('rename', held.leasePath.split('/').at(-1).replace('.json', '.waiters.json'));
+        } else if (polls === 2) {
+          releaseMergeLease({ rootDir, ...held.lease, now: args.now, merged: true });
+          notify('change', releaseEventName === 'holder-buffer'
+            ? Buffer.from(held.leasePath.split('/').at(-1)) : releaseEventName);
+        }
+        return acquired;
+      },
+      onSleep: () => { sleeps++; },
+    });
+    assert.equal(result.code, 0, result.io.stderrText);
+    assert.equal(polls, 3);
+    assert.equal(sleeps, 1);
+    assert.equal(closed, true);
+  });
+}

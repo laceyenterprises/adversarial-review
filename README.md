@@ -620,8 +620,8 @@ bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
 unchanged; the clean smoke verifies FIFO service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
 `ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
 HAMLEASE-01 progress reports occur at least 25 seconds apart, with a maximum
-gap of 25 seconds plus the once-scaled polling ceiling (excluding synchronous
-I/O); the waiter data-model documents the ceiling calculation.
+gap of 40 seconds (25 seconds plus the fixed 15-second polling ceiling, excluding
+synchronous I/O); the waiter data-model documents the polling contract.
 
 LEASEFAIR-03 gives closers a progress-aware lease wait: a 900-second nominal
 stall bound and six-hour nominal ceiling, each load-scaled once. Service advances
@@ -637,8 +637,13 @@ same-host watchers lose their reservations before queue selection. Holder releas
 wakes the first daemon PR at its reserved head through the existing per-head cap.
 The clean offline smoke verifies service at 299 seconds and an exact-head release
 wake; no deployment configuration or migration is needed.
-CLI polling doubles from 250ms to a once-load-scaled ceiling from 30 seconds for short waits to the existing
-watcher poll interval for long waits.
+CLI polling doubles from 250ms to a fixed 15-second ceiling, independent of
+host load. Both release paths wake sleeping CLI waiters through a directory
+watch of the matching holder file; the existing daemon wake is unchanged.
+Ambiguous directory events wake only on a holder metadata change, preserving
+macOS release notifications without spinning on queue writes.
+Watch failures fall back to polling. Focused merge-lease CLI tests cover prompt
+release wakeup, FIFO ordering, fixed polling and watch failures.
 Status/list includes arrival time, role and position; history records re-entry
 and parking with the release reason. Synthetic merge-lease and daemon-merge
 regressions cover starvation, backoff, parking, drafts and bounded polling.

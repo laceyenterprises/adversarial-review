@@ -1,5 +1,5 @@
 /** OSG-11: read-only replay policy and parsing. No runtime, store or publication imports. */
-import { ROUTE_BY_BUILDER_CLASS, normalizeBuilderClass, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
+import { GEMINI_REVIEWABLE_BUILDER_CLASSES, ROUTE_BY_BUILDER_CLASS, normalizeBuilderClass, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { findingLineRanges } from './kernel/finding-lines.mjs';
 
@@ -26,7 +26,9 @@ export function replayRouteAllowed(builderInput, arm, options = {}) {
   if (diagnostic && arm.harness === 'pi' && family === 'deepseek') {
     return !['pi', 'opencode', 'hermes'].includes(builder) || Boolean(builderModel);
   }
-  return arm.harness === family && ROUTE_BY_BUILDER_CLASS[builder].reviewerModel === family;
+  return arm.harness === family && (family === 'gemini'
+    ? GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(builder)
+    : ROUTE_BY_BUILDER_CLASS[builder].reviewerModel === family);
 }
 
 export function parseReplayReview(body) {

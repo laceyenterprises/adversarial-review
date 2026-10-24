@@ -22,6 +22,22 @@ test('OSG-11 parses shadow findings with canonical headings and line ranges', ()
   assert.throws(() => parseReplayReview('malformed'));
 });
 
+test('OSG-11 replay accepts eligible native Gemini arms without relaxing family guards', () => {
+  const arm = { harness: 'gemini', model: 'gemini-1.5-pro', worker_class: 'gemini-reviewer' };
+  for (const builder of ['claude-code', 'codex', 'clio-agent', 'codex-corp']) {
+    assert.equal(replayRouteAllowed(builder, arm), true, builder);
+  }
+  for (const builder of ['gemini', 'unknown', 'pi', 'opencode', 'hermes']) {
+    assert.equal(replayRouteAllowed(builder, arm), false, builder);
+  }
+  assert.equal(replayRouteAllowed('codex', { ...arm, harness: 'pi', worker_class: 'pi' }), false);
+  assert.equal(replayRouteAllowed('codex', { ...arm, worker_class: 'codex-reviewer' }), false);
+  assert.equal(replayRouteAllowed('codex', arm, { builderModel: 'gemini-test' }), false);
+  const result = runBridge({ operation: 'route', builder_class: 'claude-code', arm });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'true\n');
+});
+
 test('OSG-11 requires both review sections to be known, including placeholder validation', () => {
   const clean = '- None.\n';
   const placeholder = '- **<Title>**\n  - **File:** <path>\n  - **Problem:** <one paragraph>\n';
@@ -56,6 +72,24 @@ test('OSG-11 stdin bridge accepts null options and emits newline-delimited JSON'
   assert.equal(result.stdout, 'true\n');
 });
 
+test('OSG-11 stdin bridge distinguishes unresolved ranges from unknown operations', () => {
+  for (const lines of ['unknown', 'unparseable citation', null]) {
+    const result = runBridge({ operation: 'ranges', lines, file: 'x.py' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, '[]\n');
+  }
+  const valid = runBridge({ operation: 'ranges', lines: '2-3', file: 'x.py' });
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, '[{"start":2,"end":3}]\n');
+  for (const operation of ['unknown', null]) {
+    const result = runBridge({ operation });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'Replay input unavailable or invalid.\n');
+  }
+});
+
 test('OSG-11 stdin bridge preserves UTF-8 sequences split between chunks', () => {
   const body = '## Blocking Issues\n- **Café 🌍**\n  - **File:** café.py\n  - **Lines:** 2\n  - **Problem:** Missing bound.\n\n## Non-blocking Issues\n- None.\n';
   const input = Buffer.from(JSON.stringify({ operation: 'parse', body_md: body }));
@@ -85,22 +119,29 @@ test('OSG-11 stdin bridge rejects malformed reviews and oversized UTF-8 input wi
 
 test('OSG-11 shadow fixture runs with publication and process effects forbidden', async () => {
   const target = new URL('../src/osg-reviewer-replay.mjs', import.meta.url).href;
+  const loader = `
+    export function resolve(specifier, context, next) {
+      if (/attest|github-writer|reviewer\\.mjs$/.test(specifier)) throw Error('publication effect reached');
+      return next(specifier, context);
+    }
+  `;
   const script = `
+    import assert from 'node:assert/strict';
     import fs from 'node:fs';
     import http from 'node:http';
     import https from 'node:https';
     import cp from 'node:child_process';
-    import { syncBuiltinESMExports, registerHooks } from 'node:module';
+    import { syncBuiltinESMExports, register } from 'node:module';
+    register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(loader)}`)}, import.meta.url);
     const forbid = () => { throw Error('publication effect reached'); };
     for (const key of ['writeFileSync','appendFileSync','renameSync','mkdirSync']) fs[key] = forbid;
     for (const mod of [http, https]) { mod.request = forbid; mod.get = forbid; }
     for (const key of ['spawn','spawnSync','execFile','execFileSync','exec','execSync']) cp[key] = forbid;
     globalThis.fetch = forbid;
     syncBuiltinESMExports();
-    registerHooks({ resolve(specifier, context, next) {
-      if (/attest|github-writer|reviewer\\.mjs$/.test(specifier)) forbid();
-      return next(specifier, context);
-    }});
+    for (const specifier of ['./attest.mjs', './github-writer.mjs', './reviewer.mjs']) {
+      await assert.rejects(import(specifier), /publication effect reached/);
+    }
     const replay = await import(${JSON.stringify(target)});
     if (!replay.replayRouteAllowed('claude-code', {harness:'codex',model:'gpt-6.1-sol'})) throw Error('route');
     replay.parseReplayReview('## Blocking Issues\\n- None.\\n\\n## Non-blocking Issues\\n- None.');

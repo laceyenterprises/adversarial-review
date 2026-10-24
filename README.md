@@ -2417,7 +2417,11 @@ route options use the ordinary non-diagnostic defaults. The bridge decodes
 streamed UTF-8 across chunk boundaries, caps input at 128 KiB and review bodies
 at 64 KiB, and emits one newline-terminated JSON result. Invalid input exits
 nonzero with a generic stderr diagnostic and no stdout result.
-Native recommendations follow the canonical builder route;
+The `ranges` operation serializes the shared parser's result directly (an empty
+array for unknown or unparseable citations); unsupported operations are rejected
+before dispatch. Native recommendations follow the canonical base builder route
+or permit Gemini for the canonical Gemini-eligible classes (`claude-code`,
+`codex`, `clio-agent`);
 unknown/same-family models are refused, including models concealed behind a
 third-party harness. DeepSeek through Pi can run diagnostically when the known
 builder family differs; that diagnostic permission cannot recommend a route.

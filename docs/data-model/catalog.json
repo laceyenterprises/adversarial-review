@@ -125,6 +125,15 @@
       "owner": "watcher empty-PR admission"
     },
     {
+      "id": "derived-artifact-receipts",
+      "title": "Exact-head Derived Artifact Receipts",
+      "path": "docs/data-model/derived-artifact-receipts.md",
+      "store": "<runtime rootDir>/data/derived-artifact-receipts/",
+      "schemaSurface": "src/ama/derived-artifact-receipt.mjs",
+      "relatedSchemaSurfaces": ["bin/derived-artifact-receipt.mjs", "src/ama/derived-artifacts.mjs", "src/ama/primary-change.mjs"],
+      "owner": "AMA canonical daemon data owner"
+    },
+    {
       "id": "primary-change-history",
       "title": "Primary Change History",
       "path": "docs/data-model/primary-change-history.md",
@@ -132,7 +141,7 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "identityVersion": "reversalprov-v3",
+      "identityVersion": "reversalprov-v4",
       "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
       "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],
@@ -218,7 +227,7 @@
     },
     {
       "id": "ama-audit",
-      "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt.",
+      "docsFastPathRange": "Terminal metadata records the latest eligible immutable base/head comparison on the same leased base branch; live gates precede attestation recording on every transport attempt. Record failures are deferred with exitCode, signal, stderrTail (redacted, at most 2000 characters), error, retryAfter, needsOperator and parkReason. Exact-head history permits three failures with 60s then 120s backoff and parks subsequent ticks without writes; legacy failure entries also count.",
       "docsFastPathFields": ["closureAuthority=docs-fast-path", "mergeAccountability=docs-fast-path", "docsFastPath.headSha", "docsFastPath.baseSha", "docsFastPath.baseBranch", "attempts[].reason=attestation-record-failed"],
       "osgResolutionFields": ["harnessResolution.modelResolution", "harnessResolution.osgRemediator", "attempts[].harnessResolution.modelResolution", "attempts[].harnessResolution.osgRemediator"],
       "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",

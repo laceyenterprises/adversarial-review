@@ -180,3 +180,46 @@ test('HAMLINES-01: actual harness rendering cites file lines and excludes diff i
     assert.ok(result.missingEvidence.rejected.some(entry => entry.reason === 'not-covered-by-cited-finding'));
   }
 });
+
+test('LAC-2101 #9097: exact secondary Lines path and literal File brace list authorize only their own ranges', async () => {
+  const { readFileSync } = await import('node:fs');
+  const saved = JSON.parse(readFileSync(new URL('./fixtures/lac-2101-preservation.json', import.meta.url)));
+  const card = saved['9097'].finding;
+  for (const braces of [false, true]) {
+    const body = `## Blocking issues\n- None.\n## Non-blocking issues\n${braces
+      ? card.replace('`modules/worker-pool/post-merge-verify.json`', '`modules/worker-pool/{post-merge-verify,state-machines}.json`')
+        .replace('3-3; modules/worker-pool/state-machines.json:3-3', '3-3') : card}\n## Verdict\nComment only`;
+    const { evidence } = await collect({ shift: 0, reviews: [review({ body })],
+      cites: ['PRR_cited finding=1 kind=non-blocking'] });
+    const authorization = evidence.reversalAuthorizations[0];
+    authorization.rebased = false;
+    const primary = path => ({ filename: path, status: 'modified', additions: 1, deletions: 0,
+      patch: '@@ -2,0 +3 @@\n+  "docsFastPath": "unchanged",' });
+    const paths = ['modules/worker-pool/post-merge-verify.json', 'modules/worker-pool/state-machines.json'];
+    evidence.primaryFiles = paths.map(primary);
+    authorization.reviewedFiles = paths.map(primary);
+    authorization.parentFiles = paths.map(primary);
+    authorization.commit.files = paths.map(filename => ({ filename, status: 'modified', additions: 0, deletions: 1,
+      patch: '@@ -3 +2,0 @@\n-  "docsFastPath": "unchanged",' }));
+    assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).ok, true);
+    assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: false }).reason, 'primary-change-reverted');
+    for (const mutate of [
+      e => { e.reversalAuthorizations[0].review.body = body.replaceAll('state-machines', 'unrelated'); },
+      e => { e.reversalAuthorizations[0].review.body = body.replaceAll('3-3', '4-4'); },
+      e => { e.reversalAuthorizations[0].commit.author.login = 'foreign-author'; },
+      e => { e.reversalAuthorizations[0].commit.files.pop(); },
+      e => { e.primaryFiles.push(primary('modules/worker-pool/unrelated.json')); },
+    ]) {
+      const bad = structuredClone(evidence); mutate(bad);
+      assert.equal(checkPrimaryChange(bad, head, { strictNonBlockingRemediation: true }).reason, 'primary-change-reverted');
+    }
+  }
+});
+
+test('LAC-2101: secondary path grammar never resumes inside notes or borrows another path range', async () => {
+  for (const lines of [
+    '30-40; src/other.mjs:10-11', '30-40; note: src/a.mjs:10-11',
+    '30-40 (src/a.mjs:10-11)', '30-40; step-1; src/a.mjs:10-11',
+    '30-40; src/{a,../other}.mjs:10-11', '30-40; src/*.mjs:10-11',
+  ]) assert.equal(checkPrimaryChange(await reversal(lines), head).reason, 'primary-change-reverted', lines);
+});

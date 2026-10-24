@@ -6,6 +6,7 @@ import { cp, mkdtemp, mkdir, writeFile, readFile, rm, realpath, lstat, utimes } 
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { loadDomainConfig } from '../domain-config.mjs';
+import { trustedArtifactRecipe } from './derived-artifact-receipt.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_BYTES = 128 * 1024 * 1024;
@@ -92,7 +93,7 @@ export async function runArtifactBuild(spec, signal) {
 // Immutable API objects materialize the final head in an isolated scratch
 // worktree, without exposing a daemon checkout, Git hooks or host dependencies.
 // This proof is deliberately collected after durable history-cache lookup.
-export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { runBuildImpl = runArtifactBuild } = {}) {
+export async function proveDerivedArtifacts({ repo, get, signal, rootDir, prNumber }, evidence, { runBuildImpl = runArtifactBuild } = {}) {
   if (evidence.hasHammerCommits !== true) return [];
   const candidates = (evidence.primaryFiles || []).filter(file => typeof file.patch !== 'string'
     && ['added', 'modified'].includes(file.status)).map(file => ({ before: file,
@@ -104,17 +105,19 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
   const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const trees = new Map(), blobs = new Map();
   let totalBytes = 0, checkoutBytes = 0, count = 0;
-  const read = async path => {
+  const boundedRead = async (reader, path) => {
     bounded.throwIfAborted();
     // Readers normally have their own transport budget. Also bound injected or
     // stalled readers here; late responses never write into the scratch tree.
     return new Promise((accept, reject) => {
       const abort = () => reject(bounded.reason);
       bounded.addEventListener('abort', abort, { once: true });
-      Promise.resolve().then(() => get(path)).then(accept, reject)
+      Promise.resolve().then(() => reader(path)).then(accept, reject)
         .finally(() => bounded.removeEventListener('abort', abort));
     });
   };
+  const read = path => boundedRead(get, path);
+  read.metadata = path => boundedRead(typeof get.metadata === 'function' ? get.metadata.bind(get) : get, path);
   const tree = async ref => {
     if (!trees.has(ref)) {
       const data = await read(`repos/${repo}/git/trees/${ref}`);
@@ -157,6 +160,13 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
     for (const { before, after } of candidates) {
       if (!safePath(after.filename) || !SHA.test(after.sha)) continue;
       let directory = dirname(after.filename);
+      const localDirectory = directory === '.' ? '' : directory;
+      const trusted = await trustedArtifactRecipe({ repo, prNumber, rootDir, get: read }, evidence, before, after,
+        await manifest(evidence.headSha, localDirectory));
+      if (trusted) {
+        declared.push({ path: after.filename, primaryBlob: before.sha, blob: after.sha, ...trusted });
+        continue;
+      }
       while (true) {
         if (directory === '.') directory = '';
         const key = PREFIX + (directory ? after.filename.slice(directory.length + 1) : after.filename);
@@ -191,7 +201,25 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
         await utimes(path, 0, 0);
       }
     };
-    await checkout(evidence.headSha, scratch);
+    if (declared.every(entry => entry.recipe === 'npm-pack-ignore-scripts-v1')) {
+      // Fixed local npm packing needs only the package subtree. Do not let an
+      // unrelated repository gitlink/symlink make a legacy SDK unprovable.
+      // Branch-declared commands retain their existing whole-tree contract.
+      const scopes = [...new Set(declared.map(entry => entry.directory))].sort();
+      for (const directory of scopes.filter(path => !scopes.some(parent => parent !== path
+        && (!parent || path.startsWith(`${parent}/`))))) {
+        let ref = evidence.headSha, prefix = '';
+        for (const part of directory ? directory.split('/') : []) {
+          const entry = (await tree(ref)).find(entry => entry.path === part);
+          if (entry?.type !== 'tree' || entry.mode !== '040000') throw new Error('unsupported package source directory');
+          ref = entry.sha;
+          prefix = prefix ? `${prefix}/${part}` : part;
+          await mkdir(join(scratch, prefix), { recursive: true });
+          directories.push(prefix);
+        }
+        await checkout(ref, join(scratch, directory));
+      }
+    } else await checkout(evidence.headSha, scratch);
     const proofs = [];
     for (const declaration of declared) {
       // Each proof starts from the head's sources, never another build's output.
@@ -277,12 +305,13 @@ export function generatedBlock(bytes, declaration) {
     if (line.replace(/\r$/, '') === declaration.end) ends.push(index);
   });
   if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) throw new Error('ambiguous generated block');
-  const startOffset = lines.slice(0, starts[0] + 1).join('\n').length + 1;
-  const endOffset = lines.slice(0, ends[0]).join('\n').length + 1;
-  const first = lines.slice(0, starts[0]).join('\n').length + (starts[0] ? 1 : 0);
-  const last = endOffset + lines[ends[0]].length + (ends[0] < lines.length - 1 ? 1 : 0);
+  // Offsets index Buffers, so count UTF-8 bytes rather than UTF-16 code units.
+  const startOffset = Buffer.byteLength(lines.slice(0, starts[0] + 1).join('\n')) + 1;
+  const endOffset = Buffer.byteLength(lines.slice(0, ends[0]).join('\n')) + 1;
+  const first = Buffer.byteLength(lines.slice(0, starts[0]).join('\n')) + (starts[0] ? 1 : 0);
+  const last = endOffset + Buffer.byteLength(lines[ends[0]]) + (ends[0] < lines.length - 1 ? 1 : 0);
   return { start: starts[0] + 2, end: ends[0] + 1,
-    startOffset, endOffset, bytes: Buffer.from(bytes.toString('utf8').slice(first, last)) };
+    startOffset, endOffset, bytes: bytes.subarray(first, last) };
 }
 
 async function regularFile(root, path) {
@@ -437,12 +466,19 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           // because the generator leaves its input untouched. Preserve the markers.
           const before = await regularFile(tree, refusal.path);
           const block = generatedBlock(before, declaration);
-          const text = before.toString('utf8');
-          await writeFile(join(tree, refusal.path), text.slice(0, block.startOffset) + text.slice(block.endOffset));
+          await writeFile(join(tree, refusal.path), Buffer.concat([
+            before.subarray(0, block.startOffset), before.subarray(block.endOffset),
+          ]));
           await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
           const after = await regularFile(tree, refusal.path);
           const regenerated = generatedBlock(after, declaration);
-          if (block.bytes.equals(regenerated.bytes)) proofs.push({ path: refusal.path,
+          // A generator owns only its interior. In particular it must retain
+          // paragraph boundaries outside the markers, byte for byte.
+          const outside = (bytes, span) => Buffer.concat([
+            bytes.subarray(0, span.startOffset), bytes.subarray(span.endOffset),
+          ]);
+          if (block.bytes.equals(regenerated.bytes)
+            && outside(before, block).equals(outside(after, regenerated))) proofs.push({ path: refusal.path,
             start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
           // Each declaration starts from the same final-head artifact.
           await writeFile(join(tree, refusal.path), before);

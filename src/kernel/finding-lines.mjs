@@ -32,3 +32,41 @@ export function findingLineRanges(text, file) {
     return rest.trim() ? [] : ranges;
   });
 }
+
+// LAC-2101: literal locations only. Never mine Problem/Recommended fix prose
+// for authority or lend one path's coordinates to another path.
+export function findingLocations(file, lines) {
+  if (typeof file !== 'string' || file.length > 512 || String(lines || '').length > 512) return [];
+  const clean = value => value.replace(/`/g, '').trim();
+  const paths = value => {
+    const raw = clean(value);
+    const brace = /^([^{}]*)\{([^{}]+)\}([^{}]*)$/.exec(raw);
+    const expanded = brace ? brace[2].split(',').map(part => brace[1] + part + brace[3]) : [raw];
+    return expanded.length <= 16 && expanded.every(path => path && !/[\s:*?{}\\\x00-\x1f]/.test(path)
+      && path.split('/').every(part => part && !['.', '..'].includes(part))) ? expanded : [];
+  };
+  const primary = paths(file);
+  if (!primary.length) return [];
+  const rawLines = clean(String(lines || ''));
+  const primaryRanges = findingLineRanges(rawLines, clean(file));
+  const locations = primaryRanges.length ? primary.map(path => ({ path, ranges: primaryRanges })) : [];
+  // Only a complete numeric list followed by explicit path:range clauses
+  // introduces secondary locations. Notes, symbols and parenthesized metadata
+  // retain the existing parser's meaning and cannot resume as authority.
+  const numeric = /^(?:lines?\s+)?~?(?:#?L)?-?\d+(?:\s*(?:[-–]|\.\.)\s*L?-?\d+)?(?:\s*[,;]\s*(?:lines?\s+)?~?(?:#?L)?-?\d+(?:\s*(?:[-–]|\.\.)\s*L?-?\d+)?)*$/i;
+  const parts = rawLines.split(';');
+  let secondary = false;
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index].trim();
+    const explicit = /^([^:]+):\s*(.+)$/.exec(part);
+    if (!secondary && (numeric.test(part) || (index === 0 && explicit
+      && primary.includes(explicit[1]) && numeric.test(explicit[2])))) continue;
+    if (index === 0 || !explicit || !numeric.test(explicit[2])) break;
+    const targets = paths(explicit[1]);
+    if (!targets.length) return [];
+    secondary = true;
+    const ranges = findingLineRanges(explicit[2], explicit[1]);
+    for (const path of targets) locations.push({ path, ranges });
+  }
+  return locations;
+}

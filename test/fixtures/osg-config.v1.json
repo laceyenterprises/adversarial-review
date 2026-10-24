@@ -733,6 +733,67 @@
         "double_blind": null
       },
       "valid": false
+    },
+    {
+      "name": "router-off",
+      "config": {
+        "router": {
+          "mode": "off"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "router-shadow",
+      "config": {
+        "router": {
+          "mode": "shadow"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "router-apply",
+      "config": {
+        "router": {
+          "mode": "apply"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "router-unknown",
+      "config": {
+        "router": {
+          "mode": "auto"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "router-extra",
+      "config": {
+        "router": {
+          "extra": true
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "router-null",
+      "config": {
+        "router": null
+      },
+      "valid": false
+    },
+    {
+      "name": "router-mode-null",
+      "config": {
+        "router": {
+          "mode": null
+        }
+      },
+      "valid": false
     }
   ]
 }

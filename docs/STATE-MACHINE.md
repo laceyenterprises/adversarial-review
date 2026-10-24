@@ -805,6 +805,12 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+LAC-2101 adds evidence within the shared primary-change gate: literal secondary
+finding locations, boundary-preserving generated-block proof, and an optional
+owner-registered exact-head fixed npm-pack receipt for legacy author heads.
+[Registration and refusal semantics](RUNBOOK-ama-closure.md#legacy-review-required-npm-rebuilds-lac-2101)
+leave both merge routes, terminal guards, caps, leases and lifecycle states unchanged.
+
 NXA-05 adopts `nextAction(snapshot)` for closer routing, queued preflight and
 recovery ownership. Capacity, drain, automatic stops and exhausted retry reports
 retain the selected action and actor; only explicit policy/hold intent selects
@@ -832,7 +838,12 @@ on each merge attempt, a live read revalidates classification, review requests,
 base branch, exact head and merge gates. A base tip advance is accepted only after
 the new base/head range classifies as docs-only; retargeting the base branch
 invalidates the lease's authority. Terminal audit metadata retains the refreshed
-eligible range. Recording failure releases the lease and retries on a later poll;
+eligible range. Recording failure releases the lease as a deferred outcome with
+exit code and a redacted stderr tail (at most 2,000 characters). Exact-head audit
+history permits three failed record attempts, with 60-second then 120-second
+backoff across polls and restarts. Further ticks park with
+`attestation-record-retry-exhausted` and `needsOperator`; a new head gets a fresh
+budget. Backoff and parked ticks do not acquire the lease or append audit rows;
 `--match-head-commit` fences the merge itself. Required contexts use the shared
 check classifier, including the pipeline gate, which records the docs waiver as
 success as a review waiver, independently of external CI. A late review request

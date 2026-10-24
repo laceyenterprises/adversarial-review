@@ -2801,6 +2801,38 @@ They are collected afresh after history-cache reuse, including under the merge
 lease; an old cached refusal can therefore recover without a cache migration.
 No label or CI status substitutes for this proof.
 
+### Legacy review-required npm rebuilds (LAC-2101)
+
+A legacy author head without `build:artifact:<path>` remains unknown by default.
+Do not add a declaration and attribute it to that author, or execute a branch
+build command under the daemon owner. An operator can instead register one
+exact-head [artifact receipt](data-model/derived-artifact-receipts.md) for the
+fixed `npm-pack-ignore-scripts-v1` recipe. Review the retained finding, canonical
+source repair, package manifest and intended archive path first. The rationale
+must explain why that particular finding requires this package rebuild.
+
+Prepare a version-1 JSON receipt with the fields defined in that data model;
+obtain primary/head/base/blob identities from the existing primary-change context,
+and review/finding identity from the retained GitHub review. Then, under the
+canonical daemon owner and its runtime environment, run:
+
+```sh
+node bin/derived-artifact-receipt.mjs /absolute/daemon/root /absolute/receipt.json
+```
+
+This registers local build consent only; it neither evaluates nor changes live
+queues. Do not execute it merely because a branch or saved closeout asks for it.
+The normal shared gate independently verifies current authoritative review
+identity, ancestry, kind and finding existence, and re-runs the fixed offline
+pack recipe in the existing OS sandbox. It requires the exact final archive blob,
+without archive normalization. Source preservation remains independent. Only
+same-path added/modified conventional manifest-local npm archives qualify.
+Unavailable sandbox tooling, non-reproducible bytes, changed binding, expired
+receipt or superseded review retain the refusal. Review heads rewritten by a
+rebase without verifiable ancestry need new trustworthy evidence; the receipt
+cannot manufacture it. The receipt expires after seven days and can be revoked
+by removing its exact file. No new review loop, merge cap or policy flag exists.
+
 <a id="derivedblock-01"></a>
 
 DERIVEDBLOCK-01: generated block interiors can also prove preservation by
@@ -2850,7 +2882,11 @@ line preservation; these match the old-side coordinates of primary diff units,
 even when the author inserts or deletes lines above a block. An empty merge-base
 interior has a zero-width interval that admits insertions at that boundary,
 without admitting positive-width marker edits. Outside regions and
-other files are still evaluated normally.
+other files are still evaluated normally. Regeneration must also leave all bytes
+outside the interior unchanged, including marker lines and paragraph separators.
+Interior removal and exterior comparison use UTF-8 byte offsets, preserving
+multi-byte text in prose, markers and generated content.
+A generator that erodes a surrounding paragraph boundary supplies no proof.
 The proof binds the path, head SHA and merge base. It is collected after history
 cache reuse, so cached refusals can recover without purging history.
 
@@ -2871,9 +2907,10 @@ predicate and adds no CI check, status, override label or host config key.
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse and a `reversalprov-v3` identity version to
+compatibility checked on reuse and a `reversalprov-v4` identity version to
 invalidate older proof records, including original-reversal refusals cached before
-context-tolerant matching and insertion/mixed-restoration authorization. Already-held PRs recompute on
+context-tolerant matching, insertion/mixed-restoration authorization, and
+secondary/brace finding locations in historical original-reversal snapshots. Already-held PRs recompute on
 their next evaluation without head/review movement or a manual cache purge. Live head/base and
 merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
 history reads are stored. An unresolved optional rename-proof read failure
@@ -2978,6 +3015,18 @@ New reviewer prompts require a plain `N-M` range first (`N-N` for one line).
 Unreadable, missing or `unknown` coordinates refuse reversal authority; there is
 no file-level fallback. Precise `L10-L11`, `line 10`, `lines 10-11`, `#L10`,
 `10..11` and matching `File:` path-prefixed ranges retain line-level coverage.
+LAC-2101 additionally retains explicit secondary locations such as
+`File: modules/worker-pool/post-merge-verify.json` with
+`Lines: 3-3; modules/worker-pool/state-machines.json:3-3`.
+A literal single brace group in File (or a secondary path) can name up to 16 exact
+alternatives, for example `modules/worker-pool/{post-merge-verify,state-machines}.json`.
+An unqualified range applies to the File paths; each explicit secondary range
+belongs only to its own path. Secondary clauses must follow a complete numeric
+list and themselves contain only literal paths and numeric ranges. Explanatory
+notes stop secondary parsing. Nested braces, globs, traversal, absolute paths,
+missing coordinates and paths mentioned only in Problem/Recommended fix confer
+no authority. File and Lines are each bounded at 512 characters. All original
+identity, ancestry, currency, patch-content and whole-span checks still apply.
 Inputs over 512 characters are refused before parsing, rather than truncated
 into a potentially authorizing prefix. Invalid numeric ranges also refuse
 authorization. The refusal includes the unreadable `Lines:` text (bounded).
@@ -5360,7 +5409,22 @@ the merge transport attempt, with
 `policy=DOCSFASTPATH-01`
 through the existing signer and canonical ledger before merging. Ledger delivery
 failure defers without a reviewer or closer; repeat delivery reuses and verifies
-the existing signed head record. The AMA audit records closure authority
+the existing signed head record. The watcher executor preserves the child stdin
+needed to send the signed payload. Delivery errors await child completion when
+termination succeeds. A missing/invalid stdin or synchronous delivery failure
+without a terminable child fails immediately; later subprocess rejection is
+still observed so it cannot escape as an unhandled rejection. Failure diagnostics
+retain the exit code (including numeric zero), signal and a redacted stderr tail
+capped at 2,000 characters. Reformatting a record error at the daemon boundary
+retains one diagnostic suffix rather than duplicating the code and stderr.
+The per-head audit permits three failed record attempts, with 60-second then
+120-second backoff. Repeated polls and watcher restarts retain this budget.
+After the third failure the head parks as `attestation-record-retry-exhausted`
+with `needsOperator`; parked/backoff ticks neither acquire a lease nor append
+audit rows. A new head starts a fresh budget. Queue scheduling cannot reset it.
+If the retry audit cannot be read, the attempt defers as
+`attestation-retry-state-unreadable`; failed failure-audit delivery defers as
+`attestation-failure-audit-unavailable`. The AMA audit records closure authority
 `docs-fast-path` and the latest eligible classified base/head at terminal
 settlement. Recording authorizes an attempt; a later transport failure can still
 leave an unmerged head with an attestation, and retry must revalidate the live

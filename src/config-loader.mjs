@@ -6304,7 +6304,7 @@ function validateOsgShape(value, source = null) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AgentOSConfigError('osg: expected mapping', { key: 'osg', source });
   }
-  for (const key of ['policy', 'double_blind']) {
+  for (const key of ['policy', 'double_blind', 'router']) {
     if (Object.hasOwn(value, key) && (!value[key] || typeof value[key] !== 'object' || Array.isArray(value[key]))) {
       throw new AgentOSConfigError(`osg.${key}: expected mapping`, { key: `osg.${key}`, source });
     }

@@ -1083,6 +1083,18 @@ of green checks, without reviewer/closer and with recorded attestations, plus a
 non-docs change receiving review. See the
 [closure runbook](docs/RUNBOOK-ama-closure.md#docs-only-daemon-merge-docsfastpath-01).
 
+Docs fast-path record failures release the merge lease and remain deferred.
+The watcher preserves child stdin and observes subprocess rejection without
+changing process handlers. Missing/invalid stdin fails promptly if the child
+cannot be terminated; late rejection remains observed. Audit diagnostics include
+the exit code (including zero) and a redacted stderr tail bounded to 2,000
+characters, without repeated diagnostic suffixes. The exact-head audit allows
+three failed record attempts with 60-second then 120-second backoff, then parks
+as `attestation-record-retry-exhausted` with `needsOperator`. A new head starts
+a new budget. These transitions are covered by offline fixtures; after deployment,
+SRE verifies a natural docs-only merge records its attestation and the watcher
+stays running. See the [closure runbook](docs/RUNBOOK-ama-closure.md).
+
 
 REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
 observational applied flag to existing remediation completions/audit text.
@@ -1764,6 +1776,17 @@ repository's existing `package.json` manifest and must be unchanged from the
 merge base. A bounded, network-denied scratch generator must reproduce the block
 exactly; marker lines and changes outside the block remain protected. See
 DERIVEDBLOCK-01 in the [AMA closure runbook](docs/RUNBOOK-ama-closure.md).
+LAC-2101 additionally rejects a generator that changes surrounding bytes,
+including paragraph separators. Explicit secondary finding locations and literal
+brace path lists retain per-path line coverage; prose does not grant authority.
+Legacy npm archives can use an owner-registered exact-head fixed-pack receipt,
+followed by fresh sandbox reproduction. See the
+[receipt procedure](docs/RUNBOOK-ama-closure.md#legacy-review-required-npm-rebuilds-lac-2101)
+and [RCA with residual renderer scope](docs/INCIDENT-2026-10-24-legacy-artifact-and-finding-preservation.md).
+Offline regressions are `primary-change-lines`, `primary-change-store`,
+`derived-artifacts` and `primary-change-generated-blocks` under `test/`.
+Lifecycle states, transitions and existing smoke promises are unchanged; native
+receipt registration and live recovery are separate operator work.
 
 [post-merge-verify.json](post-merge-verify.json) is the SMV-01 declaration for the
 registered `tools/adversarial-review` repository integration. Parent discovery
@@ -2579,6 +2602,13 @@ The caller owns pinned diff extraction, authorized read-only execution, budget
 reservations, quota measurement and score evidence. This bridge does not launch
 reviewers or change any live routing configuration. Synthetic tests exercise
 parsing/routing with network, process execution and publication writes forbidden.
+
+The strict OSG schema recognizes `osg.router.mode` as `off`, `shadow` or `apply`,
+defaulting to `off`. Router subtree nulls are rejected in every configuration layer,
+matching the shared Python/shell acceptance vectors. This reader-only addition
+performs no routing or artifact access, grants no activation approval, and changes
+no review/merge authority or service lifecycle. Allocation and offline evaluation
+belong to the companion worker-pool owner; activation follows its config-writer runbook.
 
 LVR-08 provides two bounded evidence commands for observe-mode activation:
 `node src/activation-check.mjs hammer-token` forces the existing in-process

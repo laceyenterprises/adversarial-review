@@ -16,14 +16,14 @@ const declaration = { path: 'docs/*.md', start, end, cwd: '.', command: [process
 function fixture(t, { handEdit = false, outside = false, failure = false, noop = false, duplicate = false,
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
   authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false,
-  additionalDeclarations = [], declarationLast = false } = {}) {
+  additionalDeclarations = [], declarationLast = false, paragraphBoundary = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_AUTHOR_NAME: 'Fixture Builder', GIT_AUTHOR_EMAIL: 'builder@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture Builder', GIT_COMMITTER_EMAIL: 'builder@example.invalid' } }).trimEnd();
-  const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows ? rows + '\n' : ''}${end}\nTail\n`;
+  const document = (rows, prose = 'Base prose') => `${prose}\n${start}\n${rows ? rows + '\n' : ''}${end}\n${paragraphBoundary ? '\n' : ''}Tail\n`;
   const baseProse = authorShift < 0 ? 'Base prose\nBase second line\nBase third line' : 'Base prose';
   const authorProse = authorShift > 0 ? 'Base prose\nAuthor introduction\nAuthor details'
     : authorShift < 0 ? 'Base prose' : outside ? 'Author prose' : 'Base prose';
@@ -463,4 +463,24 @@ test('real generator sandbox denies network and outside writes; bounds hung gene
   } });
   assert.ifError(generatorFailure);
   assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+});
+
+test('LAC-2101 #9110: reproduced interior cannot erase a paragraph boundary or prose outside markers', async t => {
+  const saved = JSON.parse(readFileSync(new URL('./fixtures/lac-2101-preservation.json', import.meta.url)))['9110'];
+  assert.ok(saved.nativeFailure.baseRegion[1] < saved.nativeFailure.reviewedRange[0]);
+  assert.ok(saved.finding.includes('`3762-3765`'));
+  for (const outsideChange of [text => text.replace(`${end}\n\n`, `${end}\n`), text => text.replace('Tail', 'Changed tail')]) {
+    const f = fixture(t, { paragraphBoundary: true });
+    const result = await prove(f, { runGeneratorImpl: async args => {
+      await offlineGenerator(args);
+      const path = join(args.scratch, args.cwd, 'docs/guide.md');
+      writeFileSync(path, outsideChange(readFileSync(path, 'utf8')));
+    } });
+    assert.deepEqual(result.generatedBlockProofs, []);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  }
+  // Historical #9110 had no declaration. A generated file name or review of
+  // adjacent lines cannot introduce block authority retroactively.
+  const legacy = fixture(t, { noDeclarations: true, outside: true });
+  assert.deepEqual((await prove(legacy)).generatedBlockProofs, []);
 });

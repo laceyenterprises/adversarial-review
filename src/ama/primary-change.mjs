@@ -1,4 +1,4 @@
-import { findingLineRanges as parseFindingLineRanges } from '../kernel/finding-lines.mjs';
+import { findingLocations } from '../kernel/finding-lines.mjs';
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
 import { storedPrimaryChange, primaryChangeStoreOwned } from './primary-change-store.mjs';
@@ -397,13 +397,6 @@ function firstSupersedingReview(review, reviews) {
   });
 }
 
-// HAMLINES-01: legacy Lines fields mix ranges with symbols and prose. The
-// harness's diff-line index is metadata, never a file-line citation. Approximate
-// (~) ranges use their exact endpoints: tolerance must not waive uncited code.
-function findingLineRanges(text, file) {
-  return parseFindingLineRanges(text, file);
-}
-
 function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     let citation;
@@ -444,12 +437,12 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           : parsedReview.verdict !== 'request-changes') return reject('finding-kind-not-authorizing');
         const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
         if (!finding) return reject('finding-not-found');
-        const ranges = finding.citedRanges ??= findingLineRanges(finding.lines, finding.file);
-        if (ranges.length === 0) {
+        const locations = finding.citedLocations ??= findingLocations(finding.file, finding.lines);
+        if (locations.length === 0) {
           return reject(`finding-lines-unreadable: ${JSON.stringify(String(finding.lines || '').slice(0, 200))}`);
         }
-        if (ranges.some(({ start, end }) => !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
-          || start < 1 || end < start)) return reject('finding-lines-invalid');
+        if (locations.some(location => location.ranges.some(({ start, end }) => !Number.isSafeInteger(start)
+          || !Number.isSafeInteger(end) || start < 1 || end < start))) return reject('finding-lines-invalid');
         const reviewed = rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
           : projectRegion(reviewedFiles, path, region, cache);
@@ -460,8 +453,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         // HAM repairs may change the segment; whole-segment equality cannot
         // attribute those changes to the author. Retain finding coverage and
         // the authorizing HAM patch's parent-state content proof below.
-        const sameFile = (finding.file || '').replace(/^`|`$/g, '') === reviewed.filename;
-        if (!sameFile || !ranges.some(cited => cited.start <= reviewed.start && cited.end >= reviewed.end)) {
+        if (!locations.some(location => location.path === reviewed.filename
+          && location.ranges.some(cited => cited.start <= reviewed.start && cited.end >= reviewed.end))) {
           return reject('not-covered-by-cited-finding');
         }
         if (authorization.originalAuthorization) {
@@ -542,7 +535,8 @@ function hasRebasedReversalProof(evidence, path) {
       return reversalCitations(commit.commit.message).some(cite => {
         if (![review.node_id, review.html_url].includes(cite[1])) return false;
         const findings = cite[3] === 'non-blocking' ? parseNonBlockingFindingsSection(review.body) : parseBlockingFindingsSection(review.body);
-        return findings[Number(cite[2]) - 1]?.file?.replace(/^`|`$/g, '') === path;
+        const finding = findings[Number(cite[2]) - 1];
+        return findingLocations(finding?.file, finding?.lines).some(location => location.path === path);
       });
     } catch { return false; }
   });
@@ -708,6 +702,9 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
             && evidence.derivedArtifacts?.some(proof => proof.headSha === headSha
               && proof.primaryHead === evidence.primaryHead && proof.path === change.filename
               && proof.primaryBlob === change.sha && proof.blob === actual.sha
+              && (!proof.recipe || (proof.recipe === 'npm-pack-ignore-scripts-v1'
+                && proof.mergeBase === evidence.mergeBase && ['blocking', 'non-blocking'].includes(proof.kind)
+                && (proof.kind === 'blocking' || strictNonBlockingRemediation === true)))
               && proof.comparison === 'git-blob-sha1')) continue;
           return { ok: false, reason: 'primary-change-unknown', detail: 'opaque file changed without readable patch', path, testRegionsChanged: testChanges, ...whitespaceEvidence };
         }
@@ -1344,7 +1341,7 @@ export async function fetchPrimaryChange(args, {
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
   const guardEvidence = await fetchGuardReversals(args, history);
-  const derivedArtifacts = await proveDerivedArtifactsImpl(args, history);
+  const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
   // Outside the history cache: a missing sandbox/checkout is retryable optional

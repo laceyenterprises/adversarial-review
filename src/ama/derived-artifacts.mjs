@@ -6,6 +6,7 @@ import { cp, mkdtemp, mkdir, writeFile, readFile, rm, realpath, lstat, utimes } 
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { loadDomainConfig } from '../domain-config.mjs';
+import { trustedArtifactRecipe } from './derived-artifact-receipt.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_BYTES = 128 * 1024 * 1024;
@@ -92,7 +93,7 @@ export async function runArtifactBuild(spec, signal) {
 // Immutable API objects materialize the final head in an isolated scratch
 // worktree, without exposing a daemon checkout, Git hooks or host dependencies.
 // This proof is deliberately collected after durable history-cache lookup.
-export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { runBuildImpl = runArtifactBuild } = {}) {
+export async function proveDerivedArtifacts({ repo, get, signal, rootDir, prNumber }, evidence, { runBuildImpl = runArtifactBuild } = {}) {
   if (evidence.hasHammerCommits !== true) return [];
   const candidates = (evidence.primaryFiles || []).filter(file => typeof file.patch !== 'string'
     && ['added', 'modified'].includes(file.status)).map(file => ({ before: file,
@@ -157,6 +158,13 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
     for (const { before, after } of candidates) {
       if (!safePath(after.filename) || !SHA.test(after.sha)) continue;
       let directory = dirname(after.filename);
+      const localDirectory = directory === '.' ? '' : directory;
+      const trusted = await trustedArtifactRecipe({ repo, prNumber, rootDir, get: read }, evidence, before, after,
+        await manifest(evidence.headSha, localDirectory));
+      if (trusted) {
+        declared.push({ path: after.filename, primaryBlob: before.sha, blob: after.sha, ...trusted });
+        continue;
+      }
       while (true) {
         if (directory === '.') directory = '';
         const key = PREFIX + (directory ? after.filename.slice(directory.length + 1) : after.filename);
@@ -191,7 +199,25 @@ export async function proveDerivedArtifacts({ repo, get, signal }, evidence, { r
         await utimes(path, 0, 0);
       }
     };
-    await checkout(evidence.headSha, scratch);
+    if (declared.every(entry => entry.recipe === 'npm-pack-ignore-scripts-v1')) {
+      // Fixed local npm packing needs only the package subtree. Do not let an
+      // unrelated repository gitlink/symlink make a legacy SDK unprovable.
+      // Branch-declared commands retain their existing whole-tree contract.
+      const scopes = [...new Set(declared.map(entry => entry.directory))].sort();
+      for (const directory of scopes.filter(path => !scopes.some(parent => parent !== path
+        && (!parent || path.startsWith(`${parent}/`))))) {
+        let ref = evidence.headSha, prefix = '';
+        for (const part of directory ? directory.split('/') : []) {
+          const entry = (await tree(ref)).find(entry => entry.path === part);
+          if (entry?.type !== 'tree' || entry.mode !== '040000') throw new Error('unsupported package source directory');
+          ref = entry.sha;
+          prefix = prefix ? `${prefix}/${part}` : part;
+          await mkdir(join(scratch, prefix), { recursive: true });
+          directories.push(prefix);
+        }
+        await checkout(ref, join(scratch, directory));
+      }
+    } else await checkout(evidence.headSha, scratch);
     const proofs = [];
     for (const declaration of declared) {
       // Each proof starts from the head's sources, never another build's output.
@@ -442,7 +468,13 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
           const after = await regularFile(tree, refusal.path);
           const regenerated = generatedBlock(after, declaration);
-          if (block.bytes.equals(regenerated.bytes)) proofs.push({ path: refusal.path,
+          // A generator owns only its interior. In particular it must retain
+          // paragraph boundaries outside the markers, byte for byte.
+          const outside = (bytes, span) => Buffer.concat([
+            bytes.subarray(0, span.startOffset), bytes.subarray(span.endOffset),
+          ]);
+          if (block.bytes.equals(regenerated.bytes)
+            && outside(before, block).equals(outside(after, regenerated))) proofs.push({ path: refusal.path,
             start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
           // Each declaration starts from the same final-head artifact.
           await writeFile(join(tree, refusal.path), before);

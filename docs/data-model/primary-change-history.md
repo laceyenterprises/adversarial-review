@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalprov-v3` |
+| 7 | History proof cache identity version: `reversalprov-v4` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -34,7 +34,8 @@ one recomputation of older records, including cached original-reversal refusals
 and proofs from before context-tolerant, structure-preserving reversal matching
 and before proof-backed HAM-author reversals with a foreign rebase committer
 or REVERSALPROV-02 content multiset matching across context-only rebases,
-including parent-state insertion authorization, mixed replacement restorations
+including historical original-reversal refusals before secondary/brace location support,
+parent-state insertion authorization, mixed replacement restorations
 and segment identity over both removed and added content. Reviewed-parent
 matching uses multisets; original-commit provenance retains ordered edits,
 hunk/context-run boundaries and newline-marker attachment. Evaluator coverage
@@ -64,7 +65,10 @@ PRIMARYOPAQUE-01 derived-artifact proofs are also collected after history reuse
 and never written into these records. Returned evidence may carry
 `derivedArtifacts`, an array of `{ path, primaryBlob, blob, directory, command,
 headSha, primaryHead, comparison: 'git-blob-sha1' }`. Each entry records a
-successful isolated rebuild under the unchanged author-declared package script.
+successful isolated rebuild under the unchanged author-declared package script,
+or the fixed recipe in an [owner-registered receipt](derived-artifact-receipts.md).
+Receipt proofs additionally carry `recipe`, `mergeBase`, `receipt`, `review`, `finding`, `kind`;
+the registration and proof are outside this history cache.
 The evaluator binds it to the protected author blob and final head blob at the
 same path and change status. Failed proofs add no authority and retry on the
 next collection; existing cache keys and durable shapes do not change.

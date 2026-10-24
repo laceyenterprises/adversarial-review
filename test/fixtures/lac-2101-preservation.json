@@ -1,0 +1,50 @@
+{
+  "9084": {
+    "source": "9084-start.json",
+    "url": "https://github.com/laceyenterprises/agent-os/pull/9084",
+    "capturedHead": "6b57e9479fb0cb6a5562a2b011b334b42495a3ee",
+    "review": "PRR_kwDOR6Em7c8AAAABT_bxJw",
+    "reviewedHead": "e34e27425c45137ce843d6800d29a66b7507b143",
+    "finding": "- **Browser Projection Omission of New Producer Contracts**\n  - **File:** `platform/app-sdk/node/src/producer-contracts-v1.js`\n  - **Lines:** `4-6; export const producerContractsV1`\n  - **Problem:** `platform/app-sdk/node/src/producer-contracts-v1.js` was manually edited to bump `contractVersion` from `1.0` to `1.7` instead of being regenerated via `platform/app-sdk/scripts/refresh-producer-contracts.py`. As a result, the exported `producerContractsV1` string in the browser reader projection contains only legacy producers and completely lacks schema entries for `github-token-refresh`, `launch-request-row`, and `worker-class-show`, even though `platform/app-sdk/node/src/producer-contracts-v1.json` declares them. The committed tarball `agent-os-app-sdk-0.4.0.tgz` was built with this incomplete JS module.\n  - **Why it matters:** Downstream browser consumers importing `producerContractsV1` from `@agent-os/app-sdk` 0.4.0 receive an object claiming contract version 1.7 where `producers[\"launch-request-row\"]`, `producers[\"worker-class-show\"]`, and `producers[\"github-token-refresh\"]` are `undefined`, leading to runtime lookup failures despite the documented 1.7 export.\n  - **Recommended fix:** Run `python3 platform/app-sdk/scripts/refresh-producer-contracts.py` to regenerate `platform/app-sdk/node/src/producer-contracts-v1.js` from `producer-contracts-v1.json` so all version 1.7 schemas are included, and rebuild `agent-os-app-sdk-0.4.0.tgz` via `npm pack`.",
+    "nativeFailure": {
+      "at": "2026-10-24T08:19:14Z",
+      "reason": "primary-change-unknown",
+      "detail": "opaque file changed without readable patch",
+      "path": "platform/app-sdk/node/agent-os-app-sdk-0.4.0.tgz"
+    }
+  },
+  "9097": {
+    "source": "9097-start.json",
+    "url": "https://github.com/laceyenterprises/agent-os/pull/9097",
+    "capturedHead": "8c091acaff57d9ba207f16d1e92a16d3a15a7d81",
+    "review": "PRR_kwDOR6Em7c8AAAABUAQTWw",
+    "reviewedHead": "e33c71d027c87093c0dd852e951d62da9cf30b49",
+    "finding": "- **Ad-hoc schema pollution in state declaration files**\n  - **File:** `modules/worker-pool/post-merge-verify.json`\n  - **Lines:** `3-3; modules/worker-pool/state-machines.json:3-3`\n  - **Problem:** The diff injects an arbitrary top-level `\"docsFastPath\"` prose property into both `modules/worker-pool/post-merge-verify.json` and `modules/worker-pool/state-machines.json` stating that lifecycle states and smoke promises are unchanged.\n  - **Why it matters:** Adding unmodeled top-level properties to machine-readable contract files pollutes schema validation. If post-deploy observation criteria are required, they belong under structured verification arrays or in `README.md`.\n  - **Recommended fix:** Remove the `\"docsFastPath\"` key from both JSON files and record operator verification instructions in `modules/worker-pool/README.md`.",
+    "nativeFailure": {
+      "at": "2026-10-24T08:55:53Z",
+      "reason": "primary-change-reverted",
+      "path": "modules/worker-pool/state-machines.json",
+      "detail": "not-covered-by-cited-finding"
+    }
+  },
+  "9110": {
+    "source": "9110-start.json",
+    "url": "https://github.com/laceyenterprises/agent-os/pull/9110",
+    "capturedHead": "4ed90fb1b1039c3beaeb37be96dd6d197336b63b",
+    "review": "PRR_kwDOR6Em7c8AAAABUAYWJQ",
+    "reviewedHead": "72dce92a403a7cd8a7ddbb50b729822481475ce6",
+    "finding": "- **State note stripped from module README during regeneration**\n  - **File:** `modules/worker-pool/README.md`\n  - **Lines:** `3762-3765`\n  - **Problem:** Running the state renderer to incorporate `REVIEWERIPC-01` into `modules/worker-pool/README.md:3762` stripped the preexisting `WSR-13 publishes version-1 app resume request/pending/outcome/error schemas through the existing producer export and OpenAPI components...` note directly above `WSR-12`, because `modules/worker-pool/state-machines.json` lacked an entry for WSR-13 in its `deadEndNotes` array.\n  - **Why it matters:** Dropping state notes during automated document regeneration causes untracked documentation drift against historical contract records.\n  - **Recommended fix:** If the WSR-13 note was intended to be retained alongside WSR-12, add it explicitly to `deadEndNotes` in `modules/worker-pool/state-machines.json` so that automated regeneration does not silently remove it.",
+    "nativeFailure": {
+      "reason": "primary-change-reverted",
+      "path": "modules/worker-pool/README.md",
+      "baseRegion": [
+        3759,
+        3760
+      ],
+      "reviewedRange": [
+        3762,
+        3765
+      ]
+    }
+  }
+}

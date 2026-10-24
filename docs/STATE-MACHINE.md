@@ -805,6 +805,12 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+LAC-2101 adds evidence within the shared primary-change gate: literal secondary
+finding locations, boundary-preserving generated-block proof, and an optional
+owner-registered exact-head fixed npm-pack receipt for legacy author heads.
+[Registration and refusal semantics](RUNBOOK-ama-closure.md#legacy-review-required-npm-rebuilds-lac-2101)
+leave both merge routes, terminal guards, caps, leases and lifecycle states unchanged.
+
 NXA-05 adopts `nextAction(snapshot)` for closer routing, queued preflight and
 recovery ownership. Capacity, drain, automatic stops and exhausted retry reports
 retain the selected action and actor; only explicit policy/hold intent selects

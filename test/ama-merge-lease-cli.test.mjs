@@ -1416,33 +1416,37 @@ for (const failure of ['setup', 'delivery']) {
   });
 }
 
-test('watch latches a release before sleep and ignores waiter and other-base writes', async t => {
-  const rootDir = freshRoot();
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const held = acquireFixture(rootDir);
-  let notify, polls = 0, sleeps = 0, closed = false;
-  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
-    '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
-    watch: (_dir, callback) => {
-      notify = callback;
-      return Object.assign(new EventEmitter(), { close() { closed = true; } });
-    },
-    acquireMergeLease: args => {
-      const acquired = acquireMergeLease(args);
-      if (++polls === 1) {
-        notify('rename', null);
-        notify('rename', 'unrelated.json');
-        notify('rename', held.leasePath.split('/').at(-1).replace('.json', '.waiters.json'));
-      } else if (polls === 2) {
-        releaseMergeLease({ rootDir, ...held.lease, now: args.now, merged: true });
-        notify('rename', Buffer.from(held.leasePath.split('/').at(-1)));
-      }
-      return acquired;
-    },
-    onSleep: () => { sleeps++; },
+for (const releaseEventName of [null, 'merge-leases', 'holder-buffer']) {
+  test(`watch latches ${releaseEventName} holder changes and ignores unchanged noise`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquireFixture(rootDir);
+    let notify, polls = 0, sleeps = 0, closed = false;
+    const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
+      watch: (_dir, callback) => {
+        notify = callback;
+        return Object.assign(new EventEmitter(), { close() { closed = true; } });
+      },
+      acquireMergeLease: args => {
+        const acquired = acquireMergeLease(args);
+        if (++polls === 1) {
+          notify('rename', null);
+          notify('change', 'merge-leases');
+          notify('rename', 'unrelated.json');
+          notify('rename', held.leasePath.split('/').at(-1).replace('.json', '.waiters.json'));
+        } else if (polls === 2) {
+          releaseMergeLease({ rootDir, ...held.lease, now: args.now, merged: true });
+          notify('change', releaseEventName === 'holder-buffer'
+            ? Buffer.from(held.leasePath.split('/').at(-1)) : releaseEventName);
+        }
+        return acquired;
+      },
+      onSleep: () => { sleeps++; },
+    });
+    assert.equal(result.code, 0, result.io.stderrText);
+    assert.equal(polls, 3);
+    assert.equal(sleeps, 1);
+    assert.equal(closed, true);
   });
-  assert.equal(result.code, 0, result.io.stderrText);
-  assert.equal(polls, 3);
-  assert.equal(sleeps, 1);
-  assert.equal(closed, true);
-});
+}

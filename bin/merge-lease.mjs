@@ -505,9 +505,27 @@ async function runAcquire(argv, deps) {
     // Only holder changes wake us; our own waiter/history writes must not spin.
     const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
     try {
+      const holderName = basename(leasePath);
+      const directoryName = basename(dirname(leasePath));
+      const holderFingerprint = () => {
+        try {
+          const info = statSync(leasePath);
+          return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+        } catch (err) {
+          return err?.code === 'ENOENT' ? 'absent' : null;
+        }
+      };
+      let observedHolder = holderFingerprint();
       leaseWatcher = deps.watch(dirname(leasePath), (_event, filename) => {
-        // Unidentified events may be our own writes: leave those to polling.
-        if (filename == null || String(filename) !== basename(leasePath)) return;
+        const name = filename == null ? null : String(filename);
+        const namedHolder = name === holderName;
+        if (!namedHolder && name !== null && name !== directoryName) return;
+        // macOS can report an existing holder's removal as a directory event.
+        // Its other directory events include our own queue/lock writes; only
+        // a changed holder fingerprint may wake us for an ambiguous event.
+        const fingerprint = holderFingerprint();
+        if (!namedHolder && (fingerprint === null || fingerprint === observedHolder)) return;
+        observedHolder = fingerprint;
         wakePending = true;
         pollSleepAbort?.abort();
       });

@@ -4454,8 +4454,10 @@ same-host watcher is pruned, and uncertain identities expire at the stored deadl
 for the first surviving daemon waiter's PR and exact head. The existing per-head
 wake cap applies; a failed wake write falls back to the next poll. CLI acquisitions
 watch the lease directory for matching holder-file changes, so both release
-paths interrupt sleeping CLI waiters too. Watch failures fall back to polling
-at a fixed 15-second ceiling, independent of host load. FIFO selection remains
+paths interrupt sleeping CLI waiters too. On macOS, holder removal can arrive
+as an unnamed or directory-name event; a holder metadata change confirms that
+wake while unchanged queue/lock activity is ignored. Watch failures fall back
+to polling at a fixed 15-second ceiling, independent of host load. FIFO selection remains
 under the existing mutation lock. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 

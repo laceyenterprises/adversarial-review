@@ -640,6 +640,8 @@ wake; no deployment configuration or migration is needed.
 CLI polling doubles from 250ms to a fixed 15-second ceiling, independent of
 host load. Both release paths wake sleeping CLI waiters through a directory
 watch of the matching holder file; the existing daemon wake is unchanged.
+Ambiguous directory events wake only on a holder metadata change, preserving
+macOS release notifications without spinning on queue writes.
 Watch failures fall back to polling. Focused merge-lease CLI tests cover prompt
 release wakeup, FIFO ordering, fixed polling and watch failures.
 Status/list includes arrival time, role and position; history records re-entry

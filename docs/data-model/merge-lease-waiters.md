@@ -144,9 +144,11 @@ and fixed bounded cleanup retries retain their existing behavior.
 Acquire contention `queuePosition` describes ready service order, excluding earlier delayed arrivals. A delayed candidate retains its arrival position; the status/list `position` field continues to enumerate arrival order alongside `notBefore`. Holder, waiter and release-wake mutations use the same per-base lease mutation lock; release does not reacquire that non-reentrant lock.
 
 The CLI watches the lease directory before its first acquisition attempt and
-interrupts its poll sleep when the matching holder filename changes. Watching
-the directory survives atomic holder replacement; waiter/history and other-base
-writes do not wake it. Both ordinary and retryable-abort release remove that
+interrupts its poll sleep when the matching holder filename changes. Unnamed
+or directory-name events wake it only when the holder metadata fingerprint
+changes, covering macOS holder-removal notifications without spinning on its
+own queue/lock writes. Watching the directory survives atomic holder replacement;
+waiter/history and other-base writes do not wake it. Both ordinary and retryable-abort release remove that
 holder file, waking CLI waiters as well as the existing exact-head daemon wake.
 Events arriving before sleep are latched. Wakes only request another acquisition
 attempt under the existing FIFO lock; they grant no priority or lease authority.

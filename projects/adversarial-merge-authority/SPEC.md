@@ -164,6 +164,23 @@ retry reacquires and rechecks the head/base/file-overlap contract below.
 No required tests or GitHub checks are waived. Evidence and separate deployment
 acceptance are in `docs/validation/lac-2093.md`.
 
+LAC-2097 closer convergence: after the lease-free initial CI wait, and again
+before each merge click, strict or unknown protection requires complete base
+containment. Explicitly non-strict protection allows disjoint base advancement
+without changing the validated head or restarting CI; overlapping paths (including
+both sides of renames) still require rebase/revalidation. The exact head's
+merge-base anchors this comparison. One required rebase may retain the reacquired
+lease through fresh exact-head CI and rebuilt audit/predicate authority; both
+waits and rebase share the original absolute deadline. Reacquisition and base
+capture recheck expiry before starting a retry mutation. Further required rebases
+refuse; daemon priority and FIFO are unchanged. A successful CAS returning the
+old head is a visibility acknowledgement, never an instruction to reissue the
+mutation. A later candidate requires a bounded complete ordered tree replay onto
+the captured pre-CAS base before pushed provenance; unknown evidence refuses.
+This does not transfer CI, waive findings/primary-change checks, change protection
+or bypass normal exact-head merge CAS. See the LAC-2097 RCA for regression and
+separate deployment acceptance.
+
 The merge-lease library exposes
 `assessMergeLeaseNeedsRevalidation({ repoPath, base, validationBase,
 currentBase, changedFilesFrom })`, and `bin/merge-lease.mjs

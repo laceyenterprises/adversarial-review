@@ -1694,14 +1694,14 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    always rebases at least once onto the current base and re-validates the
    rebased head — required checks plus the changed-surface test bar above —
    before merging. LEASEFAIR-01 releases the lease during remote CI, then
-   requires the fetched current base to be contained in that exact validated
-   head after reacquisition. Any base advancement, including disjoint changes
-   and non-strict branches, triggers one in-run rebase and exact-head CI wait
-   under the reacquired lease (LEASEFAIR-02). Deferred daemon merges retain
-   priority before reacquisition; conflict, red CI or timeout release with their
-   actual reasons. A lagging `BEHIND`
-   snapshot avoids a redundant rebase only if the validated head already
-   contains the entire current base.
+   applies the strictness/overlap base policy after reacquisition (LAC-2097).
+   Explicitly non-strict disjoint advances retain the exact head and its CI;
+   strict/unknown protection requires containment and overlap requires rebase.
+   One required rebase and exact-head CI wait retain the reacquired lease
+   (LEASEFAIR-02). Deferred daemon merges retain priority before reacquisition;
+   conflict, red CI or timeout release with their actual reasons. A lagging
+   `BEHIND` snapshot cannot force another source rewrite when this policy is
+   satisfied; the final live gate still must pass.
 3. **Keep canonical docs current.** Doc-currency is part of the terminal
    remediation scope, not net-new feature work. When the diff changes an
    in-repo persistent store shape and `docs/data-model/` exists, the hammer
@@ -3978,10 +3978,11 @@ current wait totals for audit reporting. Phases that update them must run in
 the persistent shell; child-process changes do not propagate back to a parent.
 After reacquisition LEASEFAIR-01 re-runs the fail-closed base revalidation from
 verify-head against the fetched live base before the final fresh exact-head
-gate. The merge-base of that base and the exact CI-validated head must equal
-the entire current base. The older parallel-phase validation base is not used
-as a substitute. Any new base commit, including disjoint changes, requires
-rebase and fresh CI even without a strict branch-protection rule.
+gate. Strict/unknown protection requires the merge-base to equal the fetched
+current base. Explicitly non-strict protection permits disjoint changes measured
+from the exact CI-validated head/base merge-base; overlap requires rebase and
+fresh exact-head CI even if mergeability is CLEAN. The older parallel-phase
+validation base is not used as a substitute (LAC-2097).
 
 IDENTBASE-01 merge-agent rebases with a worker author remain reviewable. Do not
 assume a per-head review ceiling bounds repeated new rebase heads: the combined
@@ -4238,8 +4239,16 @@ head, host, PID and acquisition time as a fallback identity.
 The hammer releases before its first remote-CI wait, including snapshots,
 transient reads and UNKNOWN sampling/backoffs. After green CI it reacquires
 through the same priority queue, so deferred daemon merges are served first.
-The entire current base must be contained in the exact validated head, even
-for disjoint changes. LEASEFAIR-02 handles an absent base in this same run:
+LAC-2097 makes the post-wait and final-click base policy match branch protection:
+strict or unreadable protection requires complete current-base containment.
+With an explicitly non-strict rule, the exact validated head may retain its CI
+when the base advance is disjoint from the PR's entire changed-file set. Both
+sides of renames count. The comparison starts at the exact head/base merge-base,
+not a mutable validation-base variable. Fetch/diff failures require rebase.
+Overlap still requires rebase even if GitHub reports CLEAN/MERGEABLE. A live
+CONFLICTING gate requires the rebase/conflict path even with disjoint path names
+(for example, directory/file conflicts). Sorting/comparison errors fail closed.
+LEASEFAIR-02 handles a required rebase in this same run:
 rebase/publish through GitHub's existing update-branch path, fetch and detach
 the exact resulting SHA, and wait once for that head's required CI while
 retaining the lease. Both CI windows share one absolute deadline initialized
@@ -4248,7 +4257,12 @@ polling, backoffs and gate reads consume the remaining deadline. This single
 serialized retry prevents cooperating mergers from overtaking the closer again. The
 existing holder-fenced lease renewal runs at the retry wait boundaries so audit
 expiry allows the full window; renewal never extends the CI deadline. The
-single retry is independent of the initial rebase-attempt cap.
+single retry is independent of the initial rebase-attempt cap. Reacquisition,
+base-policy probing and pre-mutation base capture recheck the original deadline;
+an exhausted run that needs new validation releases without starting another
+rebase or CI cycle. An unchanged already-green head that still satisfies the
+base policy may close after a longer queue wait, with the fresh in-lease live
+gate and exact-head merge CAS; CI patience is not a new veto on ready heads.
 
 After retry CI succeeds, the closer republishes its head-bound remediation
 audit and rebuilds the full predicate from fresh head, reviews, timeline, commit,
@@ -4267,8 +4281,31 @@ and releases the lease before returning, including during the in-run CI retry.
 PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
 authority failures continue to fail closed. A non-cooperating base writer during
-the serialized retry refuses as `retry-base-not-contained`; no unbounded retry
-loop is added.
+the serialized retry refuses as `retry-base-not-contained` when the same
+strictness/overlap policy requires another rebase; disjoint non-strict movement
+does not mutate the head. No unbounded retry loop is added.
+
+A successful update-branch CAS can acknowledge the old head before GitHub finishes
+publishing the rebase. The closer issues no second mutation for visibility lag.
+Snapshot reads share the update-branch retry cap (default three), with 5/10-second
+backoff. A changed SHA returned by the mutation remains the only acceptable
+result on that path; an old snapshot is polled and a third head refuses. If the
+mutation itself returned the old SHA, a later candidate must pass
+`hammer-rebase-result.mjs`: the base is captured and fetched before the CAS, the
+old and new series must be linear, nonempty and equal length (at most 256
+commits), and each new commit tree must exactly equal a clean replay of its old
+commit onto the preceding new parent. This includes all paths, binary contents,
+whitespace, modes and intermediate remediation; no generated-file exclusions or
+patch-ID normalization apply. Missing objects, conflicts, added/dropped commits,
+wrong bases and unproven candidates refuse as `rebase-result-unproven`; visibility
+exhaustion reports `rebase-head-timeout`. Unsupported Git replay commands fail
+closed. The proof writes Git objects only, never refs, index or checkout.
+Only a proven result receives a pushed provenance edge, before checkout sync
+and CI. No proof carries old-head CI, findings disposition or merge authority:
+publication/range proof, primary-change evidence and the exact-head live checks
+remain mandatory. Known mutation-result edges are still recorded even if a
+later snapshot read fails. Source publication is not deployment proof; see
+[the LAC-2097 RCA](postmortems/LAC-2097-validated-closer-convergence.md).
 The final live head/required-check gate is refreshed under the lease, preserving
 stale-head, current-review, remediation, primary-change and merge authority checks.
 
@@ -4276,8 +4313,10 @@ No migration, configuration change or new CI check is needed. Deploy through the
 normal submodule float and daemon rollout; already running closers finish with
 their original procedure and are never interrupted by a reservation. After
 rollout, inspect waiter service order and logs for a deferred clean head taking
-the first eligible acquisition ahead of closer retries. Check that the first remote-CI wait shows no base holder and an advanced base
-rebases in the same closer run, holding the lease through only its retry CI wait.
+the first eligible acquisition ahead of closer retries. Check that the first
+remote-CI wait shows no base holder. A required strict/overlap rebase stays in the
+same closer run and holds the lease through its retry CI wait; non-strict
+disjoint advancement retains the validated head and does not restart CI.
 The lifecycle graph is unchanged. The clean offline smoke also verifies
 priority service without preemption; focused synthetic regressions cover
 reacquisition, CI and current-base behavior.

@@ -50,17 +50,22 @@ if (args[0] === 'pushed') {
   if (state.retried && process.env.SCENARIO === 'ci-head-moved') state.head = state.foreign;
   const checks = [{ name: 'fixture-test', status: pending ? 'IN_PROGRESS' : 'COMPLETED',
     conclusion: pending ? null : red ? 'FAILURE' : 'SUCCESS' }];
+  const mergeStateStatus = state.behind ? 'BEHIND' : 'CLEAN';
+  const mergeable = !state.retried && process.env.SCENARIO === 'ci-disjoint-conflict' ? 'CONFLICTING' : 'MERGEABLE';
   const verdict = evaluateMergeEligibility({ verdict: 'settled-success', leaseHeld: true,
-    requiredChecks: checks, branchProtectionRequired: false, mergeable: 'MERGEABLE',
-    mergeStateStatus: !state.retried && process.env.SCENARIO === 'ci-strict-behind' ? 'BEHIND' : 'CLEAN', prState: 'OPEN', labels: [], candidateHead: state.head, validatedHead: expected });
+    requiredChecks: checks, branchProtectionRequired: false, mergeable,
+    requiresUpToDateBranch: process.env.HAM_REQUIRES_UP_TO_DATE !== '0',
+    mergeStateStatus, prState: 'OPEN', labels: [], candidateHead: state.head, validatedHead: expected });
   log('checks', { head: expected, held: existsSync(join(dir, 'lease-held')), conclusion: classifyCheckRollup(checks) });
   save();
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,
-    checksConclusion: classifyCheckRollup(checks), mergeable: 'MERGEABLE', mergeStateStatus: !state.retried && process.env.SCENARIO === 'ci-strict-behind' ? 'BEHIND' : 'CLEAN' }));
+    checksConclusion: classifyCheckRollup(checks), mergeable, mergeStateStatus }));
 } else if (args[0] === 'predicate') {
   const claim = JSON.parse(readFileSync(args[args.indexOf('--ham-terminal-remediation') + 1]));
   assert.equal(claim.commit.sha, state.nextRebased);
+  assert.deepEqual(claim.auditComment.findings, JSON.parse(readFileSync(join(dir, 'terminal-remediation.json'))).auditComment.findings,
+    'retry must preserve the original blocking and non-blocking source findings');
   assert.equal(claim.auditComment.body, state.publishedBody,
     'retry predicate must use the audit body produced by retry publication');
   assert.ok(state.publishedBody.includes(state.nextRebased));
@@ -89,13 +94,16 @@ if (args[0] === 'pushed') {
     assert.ok(args.includes('id=synthetic-pr'));
     assert.equal(localHead(), state.head);
     assert.ok(existsSync(join(dir, 'lease-held')));
-    if (process.env.SCENARIO === 'conflict' || (state.checkReads && process.env.SCENARIO === 'ci-conflict')) {
+    if (process.env.SCENARIO === 'conflict' || (state.checkReads && ['ci-conflict', 'ci-disjoint-conflict'].includes(process.env.SCENARIO))) {
       console.error('synthetic rebase conflict: resolve conflicts');
       process.exit(1);
     }
     const target = state.checkReads ? state.nextRebased : state.rebased;
     git('--git-dir', join(dir, 'remote.git'), 'update-ref', 'refs/heads/topic', target, state.head);
+    const previous = state.head;
     state.head = target;
+    state.updateAcknowledged = true;
+    state.visibilityReads = 0;
     if (state.checkReads) state.retried = true;
     if (state.retried && process.env.SCENARIO === 'ci-shared-deadline') {
       const clock = join(dir, 'clock');
@@ -103,10 +111,11 @@ if (args[0] === 'pushed') {
     }
     state.behind = false;
     save();
-    console.log(JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: { headRefOid: target } } } }));
+    console.log(JSON.stringify({ data: { updatePullRequestBranch: { pullRequest: { headRefOid: process.env.SCENARIO.includes('old-reply') ? previous : target } } } }));
   } else if (args[0] === 'pr' && args[1] === 'view') {
     if (args.includes('id') && args.includes('--jq')) {
       state.idReads = (state.idReads || 0) + 1;
+      if (state.checkReads && process.env.SCENARIO === 'ci-id-deadline') writeFileSync(join(dir, 'clock'), '1700000900');
       save();
       if (process.env.SCENARIO === 'id-exhausted' || process.env.SCENARIO === 'id-permanent' ||
         (process.env.SCENARIO === 'id-transient' && state.idReads === 1)) {
@@ -116,7 +125,7 @@ if (args[0] === 'pushed') {
       console.log('synthetic-pr'); process.exit(0);
     }
     if (args.includes('number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName') &&
-      ((process.env.SCENARIO.startsWith('snapshot-') && state.head === state.rebased) ||
+      ((process.env.SCENARIO.startsWith('snapshot-') && process.env.SCENARIO !== 'snapshot-lag' && state.head === state.rebased) ||
         (process.env.SCENARIO.startsWith('ci-snapshot-') && state.retried))) {
       state.snapshotReads = (state.snapshotReads || 0) + 1;
       save();
@@ -127,6 +136,16 @@ if (args[0] === 'pushed') {
           ? 'HTTP 403: Forbidden' : 'HTTP 502: synthetic post-rebase snapshot failure');
         process.exit(1);
       }
+    }
+    if (state.updateAcknowledged && args.includes('number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName') &&
+      (process.env.SCENARIO.includes('old-reply') || process.env.SCENARIO === 'snapshot-lag')) {
+      state.visibilityReads = (state.visibilityReads || 0) + 1;
+      save();
+      if (process.env.SCENARIO === 'old-reply-never' || state.visibilityReads === 1) {
+        console.log(JSON.stringify({ headRefOid: state.retried ? state.rebased : state.original, baseRefName: 'main', state: 'OPEN' }));
+        process.exit(0);
+      }
+      if (process.env.SCENARIO === 'old-reply-foreign') { state.head = state.foreign; save(); }
     }
     if (process.env.SCENARIO === 'foreign-after-rebase' && state.behind === false) {
       state.head = state.foreign; save();
@@ -140,13 +159,13 @@ if (args[0] === 'pushed') {
     else if (args.includes('reviews')) console.log('{"reviews":[]}');
     else if (args.includes('title')) console.log('Repair synthetic surface');
     else console.log(JSON.stringify({ number: 42, headRefOid: state.head, baseRefName: 'main',
-      state: state.merged ? 'MERGED' : 'OPEN', isDraft: false, mergeable: 'MERGEABLE',
-      mergeStateStatus: state.behind ? 'BEHIND' : 'CLEAN', labels: [], statusCheckRollup: [],
+      state: state.merged ? 'MERGED' : state.checkReads && process.env.SCENARIO === 'ci-closed' ? 'CLOSED' : 'OPEN', isDraft: false, mergeable: 'MERGEABLE',
+      mergeStateStatus: state.behind ? 'BEHIND' : 'CLEAN', labels: state.checkReads && process.env.SCENARIO === 'ci-canceled' ? [{ name: 'no-merge-hold' }] : [], statusCheckRollup: [],
       mergedAt: state.merged ? '2026-01-01T00:00:00Z' : null, mergeCommit: { oid: state.base } }));
   } else if (args[0] === 'api' && args.includes('graphql')) {
     console.log(JSON.stringify({ login: 'hammer-worker', databaseId: 77 }));
   } else if (args[0] === 'api' && args.some(arg => arg.endsWith('required_status_checks'))) {
-    console.log(JSON.stringify({ strict: process.env.SCENARIO !== 'ci-disjoint' }));
+    console.log(JSON.stringify({ strict: !['ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO) }));
   } else if (args[0] === 'api' && args.some(arg => arg.includes('/commits/'))) {
     console.log(JSON.stringify({ sha: state.head, parents: [{ sha: state.nextBase }] }));
   } else if (args[0] === 'api' && args.includes('--paginate')) {
@@ -161,7 +180,7 @@ if (args[0] === 'pushed') {
     save();
   } else if (args[0] === 'pr' && args[1] === 'merge') {
     assert.equal(args[args.indexOf('--match-head-commit') + 1], state.retried ? state.nextRebased : state.rebased);
-    if (retryScenario) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');
+    if (retryScenario && !['ci-disjoint', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO)) assert.ok(state.retryReads >= 2, 'new exact head must pass checks');
     assert.ok(state.checkReads >= (process.env.SCENARIO === 'pending' ? 2 : 1), 'must read exact-head checks');
     assert.ok(existsSync(join(dir, 'lease-held')));
     state.merged = true;

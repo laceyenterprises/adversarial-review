@@ -496,6 +496,9 @@ ham_update_branch_with_retries() {
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
     if ham_update_pr_id=$(ham_pr --json id --jq '.id' 2> "<<RUN_DIR>>/update-branch.stderr"); then
       [ -n "$ham_update_pr_id" ] && [ "$ham_update_pr_id" != null ] || return 1
+      if [ -n "${ham_rebase_ci_deadline:-}" ] && [ "$(date +%s)" -ge "$ham_rebase_ci_deadline" ]; then
+        return 3
+      fi
       # Bind provenance to the mutation result, never a later mutable branch tip.
       # https://docs.github.com/en/graphql/reference/pulls#updatepullrequestbranch
       if ham_gh api graphql \
@@ -522,16 +525,94 @@ ham_update_branch_with_retries() {
   return 1
 }
 
+# A successful mutation is issued only once. Poll its visibility, never repeat
+# the mutation merely because its acknowledgement/snapshot still has the old SHA.
+# A later SHA is not publication authority unless the old-SHA acknowledgement
+# can be bound to an exact full-tree replay onto our pre-mutation base.
+ham_settle_rebase_snapshot() {
+  local from="$1" base="$2" async_result="$3" attempt=1 snapshot_head
+  while true; do
+    if ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      > "<<RUN_DIR>>/pr-after.snapshot.json" 2> "<<RUN_DIR>>/update-branch.stderr"; then
+      if ! jq -e --arg base "$BASE_BRANCH" '.state == "OPEN" and .baseRefName == $base' \
+        "<<RUN_DIR>>/pr-after.snapshot.json" >/dev/null; then
+        HAM_PHASE_OUTCOME=rebase-target-changed
+        ham_release_merge_lease || return 1
+        return 20
+      fi
+      snapshot_head=$(jq -er '.headRefOid | select(type == "string" and test("^[a-f0-9]{40}$"))' \
+        "<<RUN_DIR>>/pr-after.snapshot.json") || snapshot_head=""
+      if ham_is_full_sha "$snapshot_head" && [ "$snapshot_head" != "$from" ]; then
+        if [ "$async_result" -eq 1 ]; then
+          if ! ham_bounded_git_sync "$snapshot_head" \
+            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-rebase-result.mjs \
+              "$from" "$snapshot_head" "$base" > "<<RUN_DIR>>/rebase-result-proof.json"; then
+            HAM_PHASE_OUTCOME=rebase-result-unproven
+            ham_release_merge_lease || return 1
+            return 20
+          fi
+          HAM_REBASE_PUBLISHED_HEAD="$snapshot_head"
+          POST_REMEDIATION_SHA="$snapshot_head"
+        elif [ "$snapshot_head" != "$POST_REMEDIATION_SHA" ]; then
+          HAM_PHASE_OUTCOME=head-changed
+          ham_release_merge_lease || return 1
+          return 20
+        fi
+        mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+          ham_release_merge_lease || return 1
+          return 1
+        }
+        return 0
+      fi
+      # A stale BEHIND read can trigger an already-up-to-date no-op. Accept
+      # the unchanged head only with complete captured-base containment.
+      if [ "$async_result" -eq 1 ] && [ "$snapshot_head" = "$from" ] \
+        && git merge-base --is-ancestor "$base" "$from"; then
+        mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
+          ham_release_merge_lease || return 1
+          return 1
+        }
+        return 0
+      fi
+      # Only the exact old head is a visibility lag. Malformed replies fail closed.
+      if [ "$snapshot_head" != "$from" ]; then
+        HAM_PHASE_OUTCOME=pr-refresh-failed
+        ham_release_merge_lease || return 1
+        return 1
+      fi
+      HAM_PHASE_OUTCOME=rebase-head-timeout
+    else
+      HAM_PHASE_OUTCOME=pr-refresh-failed
+      if ! ham_update_branch_transient "<<RUN_DIR>>/update-branch.stderr"; then
+        cat "<<RUN_DIR>>/update-branch.stderr" >&2
+        rm -f "<<RUN_DIR>>/pr-after.snapshot.json"
+        ham_release_merge_lease || return 1
+        return 1
+      fi
+    fi
+    if [ "$attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
+      cat "<<RUN_DIR>>/update-branch.stderr" >&2
+      rm -f "<<RUN_DIR>>/pr-after.snapshot.json"
+      ham_release_merge_lease || return 1
+      return 1
+    fi
+    sleep $((5 * (1 << (attempt - 1))))
+    attempt=$((attempt + 1))
+  done
+}
+
 ham_base_touches_pr_files() {
   # Returns 0 (overlap → a rebase+revalidation is still required) when any file
   # this PR changes is also touched by base commits that landed SINCE the base we
-  # last validated against. After releasing for CI, validated-head mode requires
-  # the entire current base to be contained in the exact CI-validated head.
-  # Even disjoint base changes require another rebase/CI pass in that mode.
-  # Other callers retain the ordinary disjoint-file decision. Fail closed to 0 on any fetch/diff
+  # last validated against. In validated-head mode use that exact head's fork
+  # point, not the mutable validation-base variable. Strict/unknown protection
+  # still requires complete containment; non-strict disjoint advances can retain
+  # the same head and its CI. A live CONFLICTING gate (second argument) always
+  # requires rebase, including directory/file conflicts with disjoint path names.
+  # Fail closed to 0 on any fetch/diff
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
   ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
-  local current_base_sha comparison_base pr_ref pr_files base_files
+  local current_base_sha comparison_base pr_ref pr_files base_files overlap
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
   HAM_CURRENT_BASE_SHA="$current_base_sha"
@@ -540,22 +621,40 @@ ham_base_touches_pr_files() {
   if [ "${1:-}" = "validated-head" ]; then
     pr_ref="$POST_REMEDIATION_SHA"
     ham_is_full_sha "$pr_ref" || return 0
+    [ "${2:-}" != CONFLICTING ] || return 0
     comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
-    [ "$comparison_base" = "$current_base_sha" ] || return 0
-    return 1
+    [ "$comparison_base" != "$current_base_sha" ] || return 1
+    [ "${HAM_REQUIRES_UP_TO_DATE:-1}" -eq 0 ] || return 0
   fi
   ham_is_full_sha "$comparison_base" || return 0
-  pr_files=$(git diff --name-only "$current_base_sha...$pr_ref" 2>/dev/null) || return 0
-  base_files=$(git diff --name-only "$comparison_base..$current_base_sha" 2>/dev/null) || return 0
+  # Include both sides of renames: changing a renamed-away path also overlaps.
+  pr_files=$(git diff --no-renames --name-only "$comparison_base..$pr_ref" 2>/dev/null) || return 0
+  base_files=$(git diff --no-renames --name-only "$comparison_base..$current_base_sha" 2>/dev/null) || return 0
   [ -n "$pr_files" ] || return 1
   [ -n "$base_files" ] || return 1
-  comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .
+  pr_files=$(printf '%s\n' "$pr_files" | sort -u) || return 0
+  base_files=$(printf '%s\n' "$base_files" | sort -u) || return 0
+  overlap=$(comm -12 <(printf '%s\n' "$pr_files") <(printf '%s\n' "$base_files") 2>/dev/null) || return 0
+  [ -n "$overlap" ]
 }
 
 # Shared by initial verification and the single in-run CI retry. GitHub publishes
 # the rebased head atomically; fetch that exact result into the scratch checkout.
 ham_rebase_head() {
-  local ham_rebase_from="$POST_REMEDIATION_SHA"
+  local ham_rebase_from="$POST_REMEDIATION_SHA" ham_rebase_base ham_async_result=0 ham_rebase_ci_deadline=""
+  if [ "${1:-}" = --ci-retry ]; then ham_rebase_ci_deadline="$HAM_REMOTE_CI_DEADLINE"; fi
+  if ! ham_capture_current_base_sha; then
+    HAM_PHASE_OUTCOME=rebase-base-unavailable
+    ham_release_merge_lease || return 1
+    return 1
+  fi
+  ham_rebase_base="$HAM_CAPTURED_BASE_SHA"
+  HAM_REBASED_ONTO_BASE_SHA="$ham_rebase_base"
+  if [ "${1:-}" = --ci-retry ] && [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+    export HAM_REMOTE_CI_STATUS=remote-ci-timeout
+    HAM_PHASE_OUTCOME=github-gate-timeout
+    return 20
+  fi
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ] && [ "${1:-}" != --ci-retry ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
     ham_release_merge_lease
@@ -565,6 +664,11 @@ ham_rebase_head() {
   HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
   ham_update_branch_with_retries
   HAM_UPDATE_BRANCH_EXIT=$?
+  if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 3 ]; then
+    export HAM_REMOTE_CI_STATUS=remote-ci-timeout
+    HAM_PHASE_OUTCOME=github-gate-timeout
+    return 20
+  fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
     # The hammer OWNS merge-conflict resolution, but NEVER while holding the
     # merge lease. Release the lease immediately, step out to the conflict
@@ -588,6 +692,10 @@ ham_rebase_head() {
     return 1
   fi
   POST_REMEDIATION_SHA="$HAM_REBASE_PUBLISHED_HEAD"
+  if [ "$POST_REMEDIATION_SHA" = "$ham_rebase_from" ]; then
+    ham_async_result=1
+    ham_settle_rebase_snapshot "$ham_rebase_from" "$ham_rebase_base" 1 || return $?
+  fi
   # A server-side rebase publishes a head too. Record its edge before scratch
   # synchronization or exact-head CI can fail, using the same App publisher.
   if ham_is_full_sha "$POST_REMEDIATION_SHA" && [ "$ham_rebase_from" != "$POST_REMEDIATION_SHA" ]; then
@@ -605,31 +713,8 @@ ham_rebase_head() {
       return 1
     fi
   fi
-  local ham_snapshot_attempt=1
-  while true; do
-    if ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
-      > "<<RUN_DIR>>/pr-after.snapshot.json" 2> "<<RUN_DIR>>/update-branch.stderr"; then
-      mv "<<RUN_DIR>>/pr-after.snapshot.json" "<<RUN_DIR>>/pr-after.json" || {
-        ham_release_merge_lease || return 1
-        return 1
-      }
-      break
-    fi
-    if [ "$ham_snapshot_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ] \
-      || ! ham_update_branch_transient "<<RUN_DIR>>/update-branch.stderr"; then
-      cat "<<RUN_DIR>>/update-branch.stderr" >&2
-      rm -f "<<RUN_DIR>>/pr-after.snapshot.json"
-      HAM_PHASE_OUTCOME=pr-refresh-failed
-      ham_release_merge_lease || return 1
-      return 1
-    fi
-    sleep $((5 * (1 << (ham_snapshot_attempt - 1))))
-    ham_snapshot_attempt=$((ham_snapshot_attempt + 1))
-  done
-  if [ "$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")" != "$POST_REMEDIATION_SHA" ]; then
-    HAM_PHASE_OUTCOME=head-changed
-    ham_release_merge_lease || return 1
-    return 20
+  if [ "$ham_async_result" -eq 0 ]; then
+    ham_settle_rebase_snapshot "$ham_rebase_from" "$ham_rebase_base" 0 || return $?
   fi
   # Fetch the exact result, never a branch tip that a later author push could
   # move. Refuse dirty tracked files rather than carrying them onto that head.
@@ -685,14 +770,13 @@ while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHI
     ham_release_merge_lease || return 1
     return 20
   fi
-  # A lagging BEHIND snapshot may avoid a redundant rebase only when the
-  # validated head already contains the entire fetched current base. A disjoint
-  # file diff alone cannot authorize reusing CI after releasing the base lease.
-  if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
-     && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
+  # After the initial update attempt, retain the produced head when the base
+  # policy permits it. This also handles a strict already-up-to-date no-op with
+  # a lagging BEHIND snapshot; the final live gate must still settle green.
+  if [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
      && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
      && ! ham_base_touches_pr_files validated-head; then
-    echo "HAM: validated head already contains the current base; avoiding a redundant rebase while GitHub recomputes BEHIND." >&2
+    echo "HAM: produced head covers the base policy; avoiding a redundant rebase." >&2
     break
   fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
@@ -742,7 +826,7 @@ else
   fi
 fi
 
-# CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. If
+# CONFIRM THE REBASE HOLDS: the head satisfies the strictness/overlap policy. If
 # HAM_NEEDS_REVALIDATION is true, re-run the changed-surface tests (mandate step
 # 2b) and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
 # the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
@@ -752,7 +836,7 @@ fi
 # that turns changed-surface tests or required checks red must be fixed (and
 # re-committed, which moves the head and re-enters this validation), never merged.
 # Do not proceed past this point with a red applicable suite, a red required
-# check, or a still-BEHIND mergeStateStatus.
+# check, or a still-BEHIND mergeStateStatus under strict/unknown protection.
 HAM_PHASE_OUTCOME=verified
 return 0
 }

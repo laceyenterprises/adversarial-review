@@ -974,7 +974,7 @@ guards still apply, and an already captured prompt path must remain unchanged.
 
 | Path | When | What happens |
 |---|---|---|
-| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait and requires the entire current base in the CI-validated head after reacquisition. LEASEFAIR-02 handles advancement with one in-run rebase and exact-head CI wait while retaining that lease, then rebuilds audit and predicate authority. |
+| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. LAC-2097 retains an exact validated head across disjoint advances under non-strict protection; strict/unknown protection and overlap require rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and exact-head CI wait while retaining that lease, then rebuilds audit and predicate authority. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
 LEASEFAIR-01 changes lease scheduling within these existing states. A daemon
@@ -996,15 +996,22 @@ holder fence are unchanged. The clean smoke covers empty-lane progress after a
 hold with a live watcher PID; dedicated fixtures also cover head changes and
 cleanup while a holder remains. No states or merge-authority edges are added.
 The closer releases before its first remote-CI wait, including UNKNOWN/read
-retry waits, and reacquires before merge. At that boundary, the entire current base
-must be contained in the exact CI-validated head; even disjoint base advancement
-triggers LEASEFAIR-02: one in-run rebase and fresh exact-head CI wait, retaining
+retry waits, and reacquires before merge. At that boundary and before each click,
+strict/unknown protection requires complete base containment; non-strict disjoint
+advances retain the exact validated head and its checks (LAC-2097). Overlap or a
+strict missing base triggers LEASEFAIR-02: one in-run rebase and fresh exact-head CI wait, retaining
 the reacquired lease so cooperating mergers cannot overtake again. Daemon
 reservations still precede reacquisition. Both waits and the intervening rebase
 consume one absolute deadline, initialized before the first wait from the
-once-scaled nominal CI bound. Conflict, red CI and expiry report their actual
+once-scaled nominal CI bound. An exhausted reacquisition/base probe cannot start
+a retry mutation; expiry preserves the last validated source head. Conflict, red CI and expiry report their actual
 reasons and release. Successful retry rebuilds head-bound audit and predicate
-authority before merge.
+authority before merge. Old-head update-branch acknowledgements poll within the
+existing snapshot cap without repeating the CAS. A later candidate needs exact
+ordered full-tree replay onto the pre-CAS base before receiving pushed provenance;
+unproven results and visibility expiry release without merge. Known mutation
+results still reject third heads. Original finding/source authority and primary
+change proof remain required; no lifecycle state or durable store shape changes.
 Fresh head/CI predicates still run under the lease before merging. Queue
 position accompanies contention logs and overdue wait receipts; contention
 does not become a safety hold. Existing lifecycle transitions are unchanged. The clean smoke also verifies

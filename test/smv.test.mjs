@@ -97,4 +97,6 @@ test('SMV canonical sandbox smoke merges only disposable Git', () => {
   assert.equal(lines.length, 5); assert.equal(report.verdict, 'pass'); assert.equal(report.mode, 'sandbox');
   assert.ok(report.durationSeconds > 0 && report.durationSeconds <= 180);
   assert.ok(report.steps.every(s => s.evidence.ok && s.verdict === 'pass'));
+  assert.deepEqual(report.steps.find(s => s.id === 'clean').evidence.validatedQueue,
+    { merged: [1, 2], sourceMutations: 0, ciRestarts: 0, leaseAndWaitersClean: true });
 });

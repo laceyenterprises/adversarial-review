@@ -704,6 +704,7 @@ ham_acquire_merge_lease() { ham_lease_pr_view --json headRefOid,statusCheckRollu
 ham_base_touches_pr_files() { return 1; }
 ham_append_terminal_audit() { echo "AUDIT:$*"; }
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + 900 ))
 HAM_MERGE_LEASE_HELD=0
 close() { ${block}
  echo REACQUIRED; }

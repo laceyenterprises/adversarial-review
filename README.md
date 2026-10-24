@@ -597,13 +597,16 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 LEASEFAIR-01 gives deferred daemon merges a durable priority reservation ahead
 of the next closer acquisition, FIFO among daemon requests. Closers release
 before the first remote-CI wait, including read retries and UNKNOWN sampling, then
-reacquire and refresh the exact-head gate. After that release, any current-base
-commit absent from the validated head requires rebase and fresh CI, including
-disjoint changes. LEASEFAIR-02 rebases in the same run, holds the reacquired
+reacquire and refresh the exact-head gate. LAC-2097 retains the exact validated
+head and CI across disjoint base advances when protection is explicitly
+non-strict. Strict/unknown protection requires complete base containment;
+overlap requires rebase even with CLEAN mergeability. LEASEFAIR-02 handles a
+required rebase in the same run, holds the reacquired
 lease through one bounded CI wait on the new head, then rebuilds its audit and
 predicate before merge. Both CI waits share one absolute deadline, set before
 the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
-reads consume the remaining budget. Conflict, red CI and expiry release with their
+reads consume the remaining budget. Expired reacquisition or base probing cannot
+start a retry source mutation. Conflict, red CI and expiry release with their
 actual reasons. Deferred daemon reservations retain priority before the retry
 acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
@@ -657,8 +660,17 @@ initialized submodules before changed-surface revalidation. Publish and recovere
 attestations compare the live head with `HAM_PRODUCED_HEAD`; required checks and
 merge remain bound to that head under the merge lease. LEASEFAIR-01 releases
 before the first remote-CI wait and reacquires before merging; LEASEFAIR-02
-retains that lease through one retry CI wait if the base advanced. Foreign pushes still
+retains that lease through one retry CI wait if the base policy requires it. Foreign pushes still
 stop with `head-changed`. Existing lifecycle states are unchanged.
+
+Old-head update-branch acknowledgements now poll without repeating the mutation.
+A later head needs an exact ordered full-tree replay onto the pre-mutation base
+before a pushed provenance edge is published. It still needs fresh exact-head
+checks, audit/range proof and the full predicate. The clean offline smoke proves
+two queued validated PRs drain across unrelated advances, preserving source heads
+and leaving no holder/waiters. Focused `rebase-result` and `hammer-self-rebase`
+fixtures cover invalid candidates and bounded failure cleanup. See the
+[LAC-2097 RCA and deployment acceptance](docs/postmortems/LAC-2097-validated-closer-convergence.md).
 
 1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
 2. **Remediate all adversarial findings** the final review raised — blocking and
@@ -667,7 +679,7 @@ stop with `head-changed`. Existing lifecycle states are unchanged.
    head is content-equivalent to the reviewed head (or re-validate it).
 4. **Push the validated head.**
 5. **Release while waiting for GitHub required checks**, then reacquire and
-   confirm the exact green head contains the fetched current base.
+   confirm the exact green head satisfies the strictness/overlap base policy.
 6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
 7. **Append the terminal audit and release the lease.**
 

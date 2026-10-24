@@ -472,16 +472,15 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    (agent-os#4090). The predicate accepts only a matched
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
-5. Refresh the post-remediation PR head. **Rebase onto a recent base (`main`) and CONFIRM THE
-   REBASE HOLDS.** Checks must pass on the exact head containing the current base.
-   The procedure releases the lease for the first CI wait, then reacquires and fetches the base.
-   Any absent base commit, including disjoint changes, triggers one in-run rebase
-   and exact-head CI wait under the held lease. Both waits and rebase share one
-   load-scaled deadline. Daemon merges retain priority before reacquisition.
-   Conflict, red CI and expiry report actual reasons; base advancement alone
-   does not end the run. Retry rebuilds audit and predicate; never reuse old-head
-   validation. A lagging `BEHIND` snapshot skips rebase only when the validated
-   head contains the entire fetched base.
+5. Refresh the PR head; **CONFIRM THE REBASE HOLDS.** Strict/unknown protection
+   requires base containment; non-strict disjoint advances retain the exact
+   validated head. Conflicts/overlap require rebase even with CLEAN mergeability.
+   Release for initial CI, then reacquire through daemon priority. One required
+   rebase/CI retry holds the lease within the original deadline; expiry forbids
+   another mutation. Retry rebuilds audit/predicate.
+   Old-head success replies poll without repeating CAS; later heads need exact
+   ordered tree replay onto the pre-CAS base before pushed provenance. Unproven
+   results/visibility expiry release; never adopt a tip or reuse old-head CI.
    Before entering the final rebase→remote-CI→merge window, acquire the
    merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
@@ -522,8 +521,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    block refreshes the single marker comment in place, so re-entries never
    duplicate it), so it names this exact head, THEN re-run
    the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
-   for that same live head. Only a rebased-onto-latest-main head whose GitHub
-   required check bar is green may proceed to merge while still holding the
+   for that same live head. Only a head satisfying the strictness/overlap base
+   policy whose GitHub required check bar is green may merge while holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
    prove the active hammer exact-head validation, responsibility from the last reviewed head through the range evidence, PR audit
@@ -879,8 +878,7 @@ Do not merge unless all of these are true:
   non-blocking-only close the entitled hammer is trusted and `eligible: true`
   alone is sufficient.)
 - `POST_REMEDIATION_SHA` still equals the PR head.
-- The branch is rebased onto the latest `main` — `mergeStateStatus` is NOT
-  `BEHIND` for `POST_REMEDIATION_SHA`.
+- The exact head meets the base policy above; strict/unknown `BEHIND` requires rebase.
 - GitHub's required checks are successful for `POST_REMEDIATION_SHA`, as read
   from `statusCheckRollup` through the existing `src/github-api.mjs` adapter, and
   no failed, missing, stale, pending, or unchecked required check exists.
@@ -952,10 +950,10 @@ hard-blocker report, and do not re-dispatch.
   floated current main instead of creating a gitlink-only PR.
 - No merging a superproject PR that is still blocked on an unmerged submodule
   fix PR.
-- No merging a head that does not contain the fetched current base after the
-  CI-wait lease release. Rebase and re-validate (required checks plus changed-
-  surface tests) whenever that base advances, even with disjoint changes or a
-  non-strict branch-protection rule.
+- No merging across overlapping base changes or absent base commits under
+  strict/unknown protection. Rebase and re-validate required checks on the new
+  exact head. Under explicitly non-strict protection, disjoint advances may keep
+  the validated head, with fresh live eligibility and head CAS still mandatory.
 - No hammer merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

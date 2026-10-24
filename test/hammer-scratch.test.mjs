@@ -384,7 +384,7 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const prompt = readFileSync(result.promptPath, 'utf8');
   assert.doesNotMatch(prompt, /hammer-procedure\.mjs|--render|\/tmp\/ham-/);
   assert.doesNotMatch(prompt, /(?:^|[\s`'"])bin\/(?:hammer-|run-bounded)/m);
-  assert.match(prompt, /each command runs in a fresh shell/i);
+  assert.match(prompt, /Fresh shells reset exports, variables, functions and cwd/);
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     const path = join(record.scratchDir, `${phase}.sh`);
     assert.ok(prompt.includes(`source "${path}"`), phase);

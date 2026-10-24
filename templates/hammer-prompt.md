@@ -9,8 +9,7 @@ gate remains mandatory.
 
 ## Shell safety
 
-Each command runs in a fresh shell unless kept open; exports, variables,
-functions and cwd reset. Persist only in
+Fresh shells reset exports, variables, functions and cwd. Persist only in
 `<<RUN_DIR>>` (TMPDIR); never `/tmp`. Use absolute helper paths: cwd is untrusted.
 
 Give every shell command a wall-clock bound. On macOS:
@@ -91,14 +90,14 @@ source "<<RUN_DIR>>/inputs.sh"
 
 Keep `HAM_ROOT_DIR` (deployed daemon/round ledger) exported; `HAM_HQ_ROOT` is HQ.
 
-Write `<<RUN_DIR>>/close-controller.sh`; run in foreground:
+Write the complete close-out to `<<RUN_DIR>>/close-controller.sh`, then run in foreground:
 
 ```bash
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
 ```
 
-Before acquiring: preserve HQ/controller env and FD 4; validators share its group.
-No direct/detached shell or nested controller.
+Required before lease acquisition. Preserve inherited HQ/controller env and FD 4.
+No direct/detached shell or nested controller; validators share its owned group.
 
 Before the merge lease, write the complete audit markdown to a file under `<<RUN_DIR>>` and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
@@ -114,7 +113,7 @@ the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
 Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. All GitHub
-calls use `ham_gh` (`<<ROOT_DIR>>/bin/metered-gh.mjs`) or `ham_pr`.
+calls use `ham_gh` or `ham_pr`.
 Never use `--watch` or add polling loops. The helpers refresh before each call and
 refresh and retry once on a credential rejection. Never read or print raw token variables.
 

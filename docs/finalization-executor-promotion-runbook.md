@@ -153,12 +153,14 @@ with the existing load-aware command supervisor (1-second nominal DB wait,
 node src/finalization/queue-probe.mjs --capability owner --json
 ```
 
-The CLI requires an explicit `--capability owner`; missing or unsupported
+The owner observation requires explicit `--capability owner`; missing or unsupported
 capabilities exit 2 without emitting observations.
 
 Record `.capabilities.owner.available == true` and `.runtime.build != null`.
-Availability is computed from exact deployed table/index definitions, DB
-readability/ownership and the resolved local lock adapter. The build is a digest
+Availability is computed from exact deployed definitions of every table/index
+named by the MGQ-01 baseline migration, DB readability/ownership and the resolved
+local lock adapter. Later additive tables and indexes do not invalidate that
+baseline; missing or changed baseline objects remain incompatible. The build is a digest
 of the actual loaded queue module/schema bytes, not a release constant. Record
 it with the deployment revision. It identifies the probe process; it does not
 prove that an already-running watcher loaded those bytes.
@@ -205,3 +207,61 @@ No native addon or host installation was changed. Touched JavaScript lint and
 `finalization-{lane-baseline,queue-owner,ledger-events,ledger-fold,ledger-store,executor-lease,executor,ledger-regression-fixtures,port}.test.mjs`.
 Deployed runtime-owner probe results and organic ownership observations are
 pending; local fixture availability is not deployment evidence.
+
+## Durable handoff observation (MGQ-02; no activation)
+
+Deploy source and apply `migrations/20261024_finalization_queue_handoff.sql`
+after the MGQ-01 migration through the normal app-store migration procedure.
+Opening the writable queue store also converges both additive migrations; the
+read probe never migrates. This slice installs no lane route, evidence-reader
+composition or owner loop and requires no service restart or config change.
+Legacy closer execution remains acting.
+
+Under the runtime account, from the deployed review-service checkout, use the
+existing load-aware command supervisor with a 30-second finite outer bound:
+
+```sh
+node src/finalization/queue-probe.mjs --capability handoff --json
+```
+
+Record `.capabilities.handoff.available == true` and `.runtime.build != null`.
+The probe checks deployed table definitions, ownership/readability and the
+resolved durable receipt adapter, and hashes actual queue/handoff/boundary module
+and migration bytes. DB read patience is 1 second nominal, scaled once with a
+5-second finite ceiling and deadline clipping. It performs no network, signer,
+dispatcher, pager, lane claim, lock-file write or migration. Its build identifies
+the probe process; it does not establish an existing watcher's build or route.
+
+`observations.handoff.acknowledgements` counts persisted validated receipts.
+Zero is valid installed capability evidence with `organicHandoffObserved=false`;
+live evidence-reader composition and organic receipts remain pending until later
+operator routing/rollout. The capability explicitly reports composition required.
+Missing/incompatible schema returns unavailable and exit 1; missing/unsupported
+capability arguments exit 2. This observation is not a blocking check or promotion
+gate. Never create lanes or synthetic submissions to manufacture evidence.
+
+If later routing changes a running watcher, the operator must drain prior
+writers, follow the registered system-domain restart entry and existing
+promotion/rollback procedure, then record actual running build and route.
+No worker restart, config flip, label, live comment or merge is authorized here.
+Retain original handoffs/acks on rollback. Actual deployed runtime-owner probe
+results and organic handoffs remain pending operator observation.
+
+MGQ-02 synthetic validation record (no live services):
+
+| Implementation stage | Observed result |
+|---|---|
+| Existing MGQ-01 storage-only acknowledgements | 20/20 admissions lacked a full validated handoff receipt; none established closer completion through the new boundary. |
+| First handoff implementation | 38/47 focused tests passed; an INSERT placeholder-count error prevented receipt creation, including the first duplicate pair (0/1 successful pair). Corrected before publication. |
+| Atomic receipt correction | 76/76 tests across four selected files; 20/20 duplicate-submitter process pairs produced one entry and identical ack. |
+| Receipt consistency and deadline hardening | 81/81 tests; another 20/20 duplicate pairs succeeded. |
+| Final source with signed reviewer binding | 82/82 tests; another 20/20 duplicate pairs succeeded, for 60 consecutive corrected outcomes with zero duplicate entries. Existing lane-owner trials also passed 30/30 in each corrected run. |
+
+The independent-process fixture forces both submitters to observe receipt absence
+before allowing either to commit. Each pair reads the resulting durable ack and
+entry count back. A separate process exits after commit before sending a reply;
+the parent reopens/replays its one ack. Existing queue-owner contention fixtures
+remain selected, along with the unchanged legacy retry-helper and port tests.
+Sibling boundaries inspected include low-level queue acknowledgement, mutation
+issuance/replay, review currency and withdrawal preservation, and the legacy
+retry helper. No legacy dispatch or ownership algorithm is changed.

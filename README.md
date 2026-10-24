@@ -2292,3 +2292,37 @@ fixture. This reader-support change publishes no recovery config values and
 changes no review, queue, merge or hammer authority. Merge/deploy compatible
 readers before an operator publishes recovery host settings. Normal Agent OS
 submodule float carries the merged companion; no feature-head pointer bump.
+
+### V2 durable closer handoff (MGQ-02)
+
+`createQueueHandoffService` validates complete terminal finding coverage and
+persists pushed head, source review id/commit, signed evidence, worker/closer
+identities, primary-change/local-validation provenance and fixed/withdrawn
+dispositions with the queue entry and ack in one transaction. Real non-blocking
+findings require dispositions too. Fixes need concrete evidence; withdrawals
+also need source explanations and locations. Original signatures and finding
+identities survive candidate derivations without rebinding or another model
+judgement.
+
+`createCloserQueueHandoffBoundary` confirms durable acknowledgement before
+resource release and suppresses duplicate closer dispatch at the admission.
+State is absent until the transaction commits; duplicates, lost replies and
+restart return the same immutable `acknowledged` receipt. Write failure rolls
+back entry/event/readiness. Both seams remain unwired until lane routing lands;
+legacy dispatch and the retry helper retain their behavior. Composition must
+supply a trusted independent evidence reader/verifier.
+
+`test/finalization-queue-handoff.test.mjs` covers coverage/provenance refusals,
+independent duplicate submitters, crash after commit, lost ack, release ordering,
+signature/disposition preservation, bounded waits and a read-only probe. Existing
+smoke promises are unchanged; there is no new live action or CI check.
+
+After source deployment and both additive queue migrations, the operator runs
+`node src/finalization/queue-probe.mjs --capability handoff --json` from the
+deployed checkout under its runtime account, using the bounded load-aware
+supervisor in the [observation procedure](docs/finalization-executor-promotion-runbook.md#durable-handoff-observation-mgq-02-no-activation).
+Require `.capabilities.handoff.available == true` and `.runtime.build != null`.
+The probe resolves the durable adapter against real schema and reports ack
+counts. Zero means organic evidence is pending. Availability does not assert
+live evidence-reader composition, lane routing or a running watcher's build.
+See the [handoff contract](docs/data-model/finalization-ledger.md#durable-closer-handoff-mgq-02).

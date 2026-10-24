@@ -204,7 +204,7 @@ These immutable historical attempts need no new lifecycle state or config key.
 The existing daemon audit may carry `closureAuthority=docs-fast-path`,
 `mergeAccountability=docs-fast-path`, and `docsFastPath={headSha,baseSha,baseBranch}`.
 No reviewer or finding count is invented. A failed attestation delivery appends
-`outcome=failed-without-merge`, `reason=attestation-record-failed`, `permanent=false`
+`outcome=deferred`, `reason=attestation-record-failed`, `permanent=false`
 and diagnostic `error`, then releases the lease for a later retry. The signed
 `docs-fast-path` attestation lives in the canonical head-attestation ledger,
 through the existing sign/record interface. Live classification and merge
@@ -216,3 +216,15 @@ terminal appends preserve this metadata and the ordinary attempt history.
 A failed metadata write defers without attesting or merging. Recording authorizes
 an attempt, so a transport failure after recording
 can still leave an unmerged head with an attestation.
+
+For a pre-merge attestation failure, the attempt also records `exitCode`
+(number or null), `signal` (string or null), `stderrTail` (redacted, at most
+2,000 characters), `error` (bounded redacted message and diagnostics),
+`retryAfter` (ISO timestamp or null), `needsOperator` (boolean), and
+`parkReason` (null or `attestation-record-retry-exhausted`). The daemon
+counts `attestation-record-failed` attempts on this exact head, including older
+non-permanent `failed-without-merge` entries. The first two failures set
+`retryAfter` to 60 then 120 seconds later; the third sets `needsOperator=true`
+and null `retryAfter`. Later observations return
+`attestation-record-retry-exhausted` without audit writes or lease acquisition.
+A new head has independent history. An unreadable audit defers without recording.

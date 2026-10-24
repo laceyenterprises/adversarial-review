@@ -35,17 +35,21 @@ export function createWatcherReviewerQuotaPollFactory(options = {}) {
       firstGrounding ||= groundings.get(key);
       return groundings.get(key);
     }
+    async function readQuotaSnapshot(command, args, execOptions) {
+      const snapshot = await (firstGrounding || getGrounding());
+      const status = snapshot.fleetQuotaStatus;
+      if (status?.error || status?.stale || snapshot.staleIfError) {
+        throw status?.cause || new Error(status?.errorMessage || 'fleet-quota-status-unavailable');
+      }
+      if (typeof status?.stdout === 'string') return { stdout: status.stdout, stderr: '' };
+      // AFH rollback leaves the worker-class fallback reader in charge.
+      return execQuotaOnce(command, args, execOptions);
+    }
     return {
-      async execFile(command, args, execOptions) {
+      execFile(command, args, execOptions) {
+        // Preserve the subprocess promise's child/stdin for payload writers.
         if (args?.join(' ') !== 'fleet quota status --json') return execFileImpl(command, args, execOptions);
-        const snapshot = await (firstGrounding || getGrounding());
-        const status = snapshot.fleetQuotaStatus;
-        if (status?.error || status?.stale || snapshot.staleIfError) {
-          throw status?.cause || new Error(status?.errorMessage || 'fleet-quota-status-unavailable');
-        }
-        if (typeof status?.stdout === 'string') return { stdout: status.stdout, stderr: '' };
-        // AFH rollback leaves the worker-class fallback reader in charge.
-        return execQuotaOnce(command, args, execOptions);
+        return readQuotaSnapshot(command, args, execOptions);
       },
       getGrounding,
       logReads() { logger.log?.(`[watcher] quota-status reads per poll: poll=${id} reads=${reads}`); },

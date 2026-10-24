@@ -1083,6 +1083,18 @@ of green checks, without reviewer/closer and with recorded attestations, plus a
 non-docs change receiving review. See the
 [closure runbook](docs/RUNBOOK-ama-closure.md#docs-only-daemon-merge-docsfastpath-01).
 
+Docs fast-path record failures release the merge lease and remain deferred.
+The watcher preserves child stdin and observes subprocess rejection without
+changing process handlers. Missing/invalid stdin fails promptly if the child
+cannot be terminated; late rejection remains observed. Audit diagnostics include
+the exit code (including zero) and a redacted stderr tail bounded to 2,000
+characters, without repeated diagnostic suffixes. The exact-head audit allows
+three failed record attempts with 60-second then 120-second backoff, then parks
+as `attestation-record-retry-exhausted` with `needsOperator`. A new head starts
+a new budget. These transitions are covered by offline fixtures; after deployment,
+SRE verifies a natural docs-only merge records its attestation and the watcher
+stays running. See the [closure runbook](docs/RUNBOOK-ama-closure.md).
+
 
 REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
 observational applied flag to existing remediation completions/audit text.

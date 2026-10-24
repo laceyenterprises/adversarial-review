@@ -136,6 +136,7 @@ export function materializePerWorkerCodexAuth({
   provider = env.CODEX_BROKER_PROVIDER || 'codex',
   execFileSyncImpl = execFileSync,
   sleepImpl = sleepSync,
+  resolveOperatorHomeImpl = resolveOperatorHome,
   pythonBin = null,
   now = Date.now(),
 } = {}) {
@@ -156,7 +157,7 @@ export function materializePerWorkerCodexAuth({
     if ((parsed?.auth_mode || '').toLowerCase() !== 'chatgpt') return null;
     if (!corporate && !parsed?.tokens?.access_token) return null;
 
-    const operatorHome = resolveOperatorHome(sharedAuthPath);
+    const operatorHome = resolveOperatorHomeImpl(sharedAuthPath);
     const baseDir = join(operatorHome, '.codex', PER_WORKER_DIRNAME);
     sweepStalePerWorkerAuth(baseDir, DEFAULT_STALE_SWEEP_MS, now);
 

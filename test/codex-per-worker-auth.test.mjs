@@ -8,6 +8,16 @@ import {
   PER_WORKER_PLACEHOLDER_REFRESH_TOKEN,
 } from '../src/codex-per-worker-auth.mjs';
 
+// Production maps every /Users/<user>/... credential to that operator's home.
+// Keep fixture writes and stale-directory sweeps inside their disposable root,
+// including when TMPDIR itself lives below /Users on a macOS worker.
+function materializeFixtureAuth(options) {
+  return materializePerWorkerCodexAuth({
+    ...options,
+    resolveOperatorHomeImpl: (authPath) => path.dirname(path.dirname(authPath)),
+  });
+}
+
 function writeSharedAuth(dir, tokens = { access_token: 'fresh-access', refresh_token: 'real-refresh', id_token: 'id', expires_at: 123 }) {
   const codexHome = path.join(dir, '.codex');
   mkdirSync(codexHome, { recursive: true });
@@ -34,7 +44,7 @@ for (const diagnostic of ['timed out', 'TLS handshake failed', 'Connection reset
     withSyncFixture(({ sharedAuthPath, env }) => {
       let attempts = 0;
       const delays = [];
-      const result = materializePerWorkerCodexAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'retry',
+      const result = materializeFixtureAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'retry',
         sleepImpl: (ms) => delays.push(ms),
         execFileSyncImpl: (_bin, _args, options) => {
           attempts += 1;
@@ -68,7 +78,7 @@ for (const [diagnostic, code, expectedAttempts] of [
       let attempts = 0;
       const delays = [];
       const failure = Object.assign(new Error('sync failed'), { code, stderr: diagnostic });
-      assert.throws(() => materializePerWorkerCodexAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'failed',
+      assert.throws(() => materializeFixtureAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'failed',
         sleepImpl: (ms) => delays.push(ms),
         execFileSyncImpl: () => { attempts += 1; throw failure; },
       }), (err) => err.cause === failure && err.cause.stderr === diagnostic);
@@ -82,7 +92,7 @@ for (const [diagnostic, code, expectedAttempts] of [
 test('a successful corporate sync with missing tokens is not retried', () => {
   withSyncFixture(({ root, sharedAuthPath, env }) => {
     let attempts = 0;
-    assert.throws(() => materializePerWorkerCodexAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'missing',
+    assert.throws(() => materializeFixtureAuth({ sharedAuthPath, env, provider: 'codex-corp', key: 'missing',
       sleepImpl: () => assert.fail('contract failures must not retry'),
       execFileSyncImpl: () => { attempts += 1; },
     }), /corporate Codex token missing/);
@@ -94,7 +104,7 @@ test('a successful corporate sync with missing tokens is not retried', () => {
 test('primary auth retains its best-effort copied-token behavior without retries', () => {
   withSyncFixture(({ sharedAuthPath, env }) => {
     let attempts = 0;
-    const result = materializePerWorkerCodexAuth({ sharedAuthPath, env, provider: 'codex',
+    const result = materializeFixtureAuth({ sharedAuthPath, env, provider: 'codex',
       sleepImpl: () => assert.fail('primary auth remains best-effort'),
       execFileSyncImpl: () => { attempts += 1; throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); },
     });
@@ -108,7 +118,7 @@ test('materializePerWorkerCodexAuth replaces refresh_token with placeholder and 
   const root = mkdtempSync(path.join(tmpdir(), 'pw-auth-'));
   try {
     const sharedAuthPath = writeSharedAuth(root);
-    const result = materializePerWorkerCodexAuth({
+    const result = materializeFixtureAuth({
       sharedAuthPath,
       key: 'job-123',
       env: {},
@@ -139,7 +149,7 @@ test('materializePerWorkerCodexAuth returns null when kill-switch is set', () =>
   const root = mkdtempSync(path.join(tmpdir(), 'pw-auth-'));
   try {
     const sharedAuthPath = writeSharedAuth(root);
-    const result = materializePerWorkerCodexAuth({
+    const result = materializeFixtureAuth({
       sharedAuthPath,
       key: 'job-123',
       env: { AGENT_OS_CODEX_PER_WORKER_AUTH: '0' },
@@ -152,7 +162,7 @@ test('materializePerWorkerCodexAuth returns null when kill-switch is set', () =>
 });
 
 test('materializePerWorkerCodexAuth is fail-safe on a missing source', () => {
-  const result = materializePerWorkerCodexAuth({
+  const result = materializeFixtureAuth({
     sharedAuthPath: '/nonexistent/.codex/auth.json',
     key: 'job-123',
     env: {},
@@ -168,7 +178,7 @@ test('materializePerWorkerCodexAuth is fail-safe on a non-chatgpt auth file', ()
     mkdirSync(codexHome, { recursive: true });
     const authPath = path.join(codexHome, 'auth.json');
     writeFileSync(authPath, JSON.stringify({ auth_mode: 'apikey', tokens: { access_token: 'x' } }), 'utf8');
-    const result = materializePerWorkerCodexAuth({ sharedAuthPath: authPath, key: 'j', env: {}, brokerRefresh: false });
+    const result = materializeFixtureAuth({ sharedAuthPath: authPath, key: 'j', env: {}, brokerRefresh: false });
     assert.equal(result, null);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -185,7 +195,7 @@ test('materializePerWorkerCodexAuth sweeps stale per-worker dirs', () => {
 
     // now far in the future so the existing dir is past the 6h cutoff.
     const future = Date.now() + 7 * 60 * 60 * 1000;
-    const result = materializePerWorkerCodexAuth({
+    const result = materializeFixtureAuth({
       sharedAuthPath,
       key: 'fresh-job',
       env: {},

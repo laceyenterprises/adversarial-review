@@ -142,3 +142,27 @@ tests verify lowercase output for lowercase, uppercase and mixed-case SHAs.
 `npm run lint` (zero errors), `npm run typecheck:contracts`, the offline
 research-finding demo and `git diff --check` also passed. No persistent model,
 lifecycle transition, smoke promise or deployment step changes in this round.
+
+## Hammer verification on a macOS worker
+
+The auth suite's two temporary-home assertions fail when its scratch directory
+is under `/Users/<user>/...`: the production operator-home resolver deliberately
+maps such credentials to `/Users/<user>`. This is independent of quota fixture
+values. The auth materializer now accepts a home-resolver dependency, defaulting
+to the existing resolver, and auth fixtures inject their disposable root. Token
+isolation and stale-directory sweep assertions still run against real files,
+without writing into the operator's credential directory.
+
+The nine affected files (the eight above plus
+`watcher-reviewer-quota.test.mjs`) pass **322 tests**, with zero failures,
+cancellations or skips, using the repository runner and a scratch directory
+under `/Users`. The root-level public-export fixture survives the real refresh
+regression unchanged, and the weekly policy matrix verifies the SDK's forwarded
+`source` field. The existing canonical `reserveFloorWeeklyMeasurement` name also
+implements the advisory simplification without changing admission behavior.
+
+An additional local `watcher-claim-loop.test.mjs` attempt was cancelled after
+the 120-second no-output deadline; process-group cleanup reported `kill EPERM`
+in this worker sandbox. This is not a passing claim-loop result. The exact-head
+GitHub suite remains mandatory and must pass before merge; no local full-suite
+run or exemption from remote CI is claimed.

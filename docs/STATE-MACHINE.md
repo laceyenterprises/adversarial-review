@@ -1087,7 +1087,9 @@ Reservations retain their arrival across live watcher passes, with twice-poll
 load-scaled expiry. Confirmed dead same-host watcher reservations are pruned.
 Draft, terminal, moved-head and declined paths withdraw on the next pass.
 Release wakes the first ready daemon reservation using the existing cap.
-Closer polling doubles to a once-scaled ceiling bounded nominally by the watcher poll interval. No holder is
+Closer polling doubles from 250ms to a fixed 15-second ceiling independent of
+host load. Both release paths interrupt CLI sleep through a directory watch of
+the holder filename; watch failure falls back to polling. No holder is
 preempted and all existing in-lease merge predicates remain authoritative.
 LAC-2098 binds each ordinary CLI request to its acquiring process separately
 from the holder parent. Confirmed same-host acquisition absence prunes the

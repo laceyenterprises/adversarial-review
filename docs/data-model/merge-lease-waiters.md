@@ -131,14 +131,25 @@ Parking removes the reservation; retry evidence survives withdrawal.
 
 CLI status/list projects `position` (one-based arrival order), `role`
 (`daemon` or `closer`) and the stored `arrivedAt`. Polling starts at 250ms,
-doubles to a nominal ceiling sized once by the load-aware helper: at least 30 seconds,
-increasing with the nominal wait budget (one sixtieth) up to the existing watcher
-poll interval,
-and clamps each sleep to the remaining caller/stall budget. HAMLEASE-01 progress
+doubles to a fixed 15-second ceiling independent of host load or wait budget,
+and clamps each sleep to the remaining caller/stall budget. The explicit wait,
+progress stall interval and six-hour nominal ceiling retain their existing sizing.
+HAMLEASE-01 progress
 reports have a 25-second minimum interval and appear on the next poll: the
-maximum gap is 25 seconds plus the once-scaled polling ceiling (before integer
-second rounding), excluding time spent in synchronous I/O. The final output
+maximum gap is 40 seconds (25 seconds plus the fixed polling ceiling), before
+integer second rounding and excluding time spent in synchronous I/O. The final output
 obeys the same gap bound. Signal cancellation
 and fixed bounded cleanup retries retain their existing behavior.
 
 Acquire contention `queuePosition` describes ready service order, excluding earlier delayed arrivals. A delayed candidate retains its arrival position; the status/list `position` field continues to enumerate arrival order alongside `notBefore`. Holder, waiter and release-wake mutations use the same per-base lease mutation lock; release does not reacquire that non-reentrant lock.
+
+The CLI watches the lease directory before its first acquisition attempt and
+interrupts its poll sleep when the matching holder filename changes. Watching
+the directory survives atomic holder replacement; waiter/history and other-base
+writes do not wake it. Both ordinary and retryable-abort release remove that
+holder file, waking CLI waiters as well as the existing exact-head daemon wake.
+Events arriving before sleep are latched. Wakes only request another acquisition
+attempt under the existing FIFO lock; they grant no priority or lease authority.
+Watch setup/delivery failures leave polling active, bounded by 15 seconds plus
+local I/O. The watcher closes on every acquisition exit. No new durable files,
+fields, config keys or migration are needed.

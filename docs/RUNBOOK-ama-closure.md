@@ -4418,7 +4418,11 @@ missed watcher tick must not abandon a reservation. Ineligibility, head movement
 and merge completion remove the reservation immediately; a confirmed dead
 same-host watcher is pruned, and uncertain identities expire at the stored deadline. Ordinary and retryable-abort holder releases request one watcher wake
 for the first surviving daemon waiter's PR and exact head. The existing per-head
-wake cap applies; a failed wake write falls back to the next poll. See the
+wake cap applies; a failed wake write falls back to the next poll. CLI acquisitions
+watch the lease directory for matching holder-file changes, so both release
+paths interrupt sleeping CLI waiters too. Watch failures fall back to polling
+at a fixed 15-second ceiling, independent of host load. FIFO selection remains
+under the existing mutation lock. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
 
 LAC-2087: the posted-review candidate handler owns reservation cleanup even when
@@ -5212,7 +5216,9 @@ Closers pass `--wait-by-progress` to `bin/merge-lease.mjs acquire`. The existing
 900-second nominal wait is a no-progress interval; forward queue movement or
 lease service restarts it, subject to a six-hour nominal ceiling. Both bounds
 are load-scaled once and timer-clamped. Poll delays double from 250ms to a
-ceiling scaled once, from 30 seconds for short waits up to the watcher poll interval; every sleep respects the remaining budget.
+fixed 15-second ceiling independent of host load; every sleep respects the
+remaining budget. Holder-file changes interrupt sleep, with polling as the
+best-effort wake fallback.
 All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
 its grant, renewal and release are included in the per-base history.
 

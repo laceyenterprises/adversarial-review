@@ -36,6 +36,16 @@ test('REVIEWSIMPLE-01: all reviewer domains, models and stages reuse one shared 
   prompts.push(loadArgusReviewPromptTemplate());
   for (const prompt of prompts) {
     assert.equal(prompt.split(fragment).length - 1, 1);
+    assert.match(prompt, /Runtime-cost findings/);
+    assert.match(prompt, /FINDING, not simplicity advice/);
+    assert.match(prompt, /subprocess or interpreter inside a\nloop or on a timer/);
+    assert.match(prompt, /polling at sub-second intervals/);
+    assert.match(prompt, /ledger or database write\nper poll iteration/);
+    assert.match(prompt, /unbounded filesystem or process-table scan per event/);
+    assert.match(prompt, /per worker, per review, per request or per\ntick/);
+    assert.match(prompt, /no bound or justification; otherwise it is non-blocking/);
+    assert.match(prompt, /cite file and line at the PR head/);
+    assert.match(prompt, /Runtime-cost defects do not belong here/);
     assert.doesNotMatch(prompt, /Do not include any epilogue or trailing notes after the Verdict|End with "## Verdict" as the last section/);
   }
 });

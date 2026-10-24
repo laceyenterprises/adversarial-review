@@ -157,6 +157,37 @@ database, service or configuration change is part of a coding test.
 
 ## Non-blocking backlog (FINDINGSBATCH-01)
 
+Simplicity advisories are separate observations in `finding_batch_notes`, added
+by `migrations/20261024_simplicity_batch.sql`. Capture uses `extractSimplicityNote`
+on the stored review body, including bodies with zero findings. Each record has
+`note_id` (digest of pass ID and note), `pass_id`, `repo`, `pr_number`, `head_sha`,
+`note` and nullable `batch_id`. Re-projecting a pass replaces only its unassigned
+observations. Assigned snapshots are immutable. No advisory becomes a finding
+or changes verdict parsing, strict-mode gates, round counts or retry caps.
+
+Only a confirmed merged source PR's final posted review can supply a note.
+Final-pass ordering matches the finding backlog below, including late posting
+receipts. Superseded notes remain unassigned and cannot dispatch. Once a note
+on a given repository/PR/head is assigned, identical text on a duplicate pass
+cannot dispatch again. Notes join the first pending finding area for their
+source review, or the reserved `_simplicity` area when there are no pending
+findings. The existing daily, transactional per-area fences apply; a batch
+assigns at most 100 notes as well as at most 100 findings. There is no historical
+corpus scan during migration; normal capture/backfill projects stored bodies.
+
+The batch prompt carries these notes separately and requires applying or
+declining each one. Application is allowed only when net lines or runtime cost
+decrease without changing behavior. The existing `outcomes.json` result gains
+`simplicityNotes: [{noteId, simplicityNoteApplied, reason}]`, covering every
+assigned note exactly once with a boolean and nonempty one-line reason.
+An advisory-only batch has `findings: []`. An applied note requires the same
+published PR identity, exact batch marker and confirmed merge as an applied
+finding; a fully declined/dropped batch requires no PR. On settlement, the
+complete validated outcome is retained in `finding_batches.result_json`, so
+true/false applied rates can be counted without reading worker artifacts.
+Historical batches have null `result_json`. Existing batches without notes
+continue to accept their original result shape.
+
 `finding_backlog` references the existing finding records, retaining repository,
 PR, reviewed head, content hash, reviewer family and top-level cited path as its
 area (`_uncited` for absent paths). The final posted review is selected by capture

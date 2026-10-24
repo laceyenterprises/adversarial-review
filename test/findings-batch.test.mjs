@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -19,6 +19,9 @@ const body = `## Blocking Issues
 ## Verdict
 Comment only
 `;
+const note = 'Reuse `src/result.mjs:formatResult` and delete the duplicate wrapper (~20 lines saved).';
+const advisory = `\n## Simplicity and cost (advisory)\n${note}\n`;
+const adviceOnly = body.replace(/- \*\*Explain the result\*\*[\s\S]*?(?=## Verdict)/, '- None.\n') + advisory;
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'findings-batch-'));
   const db = openReviewStateDb(rootDir);
@@ -36,6 +39,94 @@ function fixture(t) {
     .run(repo, '2026-01-01T00:00:00Z', head);
   return { rootDir, db, pass };
 }
+
+test('batch jobs own advisory-only and mixed feedback, and durably record applied or declined advice', async t => {
+  const { claimFindingBatches, settleFindingBatch, runFindingBatches } = await import('../src/findings-batch.mjs');
+  for (const mixed of [false, true]) for (const applied of [false, true]) {
+    await t.test(`mixed=${mixed}, applied=${applied}`, async t => {
+      const { rootDir, db, pass } = fixture(t);
+      pass(1, mixed ? body + advisory : adviceOnly);
+      assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+      db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
+      assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+      db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+      let prompt;
+      await runFindingBatches({ db, rootDir, env: { HQ_ROOT: rootDir }, day: '2026-01-02',
+        execFileImpl: async (_bin, args) => {
+          prompt = readFileSync(args[args.indexOf('--prompt') + 1], 'utf8');
+          return { stdout: '{"launchRequestId":"fixture-launch"}' };
+        } });
+      const batch = db.prepare('SELECT * FROM finding_batches').get();
+      assert.equal(batch.area, mixed ? 'src' : '_simplicity');
+      assert.ok(prompt.includes(note));
+      assert.match(prompt, /simplicityNoteApplied as true or false and a one-line reason/);
+      assert.match(prompt, /reduces net lines or runtime cost\nwithout changing behavior/);
+      assert.equal(db.prepare('SELECT count(*) n FROM review_findings').get().n, mixed ? 1 : 0);
+      const notes = db.prepare('SELECT * FROM finding_batch_notes WHERE batch_id=?').all(batch.batch_id);
+      assert.equal(notes.length, 1);
+      const findings = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id)
+        .map(f => ({ findingId: f.finding_id, outcome: 'dropped', reason: 'Already fixed on main' }));
+      const result = { batchId: batch.batch_id, prNumber: applied ? 8 : null, headSha: applied ? head : null,
+        findings, simplicityNotes: [{ noteId: notes[0].note_id, simplicityNoteApplied: applied,
+          reason: applied ? 'Reused formatter and removed 20 lines' : 'Current helper changes behavior' }] };
+      assert.throws(() => settleFindingBatch(db, batch, { ...result, simplicityNotes: [] }), /invalid-advisory-manifest/);
+      for (const invalid of [undefined, 'false', null]) {
+        assert.throws(() => settleFindingBatch(db, batch, { ...result,
+          simplicityNotes: [{ ...result.simplicityNotes[0], simplicityNoteApplied: invalid }] }), /invalid-advisory-outcome/);
+      }
+      assert.throws(() => settleFindingBatch(db, batch, { ...result,
+        simplicityNotes: [{ ...result.simplicityNotes[0], noteId: 'foreign' }] }), /invalid-advisory-outcome/);
+      assert.throws(() => settleFindingBatch(db, batch, { ...result,
+        simplicityNotes: [{ ...result.simplicityNotes[0], reason: '' }] }), /invalid-advisory-outcome/);
+      const pr = { state: 'OPEN', body: `Finding-Batch: ${batch.batch_id}` };
+      if (applied) {
+        assert.throws(() => settleFindingBatch(db, batch, result), /batch-pr-evidence-mismatch/);
+        assert.equal(settleFindingBatch(db, batch, result, pr), false);
+        assert.equal(db.prepare('SELECT result_json FROM finding_batches').get().result_json, null);
+      }
+      const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
+      writeFileSync(join(dir, 'outcomes.json'), JSON.stringify(result));
+      let reads = 0;
+      await runFindingBatches({ db, rootDir, env: { HQ_ROOT: rootDir }, resolutionOnly: true,
+        fetchPr: async () => { reads++; return { ...pr, state: 'MERGED' }; } });
+      assert.equal(reads, applied ? 1 : 0);
+      const stored = db.prepare('SELECT completed_at,result_json FROM finding_batches').get();
+      assert.ok(stored.completed_at);
+      assert.deepEqual(JSON.parse(stored.result_json).simplicityNotes, result.simplicityNotes);
+      assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+      assert.equal(settleFindingBatch(db, batch, result), true);
+    });
+  }
+});
+
+test('advisory enrollment uses the final posted review, deduplicates, and survives a late receipt', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  const { claimFindingBatches } = await import('../src/findings-batch.mjs');
+  pass(1, adviceOnly);
+  pass(2, adviceOnly.replace(note, 'Reuse `src/result.mjs:formatResult` (~10 lines saved).'));
+  pass(3, body); // A later review with no advice supersedes both notes.
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const [first] = claimFindingBatches(db, '2026-01-02');
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id=?').get(first.batch_id).n, 0);
+  const p = pass(4, adviceOnly);
+  const { persistReviewFindings } = await import('../src/review-finding-records.mjs');
+  // Re-projecting an old duplicate must not steal ownership from the final pass.
+  const oldPass = db.prepare('SELECT min(pass_id) id FROM reviewer_passes').get().id;
+  persistReviewFindings(db, oldPass);
+  db.prepare('UPDATE reviewer_passes SET gh_comment_id=NULL WHERE pass_id=?').run(p.pass_id);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+  db.prepare("UPDATE reviewer_passes SET gh_comment_id='4' WHERE pass_id=?").run(p.pass_id);
+  const other = openReviewStateDb(rootDir);
+  try {
+    const [batch] = claimFindingBatches(other, '2026-01-03');
+    assert.equal(batch.area, '_simplicity');
+    assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+    persistReviewFindings(db, p.pass_id);
+    assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id=?').get(batch.batch_id).n, 1);
+    pass(5, adviceOnly);
+    assert.deepEqual(claimFindingBatches(db, '2026-01-04'), []);
+  } finally { other.close(); }
+});
 
 test('FINDINGSBATCH-01 capture enrolls only the final review, deduplicates and survives reopen', async t => {
   const { db, rootDir, pass } = fixture(t);

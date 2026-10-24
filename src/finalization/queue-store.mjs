@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { isDeepStrictEqual } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { makeQueueEvent, QUEUE_ACTIONABLE_PHASES, QUEUE_PHASES, resolveLaneKey } from './ledger-events.mjs';
@@ -9,6 +10,7 @@ const migration = new URL('../../migrations/20261023_finalization_queue.sql', im
 export function ensureFinalizationQueueSchema(db) {
   db.exec(readFileSync(migration, 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
 }
 
 export function assertQueueStoreOwner(rootDir) {
@@ -54,7 +56,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     return { ...event, seq: Number(row.lastInsertRowid) };
   };
   const readEntry = id => parse(database.prepare('SELECT payload_json FROM finalization_queue_entry WHERE entry_id=?').get(queueId(id)));
-  const entries = lane => database.prepare('SELECT payload_json FROM finalization_queue_entry WHERE repository=? AND base=? ORDER BY readiness_seq').all(...laneArgs(lane)).map(parse);
+  const entries = lane => database.prepare('SELECT payload_json FROM finalization_queue_entry WHERE repository=? AND base=? ORDER BY readiness_seq,entry_id').all(...laneArgs(lane)).map(parse);
   const assertFence = (fence, now) => {
     const row = readOwner(fence.lane);
     if (!row || row.owner_state !== 'active' || row.owner_id !== fence.ownerId
@@ -104,15 +106,16 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
         return entry;
       });
     },
-    progress({ fence, entryId, phase, patch = {}, at, readmit = false, recoveryObservation }) {
+    progress({ fence, entryId, phase, patch = {}, at, readmit = false, recoveryObservation, expectedEntry }) {
       at = queueTime(at);
       if (!QUEUE_PHASES.includes(phase)) throw new TypeError('invalid queue phase');
-      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery'];
+      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission'];
       if (Object.keys(patch).some(key => !allowed.includes(key))) throw new TypeError('immutable queue entry field');
       return tx(() => {
         assertFence(fence, at);
         const entry = readEntry(entryId);
         if (!entry || JSON.stringify(entry.lane) !== JSON.stringify(resolveLaneKey(fence.lane))) throw new Error('foreign queue entry');
+        if (expectedEntry && !isDeepStrictEqual(entry, expectedEntry)) throw new Error('queue admission observation superseded');
         if (operations(fence.lane).length) throw new Error('unreconciled queue operation');
         if (['merged','closed-observed','returned-to-closer'].includes(entry.phase)) throw new Error('terminal queue entry');
         if (recoveryObservation) {
@@ -132,7 +135,9 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
         if (wasActive && becomesActive && QUEUE_ACTIONABLE_PHASES.indexOf(phase) !== QUEUE_ACTIONABLE_PHASES.indexOf(entry.phase) + 1
           && phase !== entry.phase && phase !== 'rebasing' && !recoveryObservation) throw new Error('invalid queue transition');
         if (phase === 'merged' && entry.phase !== 'finalizing') throw new Error('invalid merged transition');
-        const update = { ...patch, phase, updatedAt: at };
+        const progressVersion = (entry.progressVersion ?? 0) + 1;
+        if (!Number.isSafeInteger(progressVersion)) throw new Error('queue progress version exhausted');
+        const update = { ...patch, phase, updatedAt: at, progressVersion };
         if (readmit) update.readinessSeq = database.prepare('UPDATE finalization_queue_lane SET readiness_seq=readiness_seq+1 WHERE repository=? AND base=? RETURNING readiness_seq').get(...laneArgs(fence.lane)).readiness_seq;
         Object.assign(entry, update); writeEntry(entry);
         append('progress', fence.lane, { at, entryId, patch: update, generation: fence.generation, routeGeneration: fence.routeGeneration,

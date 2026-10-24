@@ -265,3 +265,52 @@ remain selected, along with the unchanged legacy retry-helper and port tests.
 Sibling boundaries inspected include low-level queue acknowledgement, mutation
 issuance/replay, review currency and withdrawal preservation, and the legacy
 retry helper. No legacy dispatch or ownership algorithm is changed.
+
+## FIFO admission observation (MGQ-03; no activation)
+
+Deploy source and apply `migrations/20261025_finalization_queue_admission.sql`
+after the owner/handoff migrations through normal app-store migration. Writable
+queue-store opening converges all three; the probe never migrates. There is no
+route change, production activation or service restart required by this slice.
+
+Under the deployed runtime owner in the deployed review-service checkout, run
+through the existing load-aware command supervisor with a finite 30-second bound:
+
+```sh
+node src/finalization/queue-probe.mjs --capability admission --json
+```
+
+Record `.capabilities.admission.available == true`, `.runtime.build != null`,
+the resolved adapter/schema, counts by clean/remediated/unvalidated source and
+active/parked/terminal disposition, observed admissions and bounded receipt sample.
+SQLite read patience remains 1 second nominal, scaled once and clipped to a
+5-second ceiling. Schema comparison and receipt reads use the real deployed DB;
+the probe validates at most 100 recent receipts. Counts describe stored records,
+not a whole-store provenance audit. The digest identifies probe code bytes,
+not a running watcher's build or effective lane route. Missing organic observations
+remain pending. Do not submit synthetic work, claim a lane or mutate state to
+make this observation pass. Availability is not a blocking check or promotion gate.
+
+Runtime reader composition and whole-lane routing belong to later slices.
+For later promotion/rollback the operator drains prior writers and follows the
+existing registered system-domain restart/verify procedure; record actual running
+build, effective route and unresolved-operation reconciliation. Workers do not
+restart services or change production config. Retain receipts and entry history
+on rollback. Deployed probe and organic admission evidence remain pending.
+
+Synthetic concurrency evidence: the unfixed store accepted 20/20 stale recovery
+snapshots after a recover/hold phase cycle. The snapshot-CAS correction accepted
+0/20 under the same reproduction. The first scoped suite passed 21/21, including
+10 consecutive four-process mixed clean/remediated trials (one entry per admission)
+and 20 consecutive late-recovery refusals across store reopen. Sibling sites
+inspected: handoff acknowledgement, single-owner issuance, entry phase progress,
+publication recovery and clean receipt replay. Original owner/handoff mechanisms
+remain in place; the new live-read writer uses a fenced snapshot comparison.
+
+Further intermediate validation passed 110/110 selected tests. A disposable
+version of the snapshot-only implementation accepted 20/20 identical parked
+observations after a same-timestamp phase cycle; the retained progress-version
+correction rejected all 20/20 under the same reproduction. The final selected
+suite passed 116/116, including the deployed CLI fixture, with 10 consecutive
+mixed-source process trials and 20 consecutive asynchronous recovery refusals. Touched JavaScript lint, contract
+typecheck and whitespace checks also passed. No live service was exercised.

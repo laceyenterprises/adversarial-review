@@ -381,7 +381,7 @@
       "path": "docs/data-model/finalization-ledger.md",
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260717_finalization_ledger.sql",
-      "relatedSchemaSurfaces": ["migrations/20261023_finalization_queue.sql", "migrations/20261024_finalization_queue_handoff.sql", "src/finalization/queue-store.mjs", "src/finalization/queue-owner.mjs", "src/finalization/queue-handoff.mjs", "src/finalization/queue-handoff-store.mjs", "src/ama/closer-queue-handoff.mjs", "src/finalization/ledger-events.mjs", "src/finalization/ledger-fold.mjs", "src/finalization/queue-probe.mjs"],
+      "relatedSchemaSurfaces": ["migrations/20261023_finalization_queue.sql", "migrations/20261024_finalization_queue_handoff.sql", "migrations/20261025_finalization_queue_admission.sql", "src/finalization/queue-admission.mjs", "src/finalization/queue-clean-review.mjs", "src/finalization/queue-read.mjs", "src/finalization/queue-store.mjs", "src/finalization/queue-owner.mjs", "src/finalization/queue-handoff.mjs", "src/finalization/queue-handoff-store.mjs", "src/ama/closer-queue-handoff.mjs", "src/finalization/ledger-events.mjs", "src/finalization/ledger-fold.mjs", "src/finalization/queue-probe.mjs"],
       "owner": "Merge Authority v2 subject ledger and repository/base queue"
     },
     {

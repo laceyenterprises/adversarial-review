@@ -243,3 +243,73 @@ They never rewrite dispositions, signed heads, subjects or signatures. The focus
 fixture advances a candidate and replays events while asserting the complete
 original receipt is unchanged. Rebase preservation and final eligibility belong
 to their later slices; handoff storage alone grants no merge permission.
+
+## FIFO admission and clean reviews (MGQ-03)
+
+`migrations/20261025_finalization_queue_admission.sql` adds the app-owned
+`finalization_queue_clean_review` table: `entry_id` is the primary/reference key,
+`input_json` retains the immutable direct-admission request, and `evidence_json`
+retains trusted signature, identity, review, publication and validation reads.
+Opening the writable queue store converges all three queue migrations.
+
+`createCleanReviewService` accepts the same provenance envelope as a handoff,
+without `closer` or `dispositions`. The worker is the produced-attestation
+principal. The source review must be signed at the exact admission head, have a
+complete empty finding inventory and a settled-success verdict. Shared handoff
+validation checks original signed subjects, producer identity, primary-change,
+publication and validation evidence. No closer is dispatched or fabricated.
+Missing signatures, findings or stale evidence refuse admission atomically.
+The trusted reader has the same verification responsibilities as MGQ-02.
+
+Clean and remediated entry acknowledgements allocate readiness in the same
+immediate transaction/counter. No timestamp, source class or priority changes
+order. Deterministic ordering uses `(readiness_seq, entry_id)`. Duplicate clean
+submissions return the existing entry, including its original acknowledgement
+and patience; conflicting input is refused. The immutable receipt and initial
+acknowledgement event retain the original evidence and readiness position.
+
+`createQueueAdmissionService({store,liveAdapter})` consumes validated receipts
+and exposes `reconcile({fence,entryId,deadline})` and `order(lane)`. A trusted live
+reader supplies fresh exact lane/PR/head/base SHA/state/complete labels, identity,
+branch push rights, repository rules and existing structural eligibility inputs,
+all with source references. Normal clean admission also requires the final live
+current-head review read; the complete terminal-remediation receipt uses the
+existing exception without another review or model judgement. An empty handoff
+inventory still requires the normal final current-head review read.
+
+The shared `evaluateMergeEligibility` evaluates structural inputs and mandatory
+primary-change evidence. Admission defers CI greenness and a mergeable BEHIND
+branch to their execution phases, retaining the classifier result. It does not
+set checks green or authorize merge. Unknown mergeability, rules or identity
+park infrastructure; denied/unknown write rights park permission. Existing
+operator hold labels and unreadable/malformed labels park hold. Closed/merged
+observations become `closed-observed` with their live-state reason, without a
+closer or an assertion that this queue merged the PR. A foreign head returns for
+fresh adjudication. Execution phases remain owned by later executor recovery.
+
+Every progress event increments retained `progressVersion` (older entries begin
+at zero), fencing even identical observations within the same timestamp.
+Entry JSON gains `admission`: kind, observation timestamp, live subject,
+structural reference/classifier result, current review where applicable,
+identity and permission observations. Progress events retain this history.
+The writer compares the complete pre-read entry snapshot after each await;
+superseded reads cannot overwrite newer holds/recovery even after a phase cycle.
+The owner fence and original deadline are checked again inside the transaction.
+Held/unreadable entries leave actionable order. Recovery requires fresh reads
+and allocates readiness at the tail on the same entry; patience and history
+survive. Repairs of terminal work require fresh evidence and a new admission
+generation/entry. Duplicate wakes allocate neither another position nor patience.
+
+Live reads and SQLite writer waits use nominal 5-second budgets scaled once,
+clipped to the original entry/submission deadline with a 30-second finite ceiling
+and Node timer cap. Clean submission defaults to a 30-second absolute bound;
+entry patience remains nominal 30 minutes with a 60-minute ceiling. Read timers
+abort and reject late evidence; SQLite busy settings are restored. An expired
+entry parks rather than renewing its deadline. Owner expiry is not patience.
+
+`resolveQueueAdmissionAdapters` and `resolveCleanReviewStore` also serve the
+read-only deployed probe. It compares the real clean-review schema, resolves
+actual receipt statements and reports counts by source/disposition plus a
+bounded sample of at most 100 recent receipts. Availability establishes installed
+storage/adapter capability, not live-reader composition, running watcher version,
+execution routing or authority. Organic admission evidence can remain pending.

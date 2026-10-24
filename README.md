@@ -2548,3 +2548,32 @@ Evidence-read failures use exit 126 (the consuming activation contract's
 `check_error`), making missing entitlement and transport/read failures
 inconclusive. Exit zero means evidence was collected; the declaration evaluates
 that evidence for pass or fail.
+
+### V2 FIFO admission (MGQ-03)
+
+`createCleanReviewService` admits signed, complete zero-finding exact-head reviews
+through the same transactional readiness counter as terminal closer handoffs.
+`createQueueAdmissionService` reads live subject/head/base, complete labels,
+identity, write rights and shared structural policy. Clean work retains its final
+current-head review read; complete terminal adjudication needs no re-review.
+Live/unknown holds park outside actionable FIFO. Closed/merged observations
+reconcile without dispatch. External author changes return for fresh adjudication.
+Parked recovery and repairs join the tail with fresh evidence, retaining history;
+duplicate wakes and restarts preserve position and the original absolute deadline.
+Snapshot comparison prevents late recovery reads from overwriting a newer hold.
+
+The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
+returned-to-closer, or closed-observed. These seams remain uncomposed until lane
+routing; readiness alone grants no merge authority. Focused offline
+`finalization-queue-admission.test.mjs` exercises mixed-source process contention,
+read/recovery races, holds, current-head reads, bounded waits and probe immutability.
+Existing smoke promises gain no new live action, CI check or promotion gate.
+
+After normal source deployment and all three queue migrations, the operator runs
+`node src/finalization/queue-probe.mjs --capability admission --json` from the
+deployed checkout under its runtime account with the existing bounded load-aware
+supervisor. Require `.capabilities.admission.available == true` and
+`.runtime.build != null`; record actual source/disposition/observation counts.
+Empty organic evidence and live-reader/routing composition remain pending.
+See the [store contract](docs/data-model/finalization-ledger.md#fifo-admission-and-clean-reviews-mgq-03)
+and [operator observation procedure](docs/finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).

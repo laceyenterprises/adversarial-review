@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { hammerTokenSession } from '../hammer-token.mjs';
 import { buildAllowlistedGhEnv } from '../gh-cli.mjs';
+import { meteredExecFile } from '../metered-gh.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 
 const execAsync = promisify(execFile);
@@ -28,7 +29,7 @@ export function createEntitledQueueCheckRequest({ credentialEnv, execFileImpl = 
       if (!remaining) throw new Error('checks-deadline-expired');
       let result;
       try {
-        result = await execFileImpl('gh', ['api', '--include', '--method', 'GET', path], {
+        result = await meteredExecFile(execFileImpl, 'gh', ['api', '--include', '--method', 'GET', path], {
           ...active, timeout: remaining, signal, maxBuffer: 8 * 1024 * 1024, killSignal: 'SIGKILL',
         });
       } catch (error) { session.retry(error); continue; }

@@ -439,7 +439,9 @@ The capability remains unwired. Future queue composition must supply the complet
 existing required-policy reader, entitled per-operation credential environment,
 live admission reader, Git derivation verifier, owner and existing Sentinel alert
 bus. The check transport is GET-only; no check context is created or rerun. The
-required-set resolver never guesses from a green subset or unreadable protection.
+transport uses the shared GitHub request meter with its entitled credentials,
+so pagination and credential retries remain subject to the existing read budget.
+The required-set resolver never guesses from a green subset or unreadable protection.
 An explicitly configured no-CI repository still needs its existing live proof.
 Source fixture validation is not evidence that any of these production adapters
 or routing is active.

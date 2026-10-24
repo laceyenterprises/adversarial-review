@@ -1155,7 +1155,9 @@ unregistered shell. Validators share that group. Terminal/parked/unreadable
 launch evidence and signals transition `running` → `stopping` → `quiescent`,
 or `cleanup-unconfirmed` on missing drain proof. Cancellation defers trap release
 until confirmed drain; the existing full lease-generation fence protects other
-holders. [Controller data](docs/data-model/hammer-controllers.md) describes the
+holders. An empty census before the shell exit event waits for that event,
+preserves the script's exit status and grants no signaling or lease-release
+authority by itself. [Controller data](docs/data-model/hammer-controllers.md) describes the
 two-second TERM grace, one-second drain bound and retained scratch. Focused
 offline `hammer-controller` tests extend source acceptance; the existing
 `smv-handoff` smoke promise is unchanged. Deployed organic cancellation and

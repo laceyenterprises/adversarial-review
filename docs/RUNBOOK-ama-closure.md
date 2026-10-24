@@ -5242,9 +5242,16 @@ capture before its merge attempt. Capture failure returns a retryable
 lease respects this policy too. Strict mode on retains its existing hammer path;
 all exact-head, required-check, lease and execution-switch gates still apply.
 
-The watcher performs one asynchronous sweep per UTC day. It dispatches one
+The watcher performs one successful asynchronous sweep per UTC day. A failed
+startup (for example SQLite lock contention) retries on the next poll; an
+in-flight sweep fences overlapping ticks. Per-batch errors remain durably
+recorded and fenced for the next daily sweep. It dispatches one
 normal-priority remediation worker per repository/area, using existing classes
 and the existing `hq dispatch` transport. No cron, CI gate or config key is added.
+Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
+retrying GitHub transport. Applied findings require a merged batch PR with its
+exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers
+are accepted. Missing or foreign markers and unreadable PRs remain unresolved.
 See [the store contract](data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
 for outcome validation and restart fencing. Preserve batch artifacts until their
 outcomes are collected. An incomplete batch stays fenced and visible for repair.

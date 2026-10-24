@@ -135,7 +135,10 @@ index), and at most one new batch per UTC date. An immediate SQLite transaction
 assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
 remain visible but cannot dispatch until merged. The watcher checks a cached UTC
 midnight deadline after its ordinary poll; only the daily sweep does database,
-GitHub or dispatch work, asynchronously from review admission.
+GitHub or dispatch work, asynchronously from review admission. The deadline
+advances after successful sweep completion; startup failures retry on the next
+poll and an in-flight sweep fences overlapping ticks. Per-batch errors remain
+recorded for the next daily sweep.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
 normal priority. It persists the batch before submission and uses its stable
@@ -146,7 +149,10 @@ Workers re-check current main, drop stale/no-evidence findings with reasons and
 open one normal-review PR per area for valid fixes. An all-dropped batch needs
 no PR. Outcome JSON must cover every manifest ID exactly once. Applied outcomes
 require a merged PR in the same repository with the
-`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved. Normal review may rebase the batch PR;
+`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
+The collector reads body and merge state via `gh pr view` using the retrying
+GitHub transport. Marker lines accept surrounding whitespace, bold or HTML
+comments, while still requiring the exact batch ID. Normal review may rebase the batch PR;
 completion records the worker outcome and PR merge, without granting merge authority.
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
 `result_pr`. Batch failures retain `error`, never discard findings or launch a

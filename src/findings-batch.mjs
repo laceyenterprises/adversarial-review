@@ -5,11 +5,28 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt } from './producer-contracts/dispatch-receipt.mjs';
-import { fetchPullRequestRollup } from './github-api.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 
 const execFileAsync = promisify(execFile);
+
+async function fetchFindingBatchPr(repo, prNumber, { execFileImpl, env, logger }) {
+  const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger,
+    args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,body,headRefOid'],
+    timeoutMs: 15_000 });
+  return JSON.parse(stdout);
+}
+
+function hasBatchMarker(body, batchId) {
+  const marker = `Finding-Batch: ${batchId}`;
+  return String(body || '').split(/\r?\n/).some(line => {
+    const trimmed = line.trim();
+    return trimmed === marker || trimmed === `**${marker}**`
+      || (trimmed.startsWith('<!--') && trimmed.endsWith('-->')
+        && trimmed.slice(4, -3).trim() === marker);
+  });
+}
 
 // SQLite's immediate transaction and partial unique index fence concurrent
 // watchers. An interrupted submission keeps its batch and idempotency key.
@@ -68,7 +85,7 @@ export function settleFindingBatch(db, batch, result, pr = null) {
     }
     if (result.findings.some(f => f.outcome === 'applied')) {
       if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')
-        || !String(pr?.body || '').split(/\r?\n/).includes(`Finding-Batch: ${batch.batch_id}`)) {
+        || !hasBatchMarker(pr?.body, batch.batch_id)) {
         throw Error('batch-pr-evidence-mismatch');
       }
       if (String(pr.state).toUpperCase() !== 'MERGED' && !pr.mergedAt) return false;
@@ -90,7 +107,7 @@ export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env }
 }
 
 export async function runFindingBatches({ db, rootDir, env = process.env, day = new Date().toISOString().slice(0, 10),
-  execFileImpl = execFileAsync, fetchPr = fetchPullRequestRollup, logger = console }) {
+  execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, logger = console }) {
   claimFindingBatches(db, day);
   for (const batch of db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL').all()) {
     try {
@@ -104,7 +121,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       if (result) {
         const pr = result.findings?.some(f => f.outcome === 'applied') && Number.isSafeInteger(result.prNumber)
-          ? await fetchPr(batch.repo, result.prNumber, { execFileImpl }) : null;
+          ? await fetchPr(batch.repo, result.prNumber, { execFileImpl, env, logger }) : null;
         settleFindingBatch(db, batch, result, pr);
       } else if (!batch.launch_id) {
         const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
@@ -130,12 +147,17 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
 }
 
 // One clock comparison per watcher poll. Database work, remote reads and dispatch
-// run only once a UTC day; restarts retain the durable per-area fences.
+// run once a UTC day after success; a failed sweep retries on the next poll.
+// Restarts retain the durable per-area fences.
 export function createFindingBatchTicker(options) {
   let next = 0;
+  let running = false;
   return { async tick(now = Date.now()) {
-    if (now < next) return;
-    next = (Math.floor(now / 86400000) + 1) * 86400000;
-    await runFindingBatches({ ...options, day: new Date(now).toISOString().slice(0, 10) });
+    if (now < next || running) return;
+    running = true;
+    try {
+      await runFindingBatches({ ...options, day: new Date(now).toISOString().slice(0, 10) });
+      next = (Math.floor(now / 86400000) + 1) * 86400000;
+    } finally { running = false; }
   } };
 }

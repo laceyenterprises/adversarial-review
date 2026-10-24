@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -157,4 +157,87 @@ test('FINDINGSBATCH-01 report exposes size and oldest age per area and reports u
   assert.deepEqual(main(['backlog', '--db', join(rootDir, 'data', 'reviews.db')]).areas, []);
   db.exec('DROP TRIGGER finding_backlog_on_merge; DROP TRIGGER finding_backlog_late_capture; DROP TRIGGER finding_backlog_late_receipt; DROP TRIGGER finding_backlog_on_close; DROP TABLE finding_backlog');
   assert.equal(summarizeFindingBacklog(db).available, false);
+});
+
+test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and preserves unresolved batches', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { claimFindingBatches, runFindingBatches } = await import('../src/findings-batch.mjs');
+  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const rows = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
+  const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ batchId: batch.batch_id, prNumber: 8, headSha: head,
+    findings: rows.map(r => ({ findingId: r.finding_id, outcome: 'applied', reason: 'Documented return value' })) }));
+  const env = { HQ_ROOT: rootDir, GH_TOKEN: 'fixture-only' };
+  let response;
+  let reads = 0;
+  const options = { db, rootDir, env, day: '2026-01-02', logger: { warn() {} },
+    execFileImpl: async (bin, args, opts) => {
+      reads++;
+      assert.equal(bin, 'gh');
+      assert.deepEqual(args, ['pr', 'view', '8', '--repo', repo, '--json', 'state,mergedAt,body,headRefOid']);
+      assert.equal(opts.env.GH_TOKEN, env.GH_TOKEN);
+      assert.equal(opts.timeout, 15_000);
+      if (response instanceof Error) throw response;
+      return { stdout: JSON.stringify(response) };
+    } };
+  for (const invalidBody of ['', `Finding-Batch: ${batch.batch_id}extra`, `Finding-Batch: foreign`]) {
+    response = { state: 'MERGED', body: invalidBody };
+    await runFindingBatches(options);
+    assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, 'batch-pr-evidence-mismatch');
+    assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+  }
+  response = Error('permission denied');
+  await runFindingBatches(options);
+  assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, 'permission denied');
+  assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+  for (const marker of [`  Finding-Batch: ${batch.batch_id}  `,
+    `**Finding-Batch: ${batch.batch_id}**`, ` <!-- Finding-Batch: ${batch.batch_id} --> `]) {
+    response = { state: 'OPEN', headRefOid: head, body: `Batch repairs\r\n${marker}\r\n` };
+    await runFindingBatches(options);
+    assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    // A recognized marker reaches the lifecycle check without writing a new error.
+    assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, 'permission denied');
+  }
+  response = { ...response, state: 'MERGED', mergedAt: '2026-01-02T04:00:00Z', headRefOid: 'b'.repeat(40) };
+  await runFindingBatches(options);
+  assert.equal(reads, 8);
+  assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, 'applied');
+  assert.equal(db.prepare('SELECT result_pr FROM finding_backlog').get().result_pr, 8);
+  assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, null);
+  assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+});
+
+test('FINDINGSBATCH-01 ticker retries failed startup and fences overlapping polls until success', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
+  let transactions = 0, launches = 0, finish;
+  const ticker = createFindingBatchTicker({ rootDir,
+    db: { transaction(fn) {
+      transactions++;
+      if (transactions === 1) throw Error('SQLITE_BUSY');
+      return db.transaction(fn);
+    }, prepare: (...args) => db.prepare(...args) },
+    env: { HQ_ROOT: rootDir }, execFileImpl: async () => {
+      launches++;
+      await new Promise(resolve => { finish = resolve; });
+      return { stdout: '{"launchRequestId":"fixture-launch"}' };
+    } });
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  await assert.rejects(ticker.tick(now), /SQLITE_BUSY/);
+  const retry = ticker.tick(now + 30_000);
+  await ticker.tick(now + 60_000);
+  assert.equal(transactions, 2);
+  assert.equal(launches, 1);
+  finish();
+  await retry;
+  await ticker.tick(now + 90_000);
+  assert.equal(transactions, 2);
+  await ticker.tick(Date.parse('2026-01-03T00:00:00Z'));
+  assert.equal(transactions, 3);
+  assert.equal(launches, 1);
 });

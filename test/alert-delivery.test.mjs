@@ -1439,3 +1439,26 @@ test('CLOSERGATE-01: inspection page deduplicates an attempt before and after ou
   assert.equal(presentation.severity, 'SEV1');
   assert.match(presentation.detail, /fixture\/repo#7.*synthetic-head.*receipt-lookup-unreadable/);
 });
+
+test('queue infrastructure cause deduplicates enqueue across lost receipt and delivered retry with fake transport', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let sent = 0;
+  const options = { env, event: 'finalization.queue.infrastructure',
+    payload: { causeKey: 'synthetic-cause', repo: 'example/review', pr: 101, dependency: 'checks', head: 'b'.repeat(40), base: 'c'.repeat(40), reason: 'missing-required-check:unit' },
+    fsImpl: { readFileSync: () => 'synthetic-hooks-token', existsSync: () => true },
+    requestText: async () => { sent++; return '{}'; } };
+  const first = await deliverAlert('synthetic infrastructure expiry', options);
+  const repeat = await deliverAlert('synthetic retry after lost receipt', options);
+  assert.equal(first.id, repeat.id);
+  assert.equal(repeat.queued, false);
+  await drainPendingAlerts(options);
+  assert.equal(sent, 1);
+  const delivered = await deliverAlert('synthetic delivered retry', options);
+  assert.equal(delivered.id, first.id); assert.equal(delivered.queued, false);
+  const presentation = alertPresentationForDoc({ event: options.event, payload: options.payload });
+  assert.equal(presentation.severity, 'SEV1'); assert.match(presentation.detail, /checks/);
+  const distinct = await deliverAlert('different dependency cause', { ...options, payload: { ...options.payload, causeKey: 'synthetic-cause-2' } });
+  assert.notEqual(distinct.id, first.id);
+  await drainPendingAlerts(options); assert.equal(sent, 2);
+});

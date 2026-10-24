@@ -408,3 +408,59 @@ or deadline refusals before transport invocation settle `not-applied` with
 results or drain reconciliation. Ambient author/committer environment variables
 and `EMAIL` are removed from local Git execution so replay retains the source
 author and uses the synthetic committer.
+
+### Checks and parking observation (MGQ-05; no activation)
+
+After normal deployment, the runtime owner applies
+`migrations/20261026_finalization_queue_checks.sql` through the existing app-store
+migration procedure, after the three queue migrations. Writable queue-store
+opening also converges these additive schemas; the read-only probe never does.
+Use the existing documented runtime-owner/system-service deploy and restart
+procedure when that operator authorizes deployment. This slice authorizes no
+worker restart, route change, production fault injection or pager test.
+
+From that deployed checkout, under its actual runtime owner and the existing
+bounded load-aware supervisor (5 seconds nominal, 30 seconds maximum), run:
+
+```sh
+node src/finalization/queue-probe.mjs --capability checks --json
+```
+
+Require `capabilities.checks.available == true` and `runtime.build != null`.
+Record the checkout/digest, resolved store adapter, schema, bounded exact-candidate
+snapshots, original patience, parking causes, next reprobe and page enqueue
+counts. The probe opens the real store read-only and verifies definitions against
+the shipped migration in a disposable reference DB. Its digest identifies this
+probe's code, not an already-running watcher's build. Empty snapshots/pages are
+pending organic evidence, not a successful outage/recovery exercise. Missing
+schema or adapters reports unavailable; never insert a lane to satisfy the probe.
+
+The capability remains unwired. Future queue composition must supply the complete
+existing required-policy reader, entitled per-operation credential environment,
+live admission reader, Git derivation verifier, owner and existing Sentinel alert
+bus. The check transport is GET-only; no check context is created or rerun. The
+required-set resolver never guesses from a green subset or unreadable protection.
+An explicitly configured no-CI repository still needs its existing live proof.
+Source fixture validation is not evidence that any of these production adapters
+or routing is active.
+
+During subsequent organic operation, inspect completed-red returns separately
+from infrastructure parks. Verify that missing/hung/unreadable checks and auth
+outages keep the original deadline, release the lane, enqueue one cause page and
+consume no remediation budget. Observe recovery with a later ready entry ahead
+of the recovered entry: proof/currency and fresh holds must pass before tail
+readmission. After the original deadline, recovery grants only bounded
+observations of a recovered published candidate, not fresh patience for CI or a
+changed base. No merge is authorized by readmission or by this probe. Existing
+smoke promises are unchanged; offline fixtures use fake GitHub/broker/pager and
+disposable stores/Git repositories.
+
+Offline concurrency measurements use ten consecutive overlapping reads against
+one disposable published candidate. The deliberately unguarded waiter variant
+(snapshot guard and store CAS removed) overwrote all 10 newer inconclusive
+observations. The intermediate store-CAS-only variant rejected 10/10 late
+responses; the complete snapshot-plus-store-CAS implementation also rejected
+10/10, with zero overwritten observations. The production source was restored
+after each experiment. Sibling admission and rebase services use the same
+persisted snapshot/version discipline. Reprobe releases its temporary owner even
+when recovery remains unavailable or rejoins behind a predecessor.

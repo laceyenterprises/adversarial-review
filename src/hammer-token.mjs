@@ -198,13 +198,15 @@ export function hammerTokenSession(options = {}) {
         throw error;
       }
     },
-    prepare() {
+    prepare({ timeoutMs = 10_000 } = {}) {
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw failure('failed (deadline expired)');
+      const refreshTimeout = Math.min(10_000, Math.max(1, Math.floor(timeoutMs)));
       if (!managed) return childOptions;
       if (forced) {
         forced = false;
-        refresh();
+        refresh(refreshTimeout);
       } else if (!held || !expiresLater(expiresAt)) {
-        try { refresh(); } catch (error) {
+        try { refresh(refreshTimeout); } catch (error) {
           if (!held) throw error;
           warnProactiveFailure(error.refreshOutcome);
         }

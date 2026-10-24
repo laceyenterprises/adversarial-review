@@ -41,7 +41,6 @@ const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
 export const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 export const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
   'fast-merge:spec-hash-rebind': 'spec-hash-rebind',
-  'fast-merge:docs': 'docs',
   'fast-merge:test-fixtures': 'test-fixtures',
   'fast-merge:submodule-bump': 'submodule-bump',
 });
@@ -228,9 +227,6 @@ export function isKnownSubmodulePath(filename) {
 export function fastMergeFileMatchesCategory(file, category) {
   const normalized = normalizeChangedFile(file);
   if (!normalized.filename) return false;
-  if (category === 'docs') {
-    return isMarkdownOrDocsPath(normalized.filename);
-  }
   if (category === 'test-fixtures') {
     return normalized.deletions === 0 && isTestFixturePath(normalized.filename);
   }

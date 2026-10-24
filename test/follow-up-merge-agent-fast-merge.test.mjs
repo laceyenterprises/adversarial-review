@@ -62,7 +62,7 @@ function row(db, prNumber, repo = REPO) {
   return getReviewRow(db, { repo, prNumber });
 }
 
-function openView(head = 'sha-A', labels = [{ name: 'fast-merge:docs' }]) {
+function openView(head = 'sha-A', labels = [{ name: 'fast-merge:test-fixtures' }]) {
   return {
     state: 'OPEN',
     isDraft: false,
@@ -780,7 +780,7 @@ test('fast-merge veto racing before merge requeues and never merges', async () =
   seedFastMerge(db, 804);
   const audits = [];
   const gh = makeGhStub({
-    views: [openView('sha-A', [{ name: 'fast-merge:docs' }]), openView('sha-A', [{ name: 'fast-merge-veto' }])],
+    views: [openView('sha-A', [{ name: 'fast-merge:test-fixtures' }]), openView('sha-A', [{ name: 'fast-merge-veto' }])],
     checks: [successChecks()],
   });
 
@@ -806,8 +806,8 @@ test('fast-merge duplicate-family hold racing before merge requeues and never me
   const audits = [];
   const gh = makeGhStub({
     views: [
-      openView('sha-A', [{ name: 'fast-merge:docs' }]),
-      openView('sha-A', [{ name: 'fast-merge:docs' }, { name: 'duplicate-family-hold' }]),
+      openView('sha-A', [{ name: 'fast-merge:test-fixtures' }]),
+      openView('sha-A', [{ name: 'fast-merge:test-fixtures' }, { name: 'duplicate-family-hold' }]),
     ],
     checks: [successChecks()],
   });

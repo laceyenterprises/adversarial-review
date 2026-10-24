@@ -1,3 +1,4 @@
+import { readHeadAttestationChainForPr } from './daemon-worker-identity.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
@@ -173,11 +174,12 @@ async function signReviewedAttestation({
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new TypeError('payload object is required');
   }
+  const docs = payload.kind === 'docs-fast-path';
   const reviewerSubject = String(payload.payload?.reviewer_identity || '').trim();
-  if (!reviewerSubject) {
+  if (!docs && !reviewerSubject) {
     throw new TypeError('payload.payload.reviewer_identity is required for HCP signing');
   }
-  const signingEnv = { ...env, HCP_SUBJECT: reviewerSubject };
+  const signingEnv = reviewerSubject ? { ...env, HCP_SUBJECT: reviewerSubject } : env;
   const { stdout } = await execFileWithTransientRetry(
     execFileImpl,
     hqPath,
@@ -195,6 +197,10 @@ async function signReviewedAttestation({
       `hq attest sign returned invalid JSON: ${err.message}; stdout=${JSON.stringify(trimmed.slice(0, 500))}`,
       { cause: err }
     );
+  }
+  if (docs) {
+    if (!String(signed.producer_identity || '').trim()) throw new Error('docs attestation signer missing');
+    payload = { ...payload, producer_identity: signed.producer_identity };
   }
   validateSignedReviewedAttestation(signed, payload);
   return signed;
@@ -226,7 +232,7 @@ function validateSignedReviewedAttestation(signed, payload) {
   if (signature.algorithm !== REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM) {
     throw new Error(`signed attestation signature algorithm mismatch: ${signature.algorithm}`);
   }
-  const reviewerIdentity = payload.payload?.reviewer_identity;
+  const reviewerIdentity = payload.payload?.reviewer_identity || payload.producer_identity;
   const signedSubject = String(signature.subject || '').trim();
   if (!signedSubject || signedSubject !== reviewerIdentity) {
     throw new Error(`signed attestation HCP subject mismatch: ${signedSubject}`);
@@ -318,6 +324,32 @@ async function emitReviewedAttestation({
       `verdict=${payload.verdict} findings_count=${payload.findings_count ?? 'unknown'}`
   );
   return { payload, signed, recorded };
+}
+
+export async function emitDocsFastPathAttestation({ repo, prNumber, headSha, hqRoot,
+  hqPath, execFileImpl, env = process.env,
+  readChainImpl = readHeadAttestationChainForPr } = {}) {
+  // The ledger is append-only by (repo, PR, head, kind, principal). Reuse an
+  // acknowledged head attestation after a crash; live classification still runs.
+  const rows = await readChainImpl({ repo, prNumber, hqRoot, execFileImpl, env });
+  const existing = rows.find(row => row.kind === 'docs-fast-path' && row.repo === repo
+    && row.pr_number === prNumber && row.head_sha === headSha && row.payload?.policy === 'DOCSFASTPATH-01');
+  if (existing) {
+    // Record re-verifies the MAC; a database row alone is never authority.
+    const recorded = await recordSignedReviewedAttestation({ signed: existing, hqPath, execFileImpl, env });
+    if (!recorded?.attestation_id) throw new Error('docs attestation reuse was not acknowledged');
+    return { signed: existing, recorded };
+  }
+  const payload = { schema_version: 1, repo, pr_number: prNumber, head_sha: headSha,
+    parent_head_sha: null, kind: 'docs-fast-path', producer_identity: null,
+    verdict: null, findings_count: null, payload: { policy: 'DOCSFASTPATH-01' }, ts: new Date().toISOString() };
+  const signed = await signReviewedAttestation({ payload, hqPath, execFileImpl, env });
+  const recorded = await recordSignedReviewedAttestation({ signed, hqPath, execFileImpl, env });
+  if (!recorded?.attestation_id || recorded.kind !== payload.kind || recorded.head_sha !== headSha
+    || recorded.repo !== repo || recorded.pr_number !== prNumber) {
+    throw new Error('docs-fast-path attestation persistence was not acknowledged');
+  }
+  return { signed, recorded };
 }
 
 function reviewedAttestationQueuePath(rootDir) {

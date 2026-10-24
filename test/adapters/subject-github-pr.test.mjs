@@ -582,7 +582,10 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
             octokitListCalls += 1;
             assert.equal(`${owner}/${repo}`, fixture.repo);
             assert.equal(state, 'open');
-            return { data: [octokitNewPull, octokitDuplicatePull] };
+            return { data: [octokitNewPull, octokitDuplicatePull, {
+              ...adapterPull, base: { sha: 'b'.repeat(40), ref: 'main' },
+              requested_reviewers: [{ login: 'example-reviewer' }], requested_teams: [],
+            }] };
           },
         },
       },
@@ -619,6 +622,9 @@ test('github-pr subject adapter supplements non-empty adapter discovery with Oct
 
   const state = await adapter.fetchState(refs[0]);
   assert.equal(state.headSha, 'adapter-head');
+  assert.equal(state.baseSha, 'b'.repeat(40));
+  assert.equal(state.baseRefName, 'main');
+  assert.deepEqual(state.requested_reviewers, [{ login: 'example-reviewer' }]);
 });
 
 test('github-pr subject adapter supplements stale adapter discovery with gh when Octokit fails', async () => {
@@ -675,7 +681,7 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,labels,createdAt,updatedAt,author,isCrossRepository',
+        'number,title,state,headRefOid,baseRefOid,baseRefName,labels,createdAt,updatedAt,author,isCrossRepository',
       ]);
       return { stdout: JSON.stringify([ghNewPull, adapterPull]) };
     },

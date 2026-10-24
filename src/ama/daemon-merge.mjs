@@ -258,6 +258,7 @@ export function daemonMergeBackoffMs(
 
 function normalizeGateState(live = {}) {
   return {
+    docsFastPath: live.docsFastPath,
     primaryChange: live.primaryChange,
     requirePrimaryChange: live.requirePrimaryChange,
     strictNonBlockingRemediation: live.strictNonBlockingRemediation,
@@ -369,6 +370,8 @@ async function attemptDaemonCleanMergeInner({
   base,
   validatedHead,
   verdict,
+  docsFastPath = null,
+  beforeMergeImpl = null,
   operatorApprovedEvidence = null,
   operatorLogins = [],
   operatorLabelActorEnforcement = 'observe',
@@ -542,6 +545,7 @@ async function attemptDaemonCleanMergeInner({
     operatorLabelActorEnforcement,
   }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
   if (
+    !docsFastPath &&
     !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
     !headCloserCertifiedBypass &&
     !initialOperatorOverride &&
@@ -554,6 +558,7 @@ async function attemptDaemonCleanMergeInner({
   const preLease = normalizeGateState(liveGate);
   let noCiEvidence = null;
   const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
+    docsFastPath: gate.docsFastPath,
     primaryChange: gate.primaryChange,
     requirePrimaryChange: gate.requirePrimaryChange,
     strictNonBlockingRemediation: gate.strictNonBlockingRemediation,
@@ -737,6 +742,16 @@ async function attemptDaemonCleanMergeInner({
   let guardReversals = [];
   let terminal = null; // { reason, permanent, reasons }
 
+  if (beforeMergeImpl) {
+    try { await beforeMergeImpl(); }
+    catch (error) {
+      appendAuditImpl({ ...auditKeys, metadata: auditMetadataDoc, now: now(),
+        attempt: { outcome: 'failed-without-merge', reason: 'attestation-record-failed',
+          permanent: false, error: String(error.message) } });
+      return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+        reason: 'attestation-record-failed', merged: false, error: String(error.message) };
+    }
+  }
   while (attempts < retryCap && !merged && !terminal) {
     attempts += 1;
 

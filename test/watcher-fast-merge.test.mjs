@@ -248,7 +248,7 @@ const octokit = {
         },
       }),
       listFiles: async ({ pull_number }) => ({
-        data: scenario.changedFiles?.[String(pull_number)] || [{ filename: 'docs/fast-merge.md', status: 'modified', additions: 1, deletions: 0 }],
+        data: scenario.changedFiles?.[String(pull_number)] || [{ filename: 'test/fixtures/fast-merge.md', status: 'modified', additions: 1, deletions: 0 }],
       }),
     },
     issues: {
@@ -403,11 +403,11 @@ test('fast-merge watcher: no fast-merge label follows normal review path', () =>
 
 test('fast-merge watcher: single category skips when flag is enabled and records head SHA', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(802, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 802: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(802, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 802: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 802: 'sha-live-802' },
     timelineEvents: {
-      802: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      802: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
@@ -415,11 +415,11 @@ test('fast-merge watcher: single category skips when flag is enabled and records
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, 'sha-live-802');
   assert.notEqual(summary.rows[0].reviewed_at, '2026-05-20T12:00:05.000Z');
   assert.equal(summary.rows[0].fast_merge_audit_status, 'written');
-  assert.deepEqual(JSON.parse(summary.rows[0].labels_json), [{ name: 'fast-merge:docs' }]);
+  assert.deepEqual(JSON.parse(summary.rows[0].labels_json), [{ name: 'fast-merge:test-fixtures' }]);
   assert.equal(summary.spawns.length, 0);
   assert.equal(summary.auditEntries[0].action, 'skipped');
   assert.equal(summary.auditEntries[0].auditType, 'fast-merge-skip');
-  assert.deepEqual(summary.auditEntries[0].categories, ['docs']);
+  assert.deepEqual(summary.auditEntries[0].categories, ['test-fixtures']);
   assert.equal(summary.auditEntries[0].fast_merge_authorized_head_sha, 'sha-live-802');
   assert.equal(summary.auditEntries[0].authorized_at, '2026-05-20T12:00:05.000Z');
   assert.match(summary.auditEntries[0].skipped_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -427,11 +427,11 @@ test('fast-merge watcher: single category skips when flag is enabled and records
 });
 
 test('fast-merge watcher: duplicate-family-hold cannot be bypassed by skip label', () => {
-  const labels = [{ name: 'fast-merge:docs' }, { name: 'duplicate-family-hold' }];
+  const labels = [{ name: 'fast-merge:test-fixtures' }, { name: 'duplicate-family-hold' }];
   const summary = runWatcherScenario({
     subjects: [subject(822, { labels })],
     labels: { 822: labels },
-    timeline: { 822: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')] },
+    timeline: { 822: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')] },
   }, { skipEnabled: true });
   assert.notEqual(summary.rows[0].review_status, 'fast_merge_skipped');
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
@@ -439,11 +439,11 @@ test('fast-merge watcher: duplicate-family-hold cannot be bypassed by skip label
 
 test('fast-merge watcher: flag-off default audits would-have-skipped but reviews normally', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(803, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 803: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(803, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 803: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 803: 'sha-live-803' },
     timelineEvents: {
-      803: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      803: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')],
     },
   });
   assert.equal(summary.rows[0].pr_state, 'open');
@@ -451,37 +451,37 @@ test('fast-merge watcher: flag-off default audits would-have-skipped but reviews
   assert.equal(summary.rows[0].fast_merge_authorized_head_sha, null);
   assert.equal(summary.spawns.length, 1);
   assert.equal(summary.auditEntries[0].action, 'would-have-skipped');
-  assert.deepEqual(summary.auditEntries[0].categories, ['docs']);
+  assert.deepEqual(summary.auditEntries[0].categories, ['test-fixtures']);
   assert.equal(summary.auditEntries[0].fast_merge_authorized_head_sha, 'sha-live-803');
   assert.equal(typeof summary.auditEntries[0].authorized_at, 'string');
 });
 
 test('fast-merge watcher: multiple categories are captured in skip audit and labels_json', () => {
-  const labels = [{ name: 'fast-merge:docs' }, { name: 'fast-merge:submodule-bump' }];
+  const labels = [{ name: 'fast-merge:test-fixtures' }, { name: 'fast-merge:submodule-bump' }];
   const summary = runWatcherScenario({
     subjects: [subject(804, { labels })],
     labels: { 804: labels },
     heads: { 804: 'sha-live-804' },
     timelineEvents: {
       804: [
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z'),
         timelineLabel('fast-merge:submodule-bump', '2026-05-20T12:00:06.000Z'),
       ],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'fast_merge_skipped');
   assert.deepEqual(JSON.parse(summary.rows[0].labels_json), labels);
-  assert.deepEqual(summary.auditEntries[0].categories, ['docs', 'submodule-bump']);
+  assert.deepEqual(summary.auditEntries[0].categories, ['test-fixtures', 'submodule-bump']);
 });
 
 test('fast-merge watcher: post-label head advance falls back to normal review', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(809, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 809: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(809, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 809: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 809: 'sha-live-809' },
     timelineEvents: {
       809: [
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z'),
         timelineForcePush('2026-05-20T12:00:06.000Z', 'sha-live-809'),
       ],
     },
@@ -495,12 +495,12 @@ test('fast-merge watcher: post-label head advance falls back to normal review', 
 
 test('fast-merge watcher: same-timestamp head advance after label invalidates label', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(812, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 812: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(812, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 812: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 812: 'sha-live-812' },
     timelineEvents: {
       812: [
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z'),
         timelineCommitted('2026-05-20T12:00:05.000Z', 'sha-live-812'),
       ],
     },
@@ -512,14 +512,14 @@ test('fast-merge watcher: same-timestamp head advance after label invalidates la
 
 test('fast-merge watcher: category shape mismatch audits and falls back to normal review', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(813, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 813: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(813, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 813: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 813: 'sha-live-813' },
     changedFiles: {
       813: [{ filename: 'src/watcher.mjs', status: 'modified', additions: 2, deletions: 0 }],
     },
     timelineEvents: {
-      813: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      813: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'open');
@@ -530,16 +530,16 @@ test('fast-merge watcher: category shape mismatch audits and falls back to norma
   assert.match(summary.auditEntries[0].shape_check.reason, /src\/watcher\.mjs/);
 });
 
-test('fast-merge watcher: docs category rejects extensionless docs-path runtime files', () => {
+test('fast-merge watcher: fixture category rejects paths outside fixtures', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(818, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 818: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(818, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 818: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 818: 'sha-live-818' },
     changedFiles: {
       818: [{ filename: 'docs/render', status: 'modified', additions: 1, deletions: 0 }],
     },
     timelineEvents: {
-      818: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      818: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'open');
@@ -598,11 +598,11 @@ test('fast-merge watcher: spec hash category allows small rebind deletions', () 
 test('fast-merge watcher: veto wins on open and veto-only is normal review', () => {
   const summary = runWatcherScenario({
     subjects: [
-      subject(805, { labels: [{ name: 'fast-merge:docs' }, { name: 'fast-merge-veto' }] }),
+      subject(805, { labels: [{ name: 'fast-merge:test-fixtures' }, { name: 'fast-merge-veto' }] }),
       subject(806, { labels: [{ name: 'fast-merge-veto' }] }),
     ],
     labels: {
-      805: [{ name: 'fast-merge:docs' }, { name: 'fast-merge-veto' }],
+      805: [{ name: 'fast-merge:test-fixtures' }, { name: 'fast-merge-veto' }],
       806: [{ name: 'fast-merge-veto' }],
     },
     heads: { 805: 'sha-live-805', 806: 'sha-live-806' },
@@ -615,11 +615,11 @@ test('fast-merge watcher: veto wins on open and veto-only is normal review', () 
 
 test('fast-merge watcher: unknown label actor does not authorize a live head', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(810, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 810: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(810, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 810: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 810: 'sha-live-810' },
     timelineEvents: {
-      810: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z', { actor: 'random-contributor' })],
+      810: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z', { actor: 'random-contributor' })],
     },
   }, { skipEnabled: true });
   assert.equal(summary.rows[0].pr_state, 'open');
@@ -631,13 +631,13 @@ test('fast-merge watcher: unknown label actor does not authorize a live head', (
 
 test('fast-merge watcher: real commit event before label does not block omitted commit_id', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(811, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 811: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(811, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 811: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 811: 'sha-live-811' },
     timelineEvents: {
       811: [
         timelineCommitted('2026-05-20T12:00:04.000Z', 'sha-live-811'),
-        timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z'),
+        timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z'),
       ],
     },
   }, { skipEnabled: true });
@@ -649,7 +649,7 @@ test('fast-merge watcher: real commit event before label does not block omitted 
 });
 
 test('fast-merge watcher: veto added after skip requeues through pending and the normal CAS claims it', () => {
-  const labels = [{ name: 'fast-merge:docs' }, { name: 'fast-merge-veto' }];
+  const labels = [{ name: 'fast-merge:test-fixtures' }, { name: 'fast-merge-veto' }];
   const summary = runWatcherScenario({
     seedRows: [{
       repo: REPO,
@@ -658,7 +658,7 @@ test('fast-merge watcher: veto added after skip requeues through pending and the
       reviewer: 'claude',
       prState: 'fast_merge_skipped',
       reviewStatus: 'fast_merge_skipped',
-      labels: [{ name: 'fast-merge:docs' }],
+      labels: [{ name: 'fast-merge:test-fixtures' }],
       fastMergeAuthorizedHeadSha: 'sha-live-807',
     }],
     subjects: [subject(807, { labels })],
@@ -682,7 +682,7 @@ test('fast-merge watcher: removed fast-merge label requeues skipped row', () => 
       reviewer: 'claude',
       prState: 'fast_merge_skipped',
       reviewStatus: 'fast_merge_skipped',
-      labels: [{ name: 'fast-merge:docs' }],
+      labels: [{ name: 'fast-merge:test-fixtures' }],
       fastMergeAuthorizedHeadSha: 'sha-live-814',
     }],
     subjects: [subject(814, { labels: [] })],
@@ -698,11 +698,11 @@ test('fast-merge watcher: removed fast-merge label requeues skipped row', () => 
 
 test('fast-merge watcher: skip audit failure leaves retry sentinel on row', () => {
   const summary = runWatcherScenario({
-    subjects: [subject(815, { labels: [{ name: 'fast-merge:docs' }] })],
-    labels: { 815: [{ name: 'fast-merge:docs' }] },
+    subjects: [subject(815, { labels: [{ name: 'fast-merge:test-fixtures' }] })],
+    labels: { 815: [{ name: 'fast-merge:test-fixtures' }] },
     heads: { 815: 'sha-live-815' },
     timelineEvents: {
-      815: [timelineLabel('fast-merge:docs', '2026-05-20T12:00:05.000Z')],
+      815: [timelineLabel('fast-merge:test-fixtures', '2026-05-20T12:00:05.000Z')],
     },
     failAuditWrites: true,
   }, { skipEnabled: true });
@@ -737,10 +737,10 @@ exit 0
       assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     }
     const log = readFileSync(logPath, 'utf8');
-    assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create fast-merge:test-fixtures --repo laceyenterprises\/agent-os/);
     assert.match(log, /label create ticket-pipeline-paused --repo laceyenterprises\/agent-os/);
     assert.match(log, /label create no-merge-hold --repo laceyenterprises\/agent-os/);
-    assert.match(log, /label edit fast-merge:docs --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label edit fast-merge:test-fixtures --repo laceyenterprises\/agent-os/);
     assert.doesNotMatch(log, /fast-merge:additive-sql/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -770,8 +770,8 @@ exit 0
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     const log = readFileSync(logPath, 'utf8');
     assert.match(log, /repo list laceyenterprises --limit 1000/);
-    assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/agent-os/);
-    assert.match(log, /label create fast-merge:docs --repo laceyenterprises\/adversarial-review/);
+    assert.match(log, /label create fast-merge:test-fixtures --repo laceyenterprises\/agent-os/);
+    assert.match(log, /label create fast-merge:test-fixtures --repo laceyenterprises\/adversarial-review/);
     assert.match(log, /label create no-merge-hold --repo laceyenterprises\/agent-os/);
     assert.match(log, /label create no-merge-hold --repo laceyenterprises\/adversarial-review/);
   } finally {

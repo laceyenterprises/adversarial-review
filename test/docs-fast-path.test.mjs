@@ -103,14 +103,15 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   // Exercise the actual Node sign/record boundary; the companion suite runs
   // the production Python interpreter and real Postgres constraint/store.
   let signed, recorded, signCalls = 0;
-  const execFileImpl = (_command, command) => {
+  const execFileImpl = (_command, command, options) => {
     if (command[1] === 'sign') {
       signCalls++;
+      assert.equal(options.env.HCP_SUBJECT, 'ama-daemon');
       const value = name => command[command.indexOf(name) + 1];
       signed = { schema_version: 1, repo: repoPath, pr_number: prNumber, head_sha: head,
-        parent_head_sha: null, kind: value('--kind'), producer_identity: 'example:daemon',
+        parent_head_sha: null, kind: value('--kind'), producer_identity: 'ama-daemon',
         verdict: null, findings_count: null, payload: JSON.parse(value('--payload-json')), ts: value('--ts'),
-        signature: { algorithm: 'hcp-hmac-sha256:v1', subject: 'example:daemon', digest: 'sha256:' + 'x'.repeat(43) } };
+        signature: { algorithm: 'hcp-hmac-sha256:v1', subject: 'ama-daemon', digest: 'sha256:' + 'x'.repeat(43) } };
       return Promise.resolve({ stdout: JSON.stringify(signed) });
     }
     let resolve;
@@ -122,12 +123,12 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
     } } };
     return task;
   };
-  await emitDocsFastPathAttestation({ repo: repoPath, prNumber, headSha: head, execFileImpl,
+  await emitDocsFastPathAttestation({ repo: repoPath, prNumber, headSha: head, execFileImpl, env: {},
     readChainImpl: async () => [] });
   assert.equal(recorded.kind, 'docs-fast-path');
   assert.equal(recorded.head_sha, head);
   assert.deepEqual(recorded.payload, { policy: 'DOCSFASTPATH-01' });
-  await emitDocsFastPathAttestation({ repo: repoPath, prNumber, headSha: head, execFileImpl,
+  await emitDocsFastPathAttestation({ repo: repoPath, prNumber, headSha: head, execFileImpl, env: {},
     readChainImpl: async () => [{ ...signed, attestation_id: 'example-attestation', recorded_at: signed.ts }] });
   assert.equal(signCalls, 1, 'restart reuses and re-verifies the already recorded head');
   assert.equal('attestation_id' in recorded, false);

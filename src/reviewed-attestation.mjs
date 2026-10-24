@@ -175,7 +175,8 @@ async function signReviewedAttestation({
     throw new TypeError('payload object is required');
   }
   const docs = payload.kind === 'docs-fast-path';
-  const reviewerSubject = String(payload.payload?.reviewer_identity || '').trim();
+  const reviewerSubject = String(payload.payload?.reviewer_identity
+    || (docs ? payload.producer_identity : '') || '').trim();
   if (!docs && !reviewerSubject) {
     throw new TypeError('payload.payload.reviewer_identity is required for HCP signing');
   }
@@ -336,7 +337,7 @@ export async function emitDocsFastPathAttestation({ repo, prNumber, headSha, hqR
   const existing = rows.find(row => row.kind === 'docs-fast-path' && row.repo === repo
     && row.pr_number === prNumber && row.head_sha === headSha && row.payload?.policy === 'DOCSFASTPATH-01');
   const payload = { schema_version: 1, repo, pr_number: prNumber, head_sha: headSha,
-    parent_head_sha: null, kind: 'docs-fast-path', producer_identity: null,
+    parent_head_sha: null, kind: 'docs-fast-path', producer_identity: 'ama-daemon',
     verdict: null, findings_count: null, payload: { policy: 'DOCSFASTPATH-01' }, ts: new Date().toISOString() };
   // Record re-verifies the MAC even when reusing a stored row.
   const signed = existing ? { ...existing } : await signReviewedAttestation({ payload, hqPath, execFileImpl, env });

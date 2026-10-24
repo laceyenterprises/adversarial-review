@@ -5381,7 +5381,8 @@ The former broad `fast-merge:docs` authorization is retired.
 
 Required checks must be green on the exact head. The watcher publishes the
 existing gate context as a docs waiver, then uses the ordinary daemon lease and
-merge predicate. It records kind `docs-fast-path` with `policy=DOCSFASTPATH-01`
+merge predicate. It records kind `docs-fast-path` as the existing `ama-daemon` merge authority, with
+`policy=DOCSFASTPATH-01`
 through the existing signer and canonical ledger before merging. Ledger delivery
 failure defers without a reviewer or closer; repeat delivery reuses and verifies
 the existing signed head record. The AMA audit records closure authority

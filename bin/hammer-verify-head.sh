@@ -102,6 +102,8 @@ ham_release_merge_lease() {
       ham_release_retryable_args=(--merged --reason merged)
     elif [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
       ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
+    elif [ "${1:-}" = "--yield" ]; then
+      ham_release_retryable_args=(--yield --reason required-checks-wait)
     else
       ham_release_retryable_args=(--reason "${HAM_PHASE_OUTCOME:-holder-release}")
     fi
@@ -258,11 +260,6 @@ NODE
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
     && [ "$(jq -r '.parked // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
     HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' "<<RUN_DIR>>/merge-lease-acquire.json")
-    if [ "$HAM_PARK_REASON" != "max-gate-attempts" ]; then
-      echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
-      HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
-      return 20
-    fi
     HAM_GATE_CAP_CLOSING_STATUS=$(jq -r '.closingStatus // empty' "<<RUN_DIR>>/merge-lease-acquire.json")
     if [ -z "$HAM_GATE_CAP_CLOSING_STATUS" ]; then
       echo "AMG-04 hard-blocker: parked lease response omitted closingStatus" >&2
@@ -300,7 +297,7 @@ NODE
     fi
     HAM_GATE_CAP_MARKER="<!-- hq:ham-gate-attempt-cap:$POST_REMEDIATION_SHA -->"
     HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_MARKER
-HAM closing status — no merge. The gate-attempt cap stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
+HAM closing status — no merge. The lease admission cap ($HAM_PARK_REASON) stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
     ham_gate_cap_gh_transient() {
       sed '/^\[load-aware-timeout\]/d' "$1" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
     }

@@ -58,12 +58,13 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
   const leaseNode = join(bin, 'lease-node');
-  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
+  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\' | sed "s/max-gate-attempts/${FIXTURE_PARK_REASON:-max-gate-attempts}/"; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
   chmodSync(leaseNode, 0o755);
   const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
   assert.ok(wrapper);
-  for (const [phase, outcome, diagnostic, status] of [
+  for (const [phase, outcome, diagnostic, status, parkReason] of [
     ['hammer-verify-head', 'parked:max-gate-attempts', 'AMG-04 parked', 20],
+    ['hammer-verify-head', 'parked:repeated-no-merge-release', 'AMG-04 parked', 20, 'repeated-no-merge-release'],
     ['hammer-publish', 'hammer-publish-error', 'terminal-remediation audit must be written', 1],
     ['hammer-merge', 'merge-error', 'no hammer merge without holding', 1],
   ]) {
@@ -72,7 +73,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
       HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer', HAM_NODE_BIN: leaseNode,
-      HAMMER_LACEY_GH_TOKEN: 'fixture',
+      HAMMER_LACEY_GH_TOKEN: 'fixture', FIXTURE_PARK_REASON: parkReason || 'max-gate-attempts',
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
     };
     const rendered = renderPhase(phase, env);

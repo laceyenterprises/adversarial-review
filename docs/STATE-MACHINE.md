@@ -1063,7 +1063,13 @@ Merge lease scheduling uses FIFO arrival across daemon and closer roles.
 A non-terminal no-merge release rejoins at the tail with persistent PR/head
 exponential backoff; delayed requests yield to ready waiters. Repeating the same
 reason through the existing attempt cap parks that head with
-`repeated-no-merge-release`; a new head or explicit reset recovers it.
+`repeated-no-merge-release`; a new head or explicit reset recovers it. Planned
+CI-wait yields and retryable aborts reset the consecutive failure count, retain
+backoff and never create a park. Yields keep the gate charge; aborts refund it
+atomically with release identity. Non-permanent daemon failures yield. Grants
+alone preserve failure evidence. Only daemon reservations requeue; exited CLI
+invocations return under fresh IDs. Repeated-failure parks use the existing
+audit, closing-status comment and page path.
 Reservations retain their arrival across live watcher passes, with twice-poll
 load-scaled expiry. Confirmed dead same-host watcher reservations are pruned.
 Draft, terminal, moved-head and declined paths withdraw on the next pass.

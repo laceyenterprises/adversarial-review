@@ -193,6 +193,8 @@ test('four same-head pending CI launches retain charges within the gate cap', t 
   assert.equal(result.audit.match(/exit:20/g).length, 4);
   assert.equal(result.attempts[0].attempts, 4);
   assert.equal(result.attempts[0].retryable, 0);
+  assert.equal(result.attempts[0].consecutiveNoMergeReleases, 0);
+  assert.equal(result.attempts[0].parkedReason, null);
 });
 
 test('CI-green reacquisition retains the pending attempt charge', t => {

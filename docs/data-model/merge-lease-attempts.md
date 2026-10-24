@@ -55,7 +55,10 @@ Optional no-merge retry fields share this existing PR/head record:
 `reenteredAt` records the latest re-entry, and `nextEligibleAt` is its earliest
 next grant. Backoff starts at one second, doubles per no-merge release, and caps
 at the existing watcher poll interval before being load-scaled once.
-After `AMG_MAX_GATE_ATTEMPTS` consecutive releases with the same reason
+Planned `--yield` releases and retryable aborts reset the consecutive failure
+count to zero while retaining backoff and any existing park. Successful grants
+do not reset failure evidence: acquisition alone is not a successful merge gate.
+After `AMG_MAX_GATE_ATTEMPTS` consecutive chargeable releases with the same reason
 (default five), `parkedReason: "repeated-no-merge-release"` refuses admission
 for that head and removes its reservation. There is no new config key or merge
 gate: this bounds rescheduling of failed holders. Changing the head or using
@@ -64,7 +67,14 @@ existing 30-day attempt expiry still applies. Gate charges and retryable refunds
 preserve these fields and cannot erase a park.
 
 Both normal and retryable-abort no-merge releases update this state under the
-holder/waiter and attempt locks. Explicit merged or terminal releases skip
-re-entry. The CLI accepts `release --merged`, `--terminal` and `--reason`;
-the hammer forwards its authoritative merged exact-head observation or current
-phase failure reason. The daemon forwards its actual result and permanence.
+holder/waiter and attempt locks. Refund and release identity persist atomically
+in one attempts-file write, so retry after a later history/write failure cannot
+refund twice; lock contention returns `mutation-lock-busy` without mutation.
+Explicit merged or terminal releases skip re-entry. The CLI accepts mutually
+exclusive `release --merged`, `--terminal`, `--yield`, or `--retryable-abort`,
+plus `--reason`. The hammer uses `--yield --reason required-checks-wait` before
+its first CI wait, retaining the provisional gate charge. Retryable aborts refund
+that charge. The daemon marks non-permanent failed outcomes as `yielded: true`,
+so transient reads and retry exhaustion cannot cause failure parking. Unknown
+exceptions remain chargeable. Repeated-failure parks carry a closing status and
+use the hammer's existing audit, comment and page path for gate-cap parks.

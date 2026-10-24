@@ -597,6 +597,11 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 Daemon and closer merge requests share FIFO arrival order. A failed holder
 re-enters at the tail with exponential backoff; repeated same-step failures
 park the head with `repeated-no-merge-release` after the existing attempt cap.
+Planned CI-wait yields and retryable aborts retain backoff but reset consecutive
+failure counting; non-permanent daemon failures yield too. Yields retain the
+gate charge; aborts refund it atomically with release identity. Only daemon
+reservations requeue; the next CLI invocation registers a fresh waiter. Both
+parking caps use the existing audit, closing-status and page path.
 Only confirmed dead same-host watcher identities permit early reservation pruning. Closers release
 before the first remote-CI wait, including read retries and UNKNOWN sampling, then
 reacquire and refresh the exact-head gate. LAC-2097 retains the exact validated
@@ -614,6 +619,10 @@ acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
 unchanged; the clean smoke verifies FIFO service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
 `ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
+HAMLEASE-01 progress reports occur at least 25 seconds apart, with a maximum
+gap of 25 seconds plus the once-scaled polling ceiling (excluding synchronous
+I/O); the waiter data-model documents the ceiling calculation.
+
 LEASEFAIR-03 gives closers a progress-aware lease wait: a 900-second nominal
 stall bound and six-hour nominal ceiling, each load-scaled once. Service advances
 reset the stall timer; all roles retain FIFO order. Exact-head green exhaustion gets

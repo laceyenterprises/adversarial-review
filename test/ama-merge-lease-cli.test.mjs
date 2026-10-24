@@ -17,6 +17,8 @@ import { join } from 'node:path';
 
 import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
 import { formatHamGateAttemptCapClosingStatus } from '../src/ama/dispatch-closer.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
+import { WATCHER_POLL_INTERVAL_MS } from '../src/watcher-poll-interval.mjs';
 import {
   acquireMergeLease,
   classifyMergeLeaseGateFailure,
@@ -903,6 +905,47 @@ test('merge-lease status reports holder and waiter ages', async () => {
   }
 });
 
+test('six planned CLI yields retain charges without failure parking or stale CLI reservations', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = ['--repo', REPO, '--base', BASE, '--pr', '601'];
+  for (let i = 0; i < 6; i++) {
+    // Isolate the five-release failure counter from the separate charged gate cap.
+    const acquired = await runCli(rootDir, ['acquire', ...args, '--head', 'yield-head',
+      '--owner-pid', '8601', '--wait', '0'], { maxGateAttempts: 100,
+      startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
+    assert.equal(acquired.code, 0);
+    const released = await runCli(rootDir, ['release', ...args, '--lease-id', jsonOutput(acquired.io).leaseId,
+      '--yield', '--reason', 'required-checks-wait'], {
+      startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
+    assert.equal(released.code, 0);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
+  }
+  const [retry] = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE });
+  assert.equal(retry.attempts, 6);
+  assert.equal(retry.consecutiveNoMergeReleases, 0);
+  assert.equal(retry.parkedReason, null);
+});
+
+test('repeated-failure CLI park supplies a closing status and reset instruction', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (let i = 0; i < 5; i++) {
+    const now = new Date(Date.parse('2026-06-20T18:00:00Z') + i * 300_000).toISOString();
+    const held = acquireFixture(rootDir, { holderPr: 601, holderHead: 'failure-head', now });
+    assert.equal(held.acquired, true);
+    releaseMergeLease({ rootDir, ...held.lease, now, reason: 'real-failure' });
+  }
+  const result = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '601', '--head', 'failure-head', '--owner-pid', '8601', '--wait', '0'], {
+    startMs: Date.parse('2026-06-20T18:30:00Z') });
+  assert.equal(result.code, 70);
+  const out = jsonOutput(result.io);
+  assert.equal(out.reason, 'repeated-no-merge-release');
+  assert.match(out.closingStatus, /repeated-no-merge-release cap/);
+  assert.match(out.closingStatus, /reset-attempts/);
+});
+
 test('merge-lease acquire parks after max gate attempts', async () => {
   const rootDir = freshRoot();
   try {
@@ -1098,11 +1141,9 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
       const started = Date.parse('2026-06-20T18:00:00Z');
       const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
         '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '900'], {
-        onSleep: ({ nowMs, advance }) => {
+        onSleep: ({ nowMs }) => {
           const target = started + (releases ? 400000 : 900000);
-          const delta = Math.min(0, target - nowMs);
-          advance(delta);
-          if (releases && !released && nowMs + delta >= target) {
+          if (releases && !released && nowMs >= target) {
             releaseMergeLease({ rootDir, repo: REPO, base: BASE, leaseId: holder.lease.leaseId,
               holderPr: holder.lease.holderPr, holderHead: holder.lease.holderHead, acquiredAt: holder.lease.acquiredAt });
             released = true;
@@ -1111,8 +1152,7 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
       });
       const out = jsonOutput(io);
       assert.equal(code, releases ? 0 : 75);
-      assert.ok(out.waited_s >= (releases ? 400 : 900));
-      assert.ok(out.waited_s <= (releases ? 430 : 900));
+      assert.equal(out.waited_s, releases ? 421 : 900);
       if (!releases) {
         assert.equal(out.configured_s, 900);
         assert.equal(out.timedOut, true);
@@ -1124,8 +1164,13 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
         return Number(line.match(/waited=(\d+)s/)[1]);
       });
       assert.equal(times[0], 0);
-      for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] <= 55);
-      assert.ok(out.waited_s - times.at(-1) <= 30);
+      const pollCeilingSeconds = loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
+        Math.max(30_000, 900_000 / 60))) / 1000;
+      for (let i = 1; i < times.length; i++) {
+        const gap = times[i] - times[i - 1];
+        assert.ok(gap >= 25 && gap <= 25 + pollCeilingSeconds);
+      }
+      assert.ok(out.waited_s - times.at(-1) <= 25 + pollCeilingSeconds);
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
 });

@@ -359,6 +359,8 @@
       "cliWaiterLifecycle": "unique-invocation-id; same-host-confirmed-dead-acquirer-pruning; bounded-finally-cleanup",
       "daemonReservationSeconds": "2 * pollIntervalMs / 1000, load-scaled once and capped at floor((2^31 - 1) / 1000)",
       "servedWaiterRemoval": "under-holder-acquisition-lock",
+      "releaseRequeue": "daemon-only; CLI returns with fresh invocation ID",
+      "progressReportGap": "25 seconds plus once-scaled polling ceiling, excluding synchronous I/O",
       "softDeadlineCleanupOwner": "concrete-coexistence-operation-including-pre-closure-exits",
       "queuePosition": "one-based-or-null-if-absent",
       "progressWait": "load-scaled-once-no-progress-interval-with-six-hour-nominal-ceiling"
@@ -372,7 +374,8 @@
       "relatedSchemaSurfaces": ["bin/merge-lease.mjs", "bin/hammer-verify-head.sh"],
       "owner": "AMA daemon and hammer merge lane",
       "retentionRows": 4096,
-      "noMergeReleaseEvents": ["requeue", "park"]
+      "noMergeReleaseEvents": ["requeue", "park"],
+      "nonFailureReleases": "yield/retryable-abort record backoff without failure parking"
     },
     {
       "id": "merge-lease-attempts",
@@ -385,6 +388,7 @@
         "templates/hammer-prompt.md"
       ],
       "owner": "AMA daemon and hammer merge lane",
+      "releaseAccounting": "atomic refund and release identity; yielded/retryable reset consecutive failures, preserve existing park",
       "optionalRetryFields": ["noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
     },
     {

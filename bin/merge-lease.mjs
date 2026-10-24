@@ -59,7 +59,7 @@ Usage:
                       [--root-dir <path>] [--required-checks-green]
                       [--wait-for-holder-deadline] [--wait-by-progress]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
-                      --lease-id <id> [--retryable-abort <reason>] [--merged | --terminal] [--reason <reason>]
+                      --lease-id <id> [--retryable-abort <reason> | --merged | --terminal | --yield] [--reason <reason>]
                       [--root-dir <path>]
   merge-lease reconcile --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease status  --repo <owner/name> --base <branch> [--root-dir <path>]
@@ -235,7 +235,7 @@ function parkedJson({ repo, base, pr, head, rootDir, attempt, maxAttempts, reaso
     retryable: attempt.retryable,
     maxAttempts,
     closingStatus: formatHamGateAttemptCapClosingStatus({
-      attempts: attempt.attempts, retryable: attempt.retryable, repo, base, pr, head, rootDir, requiredChecksGreen,
+      attempts: attempt.attempts, retryable: attempt.retryable, repo, base, pr, head, rootDir, requiredChecksGreen, reason,
     }),
   };
 }
@@ -462,7 +462,7 @@ async function runAcquire(argv, deps) {
       rootDir,
       attempt: gateAttempt.attempt,
       maxAttempts: gateAttempt.maxAttempts,
-      reason: 'max-gate-attempts',
+      reason: gateAttempt.attempt.parkedReason || 'max-gate-attempts',
       requiredChecksGreen: values['required-checks-green'],
     }));
     return EXIT_PARKED;
@@ -515,7 +515,9 @@ async function runAcquire(argv, deps) {
           });
           if (result.parked) {
             refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now: tickNow });
-            jsonLine(deps.stdout, { acquired: false, parked: true, reason: result.reason, retry: result.retry });
+            jsonLine(deps.stdout, { ...parkedJson({ repo, base, pr, head, rootDir,
+              attempt: result.retry, maxAttempts: deps.maxGateAttempts, reason: result.reason,
+              requiredChecksGreen: values['required-checks-green'] }), retry: result.retry });
             return EXIT_PARKED;
           }
           if (result.acquired) {
@@ -629,6 +631,7 @@ async function runRelease(argv, deps) {
     'retryable-abort': { type: 'string' },
     merged: { type: 'boolean' },
     terminal: { type: 'boolean' },
+    yield: { type: 'boolean' },
     reason: { type: 'string' },
   });
   if (values.help) {
@@ -642,8 +645,8 @@ async function runRelease(argv, deps) {
   const pr = parsePositiveInteger(values.pr, 'pr');
   const leaseId = requireString(values, 'lease-id');
   const retryableAbortReason = String(values['retryable-abort'] ?? '').trim();
-  if ((values.merged && values.terminal) || (retryableAbortReason && (values.merged || values.terminal))) {
-    throw usageError('release accepts one of --merged, --terminal or --retryable-abort');
+  if ([values.merged, values.terminal, values.yield, retryableAbortReason].filter(Boolean).length > 1) {
+    throw usageError('release accepts one of --merged, --terminal, --yield or --retryable-abort');
   }
   const startedMs = deps.nowMs();
   const deadlineMs = startedMs + DEFAULT_RELEASE_RETRY_MS;
@@ -684,7 +687,7 @@ async function runRelease(argv, deps) {
         now: deps.nowIso(),
       })
       : releaseMergeLease({ ...releaseArgs, now: deps.nowIso(), merged: values.merged,
-        terminal: values.terminal, reason: values.reason || 'holder-release' });
+        terminal: values.terminal, yielded: values.yield, reason: values.reason || 'holder-release' });
     if (!result.released && result.reason === 'mutation-lock-busy') {
       if (deps.nowMs() >= deadlineMs) {
         jsonLine(deps.stdout, retryableReleaseJson({

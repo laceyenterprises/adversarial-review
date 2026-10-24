@@ -143,9 +143,10 @@ export function classifyMergeLeaseGateFailure({ stage, state, error, status } = 
   return { retryable: false, reason: 'non-retryable-gate-failure' };
 }
 
-export function formatHamGateAttemptCapClosingStatus({ attempts, retryable, repo, base, pr, head, rootDir, requiredChecksGreen } = {}) {
+export function formatHamGateAttemptCapClosingStatus({ attempts, retryable, repo, base, pr, head, rootDir, requiredChecksGreen, reason } = {}) {
   const cliPath = new URL('../../bin/merge-lease.mjs', import.meta.url).pathname;
-  return `HAM closing status — no merge: parked by the gate-attempt cap after ${attempts} attempts (${retryable} retryable).${requiredChecksGreen ? ' Required checks were green in the latest pre-acquire snapshot for this head.' : ''} Reset with: node ${cliPath} reset-attempts --repo ${repo} --base ${base} --pr ${pr} --head ${head}${rootDir ? ` --root-dir ${rootDir}` : ''}`;
+  const cap = reason === 'repeated-no-merge-release' ? 'repeated-no-merge-release cap' : 'gate-attempt cap';
+  return `HAM closing status — no merge: parked by the ${cap} after ${attempts} attempts (${retryable} retryable).${requiredChecksGreen ? ' Required checks were green in the latest pre-acquire snapshot for this head.' : ''} Reset with: node ${cliPath} reset-attempts --repo ${repo} --base ${base} --pr ${pr} --head ${head}${rootDir ? ` --root-dir ${rootDir}` : ''}`;
 }
 
 function sanitizeSegment(value) {
@@ -1121,8 +1122,9 @@ export function acquireMergeLease({
 
 // Called only under the per-base holder/waiter lock, then the attempt lock.
 // Retry state survives waiter withdrawal, process restarts and new CLI IDs.
-function recordNoMergeRelease(rootDir, lease, at, reason) {
+function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, refund = false } = {}) {
   const { repo, base } = lease;
+  let attemptPrune = { removed: false };
   const retry = withAttemptMutationLockOnly({ rootDir, repo, base }, () => {
     const path = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
     const doc = readAttemptDoc(path);
@@ -1130,30 +1132,36 @@ function recordNoMergeRelease(rootDir, lease, at, reason) {
       && r.head === lease.holderHead && !attemptExpired(r, at));
     if (previous?.noMergeLeaseId === lease.leaseId) return previous;
     const noMergeReleases = (previous?.noMergeReleases || 0) + 1;
-    const consecutiveNoMergeReleases = previous?.noMergeReason === reason
+    const consecutiveNoMergeReleases = !chargeable ? 0 : previous?.noMergeReason === reason
       ? (previous.consecutiveNoMergeReleases || 0) + 1 : 1;
-    const parkedReason = consecutiveNoMergeReleases >= parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS)
-      ? 'repeated-no-merge-release' : null;
+    const parkedReason = previous?.parkedReason || (consecutiveNoMergeReleases >= parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS)
+      ? 'repeated-no-merge-release' : null);
     const backoffMs = loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
       1000 * 2 ** Math.min(noMergeReleases - 1, 20)));
     const next = normalizeAttemptRecord({ ...previous, pr: lease.holderPr, head: lease.holderHead,
+      ...(refund && previous ? { attempts: Math.max(0, (Number(previous.attempts) || 0) - 1),
+        retryable: (Number(previous.retryable) || 0) + 1 } : {}),
       noMergeLeaseId: lease.leaseId, noMergeReleases, consecutiveNoMergeReleases, noMergeReason: reason, parkedReason,
       reenteredAt: at, nextEligibleAt: new Date(Date.parse(at) + backoffMs).toISOString(),
       lastAttemptAt: at }, at);
-    writeJsonFile(path, { ...doc, updatedAt: at, attempts: sortedAttempts([
+    const attempts = sortedAttempts([
       ...doc.attempts.filter(r => Number(r.pr) !== lease.holderPr || r.head !== lease.holderHead), next,
-    ]) });
+    ]);
+    // Refund and release identity commit together. A failed history/waiter write
+    // can retry this lease without refunding a second time.
+    writeJsonFile(path, { ...doc, updatedAt: at, attempts });
+    attemptPrune = { removed: refund && Boolean(previous), attempts };
     return next;
   });
   const path = mergeLeaseWaitersFilePath(rootDir, { repo, base });
   const waiters = readWaiterDoc(path).waiters.filter(w => Number(w.pr) !== lease.holderPr || w.head !== lease.holderHead);
-  if (!retry.parkedReason && lease.waiter) {
+  if (!retry.parkedReason && lease.waiter?.priority === 'daemon') {
     waiters.push({ ...lease.waiter, arrivedAt: at, updatedAt: at, attempt: 1,
       notBefore: retry.nextEligibleAt });
   }
   writeJsonFile(path, waiterFileDoc(waiters, at));
   appendLeaseHistory(rootDir, lease, retry.parkedReason ? 'park' : 'requeue', at, `re-queued after no-merge release: ${reason}`);
-  return retry;
+  return { retry, attemptPrune };
 }
 
 export function releaseMergeLease({
@@ -1169,6 +1177,7 @@ export function releaseMergeLease({
   reason = 'holder-release',
   merged = false,
   terminal = false,
+  yielded = false,
   requestWatcherWakeImpl = requestWatcherWake,
   _afterFenceRead,
 } = {}) {
@@ -1195,7 +1204,7 @@ export function releaseMergeLease({
     const releasedAt = now || isoNow();
     let retry = null;
     if (historyEvent === 'release' && !merged && !terminal && !/^holder-pr-(merged|closed)$/.test(reason)) {
-      try { retry = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason); }
+      try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded })); }
       catch (err) {
         if (!isMutationLockBusyError(err)) throw err;
         return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
@@ -1227,7 +1236,6 @@ export function releaseMergeLeaseForRetryableAbort({
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
-  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
   const lease = readJsonFile(leasePath, null);
   const matched = holderMatches(lease, { leaseId: id, holderPr, holderHead, acquiredAt });
   if (!matched) {
@@ -1246,21 +1254,14 @@ export function releaseMergeLeaseForRetryableAbort({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
-    let attemptPrune;
+    let attemptPrune, retry;
     try {
-      attemptPrune = withAttemptMutationLockOnly(
-        { rootDir, repo, base },
-        () => refundAttemptUnlocked(attemptsPath, {
-          pr: currentLease.holderPr,
-          head: currentLease.holderHead,
-          now: now || isoNow(),
-        }),
-      );
+      ({ retry, attemptPrune } = recordNoMergeRelease(rootDir, currentLease, now || isoNow(),
+        retryableAbortReason, { chargeable: false, refund: true }));
     } catch (err) {
       if (!isMutationLockBusyError(err)) throw err;
       return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
     }
-    const retry = recordNoMergeRelease(rootDir, currentLease, now || isoNow(), retryableAbortReason);
     appendLeaseHistory(rootDir, currentLease, 'release', now || isoNow(), retryableAbortReason);
     rmSync(leasePath, { force: true });
     wakeDaemonWaiter({ rootDir, repo, base, now: now || isoNow(), requestWatcherWakeImpl });

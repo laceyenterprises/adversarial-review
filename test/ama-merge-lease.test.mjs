@@ -453,6 +453,71 @@ test('same-head retry state survives waiter withdrawal and a new acquiring proce
   assert.equal(blocked.reason, 'no-merge-backoff');
 });
 
+test('a served CLI reservation is never requeued even when its acquisition PID is reused', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { holderHead: 'cli-head', registerWaiter: true, waiterId: 'old-cli',
+    acquisitionPid: 12345, pidAliveFn: () => true, waiterDeadlineSeconds: 21601 };
+  const held = acquire(rootDir, args);
+  assert.equal(held.acquired, true);
+  releaseMergeLease({ rootDir, ...held.lease, now: '2026-06-20T18:00:01Z' });
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+  const resumed = acquire(rootDir, { ...args, waiterId: 'new-cli', acquisitionPid: 12346,
+    now: '2026-06-20T18:00:02Z' });
+  assert.equal(resumed.acquired, true);
+});
+
+for (const kind of ['yield', 'retryable-abort']) {
+  test(`six same-head ${kind} releases never park and interrupt consecutive failures`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+    const request = { holderHead: 'transient-head' };
+    let seconds = 0;
+    let held = acquire(rootDir, { ...request, now: at(seconds) });
+    releaseMergeLease({ rootDir, ...held.lease, now: at(seconds), reason: 'real-failure' });
+    for (let i = 0; i < 6; i++) {
+      seconds += 300;
+      held = acquire(rootDir, { ...request, now: at(seconds) });
+      assert.equal(held.acquired, true);
+      recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: held.lease.holderPr,
+        head: held.lease.holderHead, now: at(seconds), maxAttempts: 10 });
+      const released = kind === 'yield'
+        ? releaseMergeLease({ rootDir, ...held.lease, now: at(seconds), yielded: true, reason: 'required-checks-wait' })
+        : releaseMergeLeaseForRetryableAbort({ rootDir, ...held.lease, now: at(seconds),
+          retryableAbortReason: 'github-gate-read-failed' });
+      assert.equal(released.released, true);
+      assert.equal(released.retry.parkedReason, null);
+      assert.equal(released.retry.consecutiveNoMergeReleases, 0);
+    }
+    held = acquire(rootDir, { ...request, now: at(seconds + 300) });
+    assert.equal(held.acquired, true);
+    assert.equal(releaseMergeLease({ rootDir, ...held.lease, now: at(seconds + 300), merged: true }).released, true);
+    const [retry] = readMergeLeaseAttempts(rootDir, IDENTITY);
+    assert.equal(retry.retryable, kind === 'yield' ? 0 : 6);
+    assert.equal(retry.attempts, kind === 'yield' ? 6 : 0);
+  });
+}
+
+test('retryable release retries after a history failure without refunding twice', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const held = acquire(rootDir, { holderHead: 'retry-refund' });
+  for (let i = 0; i < 2; i++) recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY,
+    pr: held.lease.holderPr, head: held.lease.holderHead });
+  const rename = fs.renameSync;
+  const mocked = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (String(to).endsWith('.history.jsonl')) throw new Error('synthetic history write failure');
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => releaseMergeLeaseForRetryableAbort({ rootDir, ...held.lease }), /synthetic history write failure/);
+  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(releaseMergeLeaseForRetryableAbort({ rootDir, ...held.lease }).released, true);
+  assert.deepEqual(readMergeLeaseAttempts(rootDir, IDENTITY).map(r => [r.attempts, r.retryable]), [[1, 1]]);
+});
+
 test('LEASEFAIR-01 an abandoned daemon reservation expires, letting closers proceed', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

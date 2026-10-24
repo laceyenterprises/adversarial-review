@@ -29,8 +29,11 @@ operational evidence, not merge authority. A holder still cannot be preempted
 merely because a local live PID has exceeded its deadline.
 
 A fenced no-merge release also writes `requeue` (or `park` when its repeated
-failure cap is reached), with reason
+chargeable failure cap is reached), with reason
 `re-queued after no-merge release: <failure reason>`. The ordinary release row
-retains the original reason. These rows are scheduling evidence; they grant no
+retains the original reason. Planned CI-wait yields use `required-checks-wait`;
+yields and retryable aborts record re-entry/backoff without charging the parking
+count. Only daemon reservations are reinserted; a CLI re-enters on its next
+invocation. These rows are scheduling evidence; they grant no
 merge permission. Retry records retain counters, backoff deadline and parking
 reason independently of the bounded history.

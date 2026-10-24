@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters } from '../src/ama/merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 
 import {
@@ -1527,8 +1527,33 @@ test('daemon release carries success, transient pre-merge failure and permanent 
     const result = await attemptDaemonCleanMerge(args);
     assert.equal(result.reason, kind);
     assert.deepEqual(h.releaseOutcome, { merged: kind === 'merged',
-      terminal: kind === 'permanent-merge-rejection', reason: kind });
+      terminal: kind === 'permanent-merge-rejection', yielded: kind === 'attestation-record-failed', reason: kind });
   }
+});
+
+test('repeated daemon gate read failures back off without parking and recover on the same head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'daemon-transient-release-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const h = makeHarness();
+  const identity = { rootDir, repo: 'fixture/repo', base: 'main' };
+  let seconds = 0;
+  const now = () => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  h.deps.acquireLeaseImpl = async () => acquireDaemonMergeLease({ ...identity,
+    holderPr: 7702, holderHead: HEAD, holderPid: process.pid, holderHost: hostname(), now: now() });
+  h.deps.releaseLeaseImpl = (lease, outcome) => releaseMergeLease({ rootDir, ...lease, ...outcome, now: now() });
+  // Admission sees green; the subsequent in-lease read is transiently unavailable.
+  for (let i = 0; i < 6; i++) {
+    h.deps.fetchLiveGateImpl = async () => { throw new Error('HTTP 503'); };
+    const result = await attemptDaemonCleanMerge(baseArgs(h));
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(result.leaseAcquired, true);
+    const [retry] = readMergeLeaseAttempts(rootDir, identity);
+    assert.equal(retry.parkedReason, null);
+    assert.equal(retry.consecutiveNoMergeReleases, 0);
+    seconds += 300;
+  }
+  h.deps.fetchLiveGateImpl = async () => greenGate();
+  assert.equal((await attemptDaemonCleanMerge(baseArgs(h))).merged, true);
 });
 
 test('drafted daemon reservation withdraws on next pass and cannot block a ready closer', async t => {

@@ -720,6 +720,7 @@ async function attemptDaemonCleanMergeInner({
     try {
       releaseLeaseImpl(lease, { merged: releaseOutcome?.merged === true,
         terminal: releaseOutcome?.permanent === true || releaseOutcome?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        yielded: releaseOutcome?.merged === false && releaseOutcome?.permanent !== true,
         reason: releaseOutcome?.reason || 'holder-exception' });
     } catch (err) {
       logger?.warn?.(

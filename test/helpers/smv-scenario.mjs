@@ -166,7 +166,7 @@ if (scenario === 'clean') {
     await terminalReviewTick();
     assert.equal(reviewRequests, 1);
   }
-  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, readMergeLeaseHistory, upsertMergeLeaseWaiter, readMergeLeaseWaiters } = await import('../../src/ama/merge-lease.mjs');
+  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, releaseMergeLeaseForRetryableAbort, readMergeLeaseHistory, upsertMergeLeaseWaiter, readMergeLeaseWaiters } = await import('../../src/ama/merge-lease.mjs');
   const atLeaseSecond = seconds => new Date(Date.now() + seconds * 1000).toISOString();
   const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main', now: atLeaseSecond(0),
     holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
@@ -231,6 +231,24 @@ if (scenario === 'clean') {
   assert.deepEqual(leaseHistory.map(row => row.event), ['grant', 'release', 'grant', 'release', 'grant', 'release', 'grant', 'release', 'grant', 'release']);
   assert.equal(leaseHistory.find(row => row.leaseId === retry.lease.leaseId).holderRole, 'closer');
   assert.equal(leaseHistory.find(row => row.leaseId === served.lease.leaseId).holderRole, 'daemon');
+  // Planned yields and transient aborts must not turn into same-head parking.
+  for (const kind of ['yield', 'retryable-abort']) {
+    const lane = { ...leaseArgs, rootDir: join(rootDir, `nonfailure-${kind}`), holderPr: 4, holderHead: kind };
+    for (let i = 0; i < 6; i++) {
+      const now = atLeaseSecond(i * 300);
+      const held = acquireMergeLease({ ...lane, now });
+      assert.equal(held.acquired, true);
+      const result = kind === 'yield'
+        ? releaseMergeLease({ rootDir: lane.rootDir, ...held.lease, now, yielded: true, reason: 'required-checks-wait' })
+        : releaseMergeLeaseForRetryableAbort({ rootDir: lane.rootDir, ...held.lease, now, retryableAbortReason: 'github-gate-read-failed' });
+      assert.equal(result.released, true);
+      assert.equal(result.retry.parkedReason, null);
+      assert.equal(result.retry.consecutiveNoMergeReleases, 0);
+    }
+    const held = acquireMergeLease({ ...lane, now: atLeaseSecond(1800) });
+    assert.equal(held.acquired, true);
+    assert.equal(releaseMergeLease({ rootDir: lane.rootDir, ...held.lease, now: atLeaseSecond(1800), merged: true }).released, true);
+  }
   const { exerciseDaemonWaiterLifecycle } = await import('./daemon-waiter-lifecycle.mjs');
   await exerciseDaemonWaiterLifecycle(join(rootDir, 'abandoned-daemon'), 'hold', { sibling: true });
   for (const change of ['hold-base-ref', 'hold-base-branch']) {

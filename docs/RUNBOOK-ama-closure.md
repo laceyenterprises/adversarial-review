@@ -4338,10 +4338,18 @@ A non-terminal no-merge release re-enters behind all existing arrivals with
 persistent exponential backoff for its PR/head. Delayed reservations yield to
 ready waiters. The delay doubles from one second to the existing watcher poll
 interval, load-scaled once. Repeating one failure reason through the existing
-attempt cap parks the head with `repeated-no-merge-release`. Inspect
+attempt cap parks the head with `repeated-no-merge-release`. Only chargeable
+failures count; `release --yield` (the hammer's first CI-wait release) and
+retryable aborts reset the consecutive count without clearing an existing park.
+Yields retain the gate charge; retryable aborts refund it atomically with release
+accounting. Non-permanent daemon failures use the yield outcome. Grants alone
+do not prove gate success and preserve failure evidence. Repeated-failure parks
+use the same audit, closing-status comment and page path as gate-attempt parks. Inspect
 `status`/`list` for arrival time, role, position and retry evidence; inspect
 history for `requeue`/`park` with the release reason. Recovery uses a new head
 or the existing `reset-attempts` command while that head is not holding the lease.
+Only daemon reservations requeue; CLI invocations return with a fresh ID at
+the tail, so exited/reused acquisition PIDs cannot leave a ghost reservation.
 Merged/terminal releases do not requeue. No new config or deployment migration
 is required.
 

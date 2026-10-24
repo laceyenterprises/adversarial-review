@@ -121,9 +121,10 @@ pass without charging failure counters. This does not waive any live merge gate.
 No-merge release re-enters behind all arrivals already present, with optional
 `notBefore` from the head's persistent exponential backoff. Delayed waiters do
 not block ready requests. A served holder stores its optional `waiter` snapshot
-so a fenced non-terminal release can reinsert the same reservation at its new
-arrival time. The next acquiring CLI retains its unique invocation identity;
-a dead prior CLI reservation is pruned normally. Terminal/merged releases do not
+so a fenced non-terminal release can reinsert a daemon reservation at its new
+arrival time. CLI reservations are never reinserted: the acquiring process has
+exited, and the next invocation registers a fresh identity at the tail. Persistent
+PR/head backoff still applies even though the old CLI row is absent. Terminal/merged releases do not
 requeue. The daemon preserves transient retry reservations and withdraws
 draft, closed, terminal, moved-head or declined reservations on its next pass.
 Parking removes the reservation; retry evidence survives withdrawal.
@@ -133,5 +134,9 @@ CLI status/list projects `position` (one-based arrival order), `role`
 doubles to a nominal ceiling sized once by the load-aware helper: at least 30 seconds,
 increasing with the nominal wait budget (one sixtieth) up to the existing watcher
 poll interval,
-and clamps each sleep to the remaining caller/stall budget. Signal cancellation
+and clamps each sleep to the remaining caller/stall budget. HAMLEASE-01 progress
+reports have a 25-second minimum interval and appear on the next poll: the
+maximum gap is 25 seconds plus the once-scaled polling ceiling (before integer
+second rounding), excluding time spent in synchronous I/O. The final output
+obeys the same gap bound. Signal cancellation
 and fixed bounded cleanup retries retain their existing behavior.

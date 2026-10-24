@@ -65,7 +65,6 @@ declare -a LABELS=(
   "live-pack-edit-approved|Operator waiver: PR may edit the spec, plan or prompts of another running build pack.|0E8A16"
   "ticket-pipeline-paused|Pause adversarial-review Linear ticket pipeline sync.|F9D0C4"
   "fast-merge-veto|Operator override: forces normal adversarial review.|D93F0B"
-  "fast-merge:docs|Documentation-only changes.|0E8A16"
   "fast-merge:spec-hash-rebind|Spec-hash rebind PR (no code diff).|0E8A16"
   "fast-merge:test-fixtures|Additive test fixture data only.|0E8A16"
   "fast-merge:submodule-bump|Submodule pointer bump.|0E8A16"

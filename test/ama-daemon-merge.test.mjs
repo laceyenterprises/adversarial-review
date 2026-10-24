@@ -180,6 +180,56 @@ function baseArgs(harness, overrides = {}) {
   };
 }
 
+test('pre-merge recording follows live validation on every transport retry', async () => {
+  for (const revoked of [false, true]) {
+    const events = [];
+    const h = makeHarness({ mergeResults: [
+      { exitCode: 1, stderr: 'HTTP 503 Service Unavailable' }, { exitCode: 0 },
+    ] });
+    const fetchGate = h.deps.fetchLiveGateImpl;
+    const merge = h.deps.runMergeImpl;
+    h.deps.fetchLiveGateImpl = async () => {
+      events.push('gate');
+      return revoked && h.calls.merge > 0 ? greenGate({ requiredChecks: [] }) : fetchGate();
+    };
+    h.deps.runMergeImpl = async args => { events.push('merge'); return merge(args); };
+    const result = await attemptDaemonCleanMerge(baseArgs(h, {
+      beforeMergeImpl: async ({ liveGate }) => {
+        assert.equal(liveGate.candidateHead, HEAD);
+        assert.ok(liveGate.requiredChecks.length > 0);
+        events.push('record');
+      },
+    }));
+    assert.equal(result.merged, !revoked);
+    assert.deepEqual(events, revoked
+      ? ['gate', 'record', 'merge', 'gate']
+      : ['gate', 'record', 'merge', 'gate', 'record', 'merge', 'gate']);
+    assert.equal(h.calls.release, 1);
+  }
+});
+
+test('docs range metadata write failure releases the lease without attesting or merging', async () => {
+  const docsFastPath = { headSha: HEAD, baseSha: OTHER_HEAD, baseBranch: 'main' };
+  const gate = greenGate({ docsFastPath });
+  const h = makeHarness({ liveGate: gate });
+  const write = h.deps.writeAuditImpl;
+  let writes = 0, recorded = 0;
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    docsFastPath, verdict: 'docs-fast-path', liveGate: gate,
+    auditMetadata: { closureAuthority: 'docs-fast-path', docsFastPath },
+    writeAuditImpl: args => {
+      if (++writes === 2) throw new Error('synthetic metadata write failure');
+      return write(args);
+    },
+    beforeMergeImpl: async () => { recorded++; },
+  }));
+  assert.equal(result.reason, 'audit-init-failed');
+  assert.equal(result.disposition, 'deferred');
+  assert.equal(recorded, 0);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+});
+
 // ── Unit helpers ─────────────────────────────────────────────────────────────
 
 test('isFullyCleanSettledReview: zero/known both → clean', () => {

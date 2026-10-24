@@ -1,4 +1,6 @@
 import { captureReadyFindings } from './findings-backlog.mjs';
+import { readDocsFastPath } from './docs-only.mjs';
+import { emitDocsFastPathAttestation } from './reviewed-attestation.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -375,6 +377,9 @@ export function runDaemonCleanMergeAttempt(args = {}) {
 async function runDaemonCleanMergeAttemptInner({
   rootDir = ROOT,
   cfg,
+  docsFastPath = null,
+  readDocsFastPathImpl = readDocsFastPath,
+  emitDocsFastPathAttestationImpl = emitDocsFastPathAttestation,
   pollIntervalMs,
   repoPath,
   prNumber,
@@ -417,7 +422,7 @@ async function runDaemonCleanMergeAttemptInner({
   onGateSnapshot = null,
 } = {}) {
   const base = candidate?.baseBranch;
-  const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
+  const validatedHead = docsFastPath?.headSha || gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
   const stopHold = () => {
     const reason = fleetStopReason({ env });
@@ -430,6 +435,7 @@ async function runDaemonCleanMergeAttemptInner({
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
   }
+  if (docsFastPath && cfg?.autonomousMergeExecutionEnabled === false) return NOT_TAKEN('autonomous-merge-execution-disabled');
   const strictMode = cfg?.strictMode !== false;
   const branchProtectionRequired = cfg?.branchProtection?.required !== false;
   const requiredGateContext = resolveGateStatusContext(env);
@@ -493,7 +499,7 @@ async function runDaemonCleanMergeAttemptInner({
     operatorLogins: cfg?.operatorLogins,
     operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: hamAuditHead, labels: candidate?.labels });
-  if (!snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  if (!docsFastPath && !snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
     hamTerminalRemediationHead =
@@ -626,11 +632,11 @@ async function runDaemonCleanMergeAttemptInner({
   // The MSM-02 predicate clears the verdict gate only for the normalized
   // `settled-success` token; a settled-success review verdict maps to it, and
   // anything else stays raw so the predicate refuses it.
-  const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+  const settledVerdict = docsFastPath ? 'docs-fast-path' : SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
     ? 'settled-success'
     : String(gateSnapshot?.settledReview?.verdict || '');
   const mergeMethod = cfg?.mergeMethod === 'merge' ? 'merge' : 'squash';
-  const workerIdentity = await resolveDaemonWorkerIdentityForPr({
+  const workerIdentity = docsFastPath ? { ok: false, reason: 'docs-fast-path' } : await resolveDaemonWorkerIdentityForPr({
     repo: repoPath,
     prNumber,
     currentHeadSha: liveHead,
@@ -735,7 +741,7 @@ async function runDaemonCleanMergeAttemptInner({
   // The label must be pinned to the EXACT head being merged (`liveHead`).
   let operatorMergeAccountability = null;
   let autonomousAccountabilitySubstituted = false;
-  if (!workerIdentity.ok) {
+  if (!workerIdentity.ok && !docsFastPath) {
     operatorMergeAccountability = resolveOperatorMergeAccountabilityImpl({
       operatorApprovalEvent,
       mergeAgentRequestEvent,
@@ -937,6 +943,7 @@ async function runDaemonCleanMergeAttemptInner({
   };
   const terminalReviewHead = certifiedNonCleanHead ? hamAuditHead : null;
   const initialGate = {
+    docsFastPath,
     terminalReviewValidated: Boolean(terminalReviewHead && terminalReviewHead === liveHead),
     primaryChange,
     requirePrimaryChange: true,
@@ -964,6 +971,7 @@ async function runDaemonCleanMergeAttemptInner({
     operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
     allowHamTerminalRemediation: hamTerminalRemediationHead,
     allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
+    docsFastPath,
     reviewState: {
       blockingFindingCount: reviewState?.blockingFindingCount,
       blockingFindingState: reviewState?.blockingFindingState,
@@ -974,17 +982,20 @@ async function runDaemonCleanMergeAttemptInner({
     noCiRepositories: cfg?.noCiRepositories,
     requiredGateContext,
     branchProtectionRequiredContexts,
-    requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    requiredCheckContexts: docsFastPath
+      ? [...new Set([...resolveRequiredCheckContextsFromCfg(cfg), ...branchProtectionRequiredContexts])]
+      : resolveRequiredCheckContextsFromCfg(cfg),
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: initialGate,
     mergeMethod,
     hqRoot,
     auditMetadata: {
       ciMode: ciBootstrap.mode || 'github-checks',
+      ...(docsFastPath ? { docsFastPath } : {}),
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
       // Name the authority that cleared the review gate in the audit doc.
-      ...(operatorOverrideUsed
+      ...(docsFastPath ? { closureAuthority: 'docs-fast-path' } : operatorOverrideUsed
         ? { closureAuthority: 'daemon-operator-approved-override' }
         : hamTerminalRemediationHead
           ? { closureAuthority: 'daemon-ham-terminal-remediation' }
@@ -997,7 +1008,7 @@ async function runDaemonCleanMergeAttemptInner({
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
       // merge authority rests on.
-      mergeAccountability: operatorOverrideUsed
+      mergeAccountability: docsFastPath ? 'docs-fast-path' : operatorOverrideUsed
         ? 'operator-approval'
         : cleanCloserCommitAccountability
           ? 'autonomous-closer-commit'
@@ -1077,7 +1088,7 @@ async function runDaemonCleanMergeAttemptInner({
       }
     },
     emitFindingImpl: emitProtectivePredecessorFindingImpl,
-    dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false
+    dismissStaleRequestChangesImpl: !docsFastPath && dismissStaleRequestChangesOnResolved !== false
       ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
           authoritativeReviewerLogins,
           message:
@@ -1095,15 +1106,24 @@ async function runDaemonCleanMergeAttemptInner({
         return JSON.parse(stdout);
       },
     }),
+    beforeMergeImpl: docsFastPath ? async ({ liveGate }) => {
+      await emitDocsFastPathAttestationImpl({ hqRoot, repo: repoPath, prNumber, headSha: validatedHead,
+        baseSha: liveGate.docsFastPath.baseSha, execFileImpl, env, log: logger });
+    } : null,
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
       const state = String(rollup?.state || '');
+      const freshDocs = docsFastPath ? await readDocsFastPathImpl({ repoPath, prNumber,
+        subject: { headSha: validatedHead }, live: true, execFileImpl, env, execGhWithRetryImpl }) : null;
       const freshBootstrap = await bootstrapFor(rollup);
       ciMergePathPending = mergePathPendingFor(rollup);
       return reportGateSnapshot({
         terminalReviewValidated: Boolean(terminalReviewHead
           && terminalReviewHead === (rollup?.headSha || rollup?.headRefOid || '')),
+        // A moving base tip is normal: the reader reclassifies its immutable
+        // base/head range. A retarget still invalidates the base-scoped lease.
+        docsFastPath: freshDocs?.baseBranch === docsFastPath?.baseBranch ? freshDocs : null,
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,

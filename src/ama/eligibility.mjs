@@ -498,7 +498,8 @@ function branchProtectionRequiresGate(prMetadata, requiredContext) {
 function classifyFastMergeState(prMetadata, cfg, fastMergeState) {
   const labels = currentLabelSet(prMetadata);
   const configuredLabels = new Set(
-    (cfg?.eligibility?.fastMergeLabels || []).map((label) => normalizeLogin(label)),
+    (cfg?.eligibility?.fastMergeLabels || []).map((label) => normalizeLogin(label))
+      .filter(label => label !== 'fast-merge:docs'),
   );
   const configuredLabelPresent = [...configuredLabels].some((label) => labels.has(label));
   const vetoPresent = labels.has('fast-merge-veto') || fastMergeState?.vetoPresent === true;

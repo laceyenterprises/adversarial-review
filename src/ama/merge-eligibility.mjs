@@ -1,3 +1,4 @@
+import { docsReviewRequested } from '../docs-only.mjs';
 import { checkPrimaryChange } from './primary-change.mjs';
 /**
  * MSM-02 — shared merge-eligibility predicate over already-fetched GitHub state.
@@ -263,7 +264,11 @@ export function evaluateMergeEligibility(state = {}) {
     operatorLabelActorEnforcement: state.operatorLabelActorEnforcement,
   }, { headSha: state.candidateHead, labels: state.labels });
 
-  if (!verdictEligible(state?.verdict) && !operatorOverride) reasons.push('verdict-not-eligible');
+  const docsAuthority = state.verdict === 'docs-fast-path'
+    && state.docsFastPath?.headSha === state.candidateHead
+    && Boolean(state.docsFastPath?.baseSha) && state.docsFastPath.reviewRequested !== true
+    && !docsReviewRequested(state);
+  if (!verdictEligible(state?.verdict) && !operatorOverride && !docsAuthority) reasons.push('verdict-not-eligible');
   if (!requiredChecksGreen(state?.requiredChecks, state?.requiredCheckContexts)) reasons.push('ci-not-green');
   // A closed/merged PR is a definite `pr-not-mergeable` even while GitHub still
   // reports `UNKNOWN`; only an open PR's UNKNOWN is the transient read.

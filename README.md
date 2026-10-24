@@ -1048,6 +1048,22 @@ next-day batch PRs and complete applied/dropped coverage. Read per-area size,
 age and batch errors through `pipeline-health` JSON (`nonBlockingBacklog`) or
 `node bin/review-findings.mjs backlog --db <existing-review-db>`.
 
+DOCSFASTPATH-01 sends Markdown/image-only changes under `docs/` to the existing
+daemon merge lane, with a signed docs-fast-path attestation and green exact-head
+checks. Under the merge lease, every attempt revalidates live gates before
+recording an attestation. Base tip advancement requires a fresh docs-only range
+on the same base branch; terminal audit metadata records that refreshed range.
+Explicit review requests keep full review, withdrawing the waiver with a pending
+gate status at admission, classification or live merge checks. Failed withdrawal
+retains the fast-path wait for retry. No durable review status or smoke promise is added; offline
+regressions are in `test/docs-fast-path.test.mjs` and
+`test/ama-daemon-merge.test.mjs`. Deploy the companion signer/ledger migration first.
+SRE separately observes the next three docs-only merges within about ten minutes
+of green checks, without reviewer/closer and with recorded attestations, plus a
+non-docs change receiving review. See the
+[closure runbook](docs/RUNBOOK-ama-closure.md#docs-only-daemon-merge-docsfastpath-01).
+
+
 REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
 observational applied flag to existing remediation completions/audit text.
 The note has no lifecycle, verdict, strict-mode or round-budget authority.

@@ -11,6 +11,7 @@ import {
   buildReviewedAttestationPayload,
   enqueuePendingReviewedAttestation,
   emitReviewedAttestation,
+  emitDocsFastPathAttestation,
   recordSignedReviewedAttestation,
   readPendingReviewedAttestations,
   retryPendingReviewedAttestations,
@@ -204,6 +205,7 @@ test('reviewed attestation signing uses the shipped flag contract and records th
     '--head-sha', 'def456', '--kind', 'reviewed',
   ]);
   assert.equal(calls[0].options.input, undefined);
+  assert.equal(calls[0].args[calls[0].args.indexOf('--verdict') + 1], 'request-changes');
   assert.deepEqual(calls[0].options.env, {
     PATH: '/usr/bin',
     KEEP_ME: 'yes',
@@ -1093,6 +1095,41 @@ test('reviewed attestation recording does not retry permanent subprocess failure
     /permission denied/
   );
   assert.equal(attempts, 1);
+});
+
+test('docs attestation signing omits absent verdict flags across a real subprocess boundary', async () => {
+  const result = await emitDocsFastPathAttestation({
+    repo: 'example/docs', prNumber: 1, headSha: 'a'.repeat(40), env: {},
+    readChainImpl: async () => [],
+    execFileImpl: (_command, args, options) => execFileAsync(process.execPath, [
+      '-e', `
+        const assert = require('node:assert/strict');
+        const args = process.argv.slice(1);
+        if (args[1] === 'sign') {
+          assert.equal(args.includes('--verdict'), false);
+          assert.equal(args.includes('--findings-count'), false);
+          const value = flag => args[args.indexOf(flag) + 1];
+          process.stdout.write(JSON.stringify({
+            schema_version: 1, repo: value('--repo'), pr_number: Number(value('--pr')),
+            head_sha: value('--head-sha'), parent_head_sha: null, kind: value('--kind'),
+            producer_identity: process.env.HCP_SUBJECT, verdict: null, findings_count: null,
+            payload: JSON.parse(value('--payload-json')), ts: value('--ts'),
+            signature: { algorithm: 'hcp-hmac-sha256:v1', subject: process.env.HCP_SUBJECT,
+              digest: 'sha256:' + 'A'.repeat(43) }
+          }));
+        } else {
+          let input = '';
+          process.stdin.setEncoding('utf8');
+          process.stdin.on('data', chunk => { input += chunk; });
+          process.stdin.on('end', () => process.stdout.write(JSON.stringify({
+            ...JSON.parse(input), attestation_id: 'fixture-docs-attestation'
+          })));
+        }
+      `, '--', ...args,
+    ], options),
+  });
+  assert.equal(result.signed.verdict, null);
+  assert.equal(result.recorded.attestation_id, 'fixture-docs-attestation');
 });
 
 test('reviewed attestation recording writes payload to a real child stdin stream', async () => {

@@ -272,6 +272,7 @@
     },
     {
       "id": "follow-up-jobs",
+      "simplicityNote": "Optional advisory section text or null, derived from reviewBody; excluded from findings, gates and round accounting (REVIEWSIMPLE-01)",
       "terminalEventEvidence": "Normalized events and status probes retain SDK terminal/succeeded booleans, including explicit false and wire-only terminal outcomes.",
       "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000, "settledCleanBypassesResolution": true, "attempts": "failed lookups including creation; legacy holds count as one", "maxAttempts": 3, "exhaustedStopCode": "branch-unresolved", "operatorRequeueResetsAttempts": true },
       "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],

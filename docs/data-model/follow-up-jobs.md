@@ -10,6 +10,16 @@ replay; no queue state, retry budget or merge decision changes.
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
+## Simplicity advisory (REVIEWSIMPLE-01)
+
+Each review's existing job stores `simplicityNote`: the text of the optional
+final `## Simplicity and cost (advisory)` section, or `null` when absent/empty.
+Normalization derives it from `reviewBody` for older records. Count non-null
+notes by distinct `(repo, prNumber)` to measure the share of PRs with advice.
+The note is outside both finding lists and the verdict; it changes no strict
+gate, dispatch decision, remediation round budget or retry cap. A settled clean
+review with only a note still owes no remediation round.
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

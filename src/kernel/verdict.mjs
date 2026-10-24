@@ -23,6 +23,7 @@ const CANONICAL_REVIEW_SECTION_HEADINGS = new Map([
   ['non-blocking issues', 'Non-blocking issues'],
   ['suggested fixes', 'Suggested fixes'],
   ['verdict', 'Verdict'],
+  ['simplicity and cost (advisory)', 'Simplicity and cost (advisory)'],
 ]);
 
 function canonicalReviewSectionHeading(value) {
@@ -33,16 +34,16 @@ function canonicalReviewSectionHeading(value) {
 function promoteCanonicalReviewSectionHeadings(text) {
   return mapUnfencedReviewLines(text, (line) => line
     .replace(
-      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:[ \t]*(\S.*)$/gim,
+      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict|simplicity and cost \(advisory\))[ \t]*:[ \t]*(\S.*)$/gim,
       (_, heading, inlineBody) => `## ${canonicalReviewSectionHeading(heading)}\n${String(inlineBody).trim()}`,
     )
     .replace(
-      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:?[ \t]*\r?$/gim,
+      /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict|simplicity and cost \(advisory\))[ \t]*:?[ \t]*\r?$/gim,
       (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
     ));
 }
 
-const CANONICAL_REVIEW_SECTION_PATTERN = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/gim;
+const CANONICAL_REVIEW_SECTION_PATTERN = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict|Simplicity and cost \(advisory\))[ \t]*$/gim;
 const TOP_LEVEL_REVIEW_SECTION_PATTERN = /^##[ \t]+\S.*$/gim;
 
 function canonicalReviewSectionMatches(text) {
@@ -220,6 +221,12 @@ function classifyStructuredBlockingIssues(reviewBody) {
   return { count, state };
 }
 
+function extractSimplicityNote(reviewBody) {
+  return extractMarkdownSection(
+    promoteCanonicalReviewSectionHeadings(reviewBody), 'Simplicity and cost (advisory)',
+  )?.trim() || null;
+}
+
 function normalizeEffectiveReviewVerdict(reviewBody, { log = null, context = '' } = {}) {
   const statedVerdict = extractReviewVerdict(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(statedVerdict);
@@ -316,6 +323,7 @@ function normalizeReviewVerdict(verdict) {
 export {
   classifyStructuredBlockingIssues,
   extractReviewVerdict,
+  extractSimplicityNote,
   looksLikeRuntimeJunk,
   normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,

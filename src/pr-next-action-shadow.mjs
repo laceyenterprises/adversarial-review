@@ -1,6 +1,7 @@
 // ── NXA-02 observational shadow of the shared next action ────────────────────
 //
-// Consumers other than the NXA-03 wake keep legacy decisions and effects. After deciding,
+// Consumers other than the NXA-03 wake and HAMATTEST-03 ownerless review keep
+// legacy decisions and effects. After deciding,
 // it hands this module (through src/pr-next-action-consumer.mjs, which copies
 // the evidence synchronously and loads this module lazily) that decision plus
 // evidence it already holds. The

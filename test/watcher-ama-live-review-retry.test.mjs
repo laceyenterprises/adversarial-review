@@ -218,6 +218,7 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
     assert.deepEqual(result, {
       dispatched: false,
       reason: 'fail-closed',
+      selectedClosureOwner: { owner: 'review', reason: 'exact-head-review' },
       closureOwner: { owner: 'review', reason: 'exact-head-review' },
       namedReason: 'fail-closed',
       amaEnabled: true,

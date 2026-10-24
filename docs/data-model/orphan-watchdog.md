@@ -26,6 +26,17 @@ the bound. Held, draft and terminal PRs do not enter recovery.
 
 HAMATTEST-02 executes an explicit shared `rereview-exact-head` decision before
 the idle bound when the PR has no live owner and ownership reads are certain.
+HAMATTEST-03 also honors `selectedClosureOwner` of review/exact-head-review
+(with `closureOwner` accepted for compatibility). Both this selection and an
+explicit `rereview-exact-head` decision require stale-head evidence matching the
+current head and this row's reviewed head, with those heads distinct.
+This covers a recorded publication bridge whose live verdict is unsettled,
+without overwriting its carry-forward refusal reasons. Coexistence preserves
+that selection separately through bounded waits and invokes recovery before
+returning the wait. `closureOwner` remains wait/page until ownership is certainly
+absent and queueing succeeds, then reports review with `exact-head-review-queued`.
+Live or uncertain ownership and queue refusal retain wait/page. The selection
+is an in-memory projection; the durable store shape is unchanged.
 The existing `heads.rereview` reservation permits one successful request per
 head. Local queue failures refund that reservation. The request uses the
 existing `system-orphan-head-review:<head>` marker, which the watcher honors

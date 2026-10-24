@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { isAmaCloserPidAlive } from './closer-lease.mjs';
 
 const psOptions = { encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024 };
@@ -8,15 +9,16 @@ const validRowPid = pid => Number.isInteger(pid) && pid >= 0;
 const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
   ? new Date(Date.parse(value)).toISOString() : null;
 const psTimestamp = value => timestamp(`${value} UTC`);
-const psEnvironment = () => ({ ...process.env, LC_ALL: 'C', TZ: 'UTC' });
+const execFileAsync = promisify(execFile);
+const psEnvironment = env => ({ ...process.env, ...env, LC_ALL: 'C', TZ: 'UTC' });
 
 // Best effort at spawn time. Missing identity never authorizes early recovery.
-export function captureCloserProcess(pid, options = {}) {
+export async function captureCloserProcess(pid, options = {}) {
   if (!validPid(pid)) return null;
   try {
-    const start = (options.processExecFileSyncImpl || execFileSync)('ps', ['-o', 'lstart=', '-p', String(pid)],
-      { ...psOptions, env: psEnvironment() });
-    return { pid, startedAt: psTimestamp(String(start).trim()) };
+    const { stdout } = await (options.processExecFileImpl || execFileAsync)('ps', ['-o', 'lstart=', '-p', String(pid)],
+      { ...psOptions, env: psEnvironment(options.env) });
+    return { pid, startedAt: psTimestamp(String(stdout).trim()) };
   } catch { return { pid, startedAt: null }; }
 }
 
@@ -37,11 +39,11 @@ export function probeCloserSubmitter(record, lease, options = {}) {
     // overflow, empty result or malformed row is unknown, never an empty scan.
     const output = String((options.processExecFileSyncImpl || execFileSync)('ps',
       ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args='],
-      { ...psOptions, env: psEnvironment() }));
+      { ...psOptions, env: psEnvironment(options.env) }));
     if (!output.endsWith('\n')) throw Error('incomplete process scan');
     rows = [];
     for (const line of output.slice(0, -1).split('\n')) {
-      const match = /^\s*(\d+)\s+(.{24})\s+(.+)$/.exec(line);
+      const match = /^\s*(\d+)\s+(.{24})(?:\s+(.*))?$/.exec(line);
       if (!match) {
         // Embedded argument newlines continue the preceding command. Keep
         // them in the key scan, but an orphan continuation proves nothing.
@@ -50,7 +52,7 @@ export function probeCloserSubmitter(record, lease, options = {}) {
         continue;
       }
       if (!validRowPid(Number(match[1])) || !psTimestamp(match[2])) throw Error('invalid process row');
-      rows.push({ pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] });
+      rows.push({ pid: Number(match[1]), startedAt: psTimestamp(match[2]), command: match[3] || '' });
     }
   } catch {
     result.reason = 'process-scan-unreadable';

@@ -59,6 +59,7 @@ function testDeps() {
     calls,
     deliverAlertImpl: async () => {},
     readPullRequestStateImpl: () => null,
+    processExecFileImpl: async () => ({ stdout: 'Thu Oct 22 10:18:18 2026\n' }),
     execFileImpl: async (cmd, args, options = {}) => {
       calls.push({ cmd, args, options });
       return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${args[args.indexOf('--pr') + 1]}`, dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
@@ -2917,16 +2918,19 @@ test('CLOSERPENDINGDEAD-01: background submission persists watcher and child ide
   const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
   let submitted = false;
   const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
-    processExecFileSyncImpl: (command, psArgs, options) => {
+    env: args.options.env,
+    processExecFileImpl: async (command, psArgs, options) => {
       assert.equal(command, 'ps');
       assert.deepEqual(psArgs.slice(0, 3), ['-o', 'lstart=', '-p']);
       assert.ok(options.timeout <= 1000);
-      return 'Thu Oct 22 10:18:18 2026\n';
+      assert.equal(options.env.ADV_GATE_STATUS_CONTEXT, REQUIRED_GATE);
+      await new Promise(resolve => setImmediate(resolve));
+      return { stdout: 'Thu Oct 22 10:18:18 2026\n' };
     },
     execFileImpl: (command, dispatchArgs) => {
       assert.equal(dispatchArgs[0], 'dispatch');
       submitted = true;
-      const submission = Promise.resolve().then(() => {
+      const submission = new Promise(resolve => setImmediate(() => setImmediate(resolve))).then(() => {
         const intent = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
         assert.deepEqual(intent.dispatchWatcher, { pid: process.pid, startedAt: '2026-10-22T10:18:18.000Z' });
         assert.deepEqual(intent.dispatchSubmitter, { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' });
@@ -2942,6 +2946,32 @@ test('CLOSERPENDINGDEAD-01: background submission persists watcher and child ide
   assert.equal(result.dispatched, true, JSON.stringify(result));
 });
 
+test('CLOSERPENDINGDEAD-01: submission rejection is observed during asynchronous child capture', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-submitter-rejection-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir);
+  const identity = { repo: args.dispatchContext.repo, prNumber: args.prMetadata.prNumber, headSha: HEAD };
+  let childCaptured = false;
+  const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+    processExecFileImpl: async (_command, psArgs) => {
+      if (psArgs.at(-1) === '12346') {
+        await new Promise(resolve => setImmediate(resolve));
+        childCaptured = true;
+      }
+      return { stdout: 'Thu Oct 22 10:18:18 2026\n' };
+    },
+    execFileImpl: () => {
+      const submission = Promise.reject(new Error('synthetic submission refused'));
+      submission.child = { pid: 12346 };
+      return submission;
+    },
+  });
+  assert.equal(childCaptured, true);
+  assert.equal(result.dispatched, false);
+  const intent = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+  assert.match(intent.lastError, /synthetic submission refused/);
+});
+
 for (const replacement of ['state', 'key', 'missing']) {
   test(`CLOSERPENDINGDEAD-01: submitter identity preserves ${replacement} intent replacement`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closer-submitter-replaced-'));
@@ -2951,7 +2981,7 @@ for (const replacement of ['state', 'key', 'missing']) {
     const path = amaCloserDispatchFilePath(rootDir, identity);
     let checked = false;
     const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
-      processExecFileSyncImpl: () => 'Thu Oct 22 10:18:18 2026\n',
+      processExecFileImpl: async () => ({ stdout: 'Thu Oct 22 10:18:18 2026\n' }),
       execFileImpl: () => {
         const original = readFileSync(path, 'utf8');
         const changed = { ...JSON.parse(original), ...(replacement === 'state'
@@ -2959,7 +2989,7 @@ for (const replacement of ['state', 'key', 'missing']) {
         // Model an out-of-band writer that bypasses the held intent fence.
         if (replacement === 'missing') rmSync(path);
         else writeFileSync(path, JSON.stringify(changed));
-        const submission = Promise.resolve().then(() => {
+        const submission = new Promise(resolve => setImmediate(resolve)).then(() => {
           if (replacement === 'missing') assert.equal(existsSync(path), false);
           else assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), changed);
           checked = true;
@@ -2991,6 +3021,7 @@ test('CLOSERPENDINGDEAD-01: one poll re-takes a dead intent through ordinary dis
     processKillImpl: () => { throw Object.assign(Error('synthetic dead'), { code: 'ESRCH' }); },
     processExecFileSyncImpl: (_command, psArgs) => psArgs[0] === '-axww'
       ? '99 Thu Oct 22 10:18:18 2026 synthetic-process\n' : 'Thu Oct 22 10:18:18 2026\n',
+    processExecFileImpl: async () => ({ stdout: 'Thu Oct 22 10:18:18 2026\n' }),
     readIntentReceiptImpl: () => ({ ok: true, rows: [] }),
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
   });

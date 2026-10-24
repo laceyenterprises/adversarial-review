@@ -76,6 +76,10 @@ for dispatch-key matching; a continuation before any process row is unreadable.
 New intents record `dispatchWatcher` and `dispatchSubmitter` as `{ pid,
 startedAt }`; start times are UTC at the operating system's second resolution.
 The background submission records the actual child before awaiting its receipt.
+Watcher and child start-time capture uses asynchronous, one-second bounded
+`ps` calls so it does not block the watcher event loop. Capture and scan probes
+merge caller environment overrides, then force the C locale and UTC timezone.
+Rows with empty command text remain separate process identities.
 That identity update requires the same attempt key and `dispatching` state;
 a missing or replaced intent is preserved.
 An interrupted identity write is covered by the key scan. Old keyed intents

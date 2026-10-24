@@ -4714,6 +4714,7 @@ async function maybeDispatchAmaCloserAttempt({
   execFileImpl = execFileAsync,
   processKillImpl = process.kill,
   processExecFileSyncImpl,
+  processExecFileImpl,
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
   writeFileImpl = null,
@@ -7509,7 +7510,7 @@ async function maybeDispatchAmaCloserAttempt({
       state: 'dispatching',
       dispatchIdempotencyKey,
       dispatchPhase: 'prepared',
-      dispatchWatcher: captureCloserProcess(process.pid, { processExecFileSyncImpl }),
+      dispatchWatcher: await captureCloserProcess(process.pid, { processExecFileImpl, env }),
       lastObservedStatus: existingRecord?.lastObservedStatus || null,
       lastObservedAt: existingRecord?.lastObservedAt || null,
       lastError: null,
@@ -7975,8 +7976,11 @@ async function maybeDispatchAmaCloserAttempt({
       // promisified execFile exposes the actual spawned ChildProcess. Persist
       // its identity while this background submission still holds the PR fence.
       // A crash before this write is covered by the exact-key process scan.
+      // Observe rejection immediately while the asynchronous identity probe runs;
+      // awaiting submission below still propagates the original failure.
+      Promise.resolve(submission).catch(() => {});
       try {
-        const dispatchSubmitter = captureCloserProcess(submission?.child?.pid, { processExecFileSyncImpl });
+        const dispatchSubmitter = await captureCloserProcess(submission?.child?.pid, { processExecFileImpl, env });
         if (dispatchSubmitter) updateDispatchRecord(rootDir, targetDispatchIdentity, current => {
           if (current?.dispatchIdempotencyKey !== dispatchIdempotencyKey
             || current?.state !== 'dispatching') return current;

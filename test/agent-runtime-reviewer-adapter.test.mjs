@@ -12,6 +12,7 @@ import {
   reviewIdempotencyKey,
   toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
+import { REVIEW_EVIDENCE_GUIDANCE } from '../src/kernel/prompt-stage.mjs';
 import { resolveRouterConfig } from '../src/adapters/agent-runtime/router/config.mjs';
 import {
   readReviewerRunRecord,
@@ -498,7 +499,7 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(calls[0].role.model, 'claude-code');
     assert.equal(calls[0].promptSet, 'code-pr');
     assert.equal(calls[0].promptStage, 'middle');
-    assert.equal(calls[0].subjectContent.representation, 'fixture reviewer middle prompt\n\nfixture simplicity guidance');
+    assert.equal(calls[0].subjectContent.representation, `fixture reviewer middle prompt\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\nfixture simplicity guidance`);
     assert.equal(calls[0].subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
     assert.equal(
       calls[0].idempotencyKey,

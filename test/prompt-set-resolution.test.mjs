@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   PromptSetResolutionError,
+  REVIEW_EVIDENCE_GUIDANCE,
   loadStagePrompt,
   resolvePromptSet,
 } from '../src/kernel/prompt-stage.mjs';
@@ -16,7 +17,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 function readPrompt(...parts) {
   const prompt = readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
   return parts.at(-1).startsWith('reviewer.')
-    ? `${prompt}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
+    ? `${prompt}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
 }
 
 // Assemble every reviewer/remediator stage prompt from a domain's *declared*

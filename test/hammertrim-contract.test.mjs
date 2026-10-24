@@ -1106,7 +1106,8 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   const db = new Database(join(dir, 'data', 'reviews.db'));
   db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (identity TEXT, head_sha TEXT,
     finding_reviewed_head TEXT, evidence_sha256 TEXT, resolution TEXT, comment_id TEXT,
-    comment_author TEXT, comment_sha256 TEXT, repo TEXT, pr_number INTEGER)`);
+    comment_author TEXT, comment_sha256 TEXT, reply_id TEXT, review_body_sha256 TEXT,
+    repo TEXT, pr_number INTEGER)`);
   db.close();
   const head = 'a'.repeat(40), base = 'b'.repeat(40);
   const env = {

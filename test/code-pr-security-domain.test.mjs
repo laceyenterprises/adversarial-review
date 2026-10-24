@@ -10,6 +10,7 @@ import { createGitHubPRCommentsAdapter } from '../src/adapters/comms/github-pr-c
 import { createFixtureStubReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/fixture-stub/index.mjs';
 import {
   loadStagePrompt,
+  REVIEW_EVIDENCE_GUIDANCE,
   pickReviewerStage,
   pickRemediatorStage,
   resolvePromptSet,
@@ -97,7 +98,7 @@ test('code-pr-security resolves to its own prompt set (never falls back to code-
   for (const actor of ['reviewer', 'remediator']) {
     for (const stage of ['first', 'middle', 'last']) {
       const selected = loadStagePrompt({ rootDir: ROOT, promptSet, actor, stage });
-      const withGuidance = (prompt) => actor === 'reviewer' ? `${prompt}\n\n${guidance}` : prompt;
+      const withGuidance = (prompt) => actor === 'reviewer' ? `${prompt}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${guidance}` : prompt;
       assert.equal(
         selected,
         withGuidance(readPrompt(DOMAIN_ID, `${actor}.${stage}.md`)),

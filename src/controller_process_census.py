@@ -95,6 +95,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except ValueError:
+        print("controller census: EINVAL", file=sys.stderr)
+        sys.exit(2)
     except OSError as error:
         # Only the errno name leaves the helper; the caller names the mechanism.
         name = errno.errorcode.get(error.errno, "EIO")

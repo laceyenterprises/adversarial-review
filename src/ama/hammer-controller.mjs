@@ -66,7 +66,7 @@ export function confirmControllerValidation() {
 // census reads the same kernel group records unprivileged and never falls back.
 export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform,
   nativeImpl = nativeControllerIdentity } = {}) {
-  if (platform === 'darwin') return nativeImpl('group', pgid);
+  if (platform === 'darwin') return nativeImpl('group', pgid, { execFileSyncImpl });
   const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
     encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024,
     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },

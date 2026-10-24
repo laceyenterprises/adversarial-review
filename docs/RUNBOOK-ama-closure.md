@@ -5490,6 +5490,12 @@ process-introspection change is needed; the receipt keeps the errno code. Other 
 provider. The two-second probe timeout, 1 MiB output ceiling, controller grace,
 ledger adapter, launch ownership and lease-generation fences remain in force.
 
+`controllerGroupSnapshot` forwards an injected `execFileSyncImpl` to the native
+helper on Darwin as well as to `ps` on other platforms. Invalid helper argument
+counts, non-integer identities or identities at or below 1, and unsupported operations emit only
+`controller census: EINVAL` on stderr and exit 2; the JavaScript caller retains
+`EINVAL` as the refusal code.
+
 An unavailable interpreter/library, permission denial, malformed output, partial
 ABI read, inconsistent PID/PGID/birth or saturated bounded enumeration refuses
 proof. Exited members are absent from the snapshot; zombies are excluded.

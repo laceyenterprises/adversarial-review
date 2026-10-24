@@ -9,7 +9,6 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
-import { nativeControllerIdentity } from '../src/controller-process-census.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const head = 'a'.repeat(40);
@@ -164,6 +163,22 @@ test('Darwin census never executes setuid /bin/ps, so a sandbox exec refusal can
   assert.deepEqual(executed, []);
 });
 
+test('Darwin census forwards the subprocess runner through the default native provider', () => {
+  const members = [{ pid: 100, birth: '1792828800.000000' }];
+  const executed = [];
+  const result = controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl(bin, args, options) {
+    executed.push(bin);
+    assert.notEqual(bin, '/bin/ps');
+    assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
+    assert.match(args[2], /controller_process_census\.py$/);
+    assert.deepEqual(args.slice(3), ['group', '100']);
+    assert.equal(options.timeout, 2000);
+    return JSON.stringify(members);
+  } });
+  assert.deepEqual(result, members);
+  assert.equal(executed.length, 1);
+});
+
 test('Darwin native census returns the same members and births as legacy ps parsing for a fake group',
   { skip: process.platform !== 'darwin', timeout: 15000 }, async t => {
     const leader = spawn(process.execPath, ['-e', `
@@ -175,8 +190,7 @@ test('Darwin native census returns the same members and births as legacy ps pars
     const childPid = await until(() => output.endsWith('\n') && Number(output.trim()));
     // Compare results, not the production 2s deadline, on a loaded test host.
     const execFileSyncImpl = (bin, args, options) => execFileSync(bin, args, { ...options, timeout: 10000 });
-    const native = controllerGroupSnapshot(leader.pid, {
-      nativeImpl: (verb, pgid) => nativeControllerIdentity(verb, pgid, { execFileSyncImpl }) });
+    const native = controllerGroupSnapshot(leader.pid, { execFileSyncImpl });
     assert.deepEqual(native.map(member => member.pid).sort((a, b) => a - b),
       [leader.pid, childPid].sort((a, b) => a - b), JSON.stringify(native));
     let legacy;

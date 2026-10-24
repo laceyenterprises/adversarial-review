@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { nativeControllerIdentity } from '../src/controller-process-census.mjs';
@@ -54,6 +54,20 @@ test('a missing helper or interpreter fails closed naming the mechanism, not ope
 test('the helper reports an OS refusal as its errno name only', () => {
   // pgid of a PID that cannot exist exercises the real os.getpgid refusal path.
   assert.throws(() => nativeControllerIdentity('pgid', 2 ** 31 - 2), error => error.code === 'ESRCH');
+});
+
+test('invalid helper arguments report only EINVAL and exit 2', () => {
+  const helper = fileURLToPath(new URL('../src/controller_process_census.py', import.meta.url));
+  for (const args of [[], ['pgid'], ['pgid', '42', 'extra'], ['pgid', 'not-a-pid'],
+    ['pgid', '1'], ['unsupported', '42']]) {
+    const result = spawnSync(python, ['-I', '-B', helper, ...args], { encoding: 'utf8', timeout: 2000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2, JSON.stringify(args));
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'controller census: EINVAL\n');
+  }
+  assert.throws(() => nativeControllerIdentity('unsupported', 42),
+    error => error.code === 'EINVAL' && unavailable('EINVAL').test(error.message));
 });
 
 test('native kern.proc.pgrp allowed, zombie, denied, truncated and inconsistent fixtures', () => {

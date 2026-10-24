@@ -90,8 +90,8 @@ npm install && bash demo/research-finding-walkthrough.sh
 The walkthrough:
 
 1. Builds a temporary fixture root.
-2. Copies the `research-finding` domain config and the six staged prompt
-   files.
+2. Copies the `research-finding` domain config, the six staged prompt
+   files, and the shared simplicity/cost guidance.
 3. Drives a markdown subject through the reviewer (a deterministic stub),
    the verdict parser, the remediation-reply validator, the JSONL
    transcript adapter, the re-review path, and convergence.

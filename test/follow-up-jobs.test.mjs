@@ -1336,6 +1336,24 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.path, null);
 });
 
+test('readFollowUpJob preserves cached simplicity notes and derives missing legacy notes', (t) => {
+  const rootDir = makeTempRoot(t);
+  const jobPath = path.join(rootDir, 'advisory.json');
+  const derived = 'Reuse the shared cache; save 40 lines.';
+  const cached = 'Reuse the existing worker; avoid one subprocess.';
+  const reviewBody = `## Summary\nSynthetic change.\n\n## Verdict\nComment only\n\n## Simplicity and cost (advisory)\n${derived}`;
+  for (const [fields, expected] of [
+    [{ simplicityNote: cached }, cached],
+    [{ simplicityNote: cached, reviewBody }, cached],
+    [{ reviewBody }, derived],
+    [{ simplicityNote: null, reviewBody }, derived],
+    [{}, null],
+  ]) {
+    writeFileSync(jobPath, JSON.stringify({ repo: 'example/repo', prNumber: 42, ...fields }));
+    assert.equal(readFollowUpJob(jobPath).simplicityNote, expected);
+  }
+});
+
 test('readFollowUpJob preserves elevated schema v2 remediation budgets', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   try {

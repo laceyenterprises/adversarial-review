@@ -36,6 +36,12 @@ function deliveryExternalIdForKey(key) {
 }
 
 function copyPromptSet(rootDir) {
+  mkdirSync(join(rootDir, 'prompts', 'shared'), { recursive: true });
+  writeFileSync(
+    join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'),
+    readFileSync(join(ROOT, 'prompts', 'shared', 'simplicity-and-cost.md'), 'utf8'),
+    'utf8',
+  );
   mkdirSync(join(rootDir, 'prompts', 'research-finding'), { recursive: true });
   for (const actor of ['reviewer', 'remediator']) {
     for (const stage of ['first', 'middle', 'last']) {

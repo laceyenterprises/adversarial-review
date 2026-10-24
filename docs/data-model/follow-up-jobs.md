@@ -14,7 +14,8 @@ replay; no queue state, retry budget or merge decision changes.
 
 Each review's existing job stores `simplicityNote`: the text of the optional
 final `## Simplicity and cost (advisory)` section, or `null` when absent/empty.
-Normalization derives it from `reviewBody` for older records. Count non-null
+Normalization preserves an existing non-null note, including when `reviewBody`
+is omitted, and derives it from `reviewBody` for older records. Count non-null
 notes by distinct `(repo, prNumber)` to measure the share of PRs with advice.
 The note is outside both finding lists and the verdict; it changes no strict
 gate, dispatch decision, remediation round budget or retry cap. A settled clean
@@ -29,8 +30,11 @@ It is copied to `completion.simplicityNoteApplied` and the current round's
 also retain this field. Historical completed records may omit it.
 
 The Hammer receives the same advice from its existing bounded context snapshot
-(`review.simplicityNote`, capped at 1,200 bytes; fetch the full review when the
-snapshot reports truncation). It records `simplicityNoteApplied: true|false`
+(`review.simplicityNote`, capped at 1,200 bytes). The boolean
+`review.simplicityNoteTruncated` reports whether that cap removed any text;
+it is false for absent notes. Fetch the full review when either
+`review.findingsTruncated` or `review.simplicityNoteTruncated` is true.
+It records `simplicityNoteApplied: true|false`
 and a reason in its existing closing audit text, outside all finding counts.
 No new store, config key, label or merge authority is introduced.
 

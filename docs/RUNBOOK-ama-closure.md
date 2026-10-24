@@ -26,7 +26,9 @@ dispatcher debugging), see
 
 ## Optional simplicity advice (REVIEWSIMPLE-01)
 
-Reviewer prompts share an optional final simplicity/cost section. It is advice
+Reviewer prompts share an optional final simplicity/cost section. Stage loading
+reads both the stage prompt and `prompts/shared/simplicity-and-cost.md` from the
+supplied root, so custom prompt roots must include the shared fragment. It is advice
 outside finding counts and all merge/round/retry decisions. Existing remediation
 or Hammer work may apply it only when behavior stays the same and net lines or
 runtime cost decrease. Remediation replies and round completions record

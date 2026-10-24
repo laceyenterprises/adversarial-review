@@ -83,6 +83,7 @@ test('REVIEWSIMPLE-01: existing merge-agent and Hammer prompts account for advic
   assert.doesNotMatch(absent, /Simplicity and cost|simplicityNoteApplied/);
   const hammer = readFileSync(join(ROOT, 'templates/hammer-prompt.md'), 'utf8');
   assert.match(hammer, /review.simplicityNote/);
+  assert.match(hammer, /fetch the full review if `review.findingsTruncated` or `review.simplicityNoteTruncated`/);
   assert.match(hammer, /already-running round.*without changing behavior/);
   assert.match(hammer, /simplicityNoteApplied: true\|false.*existing `HAM_AUDIT_DETAILS_FILE`/);
 });

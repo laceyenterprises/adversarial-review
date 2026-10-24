@@ -948,7 +948,7 @@ function normalizeFollowUpJob(job) {
     revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
     critical: classification.critical,
-    simplicityNote: extractSimplicityNote(job?.reviewBody),
+    simplicityNote: job?.simplicityNote ?? extractSimplicityNote(job?.reviewBody),
     recommendedFollowUpAction: {
       ...recommendedFollowUpAction,
       ...(job.recommendedFollowUpAction || {}),

@@ -442,6 +442,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   assert.equal(snapshot.review.state, 'COMMENTED');
   assert.equal(snapshot.review.findingsTruncated, true);
   assert.equal(snapshot.review.simplicityNote, 'Reuse syntheticCache; save ~40 lines.');
+  assert.equal(snapshot.review.simplicityNoteTruncated, false);
   assert.ok(snapshot.review.findingsBytes > 1800);
   assert.deepEqual(snapshot.requiredChecks, ['CI']);
   assert.deepEqual(snapshot.diffStat, { files: 1, additions: 3, deletions: 2 });
@@ -463,6 +464,23 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   const withoutNote = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42', '--state-file', state], { PATH: `${bin}:${process.env.PATH}`, HAM_ROOT_DIR: dir });
   assert.equal(withoutNote.status, 0, withoutNote.stderr);
   assert.equal(JSON.parse(withoutNote.stdout).review.simplicityNote, null);
+  assert.equal(JSON.parse(withoutNote.stdout).review.simplicityNoteTruncated, false);
+  for (const [note, truncated] of [
+    ['a'.repeat(1200), false],
+    ['a'.repeat(1201), true],
+    ['a'.repeat(1199) + '😀', true],
+  ]) {
+    fixture.reviews[0].body = `## Adversarial Review\nSynthetic clean review.\n\n## Simplicity and cost (advisory)\n${note}`;
+    writeFileSync(fixturePath, JSON.stringify(fixture));
+    const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42', '--state-file', state], { PATH: `${bin}:${process.env.PATH}`, HAM_ROOT_DIR: dir });
+    assert.equal(result.status, 0, result.stderr);
+    const { review } = JSON.parse(result.stdout);
+    assert.equal(review.findingsTruncated, false, 'advisory truncation is independent of findings truncation');
+    assert.equal(review.simplicityNoteTruncated, truncated);
+    assert.ok(Buffer.byteLength(review.simplicityNote) <= 1200);
+    assert.equal(review.simplicityNote, note.slice(0, note.includes('😀') ? 1199 : 1200));
+    assert.doesNotMatch(result.stdout, /�/);
+  }
 });
 
 test('context bounds real primary patches and survives a failed compare', (t) => {

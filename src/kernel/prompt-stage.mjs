@@ -179,7 +179,11 @@ function loadStagePrompt({
     ),
     'utf8',
   ).trim();
-  return actor === 'reviewer' ? `${prompt}\n\n${SIMPLICITY_REVIEW_GUIDANCE}` : prompt;
+  if (actor !== 'reviewer') return prompt;
+  const guidance = readFileSync(
+    join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'), 'utf8',
+  ).trim();
+  return `${prompt}\n\n${guidance}`;
 }
 
 export {

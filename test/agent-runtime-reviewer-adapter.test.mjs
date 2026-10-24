@@ -24,6 +24,8 @@ function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
   mkdirSync(join(rootDir, 'domains'), { recursive: true });
   mkdirSync(join(rootDir, 'prompts', 'code-pr'), { recursive: true });
+  mkdirSync(join(rootDir, 'prompts', 'shared'));
+  writeFileSync(join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'), 'fixture simplicity guidance');
   writeFileSync(
     join(rootDir, 'domains', 'code-pr.json'),
     JSON.stringify({ id: 'code-pr', promptSet: 'code-pr' }),
@@ -496,7 +498,7 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(calls[0].role.model, 'claude-code');
     assert.equal(calls[0].promptSet, 'code-pr');
     assert.equal(calls[0].promptStage, 'middle');
-    assert.equal(calls[0].subjectContent.representation, 'fixture reviewer middle prompt');
+    assert.equal(calls[0].subjectContent.representation, 'fixture reviewer middle prompt\n\nfixture simplicity guidance');
     assert.equal(calls[0].subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
     assert.equal(
       calls[0].idempotencyKey,

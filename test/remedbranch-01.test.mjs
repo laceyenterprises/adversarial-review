@@ -225,6 +225,8 @@ test('REMEDBRANCH-01: agent-runtime posted review retains subject branch and bui
   const sessionUuid = 'synthetic-review-session';
   let metadata;
   mkdirSync(join(rootDir, 'prompts', 'code-pr'), { recursive: true });
+  mkdirSync(join(rootDir, 'prompts', 'shared'));
+  writeFileSync(join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'), 'Synthetic simplicity guidance.');
   writeFileSync(join(rootDir, 'prompts', 'code-pr', 'reviewer.first.md'), 'Synthetic review instructions.');
   const adapter = createAgentRuntimeReviewerRuntimeAdapter({ rootDir,
     agentRuntime: { async run(request) { return { runRef: request.idempotencyKey, mode: 'os',

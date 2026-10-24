@@ -1,4 +1,7 @@
+import { exportedReserveFloors } from './reserve-floor-fixture.mjs';
+
 export function codexAccountFixture({ corp = 'ok', primary = 'ok', corpReady = true } = {}) {
+  const floors = exportedReserveFloors();
   return {
     providerStatuses: [
       { provider: 'openai', authPath: 'oauth', state: primary },
@@ -6,8 +9,8 @@ export function codexAccountFixture({ corp = 'ok', primary = 'ok', corpReady = t
       { provider: 'google', authPath: 'oauth', state: 'ok' },
     ],
     reserveFloors: {
-      'openai-oauth': { weeklyMeasurement: { status: 'measured', percentRemaining: 6 } },
-      'openai-oauth-corp': { weeklyMeasurement: { status: 'measured', percentRemaining: 89 } },
+      'openai-oauth': floors['openai-oauth'],
+      'openai-oauth-corp': floors['openai-oauth-corp'],
     },
     brokerAuth: { provider_states: {
       codex: { ready: true, can_serve: true },

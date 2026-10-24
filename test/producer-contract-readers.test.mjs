@@ -220,6 +220,8 @@ test('refresh removes deleted managed artifacts and preserves separately pinned 
       put(join(fixtures, directory, directory === 'definitions' ? 'deleted.py.txt' : 'deleted.json'), 'stale');
     }
     put(join(fixtures, 'quota/fleet-released.json'), 'separately pinned');
+    const publicExport = readFileSync(new URL('./fixtures/producer-contracts/reserve-floors.json', import.meta.url));
+    put(join(fixtures, 'reserve-floors.json'), publicExport);
     for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture']]) {
       const git = spawnSync('git', ['-C', source, ...args], options);
       assert.ifError(git.error);
@@ -232,6 +234,7 @@ test('refresh removes deleted managed artifacts and preserves separately pinned 
       assert.equal(existsSync(join(fixtures, directory, directory === 'definitions' ? 'deleted.py.txt' : 'deleted.json')), false);
     }
     assert.equal(readFileSync(join(fixtures, 'quota/fleet-released.json'), 'utf8'), 'separately pinned');
+    assert.deepEqual(readFileSync(join(fixtures, 'reserve-floors.json')), publicExport);
     const refreshed = JSON.parse(readFileSync(join(fixtures, 'provenance.json')));
     for (const [artifact, record] of Object.entries(refreshed.files)) {
       assert.equal(createHash('sha256').update(readFileSync(join(fixtures, artifact))).digest('hex'), record.sha256);

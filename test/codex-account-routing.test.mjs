@@ -88,14 +88,10 @@ for (const evidence of ['stale', 'unknown', 'missing', 'cached-stale']) {
     if (evidence === 'missing') delete fixture.brokerAuth.provider_states['codex-corp'];
     else if (evidence === 'cached-stale') fixture.providerStatuses[1].cachedEvidenceStale = true;
     else {
-      const reading = { status: evidence, confidence: evidence, inferred: false, percentRemaining: 99 };
-      fixture.reserveFloors['openai-oauth-corp'] = {
-        weeklyMeasurement: { ...reading }, measurement: { ...reading },
-      };
-      const personal = { status: 'measured', confidence: 'measured', inferred: false, percentRemaining: 6 };
-      fixture.reserveFloors['openai-oauth'] = {
-        weeklyMeasurement: { ...personal }, measurement: { ...personal },
-      };
+      // Negative mutation: stale/unknown weekly evidence from the export.
+      const floor = fixture.reserveFloors['openai-oauth-corp'];
+      Object.assign(floor.weeklyMeasurement, { status: evidence, confidence: evidence });
+      floor.weeklyMeasurementReason = evidence;
     }
     const account = groundingFor(fixture).codexAccountSelection;
     assert.equal(account.hold, true);

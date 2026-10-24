@@ -1,3 +1,4 @@
+import { readReserveFloorWeeklyEvidence as readSdkReserveEvidence } from '@agent-os/app-sdk';
 import { diagnosticValue } from './producer-contracts/diagnostics.mjs';
 import { readIdentityPoolProjection } from './identity-token-snapshot.mjs';
 
@@ -172,31 +173,21 @@ export function parseHqFleetQuotaStatus(stdout) {
   return quotaStatusesFromSnapshot(parseHqFleetQuotaSnapshot(stdout));
 }
 
-// `hq fleet quota status --json` reports each reserve floor's weekly reading in the
-// shape {status, confidence, inferred, percentRemaining, ...} under
-// `weeklyMeasurement` for both providers, or null plus `weeklyMeasurementReason`.
-// Older payloads used confidence-only weekly objects, status-only objects, or
-// OpenAI's `measurement` field. Normalize these documented compatibility shapes
-// for account routing. Missing/invalid percentages stay NaN. Only pre-repair
-// floors without an explicit weekly reason may fall back to `measurement`.
-function normalizeWeeklyMeasurement(reading) {
-  if (!reading || typeof reading !== 'object') return null;
-  const percentRemaining = normalizedCount(reading.percentRemaining) ?? NaN;
-  if (typeof reading.status === 'string') return { ...reading, percentRemaining };
-  const measured = reading.confidence === 'measured' && reading.inferred !== true;
-  return {
-    status: measured ? 'measured' : (reading.inferred === true ? 'inferred' : String(reading.confidence || 'unknown')),
-    percentRemaining,
+// Admission policy for the current producer: only independent weekly evidence
+// may admit an account. The SDK may report short-window evidence; remove that
+// candidate before interpretation when the current reason key is present.
+// Floors predating that key retain their documented compatibility fallback.
+export function readWeeklyOnlyReserveFloorEvidence(floor, credential) {
+  const current = floor && typeof floor === 'object' && Object.hasOwn(floor, 'weeklyMeasurementReason');
+  const input = current ? { ...floor, measurement: null } : floor;
+  const evidence = readSdkReserveEvidence(input, credential);
+  return { ...evidence,
+    ...(current ? { weeklyMeasurementReason: floor.weeklyMeasurementReason } : {}),
   };
 }
 
 export function reserveFloorWeeklyMeasurement(floor) {
-  const weekly = normalizeWeeklyMeasurement(floor?.weeklyMeasurement);
-  if (weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)) return weekly;
-  // Current producers explicitly distinguish missing weekly windows from short
-  // windows. The pre-repair fallback applies only to the old unversioned shape.
-  if (floor && Object.hasOwn(floor, 'weeklyMeasurementReason')) return weekly;
-  return normalizeWeeklyMeasurement(floor?.measurement) || weekly;
+  return readWeeklyOnlyReserveFloorEvidence(floor, 'unknown').measurement;
 }
 
 export function quotaStatusesFromSnapshot(payload) {
@@ -366,21 +357,7 @@ export function harnessCapFromFleetStatus(stdout, options = {}) {
   return harnessCapFromStatuses(parseHqFleetQuotaStatus(stdout), options);
 }
 
-/** @returns {{measurement: object|null, diagnostics: string[]}} */
-export function readReserveFloorWeeklyEvidence(floor, credential) {
-  const path = `reserveFloors.${credential}`;
-  const prefix = 'quota_reserve.snapshot: ';
-  const measurement = reserveFloorWeeklyMeasurement(floor);
-  const diagnostics = [];
-  if (!floor || typeof floor !== 'object' || Array.isArray(floor)) diagnostics.push(`${prefix}${path} missing/invalid object`);
-  else if (!measurement) diagnostics.push(`${prefix}${path}.weeklyMeasurement missing/invalid or null; ${path}.weeklyMeasurementReason=${diagnosticValue(floor.weeklyMeasurementReason)}`);
-  else {
-    if (measurement.status !== 'measured') diagnostics.push(`${prefix}${path}.weeklyMeasurement.status=${diagnosticValue(measurement.status)}`);
-    if (!Number.isFinite(measurement.percentRemaining) || measurement.percentRemaining < 0 || measurement.percentRemaining > 100) diagnostics.push(`${prefix}${path}.weeklyMeasurement.percentRemaining missing/invalid percentage`);
-    else if (measurement.percentRemaining === 0) diagnostics.push(`${prefix}${path}.weeklyMeasurement.percentRemaining=0`);
-  }
-  return { measurement, diagnostics };
-}
+export const readReserveFloorWeeklyEvidence = readWeeklyOnlyReserveFloorEvidence;
 
 /** Diagnostics only: routing thresholds, cap interpretation and freshness policy stay with callers. */
 export function quotaAccountDiagnostics(payload, { provider, authPath, cap, reserve = false }) {

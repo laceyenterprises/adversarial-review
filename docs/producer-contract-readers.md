@@ -29,15 +29,46 @@ status output retains its last 1,000 characters for investigation; blank stdout
 is consistently identified as `$stdout empty`.
 Existing malformed-input exceptions still throw, now naming the producer field.
 
-Weekly percentages still accept the documented old status/confidence shapes
-and numeric-string compatibility. The pre-repair `measurement` fallback remains
-for floors without `weeklyMeasurementReason`. Current producers explicitly name
-unavailable weekly evidence with that field: a five-hour measurement does not
-replace their absent, stale or invalid weekly object. Presence of the reason
-key, even with a null value, disables that fallback. This narrows admission:
-accounts previously admitted through short-window evidence now hold with
-`codex-account-evidence-unknown` until weekly evidence is measured. Reserve
-thresholds and account order are unchanged.
+Account routers explicitly call `reserveFloorWeeklyMeasurement`; its evidence
+wrapper delegates normalization to the pinned SDK after excluding short-window
+candidates for floors carrying `weeklyMeasurementReason`. The established helper
+name retains this policy. Healthy admission, holds, thresholds and account order
+are unchanged. Unknown evidence alone never authorizes model fallback.
+
+### Weekly evidence and admission policy
+
+The producer owns window meanings; SDK readers interpret evidence; callers own
+admission. `readFleetQuota(payload)` preserves the original floor and its
+`weeklyMeasurementReason` in `result.payload.reserveFloors[credential]`. The
+corresponding `result.reserveFloors[credential].source` names the selected field.
+Retain both together: a measured `measurement` is never a seven-day reading.
+The repository's `readReserveFloorWeeklyEvidence` export from
+`src/fleet-quota-status.mjs` aliases `readWeeklyOnlyReserveFloorEvidence`. For
+current floors (those with a `weeklyMeasurementReason` key), this wrapper clears
+the short-window `measurement` candidate before calling the SDK reader and
+forwards `weeklyMeasurementReason` in its result. If no weekly candidate remains,
+it returns `measurement: null` and `source: null`: both fields are forwarded
+from the pinned SDK reader. In contrast, calling the SDK's `readFleetQuota`
+on the original payload can still project `source: 'measurement'` for short
+evidence. Floors without the reason key retain the
+legacy fallback. The table below distinguishes raw SDK evidence from this
+repository's weekly-only admission policy. No SDK replacement is required.
+
+| Weekly input | Reason key | Other measurement | SDK evidence/source | Review weekly-only policy |
+|---|---|---|---|---|
+| Measured, finite percentage in [0,100] | null or present | Any | Weekly / `weeklyMeasurement` | Eligible evidence; zero still proves exhaustion |
+| Null or missing | null or non-null | Measured short window | Short / `measurement`; original reason retained in payload | Hold; short capacity cannot prove weekly headroom |
+| Null or missing | null or non-null | Missing, stale or invalid | Unknown or invalid, field diagnostics | Hold |
+| Stale or malformed object | Present | Measured short window | Weekly retained with status/percentage diagnostics | Hold |
+| Unusable or absent weekly | Absent (legacy only) | Measured | Legacy fallback / `measurement` | Existing compatibility fallback retained |
+| Measured weekly | null | Any, floor disabled | Weekly / `weeklyMeasurement` | Disabled thresholds do not discard evidence |
+| Measured weekly | Any | Any, account probe stale/unavailable | Weekly remains evidence | Hold under account freshness/readiness policy |
+
+Absent reason keys and legacy confidence/status/numeric-string shapes are
+compatibility inputs, not current producer captures. Malformed percentage, status
+and object mutations are negative fixtures; diagnostics name the producer and
+actual selected field. A missing floor remains unknown. Account readiness,
+broker servability, reserve flags and account order remain independent gates.
 
 Broker readiness and cached-token servability are separate observations. Account
 routers still require both explicit booleans. OAuth preflight still accepts a
@@ -140,9 +171,12 @@ python3 scripts/contracts/refresh.py ../agent-os
 
 The refresh command requires exactly one source checkout path; missing or extra
 arguments print usage to stderr and exit with status 2 before copying artifacts.
-Refresh removes stale managed JSON/owner records and definition excerpts, while
-preserving the separately maintained `quota/fleet-released.json` capture and its
-provenance. Deleted or renamed producer artifacts therefore cannot remain as
+Refresh removes stale JSON/owner records only inside the five named capture
+directories (`quota`, `broker`, `launch`, `dispatch`, `publication`), plus
+definition excerpts. It preserves the separately maintained
+`quota/fleet-released.json` capture and root-level artifacts other than the
+regenerated `provenance.json`, including `reserve-floors.json` and
+`released-provenance.json`. Deleted or renamed producer artifacts cannot remain as
 untracked evidence in a managed capture directory.
 
 This copies artifacts only. To recapture, first use the exact commands and
@@ -217,3 +251,34 @@ These checks do not dispatch work or prove deployed runtime activation.
 
 See the [SDK migration validation record](validation/sdk-launch-status.md) for
 scoped commands, artifact isolation and native-backend evidence limits.
+
+### Public reserve-floor routing fixtures
+
+`test/fixtures/producer-contracts/reserve-floors.json` projects the unmodified
+`producers.reserve-floors.examples` from the public export, recording the full
+export SHA-256 and producer revision. Refresh from an exported file only:
+
+```bash
+hq api spec --surface producer-contracts --format json > /tmp/producer-contracts.json
+node scripts/contracts/refresh-reserve-floors.mjs /tmp/producer-contracts.json <producer-revision>
+```
+
+The shared Codex and Claude helpers use `repaired-disabled` verbatim for all
+four accounts. Disabled thresholds still have measured independent weekly
+windows, so healthy admission needs no invented positive percentages or flags.
+Provider probes and broker responses in these helpers are synthetic transport
+inputs. Near-cap, zero, stale and malformed cases are labelled consumer
+mutations. Older confidence/status-only fixtures in
+`reserve-floor-measurement.test.mjs` remain explicit compatibility tests.
+Every helper call clones the public examples before mutation.
+
+`weekly-evidence-policy.test.mjs` exercises both Codex routers and both Claude
+accounts over the exported scenarios and negative mutations. It demonstrates
+that measured short-window SDK evidence stays held by weekly-only admission,
+and that the personal Claude reserve flags still hold independently of valid
+weekly evidence. SDK Node/Python parity uses the same producer scenarios and
+field mutations. No database reader, durable state, lifecycle transition or
+smoke promise changes; no service restart or configuration flip is performed.
+
+The [weekly evidence validation record](validation/weekly-evidence-policy.md)
+lists the complete helper-consumer commands, results and baseline limitations.

@@ -181,16 +181,16 @@ for (const [personalStatus, corporateStatus, expectedProvider, reason] of [
   ['stale', 'stale', null, 'codex-account-evidence-unknown'],
   ['measured', 'measured', 'codex-corp', 'corporate-ready'],
   ['measured', 'stale', null, 'codex-account-evidence-unknown'],
-]) test(`worker producer-shaped quota: personal ${personalStatus}, corporate ${corporateStatus}`, async () => {
+]) test(`worker exported quota mutation: personal ${personalStatus}, corporate ${corporateStatus}`, async () => {
   const snapshot = codexAccountFixture();
-  for (const [authPath, status, percentRemaining] of [
-    ['oauth', personalStatus, 6], ['oauth-corp', corporateStatus, 99],
-  ]) {
-    const reading = { status, confidence: status, inferred: false, percentRemaining };
-    snapshot.reserveFloors[`openai-${authPath}`] = {
-      weeklyMeasurement: { ...reading }, measurement: { ...reading },
-    };
+  // Negative stale/unknown mutations; measured positives remain verbatim.
+  for (const [authPath, status] of [['oauth', personalStatus], ['oauth-corp', corporateStatus]]) {
+    if (status === 'measured') continue;
+    const floor = snapshot.reserveFloors[`openai-${authPath}`];
+    Object.assign(floor.weeklyMeasurement, { status, confidence: status });
+    floor.weeklyMeasurementReason = status;
   }
+
   const selected = selectCodexWorkerAccount(snapshot);
   assert.equal(selected.hold, expectedProvider === null);
   assert.equal(selected.provider, expectedProvider ?? undefined);

@@ -1,3 +1,4 @@
+import { readAmaAuditEntry, writeAmaAuditEntry, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -1423,5 +1424,95 @@ test('UNREGREPO-01: a live stacked-base hold releases the lease and permits a la
     const resumed = await attemptDaemonCleanMerge(baseArgs(h));
     assert.equal(resumed.merged, true);
     assert.equal(h.calls.merge, 1);
+  }
+});
+
+test('docs record failure defers with stderr, persists backoff and parks the exact head across ticks', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'docs-record-budget-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const h = makeHarness();
+  const writes = h.deps.writeAuditImpl;
+  h.deps.writeAuditImpl = args => { writes(args); return writeAmaAuditEntry(args); };
+  const appends = h.deps.appendAuditImpl;
+  h.deps.appendAuditImpl = args => { appends(args); return appendAmaAuditAttempt(args); };
+  // Each invocation reopens the persisted history rather than keeping retry state.
+  h.deps.readAuditImpl = readAmaAuditEntry;
+  let time = Date.parse('2026-01-01T00:00:00Z'), records = 0;
+  const run = (overrides = {}) => attemptDaemonCleanMerge(baseArgs(h, {
+    hqRoot: root, docsFastPath: { headSha: HEAD },
+    auditMetadata: { closureAuthority: 'docs-fast-path' },
+    now: () => new Date(time).toISOString(),
+    beforeMergeImpl: async () => {
+      records++;
+      throw Object.assign(new Error('record command failed'), { code: 25,
+        stderr: 'synthetic store unavailable password=fixture-secret' });
+    }, ...overrides,
+  }));
+  const handlers = process.listeners('unhandledRejection');
+  const first = await run();
+  assert.equal(first.disposition, 'deferred');
+  assert.equal(first.reason, 'attestation-record-failed');
+  assert.match(first.error, /exitCode=25; stderr=synthetic store unavailable/);
+  assert.doesNotMatch(first.error, /fixture-secret/);
+  assert.equal(h.calls.auditAppends.at(-1).attempt.outcome, 'deferred');
+  assert.equal(h.calls.auditAppends.at(-1).attempt.exitCode, 25);
+  const initialWrites = h.calls.auditWrites.length;
+  assert.equal((await run()).reason, 'attestation-record-backoff');
+  assert.equal(h.calls.auditWrites.length, initialWrites);
+  assert.equal(records, 1);
+  time += 60_000;
+  assert.equal((await run()).reason, 'attestation-record-failed');
+  assert.equal(records, 2);
+  time += 119_999;
+  assert.equal((await run()).reason, 'attestation-record-backoff');
+  time++;
+  assert.equal((await run()).reason, 'attestation-record-retry-exhausted');
+  time += 24 * 60 * 60_000;
+  const parked = await run();
+  assert.equal(parked.reason, 'attestation-record-retry-exhausted');
+  assert.equal(parked.needsOperator, true);
+  assert.equal(readAmaAuditEntry(root, 'o/r', 7, HEAD).attempts.at(-1).parkReason, 'attestation-record-retry-exhausted');
+  assert.equal(records, 3);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 3);
+  // A different head owns a new budget; every live eligibility check still runs.
+  const moved = await run({ validatedHead: 'b'.repeat(40), liveGate: { ...greenGate(), candidateHead: 'b'.repeat(40) },
+    fetchLiveGateImpl: async () => ({ ...greenGate(), candidateHead: 'b'.repeat(40) }),
+    beforeMergeImpl: async () => { records++; } });
+  assert.equal(moved.merged, true);
+  assert.equal(records, 4);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(process.listeners('unhandledRejection'), handlers);
+});
+
+test('record rejection remains deferred when writing its failure audit also fails', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    beforeMergeImpl: async () => { throw Object.assign(new Error('synthetic rejection'), { code: 26, stderr: 'synthetic cause' }); },
+    appendAuditImpl: () => { throw new Error('synthetic audit unavailable'); },
+  }));
+  assert.equal(result.reason, 'attestation-failure-audit-unavailable');
+  assert.match(result.error, /exitCode=26; stderr=synthetic cause/);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+});
+
+test('docs record retry budget includes legacy failures and refuses an unreadable audit', async () => {
+  for (const unreadable of [false, true]) {
+    const h = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(h, {
+      docsFastPath: { headSha: HEAD },
+      readAuditImpl: () => {
+        if (unreadable) throw new Error('synthetic unreadable audit');
+        return { status: 'failed-without-merge', closureAuthority: 'docs-fast-path',
+          attempts: Array.from({ length: 3 }, () => ({ outcome: 'failed-without-merge',
+            reason: 'attestation-record-failed', permanent: false })) };
+      },
+      beforeMergeImpl: () => assert.fail('record budget must prevent subprocess creation'),
+    }));
+    assert.equal(result.disposition, 'deferred');
+    assert.equal(result.reason, unreadable ? 'attestation-retry-state-unreadable' : 'attestation-record-retry-exhausted');
+    assert.equal(h.calls.acquire, 0);
+    assert.equal(h.calls.auditWrites.length, 0);
   }
 });

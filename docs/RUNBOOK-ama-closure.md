@@ -5343,7 +5343,18 @@ the merge transport attempt, with
 `policy=DOCSFASTPATH-01`
 through the existing signer and canonical ledger before merging. Ledger delivery
 failure defers without a reviewer or closer; repeat delivery reuses and verifies
-the existing signed head record. The AMA audit records closure authority
+the existing signed head record. The watcher executor preserves the child stdin
+needed to send the signed payload. Delivery errors still await child completion,
+so a child rejection cannot escape the pre-merge catch. Failure diagnostics retain
+the exit code, signal and a redacted stderr tail capped at 2,000 characters.
+The per-head audit permits three failed record attempts, with 60-second then
+120-second backoff. Repeated polls and watcher restarts retain this budget.
+After the third failure the head parks as `attestation-record-retry-exhausted`
+with `needsOperator`; parked/backoff ticks neither acquire a lease nor append
+audit rows. A new head starts a fresh budget. Queue scheduling cannot reset it.
+If the retry audit cannot be read, the attempt defers as
+`attestation-retry-state-unreadable`; failed failure-audit delivery defers as
+`attestation-failure-audit-unavailable`. The AMA audit records closure authority
 `docs-fast-path` and the latest eligible classified base/head at terminal
 settlement. Recording authorizes an attempt; a later transport failure can still
 leave an unmerged head with an attestation, and retry must revalidate the live

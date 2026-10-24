@@ -1,3 +1,4 @@
+import { attestationRecordErrorDetails } from './attestation-record-error.mjs';
 import { readHeadAttestationChainForPr } from './daemon-worker-identity.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -77,14 +78,30 @@ async function execFileWithTransientRetry(execFileImpl, command, args, options, 
   throw new Error('unreachable retry state');
 }
 
-function execFileWithStdin(execFileImpl, command, args, options, input) {
+async function execFileWithStdin(execFileImpl, command, args, options, input) {
   const execution = execFileImpl(command, args, options);
   const stdin = execution?.child?.stdin;
-  if (!stdin || typeof stdin.end !== 'function') {
-    throw new TypeError('async execFile implementation must expose child.stdin for payload delivery');
+  let inputError;
+  const onInputError = error => { inputError = error; };
+  try {
+    if (!stdin || typeof stdin.end !== 'function') {
+      throw new TypeError('async execFile implementation must expose child.stdin for payload delivery');
+    }
+    stdin.on?.('error', onInputError);
+    stdin.end(input);
+  } catch (error) {
+    inputError = error;
+    try { execution?.child?.kill?.(); } catch { /* Still drain the execution below. */ }
   }
-  stdin.end(input);
-  return execution;
+  // Always observe child completion, even if stdin delivery failed. Prefer the
+  // child's failure (including stderr) over a secondary EPIPE/delivery error.
+  try {
+    const result = await execution;
+    if (inputError) throw inputError;
+    return result;
+  } finally {
+    stdin?.removeListener?.('error', onInputError);
+  }
 }
 
 function normalizeFindingsCount(reviewBody) {
@@ -255,23 +272,31 @@ async function recordSignedReviewedAttestation({
   delayImpl = delay,
 } = {}) {
   const input = `${JSON.stringify(signed)}\n`;
-  const { stdout } = await execFileWithTransientRetry(
-    (command, args, options) => execFileWithStdin(
-      execFileImpl,
-      command,
-      args,
-      options,
-      input
-    ),
-    hqPath,
-    ['attest', 'record', '--payload', '-'],
-    {
-      env,
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 1024,
-    },
-    { maxAttempts, retryDelayMs, delayImpl }
-  );
+  let stdout;
+  try {
+    ({ stdout } = await execFileWithTransientRetry(
+      (command, args, options) => execFileWithStdin(
+        execFileImpl,
+        command,
+        args,
+        options,
+        input
+      ),
+      hqPath,
+      ['attest', 'record', '--payload', '-'],
+      {
+        env,
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+      },
+      { maxAttempts, retryDelayMs, delayImpl }
+    ));
+  } catch (error) {
+    const details = attestationRecordErrorDetails(error, env);
+    throw Object.assign(new Error(details.error, { cause: error }), {
+      code: error?.code, signal: error?.signal, killed: error?.killed, stderr: details.stderrTail,
+    });
+  }
   const trimmed = String(stdout || '').trim();
   if (!trimmed) return null;
   try {

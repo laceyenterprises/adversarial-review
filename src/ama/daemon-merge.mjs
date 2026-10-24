@@ -1,3 +1,4 @@
+import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { buildMergeCommitBody } from './closing-keywords.mjs';
 /**
  * MSM-03 — daemon clean-path merge ("Path B").
@@ -78,6 +79,8 @@ export const DAEMON_MERGE_DEFAULTS = Object.freeze({
 export const DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS = 30_000;
 
 const DAEMON_MERGE_DIAGNOSTIC_MAX_CHARS = 4_000;
+const DOCS_RECORD_MAX_FAILURES = 3;
+const DOCS_RECORD_BACKOFF_BASE_MS = 60_000;
 
 /**
  * Marker recorded on every daemon-written audit doc + attempt so the audit is
@@ -634,6 +637,30 @@ async function attemptDaemonCleanMergeInner({
     return notTaken('prior-daemon-terminal-failure');
   }
 
+  // Durable exact-head budget, independent of queue scheduling. A restart must
+  // neither reset the record budget nor append audit rows on every parked tick.
+  let recordFailures = [];
+  if (docsFastPath) {
+    try {
+      const prior = readAuditImpl(hqRoot, repo, prNumber, validatedHead);
+      recordFailures = (prior?.attempts || []).filter(attempt =>
+        attempt.reason === 'attestation-record-failed');
+    } catch (error) {
+      return { ...notTaken('attestation-retry-state-unreadable'),
+        disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+        error: attestationRecordErrorDetails(error).error };
+    }
+    if (recordFailures.length >= DOCS_RECORD_MAX_FAILURES) {
+      return { ...notTaken('attestation-record-retry-exhausted'),
+        disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, needsOperator: true };
+    }
+    const retryAfter = recordFailures.at(-1)?.retryAfter;
+    if (retryAfter && Date.parse(now()) < Date.parse(retryAfter)) {
+      return { ...notTaken('attestation-record-backoff'),
+        disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, retryAfter };
+    }
+  }
+
   // Never replace an unavailable author title with a permanent placeholder.
   if (!String(prTitle ?? '').trim()) {
     return { ...notTaken('merge-title-missing'), disposition: DAEMON_MERGE_DISPOSITION.DEFERRED };
@@ -954,11 +981,24 @@ async function attemptDaemonCleanMergeInner({
     if (beforeMergeImpl) {
       try { await beforeMergeImpl({ liveGate: live }); }
       catch (error) {
-        appendAuditImpl({ ...auditKeys, now: now(),
-          attempt: { outcome: 'failed-without-merge', reason: 'attestation-record-failed',
-            permanent: false, error: String(error.message) } });
+        const details = attestationRecordErrorDetails(error);
+        const exhausted = docsFastPath && recordFailures.length + 1 >= DOCS_RECORD_MAX_FAILURES;
+        const retryAfter = docsFastPath && !exhausted
+          ? new Date(Date.parse(now()) + DOCS_RECORD_BACKOFF_BASE_MS * 2 ** recordFailures.length).toISOString() : null;
+        try {
+          appendAuditImpl({ ...auditKeys, now: now(),
+            attempt: { outcome: 'deferred', reason: 'attestation-record-failed',
+              permanent: false, retryAfter, needsOperator: Boolean(exhausted),
+              parkReason: exhausted ? 'attestation-record-retry-exhausted' : null,
+              ...details } });
+        } catch (auditError) {
+          logger?.warn?.(`[daemon-merge] attestation failure audit unavailable: ${attestationRecordErrorDetails(auditError).error}`);
+          return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+            reason: 'attestation-failure-audit-unavailable', merged: false, ...details };
+        }
         return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-          reason: 'attestation-record-failed', merged: false, error: String(error.message) };
+          reason: exhausted ? 'attestation-record-retry-exhausted' : 'attestation-record-failed',
+          merged: false, retryAfter, needsOperator: Boolean(exhausted), ...details };
       }
     }
 

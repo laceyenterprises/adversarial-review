@@ -143,7 +143,11 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
   const mergedReceipt = lease?.terminalOutcome === 'succeeded'
     || launchRecord?.terminalOutcome === 'succeeded' || launchRecord?.outcome === 'succeeded';
   const cap = { headSha: head, retryExhausted: input.retryExhausted === true, lifetimeExhausted: input.lifetimeExhausted === true };
-  const closerAuthoredStale = input.attested === true && input.reviewState?.headSha
+  const explicitReview = input.closerAuthoredStale?.decision === 'rereview-exact-head'
+    && head && input.reviewState?.headSha
+    && input.closerAuthoredStale.currentHead === head
+    && input.closerAuthoredStale.reviewedHead === input.reviewState.headSha;
+  const closerAuthoredStale = !explicitReview && input.attested === true && input.reviewState?.headSha
     ? { decision: 'carry-forward', carryForward: true, reviewedHead: input.reviewState.headSha, currentHead: head }
     : pick(input.closerAuthoredStale, ['decision', 'carryForward', 'reviewedHead', 'currentHead']);
   const observations = {

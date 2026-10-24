@@ -260,7 +260,7 @@
         {"id": "closure-owner.02","from": "[*]","to": "page","trigger": "recompute ownership: page","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.03","from": "[*]","to": "wait","trigger": "project shared next action: wait","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)","codeSource": "src/ama/closure-next-action.mjs"},
-        {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "project shared next action: review (including a head-bound shared rereview-exact-head decision before historical hammer ownership)","codeSource": "src/ama/closure-next-action.mjs"},
+        {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.06","from": "[*]","to": "remediation","trigger": "project shared next action: remediation","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.07","from": "[*]","to": "follow-up-drain","trigger": "recompute ownership: follow-up-drain","codeSource": "src/ama/closure-owner.mjs"},
         {"id": "closure-owner.08","from": "[*]","to": "conflict-rebase","trigger": "recompute ownership: conflict-rebase","codeSource": "src/ama/closure-owner.mjs"},

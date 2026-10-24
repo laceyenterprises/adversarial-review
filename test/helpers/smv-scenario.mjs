@@ -125,6 +125,15 @@ if (scenario === 'clean') {
   const closerAuthoredStale = { currentHead: headSha, reviewedHead: base,
     decision: 'rereview-exact-head', carryForward: false };
   assert.equal(decideClosureOwner({ ...closureInput, attested: true, closerAuthoredStale }).owner, 'review');
+  const { resolveClosureNextAction } = await import('../../src/ama/closure-next-action.mjs');
+  const exactHead = await resolveClosureNextAction({
+    input: { ...closureInput, attested: true, closerAuthoredStale, checks: 'SUCCESS', lease: null },
+    subjectKey: `${repo}#${prNumber}`, observedAt: '2026-01-01T00:00:00.000Z',
+    candidate: { headSha, prState: 'open', mergeable: 'MERGEABLE' }, autonomousMergeExecutionEnabled: true,
+  });
+  assert.equal(exactHead.decision.action, 'review');
+  assert.equal(exactHead.decision.reason, 'exact-head-review');
+
   assert.equal(decideClosureOwner({ ...closureInput,
     closerAuthoredStale: { ...closerAuthoredStale, decision: 'eligible', carryForward: true } }).owner, 'daemon-merge');
   assert.equal(decideClosureOwner({ ...closureInput,

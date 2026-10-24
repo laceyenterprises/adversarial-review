@@ -458,11 +458,12 @@ function selectRow(facts) {
   if (review.attestation === 'invalid') {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'attestation-invalid', deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (review.currentHeadVerdictAbsent && !terminalHead && policy?.reviewCeilingReached === true && !handedToReview) {
-    return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
-  }
+  // HAMATTEST-03: an explicit head-bound review decision survives the old ceiling.
   if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'exact-head-review', deadlineKind: 'admission', queue: 'dispatch' };
+  }
+  if (review.currentHeadVerdictAbsent && !terminalHead && policy?.reviewCeilingReached === true && !handedToReview) {
+    return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
   }
   if (review.currentHeadVerdictAbsent && !carried) {
     return { row: 'R13-review', action: 'review', actor: 'reviewer',

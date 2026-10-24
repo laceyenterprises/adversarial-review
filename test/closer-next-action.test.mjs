@@ -53,6 +53,21 @@ test('closure invalidates an earlier wake decision when round evidence changes',
   assert.equal(await resolveSharedNextAction({ passSnapshot }), next);
 });
 
+for (const attested of [false, true]) {
+  for (const reviewCeilingReached of [false, true]) {
+    test(`explicit head-bound review survives attested=${attested}, ceiling=${reviewCeilingReached}`, async () => {
+      const shared = await resolveClosureNextAction({
+        input: { reviewState: { ...clean, headSha: OLD }, currentHead: HEAD, attested,
+          closerAuthoredStale: { decision: 'rereview-exact-head', reviewedHead: OLD, currentHead: HEAD },
+          reviewCeilingReached, lease: null, roundsLeft: false, checks: 'SUCCESS' },
+        candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+        autonomousMergeExecutionEnabled: true, observedAt: AT,
+      });
+      assert.deepEqual(tuple(shared.decision), ['review', 'reviewer', 'exact-head-review']);
+    });
+  }
+}
+
 test('existing operator approval keeps exact-head and actor policy before daemon admission', () => {
   const approval = { applied: true, actor: 'operator-05', eventId: 'event-05',
     observedAt: AT, observedRevisionRef: HEAD };

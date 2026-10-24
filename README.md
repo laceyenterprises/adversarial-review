@@ -1245,8 +1245,8 @@ synthetic I/O. No lifecycle state, transition or smoke promise changes.
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
 successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing and
 NXA-04 for remediation closeout; HAMATTEST-03 executes its head-bound exact-head
-review decision through the ownerless watchdog. Explicit decisions and selected
-review intents bind both the current and reviewed heads; NXA-05 reports retain the selected workflow through bounded waits and pages;
+review decision through the ownerless watchdog, before the historical review
+ceiling. Explicit decisions and selected review intents bind both the current and reviewed heads; NXA-05 reports retain the selected workflow through bounded waits and pages;
 watchdog queueing still requires proven ownership absence. Closer routing and
 recovery now adopt the same decision; the legacy adapter remains for source rollback.
 Disagreements and overdue decisions go to a bounded local log. Overdue alerts use the closure-wait
@@ -1600,7 +1600,8 @@ transport response, failed release stays retryable, and live leases renew until
 process drain is confirmed, independently of delivery rows. An approved
 exact-head, zero-finding review merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
-HAMATTEST-03 exercises production coexistence with a bounded closure wait:
+HAMATTEST-03 verifies shared exact-head review selection after the historical
+review ceiling and exercises production coexistence with a bounded closure wait:
 live or uncertain hammer ownership suppresses re-review and retains the wait
 owner; after confirmed absence, a head-bound review decision queues in the same
 poll and promotes the owner to review, once per head. SRE verifies the next
@@ -1921,7 +1922,7 @@ stateDiagram-v2
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 project shared next action: wait
     [*] --> s3: closure-owner.04 project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
-    [*] --> s4: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical hammer ownership)
+    [*] --> s4: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
     [*] --> s5: closure-owner.06 project shared next action: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
     [*] --> s7: closure-owner.08 recompute ownership: conflict-rebase

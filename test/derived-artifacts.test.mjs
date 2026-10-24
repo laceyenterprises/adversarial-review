@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -7,6 +8,20 @@ import { dirname, join } from 'node:path';
 import { artifactSandbox, proveDerivedArtifacts, runArtifactBuild } from '../src/ama/derived-artifacts.mjs';
 import { registerArtifactReceipt } from '../src/ama/derived-artifact-receipt.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
+import os from 'node:os';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
+import { redactAndCap } from '../src/adapters/comms/github-pr-comments/redaction.mjs';
+
+function loadedFixtureHost(t) {
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * 3, 0, 0]);
+  const original = childProcess.execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (file, ...args) => file === '/bin/ps'
+    ? `${os.cpus().length * 100}\n` : original(file, ...args));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+}
 
 // Keep the receipt policy reader offline even when this file is run directly.
 beforeEach(t => {
@@ -23,17 +38,82 @@ beforeEach(t => {
 
 // Execute only this file's synthetic commands under the clean build environment.
 // OS sandbox availability is tested separately; no production bypass exists.
-const runFixtureBuild = async spec => execFileSync('/bin/sh', spec.args.slice(-2), {
-  cwd: spec.cwd, env: spec.env, timeout: 5000, stdio: ['ignore', 'ignore', 'pipe'],
-});
-const proveFixture = (args, evidence) => proveDerivedArtifacts(args, evidence, { runBuildImpl: runFixtureBuild });
-const proveReceiptFixture = (args, evidence) => proveDerivedArtifacts(args, evidence, { runBuildImpl: async spec => {
-  try { await runFixtureBuild(spec); }
-  catch (error) {
-    console.warn(`[receipt fixture build] ${error.code || ''} ${error.signal || ''}: ${String(error.message).slice(0, 300)}`);
+// Size each fixture subprocess once, keeping idle hang detection and a 30s cap
+// even when the operator's load multiplier is higher than the default six.
+const fixtureTimeoutMs = (nominalMs, loadOptions = {}) => loadAwareTimeoutMs(nominalMs,
+  { ...loadOptions, maxMs: 30_000 });
+const runFixtureBuild = async spec => {
+  try {
+    return execFileSync('/bin/sh', spec.args.slice(-2), {
+      cwd: spec.cwd, env: spec.env, timeout: fixtureTimeoutMs(5000),
+      maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    // Proof collection deliberately fails closed to []; retain the subprocess
+    // evidence here for both declared and receipt fixtures. Redact before capping.
+    const detail = Object.fromEntries(['code', 'signal', 'status', 'message', 'stdout', 'stderr']
+      .map(key => [key, error[key] == null ? null : redactAndCap(String(error[key]), 2000)]));
+    console.warn(`[artifact fixture build] ${JSON.stringify(detail)}`);
     throw error;
   }
-} });
+};
+const proveFixture = (args, evidence) => proveDerivedArtifacts(args, evidence, { runBuildImpl: runFixtureBuild });
+const proveReceiptFixture = proveFixture;
+
+test('LAC-2107: fixture subprocess budgets scale once and stay bounded', () => {
+  const idle = { enabled: true, maxMultiplier: 6, loadAvg1m: 0, cpuCount: 4, cpuBusyPercent: 100 };
+  const busy = { ...idle, loadAvg1m: 12 };
+  for (const nominal of [5000, 15000]) {
+    assert.equal(fixtureTimeoutMs(nominal, idle), nominal);
+    assert.equal(fixtureTimeoutMs(nominal, { ...busy, enabled: false }), nominal);
+    assert.equal(fixtureTimeoutMs(nominal, busy), 30_000);
+    assert.equal(fixtureTimeoutMs(nominal, { ...busy, loadAvg1m: 100, maxMultiplier: 20, maxMs: Infinity }), 30_000);
+  }
+  assert.equal(fixtureTimeoutMs(5000, { ...busy, loadAvg1m: 8 }), 17500);
+});
+
+test('LAC-2107: controlled slow fixture survives the loaded policy beyond five seconds', async t => {
+  loadedFixtureHost(t);
+  const root = mkdtempSync(join(tmpdir(), 'slow-artifact-fixture-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const started = performance.now();
+  await runFixtureBuild({ cwd: root, env: { PATH: '/usr/bin:/bin' },
+    args: ['-c', 'exec sleep 6'] });
+  assert.ok(performance.now() - started >= 6000);
+});
+
+for (const receipt of [false, true]) test(`LAC-2107: ${receipt ? 'receipt' : 'declared'} fixture failure retains bounded redacted diagnostics`, async t => {
+  const f = fixture(t, { declared: !receipt });
+  if (receipt) registerArtifactReceipt(f.root, legacyReceipt(f));
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const failure = Object.assign(new Error('synthetic build timeout'), {
+    code: 'ETIMEDOUT', signal: 'SIGTERM', status: null,
+    stdout: Buffer.from('fixture output'),
+    stderr: Buffer.from(`npm detail ghp_fixtureSecret0123456789 /Users/fixture/private/source.txt\n${'x'.repeat(5000)}`),
+  });
+  const original = childProcess.execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (file, ...args) => {
+    if (file === '/bin/sh') throw failure;
+    return original(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const prove = receipt ? proveReceiptFixture : proveFixture;
+  assert.deepEqual(await prove(receipt ? receiptArgs(f) : f.args, f.evidence), []);
+  assert.equal(warnings.length, 1);
+  const detail = JSON.parse(warnings[0].replace(/^\[artifact fixture build\] /, ''));
+  assert.equal(detail.code, 'ETIMEDOUT');
+  assert.equal(detail.signal, 'SIGTERM');
+  assert.equal(detail.status, null);
+  assert.equal(detail.message, failure.message);
+  assert.equal(detail.stdout, 'fixture output');
+  assert.match(detail.stderr, /npm detail \[REDACTED_GITHUB_TOKEN\] <path-redacted>\/source.txt/);
+  assert.ok(detail.stderr.endsWith('…'));
+  assert.ok(detail.stderr.length <= 2000);
+  assert.ok(!warnings[0].includes('fixtureSecret'));
+  assert.ok(!warnings[0].includes('/Users/fixture'));
+});
 
 function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared = true,
   tamper = false, finalCommand = command, symlink = false, sourceFiles = {}, artifactDirectory = '',
@@ -46,7 +126,7 @@ function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared 
     GIT_AUTHOR_NAME: 'Fixture Author', GIT_AUTHOR_EMAIL: 'author@example.invalid',
     GIT_COMMITTER_NAME: 'Fixture Committer', GIT_COMMITTER_EMAIL: 'committer@example.invalid',
     npm_config_ignore_scripts: 'true', npm_config_offline: 'true', npm_config_cache: join(root, '.npm') };
-  const gitBytes = (...args) => execFileSync('git', args, { cwd: root, env, timeout: 5000 });
+  const gitBytes = (...args) => execFileSync('git', args, { cwd: root, env, timeout: fixtureTimeoutMs(5000) });
   const git = (...args) => gitBytes(...args).toString('utf8').trimEnd();
   git('init', '-q');
   git('commit', '-q', '--allow-empty', '-m', 'Fixture base');
@@ -59,7 +139,7 @@ function fixture(t, { command = 'npm pack --ignore-scripts --offline', declared 
       prepack: 'node -e "require(\'fs\').writeFileSync(\'source.txt\', \'unexpected lifecycle script\')"' } });
   mkdirSync(join(cwd, artifactDirectory), { recursive: true });
   const pack = () => execFileSync('npm', ['pack', '--ignore-scripts', '--offline', '--pack-destination', artifactDirectory || '.'],
-    { cwd, env, timeout: 15000, stdio: ['ignore', 'ignore', 'pipe'] });
+    { cwd, env, timeout: fixtureTimeoutMs(15000), stdio: ['ignore', 'ignore', 'pipe'] });
   writeFileSync(join(cwd, 'package.json'), manifest(command));
   writeFileSync(join(cwd, 'source.txt'), 'Author source\n');
   for (const [path, content] of Object.entries(sourceFiles)) {
@@ -179,7 +259,7 @@ for (const [name, options] of [
 test('native sandbox rebuilds archives and denies network, host file reads and writes', async t => {
   const f = fixture(t);
   const spec = artifactSandbox(f.root, f.root, 'true');
-  const probe = spawnSync(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, encoding: 'utf8', timeout: 5000 });
+  const probe = spawnSync(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, encoding: 'utf8', timeout: fixtureTimeoutMs(5000) });
   if (probe.error?.code === 'ENOENT' || /sandbox_apply: Operation not permitted|No permissions to create new namespace|Creating new namespace failed: Operation not permitted/.test(probe.stderr || '')) {
     assert.deepEqual(await proveDerivedArtifacts(f.args, f.evidence), []);
     t.skip(`OS sandbox unavailable: ${probe.error?.message || probe.stderr.trim()}`);
@@ -265,7 +345,7 @@ test('build cancellation kills background descendants before returning', async t
     // kill(pid, 0) also succeeds for dead, unreaped descendants on Linux.
     // The sandbox can terminate them, but only their new parent can reap them.
     const descendant = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], {
-      encoding: 'utf8', timeout: 5000,
+      encoding: 'utf8', timeout: fixtureTimeoutMs(5000),
     });
     assert.ifError(descendant.error);
     assert.ok(descendant.status === 1

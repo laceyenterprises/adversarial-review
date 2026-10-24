@@ -105,17 +105,19 @@ export async function proveDerivedArtifacts({ repo, get, signal, rootDir, prNumb
   const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const trees = new Map(), blobs = new Map();
   let totalBytes = 0, checkoutBytes = 0, count = 0;
-  const read = async path => {
+  const boundedRead = async (reader, path) => {
     bounded.throwIfAborted();
     // Readers normally have their own transport budget. Also bound injected or
     // stalled readers here; late responses never write into the scratch tree.
     return new Promise((accept, reject) => {
       const abort = () => reject(bounded.reason);
       bounded.addEventListener('abort', abort, { once: true });
-      Promise.resolve().then(() => get(path)).then(accept, reject)
+      Promise.resolve().then(() => reader(path)).then(accept, reject)
         .finally(() => bounded.removeEventListener('abort', abort));
     });
   };
+  const read = path => boundedRead(get, path);
+  read.metadata = path => boundedRead(typeof get.metadata === 'function' ? get.metadata.bind(get) : get, path);
   const tree = async ref => {
     if (!trees.has(ref)) {
       const data = await read(`repos/${repo}/git/trees/${ref}`);

@@ -434,3 +434,29 @@ test('legacy fixed pack scopes sources to its package; declared builds and packa
   const declared = fixture(t, { symlink: true });
   assert.deepEqual(await proveReceiptFixture(declared.args, declared.evidence), []);
 });
+
+
+test('trusted receipt ancestry uses bounded metadata reads without a full compare', async t => {
+  const f = fixture(t, { declared: false });
+  registerArtifactReceipt(f.root, legacyReceipt(f));
+  const args = receiptArgs(f);
+  const original = args.get;
+  let metadataReads = 0;
+  args.get = async path => {
+    assert.ok(!path.includes('/compare/'), 'ancestry must not reconstruct a full diff');
+    return original(path);
+  };
+  args.get.metadata = async path => {
+    metadataReads++;
+    assert.ok(path.endsWith(`${f.evidence.primaryHead}...${f.evidence.headSha}`));
+    return { status: 'ahead' };
+  };
+  assert.equal((await proveReceiptFixture(args, f.evidence)).length, 1);
+  assert.equal(metadataReads, 1);
+  const controller = new AbortController();
+  args.get.metadata = () => {
+    controller.abort(new Error('fixture cancellation'));
+    return new Promise(() => {});
+  };
+  assert.deepEqual(await proveReceiptFixture({ ...args, signal: controller.signal }, f.evidence), []);
+});

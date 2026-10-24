@@ -62,3 +62,5 @@ the receipt or history cache. The evaluator also rechecks the receipt proof's
 merge base and effective non-blocking policy. Missing sandbox support retains the opaque refusal.
 Owners may revoke a receipt by removing its exact file. Expired files are ignored;
 there is no automatic cleanup job or retry/dispatch mechanism.
+
+Receipt ancestry checks use the history reader metadata projection when available, under the same abort and total proof deadline as other reads. Readers without that projection retain the bounded full-reader fallback. No receipt authority or expiry rule changes.

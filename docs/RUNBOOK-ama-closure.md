@@ -1,5 +1,30 @@
 # RUNBOOK — AMA closure pipeline
 
+## Review evidence and fixer disputes (REVIEWEVIDENCE-01)
+
+Blocking PR findings require a resolvable head file/line and explicit input or
+state plus wrong outcome. The existing head-grounding pass caches file reads,
+tries local Git objects first, and bounds unique files at 25. Missing, unreadable
+or over-budget evidence demotes the finding with a recorded reason. The shared
+prompt fragment covers all reviewer families and stages, including Argus model
+findings; the deterministic security rubric keeps its separate existing policy.
+
+A worker can disprove a blocker using `pushback[].evidence`: the reviewed head,
+original citation, and either code/reproduction/output or test/output. The worker
+runs the proof; daemons never execute worker-supplied commands or call a model to
+judge it. All-blocker factual disputes on an independently observed unchanged
+open head complete without another review. Ordinary pushback does not do so.
+The existing withdrawal table caches completion admission, and the shared gate,
+closer and review-dismissal paths consume it with exact-head and body checks.
+There is no new polling path, CI gate, config key or merge permission.
+
+SRE acceptance after deploy: sample 20 reviews and confirm every blocker has
+`path:line` and a behaviour statement. Re-run the audit's 34-finding classification
+and confirm the blocking-noise share drops. Inspect retained dispute evidence and
+confirm a fully disproved same-head review closes without re-review. Do not
+claim this organic acceptance from offline tests.
+
+
 Operator runbook for enabling, validating, and rolling back the
 Adversarial Merge Authority (AMA) closure pipeline on a host. The full
 design is in

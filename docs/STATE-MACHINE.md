@@ -1,5 +1,19 @@
 # Adversarial Review State Machine Notes
 
+## Evidence-only completion (REVIEWEVIDENCE-01)
+
+The existing `in_progress -> completed` follow-up transition now also accepts a
+validated factual dispute for every blocking finding after an independent open,
+unchanged-head observation. It suppresses re-review and wakes the watcher.
+The existing withdrawal store caches `withdrawn-by-remediator` with the retained
+reply ID, reviewed head, body digest and evidence digest. All consumers require
+the same reviewed/evaluated head and body. Ordinary pushback stays unresolved;
+missing admission blocks closure, and another head cannot borrow it. Required
+checks, leases, strict remediation policy and both merge paths remain enforced.
+There is no new queue/review lifecycle state. See the closure runbook for SRE's
+20-review sample and audit reclassification after deployment.
+
+
 Quick reference for the two durable state machines in this module.
 
 Use this when you want the control-plane picture without the full runbook.

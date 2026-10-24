@@ -76,6 +76,14 @@ export interface RemediationReplyPushback {
   title?: string;
   finding: string;
   reasoning: string;
+  evidence?: {
+    headSha: string;
+    citation: string;
+    output: string;
+    code?: string;
+    reproduction?: string;
+    test?: string;
+  };
 }
 
 export interface RemediationReplyBlocker {

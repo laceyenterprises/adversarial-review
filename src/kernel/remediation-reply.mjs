@@ -1,4 +1,4 @@
-import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection, parseNonBlockingFindingsSection } from './review-findings.mjs';
+import { findingEvidenceLocation, isNoneFindingsSentinelOnly, parseBlockingFindingsSection, parseNonBlockingFindingsSection } from './review-findings.mjs';
 /**
  * @typedef {import('./contracts.js').RemediationReply} RemediationReply
  */
@@ -226,6 +226,29 @@ function validatePushbackField(items, options = {}) {
     assertNoPlaceholderText(entry.reasoning, `pushback[${index}].reasoning`);
     assertPublicReplyTextQuality(entry.finding, `pushback[${index}].finding`, options);
     assertPublicReplyTextQuality(entry.reasoning, `pushback[${index}].reasoning`, options);
+  });
+}
+
+// Evidence is an observation made by the worker, never a command for the
+// daemon to execute. Ordinary policy/scope pushback does not close a finding.
+export function disputeEvidenceForFinding(entry, finding, headSha) {
+  const e = entry?.evidence;
+  const text = value => typeof value === 'string' && value.trim() && value.length <= 16000;
+  if (!e || e.headSha !== headSha || !/^[a-f0-9]{40}$/i.test(headSha || '')
+    || !text(e.output) || !(text(e.test) || (text(e.code) && text(e.reproduction)))) return null;
+  const cited = findingEvidenceLocation({ file: e.citation });
+  const original = findingEvidenceLocation(finding);
+  if (!cited || !original || JSON.stringify(cited) !== JSON.stringify(original)) return null;
+  return e;
+}
+
+export function allBlockingDisputed(job, reply, headSha) {
+  if (!reply || reply.outcome !== 'completed' || headSha !== job?.revisionRef
+    || reply.blockers?.length || reply.operationalBlockers?.length || reply.addressed?.length) return false;
+  const findings = parseBlockingFindingsSection(job.reviewBody);
+  return findings?.length > 0 && findings.every(f => {
+    const matches = (reply.pushback || []).filter(e => normalizeCoverageTitle(e.title || e.finding) === normalizeCoverageTitle(f.title));
+    return matches.length === 1 && disputeEvidenceForFinding(matches[0], f, headSha);
   });
 }
 

@@ -15,7 +15,10 @@
 //     was determinable; or
 //   - it carries no code-like quote, cites plain line numbers, and every cited
 //     line is past the end of the head file.
-// Any quote present at head keeps the card blocking. Any fetch failure, an
+// REVIEWEVIDENCE-01: production requires resolvable coordinates and explicit
+// input/state plus wrong-outcome evidence before the legacy quote check.
+// Legacy callers can retain quote-only inspection for stored historical bodies.
+// Any quote present at head keeps the card blocking in that legacy mode. Any fetch failure, an
 // unparseable card, or an unexpected error keeps the card blocking. The pass
 // never adds a finding or a gate; it can only move a card from Blocking to
 // Non-blocking and, when no blocking card remains, the Verdict from
@@ -196,9 +199,10 @@ function isMissingFileError(err) {
 function demotedCard(cardLines, reason, headSha) {
   const [first, ...rest] = cardLines;
   const title = cardTitle(cardLines);
-  const header = /^\s*###\s+/.test(first)
-    ? `### ${title} — ${HEAD_GROUNDING_TAG}`
-    : `- **${title} — ${HEAD_GROUNDING_TAG}**`;
+  const tag = ['removed-side', 'absent', 'lines-beyond-head'].includes(reason) ? HEAD_GROUNDING_TAG : 'insufficient blocking evidence';
+  const header = !fieldValue(cardLines, 'File') ? `- Title: ${title} — ${tag}` : /^\s*###\s+/.test(first)
+    ? `### ${title} — ${tag}`
+    : `- **${title} — ${tag}**`;
   const detail = reason === 'removed-side'
     ? 'the quoted code appears only on the removed side of the diff'
     : reason === 'lines-beyond-head'
@@ -208,7 +212,7 @@ function demotedCard(cardLines, reason, headSha) {
   const result = [
     header,
     ...rest,
-    `${indent}- **Head grounding:** ${HEAD_GROUNDING_TAG} — ${detail} (head ${String(headSha).slice(0, 12)}); demoted from blocking.`,
+    `${indent}- **Head grounding:** ${tag} — ${detail} (head ${String(headSha).slice(0, 12)}); demoted from blocking.`,
   ];
   // Keep the reason in the parsed finding as well as the rendered review.
   const problemIndex = result.findIndex(line => /\*\*Problem(?::\*\*|\*\*\s*:)/i.test(line));
@@ -245,30 +249,31 @@ export function createHeadContentReader({ repo, headSha, checkoutDir = null, fet
   maxFiles = DEFAULT_MAX_HEAD_FILES, deletedFiles = new Set() } = {}) {
   const contentCache = new Map();
   const headContent = (path) => {
-      if (!contentCache.has(path)) {
-        if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
-        const read = async () => {
-          if (checkoutDir && /^[a-f0-9]{40}$/i.test(headSha)) {
-            try {
-              return execFileSync('git', ['--no-replace-objects', '-C', checkoutDir, 'show', `${headSha}:${path}`],
-                { encoding: 'utf8', timeout: 2000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-            } catch (error) {
-              if (isMissingFileError(error)) throw error;
-              /* The checkout may lack the PR object; use the existing exact-ref reader. */
-            }
+    if (!repo || !/^[a-f0-9]{40}$/i.test(headSha || '')) return Promise.resolve({ ok: false, reason: 'missing-head' });
+    if (!contentCache.has(path)) {
+      if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
+      const read = async () => {
+        if (checkoutDir && /^[a-f0-9]{40}$/i.test(headSha)) {
+          try {
+            return execFileSync('git', ['--no-replace-objects', '-C', checkoutDir, 'show', `${headSha}:${path}`],
+              { encoding: 'utf8', timeout: 2000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+                env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' } });
+          } catch (error) {
+            if (isMissingFileError(error)) throw error;
+            /* The checkout may lack the PR object; use the existing exact-ref reader. */
           }
-          return fetchFileAtRefImpl(repo, path, headSha);
-        };
-        contentCache.set(path, read().then(
-          (content) => ({ ok: true, content: String(content ?? '') }),
-          (err) => (isMissingFileError(err) && deletedFiles.has(path)
-            ? { ok: true, content: '' }
-            : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
-        ));
-      }
-      return contentCache.get(path);
-    };
-
+        }
+        return fetchFileAtRefImpl(repo, path, headSha);
+      };
+      contentCache.set(path, read().then(
+        (content) => ({ ok: true, content: String(content ?? '') }),
+        (err) => (isMissingFileError(err) && deletedFiles.has(path)
+          ? { ok: true, content: '' }
+          : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
+      ));
+    }
+    return contentCache.get(path);
+  };
   return headContent;
 }
 
@@ -284,7 +289,7 @@ async function groundBlockingFindingsAtHead(reviewText, {
 } = {}) {
   const grounding = { headSha: headSha || null, checked: 0, kept: 0, demoted: [] };
   const original = String(reviewText ?? '');
-  if (!repo || !String(headSha || '').trim() || !original) {
+  if (!original || ((!repo || !String(headSha || '').trim()) && !requireEvidence)) {
     return { reviewText: original, grounding: { ...grounding, skipped: 'missing-input' } };
   }
   try {
@@ -292,7 +297,7 @@ async function groundBlockingFindingsAtHead(reviewText, {
     const blockingIndex = findSection(sections, /^##\s+Blocking issues\b/i);
     if (blockingIndex < 0) return { reviewText: original, grounding };
     const { preamble, cards } = requireEvidence
-      ? { preamble: [], cards: (parseBlockingFindingsSection(original) || []).map(f => [
+      ? { preamble: [], cards: (parseBlockingFindingsSection(original, { includeIncompleteCards: true }) || []).map(f => [
           `- **${f.title || 'Unstructured finding'}**`,
           ...Object.entries({ Category: f.category, File: f.file, Lines: f.lines, Problem: f.problem,
             'Why it matters': f.whyItMatters, 'Recommended fix': f.recommendedFix })

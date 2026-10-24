@@ -117,6 +117,7 @@ export function createReviewCurrencyReader({ repo, prNumber, get, comments = nul
 export async function carryHammerWithdrawals(withdrawals, currentHead, currency) {
   const result = [];
   for (const entry of withdrawals) {
+    if (entry.resolution === 'withdrawn-by-remediator' && entry.headSha !== currentHead) continue;
     const reviewCurrency = await currency(entry.findingReviewedHead, currentHead);
     const evidenceCurrency = await currency(entry.headSha, currentHead, { rebaseOnly: true });
     result.push({ ...entry, reviewCurrency, evidenceCurrency });

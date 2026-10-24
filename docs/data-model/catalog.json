@@ -1039,6 +1039,8 @@
       "store": "data/reviews.db",
       "schemaSurface": "src/review-state.mjs",
       "relatedSchemaSurfaces": [
+        "src/review-finding-records.mjs",
+        "src/kernel/remediation-reply.mjs",
         "src/ama/finding-dispute.mjs",
         "src/ama/finding-dispute-owner.mjs",
         "src/ama/finding-dispute-context.mjs",

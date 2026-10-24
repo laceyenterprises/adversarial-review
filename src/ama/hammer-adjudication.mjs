@@ -15,6 +15,7 @@ import { parseBlockingFindingsSection } from '../kernel/review-findings.mjs';
 // watcher's same-head duplicate guard can no longer strand the PR, and the gate,
 // closer and hammer self-cert all read the withdrawal as a resolved finding.
 export const HAMMER_WITHDRAWN_RESOLUTION = 'withdrawn-by-hammer';
+export const REMEDIATOR_WITHDRAWN_RESOLUTION = 'withdrawn-by-remediator';
 export const HAMMER_FINAL_OPERATOR_DECISION = 'Hammers judgement is final';
 export const HAM_FINDING_DISPUTE_PREFIX = 'HAM finding dispute — ';
 
@@ -92,7 +93,11 @@ export function parseWithdrawalComment(body) {
 // entitled HAM identity, matching a successfully admitted durable withdrawal.
 // A post alone is insufficient: the helper can fail its subsequent head check.
 export function hammerWithdrawalsFromComments(comments, recordedWithdrawals = []) {
-  return (Array.isArray(comments) ? comments : []).flatMap((comment) => {
+  // Remediator evidence is in a service-admitted completed reply, not a HAM
+  // comment. It applies only to the exact reviewed/evidence head.
+  const replies = recordedWithdrawals.filter(row => row.resolution === REMEDIATOR_WITHDRAWN_RESOLUTION
+    && SHA64.test(row.replyId || '') && row.headSha === row.findingReviewedHead);
+  return [...replies, ...(Array.isArray(comments) ? comments : []).flatMap((comment) => {
     const author = typeof comment?.author === 'string' ? comment.author
       : comment?.author?.login || comment?.user?.login || comment?.actor?.login || null;
     const body = typeof comment?.body === 'string' ? comment.body : comment?.comment?.body;
@@ -109,7 +114,7 @@ export function hammerWithdrawalsFromComments(comments, recordedWithdrawals = []
       && row.findingReviewedHead === withdrawal.findingReviewedHead
       && row.evidenceSha256 === withdrawal.evidenceSha256);
     return admitted ? [withdrawal] : [];
-  });
+  })];
 }
 
 // Read-only and fail-soft, like the reviewer's dispute-context read: a missing,
@@ -130,9 +135,13 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
     db = new Database(path, { readonly: true, fileMustExist: true });
     return db.prepare(`SELECT identity, head_sha AS headSha, finding_reviewed_head AS findingReviewedHead,
       evidence_sha256 AS evidenceSha256, resolution, comment_id AS commentId,
-      comment_author AS commentAuthor, comment_sha256 AS commentSha256 FROM ham_finding_disputes
-      WHERE repo=? AND pr_number=? AND resolution=? AND comment_id IS NOT NULL`)
-      .all(repo, Number(prNumber), HAMMER_WITHDRAWN_RESOLUTION);
+      comment_author AS commentAuthor, comment_sha256 AS commentSha256,
+      reply_id AS replyId, review_body_sha256 AS reviewBodySha256 FROM ham_finding_disputes
+      WHERE repo=? AND pr_number=? AND ((resolution=? AND comment_id IS NOT NULL)
+        OR (resolution=? AND reply_id IS NOT NULL))`)
+      .all(repo, Number(prNumber), HAMMER_WITHDRAWN_RESOLUTION, REMEDIATOR_WITHDRAWN_RESOLUTION)
+      .map(({ replyId, reviewBodySha256, ...row }) => row.resolution === REMEDIATOR_WITHDRAWN_RESOLUTION
+        ? { ...row, replyId, reviewBodySha256 } : row);
   } catch (error) {
     if (strict) throw error;
     logger?.warn?.(`[ama] hammer withdrawal read failed; treating findings as unresolved: ${error?.message || error}`);
@@ -146,6 +155,7 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
 // Applies only when the structured blocker list is known and complete.
 export function resolveHammerAdjudication({
   blockingFindingState, blockingFindingCount, blockingFindingIdentities, reviewedHead, currentHead = reviewedHead, reviewCurrency = null,
+  reviewBodySha256 = null,
 } = {}, withdrawals = []) {
   const count = Number(blockingFindingCount);
   const identities = Array.isArray(blockingFindingIdentities) ? blockingFindingIdentities : null;
@@ -155,7 +165,10 @@ export function resolveHammerAdjudication({
     && SHA40.test(head) && SHA40.test(currentHead || '')
     && (!reviewCurrency || reviewCurrencyCovers(reviewCurrency, head, currentHead));
   const resolved = applicable
-    ? (Array.isArray(withdrawals) ? withdrawals : []).filter((entry) => entry?.resolution === HAMMER_WITHDRAWN_RESOLUTION
+    ? (Array.isArray(withdrawals) ? withdrawals : []).filter((entry) => (entry?.resolution === HAMMER_WITHDRAWN_RESOLUTION
+      || (entry?.resolution === REMEDIATOR_WITHDRAWN_RESOLUTION && SHA64.test(entry.replyId || '')
+        && entry.reviewBodySha256 === reviewBodySha256 && SHA64.test(reviewBodySha256 || '')
+        && entry.headSha === head && head === currentHead))
       && identities.includes(entry.identity)
       && SHA64.test(entry.evidenceSha256 || '')
       && entry.findingReviewedHead === head

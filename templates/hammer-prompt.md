@@ -9,7 +9,8 @@ gate remains mandatory.
 
 ## Shell safety
 
-Fresh shells reset exports, variables, functions and cwd. Persist only in
+Each command runs in a fresh shell unless kept open; exports, variables,
+functions and cwd reset. Persist only in
 `<<RUN_DIR>>` (TMPDIR); never `/tmp`. Use absolute helper paths: cwd is untrusted.
 
 Give every shell command a wall-clock bound. On macOS:
@@ -88,17 +89,16 @@ HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 ```
 
-`HAM_ROOT_DIR` is the deployed daemon checkout and round ledger; keep it exported.
-`HAM_HQ_ROOT` is the HQ root.
+Keep `HAM_ROOT_DIR` (deployed daemon/round ledger) exported; `HAM_HQ_ROOT` is HQ.
 
-Write the complete close-out to `<<RUN_DIR>>/close-controller.sh`, then run in foreground:
+Write `<<RUN_DIR>>/close-controller.sh`; run in foreground:
 
 ```bash
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
 ```
 
-Required before lease acquisition. Preserve inherited HQ/controller env and FD 4.
-No direct/detached shell or nested controller; validators share its owned group.
+Before acquiring: preserve HQ/controller env and FD 4; validators share its group.
+No direct/detached shell or nested controller.
 
 Before the merge lease, write the complete audit markdown to a file under `<<RUN_DIR>>` and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line

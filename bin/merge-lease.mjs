@@ -789,7 +789,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
       deps.stderr.write(`error: ${err.message}\n${USAGE}`);
       return EXIT_USAGE;
     }
-    deps.stderr.write(`error: retryable runtime failure: ${err.message}\n`);
+    deps.stderr.write(`error: retryable runtime failure: ${err?.message || String(err)}\n`);
     return EXIT_TIMEOUT;
   }
 }
@@ -800,7 +800,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     process.exitCode = await main();
   } catch (err) {
-    process.stderr.write(`error: retryable runtime failure: ${err.message}\n`);
+    process.stderr.write(`error: retryable runtime failure: ${err?.message || String(err)}\n`);
     process.exitCode = EXIT_TIMEOUT;
   }
 }

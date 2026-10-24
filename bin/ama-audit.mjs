@@ -28,6 +28,7 @@
 
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 import {
   AmaAuditRefusedWriteError,
@@ -210,4 +211,6 @@ function main(argv = process.argv.slice(2)) {
   }
 }
 
-process.exitCode = main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = main();
+}

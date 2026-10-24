@@ -238,6 +238,48 @@ test('unexpected main rejection maps to retryable failure and drains its diagnos
   assert.equal(result.stderr, `error: retryable runtime failure: ${message}\n`);
 });
 
+test('CLI boundary diagnostics preserve non-Error rejections and exit codes', async t => {
+  const { rootDir } = fixture(t, 0);
+  const preload = join(rootDir, 'throw-non-error.mjs');
+  for (const [path, code, prefix] of [
+    ['bin/merge-lease.mjs', 75, 'error: retryable runtime failure: '],
+    ['src/retrigger-review.mjs', 4, 'error: '],
+  ]) {
+    for (const value of ['literal failure', null, undefined, { reason: 'failure' }]) {
+      writeFileSync(preload, `process.stdout.write = () => { throw ${JSON.stringify(value)}; };`);
+      const result = await run(['--help'], {
+        preload, entry: fileURLToPath(new URL(`../${path}`, import.meta.url)),
+      });
+      assert.equal(result.signal, null);
+      assert.equal(result.code, code, `${path}: ${result.stderr}`);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, `${prefix}${String(value)}\n`);
+    }
+  }
+});
+
+test('audit and eligibility modules can be imported without invoking CLI logic', async t => {
+  const { rootDir } = fixture(t, 0);
+  const probe = join(rootDir, 'import-only.mjs');
+  for (const path of ['bin/ama-audit.mjs', 'bin/ama-check.mjs']) {
+    for (const missingArgv of [false, true]) {
+      writeFileSync(probe, `
+        ${missingArgv ? 'process.argv.splice(1);' : ''}
+        process.exitCode = 23;
+        await import(${JSON.stringify(new URL(`../${path}`, import.meta.url).href)});
+        if (process.exitCode !== 23) throw new Error('import changed exit code');
+        process.stdout.write('import completed\\n');
+        process.exitCode = 0;
+      `);
+      const result = await run([], { entry: probe });
+      assert.equal(result.signal, null);
+      assert.equal(result.code, 0, `${path}: ${result.stderr}`);
+      assert.equal(result.stdout, 'import completed\n');
+      assert.equal(result.stderr, '');
+    }
+  }
+});
+
 test('real entrypoint preserves usage, parked, contention and corrupt-input exit codes', async t => {
   const f = fixture(t, 0);
   const usage = await run(['status']);

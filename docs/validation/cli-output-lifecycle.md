@@ -37,6 +37,12 @@ verify usage 64, parked 70, contention 75, and corrupt-input 75 with a diagnosti
 An injected help-output failure exercises an exception outside the command-level
 catch: the CLI boundary maps it to retryable exit 75 and drains the complete
 512 KB stderr diagnostic.
+The CLI boundary tests also inject string, null, undefined and plain-object
+rejections into `merge-lease` and `retrigger-review`; diagnostics preserve the
+thrown value and the existing failure exit codes. Import-only probes verify
+that `ama-audit` and `ama-check` emit nothing and preserve the caller's exit code,
+including when `process.argv[1]` is absent. Direct CLI invocations remain covered
+by the operational fixture probes.
 The deliberately broken legacy control remains in the suite to establish the
 cause alongside the fixed production entrypoints.
 

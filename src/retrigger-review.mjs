@@ -882,7 +882,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   }).catch((err) => {
-    process.stderr.write(`error: ${err.message}\n`);
+    process.stderr.write(`error: ${err?.message || String(err)}\n`);
     process.exitCode = EXIT_RUNTIME;
   });
 }

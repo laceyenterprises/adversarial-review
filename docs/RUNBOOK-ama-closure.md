@@ -3468,6 +3468,10 @@ There is no buffer-size workaround, history truncation, or parse-error suppressi
 Command results retain exits 0/64/70/75. Unexpected exceptions escaping
 `merge-lease` command handling are diagnosed on stderr and mapped to retryable
 exit 75 at the CLI boundary, allowing the diagnostic to drain.
+Non-Error thrown values are formatted with a string fallback so diagnostics
+do not mask the original failure. The `ama-audit` and `ama-check` entrypoints
+run CLI logic only on direct invocation; importing them does not set exit status
+or emit CLI output.
 An asynchronous output failure such as
 EPIPE produces a nonzero process failure and stderr diagnostic; consumers must
 require both a successful exit and valid JSON. Output completion requires the

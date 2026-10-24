@@ -6,7 +6,7 @@
 
 LEASEFAIR-03 records every successful grant, fenced release, dead-holder steal,
 foreign-host deadline expiry, and renewal. Each version-1 JSONL row has
-`schemaVersion`, `eventId`, `event` (`grant`, `release`, `steal`, `expiry`, `renew`),
+`schemaVersion`, `eventId`, `event` (`grant`, `release`, `steal`, `expiry`, `renew`, `requeue`, `park`),
 `at`, `reason`, `repo`, `base`, `leaseId`, `holderPr`, `holderHead`, `holderPid`,
 `holderHost`, `holderRole` (`closer` or `daemon`), `acquiredAt`, and `releasedAt`.
 Grant and renewal rows have null `releasedAt`. Renewal preserves the original
@@ -27,3 +27,10 @@ holder and history during a wait. Timeout output and the hammer's deferred audit
 include `holders`, `closingStatus`, and the wait reason. History is bounded
 operational evidence, not merge authority. A holder still cannot be preempted
 merely because a local live PID has exceeded its deadline.
+
+A fenced no-merge release also writes `requeue` (or `park` when its repeated
+failure cap is reached), with reason
+`re-queued after no-merge release: <failure reason>`. The ordinary release row
+retains the original reason. These rows are scheduling evidence; they grant no
+merge permission. Retry records retain counters, backoff deadline and parking
+reason independently of the bounded history.

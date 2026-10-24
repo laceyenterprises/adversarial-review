@@ -98,8 +98,12 @@ ham_mark_merge_lease_retryable_abort() {
 ham_release_merge_lease() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
     local ham_release_retryable_args=()
-    if [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
+    if [ "${HAM_POST_STATE:-}" = "MERGED" ] && [ "${HAM_POST_HEAD:-}" = "${POST_REMEDIATION_SHA:-}" ] && [ -n "${POST_REMEDIATION_SHA:-}" ]; then
+      ham_release_retryable_args=(--merged --reason merged)
+    elif [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
       ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
+    else
+      ham_release_retryable_args=(--reason "${HAM_PHASE_OUTCOME:-holder-release}")
     fi
     ham_release_attempt=1
     while [ "$ham_release_attempt" -le "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; do

@@ -974,6 +974,7 @@ async function runDaemonCleanMergeAttemptInner({
     mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
     mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
     prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
+    isDraft: liveRollup?.isDraft === true || candidate?.isDraft === true,
     branchProtectionRequiredContexts,
     labels: liveRollup?.labels,
   };
@@ -1159,6 +1160,7 @@ async function runDaemonCleanMergeAttemptInner({
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,
+        isDraft: rollup?.isDraft,
         merged: state.toUpperCase() === 'MERGED',
         branchProtectionRequiredContexts,
         labels: rollup?.labels,
@@ -1181,7 +1183,7 @@ async function runDaemonCleanMergeAttemptInner({
       });
       return { ...res, acquired: Boolean(res?.acquired) };
     },
-    releaseLeaseImpl: (lease) => {
+    releaseLeaseImpl: (lease, outcome) => {
       releaseMergeLeaseImpl({
         rootDir,
         repo: lease.repo,
@@ -1190,6 +1192,7 @@ async function runDaemonCleanMergeAttemptInner({
         holderPr: lease.holderPr,
         holderHead: lease.holderHead,
         acquiredAt: lease.acquiredAt,
+        ...outcome,
       });
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.

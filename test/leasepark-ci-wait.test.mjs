@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
@@ -16,7 +17,7 @@ const head = 'a'.repeat(40);
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '7702')
-  .replaceAll('<<HQ_ROOT>>', quote(rootDir)).replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
+  .replaceAll('<<HQ_ROOT>>', '$TEST_ROOT').replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
   .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');
 
 test('CI retry renewal consumes the inspection lease alias and fences other holders', t => {
@@ -60,6 +61,21 @@ ham_renew_ci_retry_lease
 function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'clock'), '0');
+  writeFileSync(join(dir, 'config.yaml'), 'version: 1\n');
+  writeFileSync(join(dir, 'clock.mjs'), `
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
+const NativeDate = Date;
+const now = () => 1800000000000 + Number(readFileSync(${JSON.stringify(join(dir, 'clock'))}, 'utf8')) * 1000;
+globalThis.Date = class extends NativeDate {
+  constructor(...args) { super(...(args.length ? args : [now()])); }
+  static now() { return now(); }
+};
+os.loadavg = () => [0, 0, 0];
+syncBuiltinESMExports();
+`);
   writeFileSync(join(dir, 'gate.json'), JSON.stringify({ headMatches: true, state: 'OPEN', ...gate }));
   const renderedMerge = renderHammerProcedure('hammer-merge', {
     ROOT_DIR: rootDir, RUN_DIR: '$TEST_ROOT', HQ_ROOT: rootDir, REPO: 'fixture/repo', PR_NUMBER: '7702',
@@ -78,6 +94,9 @@ function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launch
 printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"
 `, { mode: 0o755 });
   const script = `
+export AGENT_OS_CONFIG_PATH=${quote(join(dir, 'config.yaml'))}
+export NODE_OPTIONS="${process.env.NODE_OPTIONS || ''} --import=${join(dir, 'clock.mjs')}"
+FAKE_CLOCK_SECONDS=0
 export PATH=${quote(dir)}:"$PATH"
 HAM_NODE_BIN=${quote(process.execPath)}
 TEST_ROOT=${quote(dir)}
@@ -106,6 +125,8 @@ ham_rebase_head() {
 ham_renew_ci_retry_lease() { [ "$HAM_MERGE_LEASE_HELD" -eq 1 ]; }
 ham_validate_ci_retry() { echo validate >> "$TEST_ROOT/retries"; }
 ham_refresh_github_gate() {
+  FAKE_CLOCK_SECONDS=$((FAKE_CLOCK_SECONDS + 60))
+  echo "$FAKE_CLOCK_SECONDS" > "$TEST_ROOT/clock"
   ${transientRead ? 'if [ "$FAKE_SECONDS" -eq 0 ]; then return 1; fi' : ':'}
   return 0
 }
@@ -121,12 +142,14 @@ const rootDir = process.argv[2];
 const result = acquireDaemonMergeLease({ rootDir, repo: 'fixture/repo', base: 'main',
   holderPr: 100, holderHead: 'daemon-head', holderPid: process.pid, holderHost: hostname() });
 if (!result.acquired) process.exit(92);
-if (!releaseMergeLease({ rootDir, ...result.lease }).released) process.exit(93);
+if (!releaseMergeLease({ rootDir, ...result.lease, merged: true }).released) process.exit(93);
 NODE
   [ "$?" -eq 0 ] || exit 94
   echo daemon-served >> "$TEST_ROOT/daemon-service"
   ` : ':'}
   FAKE_SECONDS=$((FAKE_SECONDS + 1))
+  FAKE_CLOCK_SECONDS=$((FAKE_CLOCK_SECONDS + 60))
+  echo "$FAKE_CLOCK_SECONDS" > "$TEST_ROOT/clock"
   ${greenAfterSleep ? `if [ "$FAKE_SECONDS" -ge ${greenAfterPolls} ]; then jq \'.ok = true | .checksConclusion = "SUCCESS" | .reasons = []\' "$HAM_GATE_JSON" > "$TEST_ROOT/green.json"; mv "$TEST_ROOT/green.json" "$HAM_GATE_JSON"; fi` : ':'}
 }
 wait_phase() {
@@ -134,6 +157,8 @@ ${loop}
 }
 for launch in $(seq 1 ${launches}); do
   FAKE_SECONDS=0
+  FAKE_CLOCK_SECONDS=$((FAKE_CLOCK_SECONDS + 60))
+  echo "$FAKE_CLOCK_SECONDS" > "$TEST_ROOT/clock"
   ${staleAbortBeforeAcquire ? 'HAM_MERGE_LEASE_RETRYABLE_ABORT=1; HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=old-acquisition' : ':'}
   ham_acquire_merge_lease || exit $?
   ${daemonDuringWait ? `"$HAM_NODE_BIN" --input-type=module - "$TEST_ROOT" <<'NODE'

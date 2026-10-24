@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -890,6 +891,9 @@ test('merge-lease status reports holder and waiter ages', async () => {
     assert.equal(out.waiters.length, 1);
     assert.equal(out.waiters[0].waiterId, 'w-status');
     assert.equal(out.waiters[0].ageSeconds, 50);
+    assert.equal(out.waiters[0].position, 1);
+    assert.equal(out.waiters[0].role, 'closer');
+    assert.equal(out.waiters[0].arrivedAt, '2026-06-20T18:00:10.000Z');
     assert.equal(out.attempts.length, 1);
     assert.equal(out.attempts[0].pr, 402);
     assert.equal(out.attempts[0].attempts, 2);
@@ -925,7 +929,8 @@ test('merge-lease acquire parks after max gate attempts', async () => {
       '--owner-pid', '8601',
       '--wait', '0',
     ], {
-      maxGateAttempts: 2,
+      maxGateAttempts: 2, startMs: Date.parse('2026-06-20T18:01:00Z'),
+      selfPid: 9001, pidAliveFn: pid => pid !== 9000,
     });
     assert.equal(second.code, 0);
     await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '601', '--lease-id', jsonOutput(second.io).leaseId]);
@@ -965,7 +970,9 @@ test('pending checks then green can acquire without parking; real failures still
   const args = ['--repo', REPO, '--base', BASE, '--pr', '602', '--head', 'green-head', '--owner-pid', '8602', '--wait', '0'];
   try {
     for (let i = 0; i < 4; i += 1) {
-      const acquired = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+      const acquired = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2,
+        startMs: Date.parse('2026-06-20T18:00:00Z') + i * 60_000,
+        selfPid: 9000 + i, pidAliveFn: pid => pid < 9000 || pid === 9000 + i });
       assert.equal(acquired.code, 0);
       const classified = i === 2
         ? await runCli(rootDir, ['classify', '--stage', 'protection', '--error', 'gh: Service Unavailable (HTTP 503)'])
@@ -975,11 +982,13 @@ test('pending checks then green can acquire without parking; real failures still
       assert.equal(jsonOutput(released.io).released, true);
     }
     assert.deepEqual(readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map(({ attempts, retryable }) => [attempts, retryable]), [[0, 4]]);
-    const green = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+    const green = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2,
+      startMs: Date.parse('2026-06-20T18:10:00Z'), selfPid: 9100, pidAliveFn: pid => pid < 9000 || pid === 9100 });
     assert.equal(green.code, 0);
     assert.equal(jsonOutput(green.io).acquired, true);
     await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(green.io).leaseId]);
-    const real = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
+    const real = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2,
+      startMs: Date.parse('2026-06-20T18:11:00Z'), selfPid: 9101, pidAliveFn: pid => pid < 9000 || pid === 9101 });
     assert.equal(real.code, 0);
     await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE, '--pr', '602', '--lease-id', jsonOutput(real.io).leaseId]);
     const parked = await runCli(rootDir, ['acquire', ...args], { maxGateAttempts: 2 });
@@ -1091,7 +1100,7 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
         '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '900'], {
         onSleep: ({ nowMs, advance }) => {
           const target = started + (releases ? 400000 : 900000);
-          const delta = Math.min(29750, target - nowMs);
+          const delta = Math.min(0, target - nowMs);
           advance(delta);
           if (releases && !released && nowMs + delta >= target) {
             releaseMergeLease({ rootDir, repo: REPO, base: BASE, leaseId: holder.lease.leaseId,
@@ -1102,7 +1111,8 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
       });
       const out = jsonOutput(io);
       assert.equal(code, releases ? 0 : 75);
-      assert.equal(out.waited_s, releases ? 400 : 900);
+      assert.ok(out.waited_s >= (releases ? 400 : 900));
+      assert.ok(out.waited_s <= (releases ? 430 : 900));
       if (!releases) {
         assert.equal(out.configured_s, 900);
         assert.equal(out.timedOut, true);
@@ -1114,7 +1124,7 @@ test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or clean
         return Number(line.match(/waited=(\d+)s/)[1]);
       });
       assert.equal(times[0], 0);
-      for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] <= 30);
+      for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] <= 55);
       assert.ok(out.waited_s - times.at(-1) <= 30);
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
@@ -1139,7 +1149,7 @@ test('LEASEFAIR-03 position 3 survives two daemon holds beyond the old wall cloc
     },
     onSleep: ({ nowMs }) => {
       if (holder && nowMs - Date.parse(holder.lease.acquiredAt) >= 1000) {
-        releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
+        releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString(), merged: true });
         holder = null;
         finished++;
       }
@@ -1209,8 +1219,8 @@ test('progress polling parses unchanged history once and detects equal-size atom
   assert.equal(reads, 2);
   assert.equal(out.waited_s, 1);
   assert.deepEqual(out.holders.map(h => h.holderPr), [100, 101]);
-  // Replacement at 500ms resets the no-progress deadline; unchanged ticks do not.
-  assert.equal(sleeps, 6);
+  // Replacement at 750ms resets the no-progress deadline; unchanged ticks do not.
+  assert.equal(sleeps, 3);
 });
 
 test('timeout evidence retains distinct holders without lease IDs', async t => {
@@ -1239,10 +1249,10 @@ test('LEASEFAIR-03 progress ceiling is sized once and cannot be postponed by dae
     '--pr', '203', '--head', 'green-closer', '--owner-pid', '8203', '--wait', '1', '--wait-by-progress'], {
     loadAwareTimeoutSeconds: n => { scaled.push(n); return n === 1 ? 2 : 4; },
     onSleep: ({ nowMs }) => {
-      releaseMergeLease({ rootDir, ...holder.lease, now: new Date(nowMs).toISOString() });
-      holder = acquireFixture(rootDir, { holderPr: 300 + (nowMs - start),
-        registerWaiter: true, waiterPriority: 'daemon', now: new Date(nowMs).toISOString() });
-      assert.equal(holder.acquired, true);
+      // Synthetic history service keeps the stall timer moving under one live holder.
+      writeFileSync(mergeLeaseHistoryFilePath(rootDir, { repo: REPO, base: BASE }),
+        JSON.stringify({ ...holder.lease, event: 'grant', eventId: String(nowMs - start),
+          at: new Date(nowMs).toISOString() }) + '\n');
     },
   });
   const out = jsonOutput(result.io);
@@ -1251,4 +1261,42 @@ test('LEASEFAIR-03 progress ceiling is sized once and cannot be postponed by dae
   assert.equal(out.waited_s, 4);
   assert.deepEqual(scaled, [1, 21600]);
   assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).length, 0);
+});
+
+test('closer polling uses a once-scaled exponential ceiling and stays in tens', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireFixture(rootDir);
+  const delays = [], scales = [];
+  let polls = 0;
+  const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '900'], {
+    loadAwareTimeoutMs: n => { scales.push(n); return n * 2; },
+    acquireMergeLease: args => { polls++; return acquireMergeLease(args); },
+    onSleep: ({ nowMs }) => { delays.push(nowMs); },
+  });
+  assert.equal(code, 75, io.stderrText);
+  assert.deepEqual(scales, [30_000]);
+  assert.ok(polls < 30, String(polls));
+  const gaps = delays.slice(1).map((value, index) => value - delays[index]);
+  assert.ok(gaps.includes(60_000));
+  assert.ok(gaps.every(value => value <= 60_000));
+});
+
+test('six-hour progress wait also polls in tens through the existing watcher cadence ceiling', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireFixture(rootDir);
+  let polls = 0;
+  const scales = [];
+  const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+    '--pr', '203', '--head', 'ready-head', '--owner-pid', '8203', '--wait', '21600', '--wait-by-progress'], {
+    loadAwareTimeoutSeconds: n => n,
+    loadAwareTimeoutMs: n => { scales.push(n); return n; },
+    acquireMergeLease: args => { polls++; return acquireMergeLease(args); },
+  });
+  assert.equal(code, 75, io.stderrText);
+  assert.deepEqual(scales, [300_000]);
+  assert.ok(polls < 90, String(polls));
+  assert.equal(jsonOutput(io).waited_s, 21600);
 });

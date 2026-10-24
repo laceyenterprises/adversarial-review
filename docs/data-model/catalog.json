@@ -354,7 +354,8 @@
       "schemaSurface": "src/ama/merge-lease.mjs",
       "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/ama/dispatch-closer.mjs", "src/posted-review-row.mjs", "bin/merge-lease.mjs"],
       "owner": "AMA daemon and hammer merge lane",
-      "optionalWaiterFields": ["priority", "acquisitionPid"],
+      "optionalWaiterFields": ["priority", "acquisitionPid", "notBefore"],
+      "admissionOrder": "arrival-fifo-across-roles; delayed-reentries-yield-to-ready-waiters",
       "cliWaiterLifecycle": "unique-invocation-id; same-host-confirmed-dead-acquirer-pruning; bounded-finally-cleanup",
       "daemonReservationSeconds": "2 * pollIntervalMs / 1000, load-scaled once and capped at floor((2^31 - 1) / 1000)",
       "servedWaiterRemoval": "under-holder-acquisition-lock",
@@ -370,7 +371,8 @@
       "schemaSurface": "src/ama/merge-lease.mjs",
       "relatedSchemaSurfaces": ["bin/merge-lease.mjs", "bin/hammer-verify-head.sh"],
       "owner": "AMA daemon and hammer merge lane",
-      "retentionRows": 4096
+      "retentionRows": 4096,
+      "noMergeReleaseEvents": ["requeue", "park"]
     },
     {
       "id": "merge-lease-attempts",
@@ -382,7 +384,8 @@
         "bin/merge-lease.mjs",
         "templates/hammer-prompt.md"
       ],
-      "owner": "AMA hammer merge gate"
+      "owner": "AMA daemon and hammer merge lane",
+      "optionalRetryFields": ["noMergeReleases", "consecutiveNoMergeReleases", "noMergeReason", "noMergeLeaseId", "reenteredAt", "nextEligibleAt", "parkedReason"]
     },
     {
       "id": "finalization-ledger",

@@ -190,13 +190,19 @@ if (scenario === 'clean') {
   const daemonRequest = { ...leaseArgs, holderPr: 3, holderHead: 'daemon' };
   const deferred = acquireDaemonMergeLease(daemonRequest);
   assert.equal(deferred.acquired, false);
-  assert.equal(deferred.queuePosition, 1);
+  assert.equal(deferred.queuePosition, 2);
   assert.equal(deferred.existingLease.leaseId, holder.lease.leaseId);
   // LEASEFAIR-04: the reservation survives a full watcher interval and release
   // requests exactly the reserved PR/head through the existing wake path.
   const leaseWakes = [];
   assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...holder.lease,
-    now: atLeaseSecond(200), requestWatcherWakeImpl: wake => leaseWakes.push(wake) }).released, true);
+    now: atLeaseSecond(200), merged: true, requestWatcherWakeImpl: wake => leaseWakes.push(wake) }).released, true);
+  assert.equal(leaseWakes.length, 0, 'earlier closer is first');
+  closerRequest.now = atLeaseSecond(200);
+  const firstCloser = acquireMergeLease(closerRequest);
+  assert.equal(firstCloser.acquired, true);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...firstCloser.lease,
+    now: atLeaseSecond(201), merged: true, requestWatcherWakeImpl: wake => leaseWakes.push(wake) }).released, true);
   assert.equal(leaseWakes.length, 1);
   assert.equal(leaseWakes[0].prNumber, daemonRequest.holderPr);
   assert.equal(leaseWakes[0].headSha, daemonRequest.holderHead);
@@ -205,21 +211,24 @@ if (scenario === 'clean') {
   daemonRequest.now = atLeaseSecond(300);
   const served = acquireDaemonMergeLease(daemonRequest);
   assert.equal(served.acquired, true);
-  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...served.lease }).released, true);
-  // LEASEFAIR-02: after priority service, the closer retry owns the lane
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...served.lease, now: atLeaseSecond(300), merged: true }).released, true);
+  // LEASEFAIR-02: after FIFO service, the closer retry owns the lane
   // throughout its one synthetic CI wait; a new daemon cannot overtake it.
+  closerRequest.now = atLeaseSecond(301);
   const retry = acquireMergeLease(closerRequest);
   assert.equal(retry.acquired, true);
   await Promise.resolve();
+  daemonRequest.now = atLeaseSecond(302);
   const duringRetry = acquireDaemonMergeLease(daemonRequest);
   assert.equal(duringRetry.acquired, false);
   assert.equal(duringRetry.existingLease.leaseId, retry.lease.leaseId);
-  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...retry.lease }).released, true);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...retry.lease, now: atLeaseSecond(303), merged: true }).released, true);
+  daemonRequest.now = atLeaseSecond(304);
   const afterRetry = acquireDaemonMergeLease(daemonRequest);
   assert.equal(afterRetry.acquired, true);
-  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...afterRetry.lease }).released, true);
+  assert.equal(releaseMergeLease({ rootDir: leaseArgs.rootDir, ...afterRetry.lease, now: atLeaseSecond(305), merged: true }).released, true);
   const leaseHistory = readMergeLeaseHistory(leaseArgs.rootDir, leaseArgs);
-  assert.deepEqual(leaseHistory.map(row => row.event), ['grant', 'release', 'grant', 'release', 'grant', 'release', 'grant', 'release']);
+  assert.deepEqual(leaseHistory.map(row => row.event), ['grant', 'release', 'grant', 'release', 'grant', 'release', 'grant', 'release', 'grant', 'release']);
   assert.equal(leaseHistory.find(row => row.leaseId === retry.lease.leaseId).holderRole, 'closer');
   assert.equal(leaseHistory.find(row => row.leaseId === served.lease.leaseId).holderRole, 'daemon');
   const { exerciseDaemonWaiterLifecycle } = await import('./daemon-waiter-lifecycle.mjs');

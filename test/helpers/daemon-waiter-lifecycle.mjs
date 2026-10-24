@@ -173,13 +173,19 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
       requestWatcherWakeImpl: () => {} }).released, true);
   }
   if (sibling) {
-    assert.equal(acquireMergeLease(closer).acquired, false, 'surviving daemon retains priority');
     const other = acquireDaemonMergeLease({ ...leaseArgs, holderPr: 4, holderHead: 'other-daemon' });
-    assert.equal(other.acquired, true);
-    assert.equal(releaseMergeLease({ ...lane, ...other.lease, now: leaseArgs.now }).released, true);
+    assert.equal(other.acquired, false, 'later daemon stays behind earlier closer arrivals');
   }
   const next = acquireMergeLease(closer);
   assert.equal(next.acquired, true, 'following closer acquires without expiry or bypass');
   assert.equal(next.lease.holderPr, 3);
-  assert.equal(releaseMergeLease({ ...lane, ...next.lease, now: leaseArgs.now }).released, true);
+  assert.equal(releaseMergeLease({ ...lane, ...next.lease, now: leaseArgs.now, merged: true }).released, true);
+  if (sibling) {
+    const samePr = acquireMergeLease({ ...closer, holderPr: 2, waiterId: 'same-pr-closer' });
+    assert.equal(samePr.acquired, true);
+    releaseMergeLease({ ...lane, ...samePr.lease, now: leaseArgs.now, merged: true });
+    const other = acquireDaemonMergeLease({ ...leaseArgs, holderPr: 4, holderHead: 'other-daemon' });
+    assert.equal(other.acquired, true, 'surviving daemon follows all earlier arrivals');
+    releaseMergeLease({ ...lane, ...other.lease, now: leaseArgs.now, merged: true });
+  }
 }

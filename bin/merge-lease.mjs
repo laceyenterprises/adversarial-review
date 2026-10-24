@@ -38,7 +38,8 @@ import {
   resetMergeLeaseGateAttempts,
 } from '../src/ama/merge-lease.mjs';
 
-import { loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { WATCHER_POLL_INTERVAL_MS } from '../src/watcher-poll-interval.mjs';
+import { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -58,7 +59,7 @@ Usage:
                       [--root-dir <path>] [--required-checks-green]
                       [--wait-for-holder-deadline] [--wait-by-progress]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
-                      --lease-id <id> [--retryable-abort <reason>]
+                      --lease-id <id> [--retryable-abort <reason>] [--merged | --terminal] [--reason <reason>]
                       [--root-dir <path>]
   merge-lease reconcile --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease status  --repo <owner/name> --base <branch> [--root-dir <path>]
@@ -305,7 +306,9 @@ function statusJson(status) {
           pastDeadline: status.pastDeadline,
         }
       : null,
-    waiters: status.waiters.map((waiter) => ({
+    waiters: status.waiters.map((waiter, index) => ({
+      position: index + 1,
+      role: waiter.priority === 'daemon' ? 'daemon' : 'closer',
       ...waiter,
       ageSeconds: waiterAge(waiter, status.inspectedAt),
     })),
@@ -401,6 +404,16 @@ async function runAcquire(argv, deps) {
     ceiling_s: acquisitionSeconds,
   });
 
+  // Scale the nominal ceiling once; exponential polling never rescales a delay.
+  const nominalWaitSeconds = progressWait ? Math.max(6 * 3600, waitSeconds) : waitSeconds;
+  const pollCeilingMs = deps.loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,
+    Math.max(30_000, nominalWaitSeconds * 1000 / 60)));
+  let pollDelayMs = DEFAULT_SLEEP_MS;
+  const waitForNextPoll = async (signal) => {
+    const remaining = Math.min(deadlineMs, lastProgressMs + stallSeconds * 1000) - deps.nowMs();
+    await deps.sleep(Math.min(pollDelayMs, Math.max(1, remaining)), undefined, signal ? { signal } : {});
+    pollDelayMs = Math.min(pollCeilingMs, pollDelayMs * 2);
+  };
   let nextProgressMs = startedMs;
   const reportProgress = () => {
     if (deps.nowMs() < nextProgressMs) return;
@@ -409,7 +422,7 @@ async function runAcquire(argv, deps) {
     const queue = readMergeLeaseWaiters(rootDir, { repo, base });
     const position = queue.findIndex((w) => Number(w.pr) === pr && w.head === head && Number(w.holderPid) === ownerPid);
     deps.stderr.write(`HAM merge lease wait: waited=${Math.floor((deps.nowMs() - startedMs) / 1000)}s allowed=${acquisitionSeconds}s holder=${status.holder?.holderPr ?? 'none'} queue=${position < 0 ? 'unregistered' : position + 1}\n`);
-    // Leave slack for the bounded lock retries and the next polling tick.
+    // Report on the next backoff tick after this minimum log interval.
     nextProgressMs = deps.nowMs() + 25000;
   };
   let gateAttempt = null;
@@ -437,7 +450,7 @@ async function runAcquire(argv, deps) {
         return EXIT_TIMEOUT;
       }
       reportProgress();
-      await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+      await waitForNextPoll();
     }
   }
   if (gateAttempt.parked) {
@@ -496,10 +509,15 @@ async function runAcquire(argv, deps) {
             waiterId,
             acquisitionPid: deps.selfPid,
             registerWaiter: true,
-            waiterDeadlineSeconds: progressWait ? Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000), acquisitionSeconds + 1) : undefined,
+            waiterDeadlineSeconds: Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000), acquisitionSeconds + 1),
             attempt,
             pidAliveFn: deps.pidAliveFn,
           });
+          if (result.parked) {
+            refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now: tickNow });
+            jsonLine(deps.stdout, { acquired: false, parked: true, reason: result.reason, retry: result.retry });
+            return EXIT_PARKED;
+          }
           if (result.acquired) {
             waiterServed = true;
             jsonLine(deps.stdout, leaseJson({
@@ -561,8 +579,7 @@ async function runAcquire(argv, deps) {
 
       attempt += 1;
       try {
-        await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())),
-          undefined, { signal: pollAbort.signal });
+        await waitForNextPoll(pollAbort.signal);
       } catch (err) {
         if (!pollAbort.signal.aborted || err?.name !== 'AbortError') throw err;
       }
@@ -610,6 +627,9 @@ async function runRelease(argv, deps) {
     pr: { type: 'string' },
     'lease-id': { type: 'string' },
     'retryable-abort': { type: 'string' },
+    merged: { type: 'boolean' },
+    terminal: { type: 'boolean' },
+    reason: { type: 'string' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -622,6 +642,9 @@ async function runRelease(argv, deps) {
   const pr = parsePositiveInteger(values.pr, 'pr');
   const leaseId = requireString(values, 'lease-id');
   const retryableAbortReason = String(values['retryable-abort'] ?? '').trim();
+  if ((values.merged && values.terminal) || (retryableAbortReason && (values.merged || values.terminal))) {
+    throw usageError('release accepts one of --merged, --terminal or --retryable-abort');
+  }
   const startedMs = deps.nowMs();
   const deadlineMs = startedMs + DEFAULT_RELEASE_RETRY_MS;
 
@@ -660,7 +683,8 @@ async function runRelease(argv, deps) {
         retryableAbortReason,
         now: deps.nowIso(),
       })
-      : releaseMergeLease(releaseArgs);
+      : releaseMergeLease({ ...releaseArgs, now: deps.nowIso(), merged: values.merged,
+        terminal: values.terminal, reason: values.reason || 'holder-release' });
     if (!result.released && result.reason === 'mutation-lock-busy') {
       if (deps.nowMs() >= deadlineMs) {
         jsonLine(deps.stdout, retryableReleaseJson({
@@ -779,6 +803,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     execFileImpl: execFile,
     maxGateAttempts: parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
     pidAliveFn: defaultPidAliveFn,
+    loadAwareTimeoutMs,
     loadAwareTimeoutSeconds,
     nowIso,
     nowMs: () => Date.now(),

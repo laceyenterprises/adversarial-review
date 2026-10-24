@@ -2522,3 +2522,8 @@ interval and calls `daemonMergeReservationSeconds` with that effective value;
 its evidence is `{reservationSeconds, pollSeconds}`. Activation YAML lives in
 the consuming superproject and remains observe-only. Normal deployment must
 make both repository revisions available before that consumer declares success.
+
+Evidence-read failures use exit 126 (the consuming activation contract's
+`check_error`), making missing entitlement and transport/read failures
+inconclusive. Exit zero means evidence was collected; the declaration evaluates
+that evidence for pass or fail.

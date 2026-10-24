@@ -41,7 +41,7 @@ test('real refresh export lines pass, force refresh despite healthy held token, 
   assert.equal(evidence.source, 'exports');
   assert.ok(evidence.expiresInSeconds > 0);
   // The old prepare()-only check skips this failing refresh on the held expiry.
-  assert.equal(run(fixture(t, exportsOutput(), true)).code, 1);
+  assert.equal(run(fixture(t, exportsOutput(), true)).code, 126);
 });
 
 test('HAMTOKEN-05 whitespace-rejecting parser fails on exactly the same export fixture', async t => {
@@ -66,9 +66,9 @@ test('invalid, expired and bare refresh output cannot satisfy the declared expor
 
 test('missing entitlement, command failures and unsupported check emit fixed errors without credentials', t => {
   for (const env of [{}, fixture(t, exportsOutput(), true), { HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: `exit 1 # ${secret}` }]) {
-    assert.deepEqual(run(env), { code: 1, out: '', err: 'activation check unavailable\n' });
+    assert.deepEqual(run(env), { code: 126, out: '', err: 'activation check unavailable\n' });
   }
-  assert.equal(run({}, [secret]).code, 1);
+  assert.equal(run({}, [secret]).code, 126);
 });
 
 test('reservation uses the effective poll reader and real sizing; incident 120 vs 300 fails', () => {

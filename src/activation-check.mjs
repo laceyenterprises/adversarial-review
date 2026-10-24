@@ -25,7 +25,7 @@ export function main({ argv = process.argv.slice(2), env = process.env,
   } catch {
     // Never forward command text, child streams, credentials, or exception text.
     error('activation check unavailable\n');
-    return 1;
+    return 126; // activation_contract check_error; no subject verdict.
   }
 }
 

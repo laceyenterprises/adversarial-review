@@ -409,6 +409,14 @@ function selectRow(facts) {
       deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt };
   }
   // R08: terminal no-merge with retry remaining (exit zero is not merged).
+  const approvedHead = review.known && review.operatorOverride && review.attestation !== 'invalid'
+    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE';
+  // Approval must not reselect a daemon that exhausted its transport budget.
+  // Other heads still pass review/source proof before daemon repair at R15.
+  if (execution?.reason === 'merge-retry-budget-exhausted' && approvedHead) {
+    return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
+      deadlineKind: 'admission', queue: 'dispatch' };
+  }
   if (launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
@@ -447,8 +455,7 @@ function selectRow(facts) {
   // Preserve the daemon's existing attributable, exact-head approval lane.
   // Earlier ownership, stops, caps, structural and CI rows still take priority;
   // the executor revalidates the live approval under the same actor policy.
-  if (review.operatorOverride && review.attestation !== 'invalid'
-    && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE') {
+  if (approvedHead) {
     return { row: 'R13-approved-head', action: 'daemon-merge', actor: 'daemon', reason: 'clean-exact-head',
       deadlineKind: 'admission', queue: 'daemon' };
   }

@@ -425,7 +425,7 @@ test('replay #7311: a network failure during the proof leaves the round in progr
   assert.deepEqual(alerts, []);
 });
 
-test('replay #7311: the worker-opened draft is named as a draft, not a state change', async (t) => {
+test('replay #7311: the shared draft hold returns before background admission', async (t) => {
   const rootDir = tempRoot(t, '7311-draft');
   const { createAmaHammerBackgroundQueue } = await import('../src/ama-hammer-background-dispatch.mjs');
   const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
@@ -457,9 +457,11 @@ test('replay #7311: the worker-opened draft is named as a draft, not a state cha
   await maybeDispatchAmaClosureFor(args);
   await queue.drain();
   const settled = await maybeDispatchAmaClosureFor(args);
-  assert.equal(settled.reason, 'background-pr-draft', 'production logged background-pr-state-changed');
-  assert.equal(settled.needsOperator, true);
-  assert.equal(settled.operatorReason, 'pr-is-draft');
+  assert.equal(settled.reason, 'draft');
+  assert.equal(settled.nextAction.action, 'operator-hold');
+  assert.equal(settled.nextAction.actor, 'operator');
+  assert.equal(settled.nextAction.queue.intent, 'none');
+  assert.equal(settled.dispatched, false);
 });
 
 // Inject history evidence so these wiring fixtures remain offline.

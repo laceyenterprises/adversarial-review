@@ -2352,9 +2352,14 @@ async function dispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  // Adopt the adapter's generation before folding returned live facts. The
+  // result may carry a gate newer than its last onGateSnapshot callback.
+  if (daemonSelected && !orphanRecovery?.ownerProof && daemonCleanMerge?.nextActionShared) {
+    shared = daemonCleanMerge.nextActionShared;
+  }
   if (daemonCleanMerge?.liveGate) observeDaemonGate(daemonCleanMerge.liveGate);
   if (daemonSelected && !orphanRecovery?.ownerProof) {
-    shared = daemonCleanMerge?.nextActionShared || observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
+    shared = observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
   }
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonCleanMerge?.reason)) {

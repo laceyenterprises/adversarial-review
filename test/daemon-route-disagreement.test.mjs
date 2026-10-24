@@ -11,6 +11,7 @@ import {
   maybeDispatchAmaClosureFor,
 } from '../src/ama-closure-orchestration.mjs';
 import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
+import { observeDaemonResult } from '../src/ama/closure-next-action.mjs';
 import { parkRecordPath } from '../src/daemon-merge-park-log.mjs';
 import {
   DAEMON_ROUTE_DISAGREEMENT_BOUND,
@@ -119,7 +120,10 @@ function closureArgs(rootDir, { daemonResult, closerCalls, logs, warns, head = H
     liveReviewRetryDelaysMs: [0, 0],
     fetchMergedProtectiveDependentsImpl: async () => [],
     logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
-    runDaemonCleanMergeAttemptImpl: async () => daemonResult,
+    runDaemonCleanMergeAttemptImpl: async ({ sharedNextAction, passSnapshot }) => daemonResult ? ({
+      ...daemonResult,
+      nextActionShared: observeDaemonResult(sharedNextAction, daemonResult, passSnapshot),
+    }) : daemonResult,
     maybeDispatchAmaCloserImpl: routingCloser(closerCalls),
     ...overrides,
   };

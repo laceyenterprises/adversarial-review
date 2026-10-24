@@ -668,6 +668,19 @@ if (scenario === 'clean') {
   const redDaemon = observeDaemonGate(daemonShared, { candidateHead: retrySubject.headSha,
     prState: 'OPEN', mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] });
   assert.equal(redDaemon.decision.actor, 'hammer');
+  const approvedSnapshot = deriveNextActionSnapshot({ base: daemonSnapshot, observations: {
+    pr: { ...daemonSnapshot.observations.pr.value, labels: ['operator-approved'] },
+    reviews: { ...daemonSnapshot.observations.reviews.value, operatorApprovedEvidence: {
+      applied: true, actor: 'operator', observedRevisionRef: retrySubject.headSha,
+      eventId: 'smoke-approval', observedAt: new Date().toISOString() } },
+    policy: { ...daemonSnapshot.observations.policy.value, operatorLogins: ['operator'] },
+  } });
+  const approvedDaemon = { snapshot: approvedSnapshot, decision: nextAction(approvedSnapshot) };
+  assert.equal(approvedDaemon.decision.row, 'R13-approved-head');
+  const exhaustedDaemon = observeDaemonResult(approvedDaemon, {
+    disposition: 'failed-closed', reason: 'merge-retry-budget-exhausted', attempts: 2 });
+  assert.equal(exhaustedDaemon.decision.row, 'R08-retry');
+  assert.equal(exhaustedDaemon.decision.actor, 'hammer');
   const recoveringCi = observeDaemonResult(daemonShared, { reason: 'not-eligible', ciMergePathPending: true });
   assert.equal(recoveringCi.decision.actor, 'ci');
   const liveHammer = reviseClosureNextAction(daemonShared, { launches: {

@@ -204,6 +204,37 @@ test('changed non-PR ownership evidence invalidates the generation under the mer
   assert.equal(shared.decision.reason, 'live-owner');
 });
 
+test('operator approval cannot shadow same-head daemon retry exhaustion or earlier safety owners', () => {
+  const approved = pair({
+    pr: { state: 'OPEN', headSha: HEAD, mergeable: 'MERGEABLE', labels: ['operator-approved'] },
+    reviews: { ...clean, operatorApprovedEvidence: { applied: true, actor: 'operator',
+      observedRevisionRef: HEAD, eventId: 'approval-1', observedAt: AT } },
+    policy: { autonomousMergeExecutionEnabled: true, strictMode: true,
+      operatorLogins: ['operator'], operatorLabelActorEnforcement: 'enforce' },
+  });
+  assert.equal(approved.decision.row, 'R13-approved-head');
+  const exhausted = observeDaemonResult(approved, {
+    disposition: 'failed-closed', reason: 'merge-retry-budget-exhausted', attempts: 2,
+  });
+  assert.equal(exhausted.decision.row, 'R08-retry');
+  assert.equal(exhausted.decision.action, 'hammer');
+  assert.equal(exhausted.decision.actor, 'hammer');
+  assert.equal(exhausted.decision.reason, 'retry-no-merge');
+  assert.equal(exhausted.decision.queue.intent, 'dispatch');
+  const stale = reviseClosureNextAction(approved, { progress: {
+    daemonExecution: { headSha: OLD, reason: 'merge-retry-budget-exhausted' },
+  } });
+  assert.equal(stale.decision.row, 'R13-approved-head');
+  for (const [observations, row] of [
+    [{ controls: { safetyRefusal: { deterministic: true, reason: 'synthetic-refusal' } } }, 'R05-structural'],
+    [{ policy: { ...approved.snapshot.observations.policy.value, hammerCap: { lifetimeExhausted: true } } }, 'R07-stop'],
+    [{ launches: { closer: { headSha: HEAD, row: { status: 'running' } } } }, 'R03-live-owner'],
+    [{ pr: { ...approved.snapshot.observations.pr.value, labels: ['operator-approved', 'no-merge-hold'] } }, 'R02-hold'],
+  ]) {
+    assert.equal(reviseClosureNextAction(exhausted, observations).decision.row, row);
+  }
+});
+
 test('daemon intent cannot steal a contended shared merge lease', async () => {
   const { shared, effects } = await execute(pair(), { lease: false });
   assert.ok(!effects.includes('merge'));

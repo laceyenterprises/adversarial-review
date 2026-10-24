@@ -2510,6 +2510,9 @@ existing merge executor. The adapter's live head, checks and source-content
 reads replace that generation before mutation. A moved head requires a new
 head-bound decision; a missing head or failed read retains its explicit unknown
 or error provenance. Terminal proof never follows a moved head.
+Closure adopts the adapter's `nextActionShared` first, then folds any returned
+`liveGate` and the execution result into that generation. Returned live facts
+therefore survive even when they were not delivered through `onGateSnapshot`.
 
 A daemon decline supplies evidence to `nextAction(snapshot)`. Confirmed failed
 checks select a remaining remediation round or final hammer; confirmed conflict
@@ -2519,6 +2522,10 @@ capability, protection and deterministic safety refusals retain closure recovery
 before repair shortcuts. Retryable daemon transport exhaustion selects capped
 repair through the common decision. Lease contention retains daemon ownership
 and cannot steal a hammer's active lease.
+Same-head `merge-retry-budget-exhausted` selects R08 hammer repair before the
+R13 operator-approved daemon lane; established owners, holds, structural safety
+refusals and retry caps still take precedence. Exhaustion from another head
+cannot authorize repair on the current head.
 
 The legacy disagreement counter and decline classifiers are retained for a
 caller-local source rollback. They no longer select the runtime owner, count

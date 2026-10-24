@@ -240,6 +240,7 @@ test('default pid liveness treats EPERM as live and ESRCH as dead', () => {
         err.code = 'EPERM';
         throw err;
       }
+      if (pid === 8126) throw new Error('liveness unavailable');
       if (pid === 8124) {
         const err = new Error('no such process');
         err.code = 'ESRCH';
@@ -251,6 +252,7 @@ test('default pid liveness treats EPERM as live and ESRCH as dead', () => {
     assert.equal(defaultPidAliveFn(8123), true);
     assert.equal(defaultPidAliveFn(8124), false);
     assert.equal(defaultPidAliveFn(8125), true);
+    assert.equal(defaultPidAliveFn(8126), true);
   } finally {
     process.kill = realKill;
   }
@@ -396,21 +398,15 @@ test('merge-lease acquire honors FIFO durable waiter order', async () => {
     assert.equal(jsonOutput(later.io).timedOut, true);
     assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).map((w) => w.waiterId), ['w-earlier']);
 
-    const earlier = await runCli(rootDir, [
-      'acquire',
-      '--repo', REPO,
-      '--base', BASE,
-      '--pr', '201',
-      '--head', 'earlier-head',
-      '--owner-pid', '8201',
-      '--wait', '0',
-    ], {
-      startMs: Date.parse('2026-06-20T18:00:02Z'),
+    // The existing request's owner resumes by its explicit waiter ID. A new
+    // CLI must never adopt it solely through matching parent/PR/head.
+    const earlier = acquireMergeLease({
+      rootDir, repo: REPO, base: BASE, holderPr: 201, holderHead: 'earlier-head',
+      holderPid: 8201, holderHost: HOST, waiterId: 'w-earlier', registerWaiter: true,
+      now: '2026-06-20T18:00:02Z', pidAliveFn: () => true,
     });
-    const out = jsonOutput(earlier.io);
-    assert.equal(earlier.code, 0);
-    assert.equal(out.acquired, true);
-    assert.equal(out.holder, 201);
+    assert.equal(earlier.acquired, true);
+    assert.equal(earlier.lease.holderPr, 201);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

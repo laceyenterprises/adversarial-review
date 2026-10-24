@@ -9,6 +9,8 @@
  *   75  retryable timeout/contention/runtime failure
  */
 
+import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -95,10 +97,6 @@ function usageError(message) {
   return new UsageError(message);
 }
 
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 export function defaultPidAliveFn(pid) {
   try {
     process.kill(pid, 0);
@@ -106,7 +104,7 @@ export function defaultPidAliveFn(pid) {
   } catch (err) {
     if (err?.code === 'EPERM') return true;
     if (err?.code === 'ESRCH') return false;
-    return false;
+    return true; // Unknown is not evidence of a dead owner.
   }
 }
 
@@ -270,11 +268,21 @@ function acquireHolderMatches(holder, { pr, head, ownerPid, host }) {
     && holder.holderHost === host;
 }
 
-function removeWaiterForTimeout({ rootDir, repo, base, waiterId, updatedAt }) {
-  try {
-    removeMergeLeaseWaiter({ rootDir, repo, base, waiterId, updatedAt });
-  } catch (err) {
-    if (!isMutationLockBusyError(err)) throw err;
+async function cleanupAcquireWaiter(args, deps) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      removeMergeLeaseWaiter({ ...args, updatedAt: deps.nowIso(),
+        expectedAcquisition: { pid: deps.selfPid, host: deps.host } });
+      return;
+    } catch (err) {
+      if (isMutationLockBusyError(err) && attempt < 3) {
+        await deps.sleep(DEFAULT_SLEEP_MS);
+        continue;
+      }
+      // A dead-acquirer prune is the fallback if shutdown cannot take the lock.
+      deps.stderr.write(`warning: merge lease waiter cleanup failed: ${err?.message || err}\n`);
+      return;
+    }
   }
 }
 
@@ -445,105 +453,116 @@ async function runAcquire(argv, deps) {
     }));
     return EXIT_PARKED;
   }
-  const existingWaiter = readMergeLeaseWaiters(rootDir, { repo, base }).find((waiter) => (
-    Number(waiter.pr) === pr
-    && waiter.head === head
-    && Number(waiter.holderPid) === ownerPid
-  ));
-  const waiterId = existingWaiter?.waiterId || `cli_${deps.selfPid}_${startedMs}_${pr}`;
+  // Each invocation owns its own position and cleanup. Never adopt another
+  // CLI's waiter just because its parent, PR and head happen to match.
+  const waiterId = `cli_${deps.selfPid}_${randomUUID()}_${pr}`;
   let attempt = 1;
+  let waiterServed = false;
+  let interrupted = null;
+  const handlers = new Map(['SIGINT', 'SIGTERM', 'SIGHUP'].map(signal => {
+    const handler = () => { interrupted ??= signal; };
+    deps.signalSource.on(signal, handler);
+    return [signal, handler];
+  }));
 
-  while (true) {
-    const tickNow = deps.nowIso();
-    try {
-      reclaimIfStale({
-        rootDir,
-        repo,
-        base,
-        now: tickNow,
-        host: deps.host,
-        pidAliveFn: deps.pidAliveFn,
-      });
-      const result = deps.acquireMergeLease({
-        rootDir,
-        repo,
-        base,
-        holderPr: pr,
-        holderHead: head,
-        holderPid: ownerPid,
-        holderHost: deps.host,
-        holderProcessGroup: ownerPgid,
-        now: tickNow,
-        waiterId,
-        registerWaiter: true,
-        waiterDeadlineSeconds: progressWait ? Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000), acquisitionSeconds + 1) : undefined,
-        attempt,
-        pidAliveFn: deps.pidAliveFn,
-      });
-      if (result.acquired) {
-        jsonLine(deps.stdout, leaseJson({
-          result,
-          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
-        }));
-        return 0;
-      }
-      observeProgress(result);
-    } catch (err) {
-      if (!isMutationLockBusyError(err)) throw err;
-      const status = inspectMergeLease({
-        rootDir,
-        repo,
-        base,
-        now: deps.nowIso(),
-        host: deps.host,
-        pidAliveFn: deps.pidAliveFn,
-      });
-      if (acquireHolderMatches(status.holder, { pr, head, ownerPid, host: deps.host })) {
-        jsonLine(deps.stdout, leaseJson({
-          result: { lease: status.holder },
-          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
-        }));
-        return 0;
-      }
-    }
-
-    reportProgress();
-    if (deps.nowMs() >= deadlineMs || deps.nowMs() - lastProgressMs >= stallSeconds * 1000) {
-      removeWaiterForTimeout({
-        rootDir,
-        repo,
-        base,
-        waiterId,
-        updatedAt: deps.nowIso(),
-      });
-      let refundFailed = false;
-      for (let refundTry = 1; refundTry <= 3; refundTry += 1) {
+  try {
+    while (true) {
+      const tickNow = deps.nowIso();
+      if (!interrupted) {
         try {
-          refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now: deps.nowIso() });
-          break;
-        } catch (err) {
-          if (isMutationLockBusyError(err) && refundTry < 3) {
-            await deps.sleep(DEFAULT_SLEEP_MS);
-            continue;
+          reclaimIfStale({
+            rootDir,
+            repo,
+            base,
+            now: tickNow,
+            host: deps.host,
+            pidAliveFn: deps.pidAliveFn,
+          });
+          const result = deps.acquireMergeLease({
+            rootDir,
+            repo,
+            base,
+            holderPr: pr,
+            holderHead: head,
+            holderPid: ownerPid,
+            holderHost: deps.host,
+            holderProcessGroup: ownerPgid,
+            now: tickNow,
+            waiterId,
+            acquisitionPid: deps.selfPid,
+            registerWaiter: true,
+            waiterDeadlineSeconds: progressWait ? Math.min(Math.floor(MAX_TIMER_DELAY_MS / 1000), acquisitionSeconds + 1) : undefined,
+            attempt,
+            pidAliveFn: deps.pidAliveFn,
+          });
+          if (result.acquired) {
+            waiterServed = true;
+            jsonLine(deps.stdout, leaseJson({
+              result,
+              waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+            }));
+            return 0;
           }
-          refundFailed = true;
-          deps.stderr.write(`warning: merge lease gate attempt refund failed: ${String(err?.message || err)}\n`);
-          break;
+          observeProgress(result);
+        } catch (err) {
+          if (!isMutationLockBusyError(err)) throw err;
+          const status = inspectMergeLease({
+            rootDir,
+            repo,
+            base,
+            now: deps.nowIso(),
+            host: deps.host,
+            pidAliveFn: deps.pidAliveFn,
+          });
+          if (acquireHolderMatches(status.holder, { pr, head, ownerPid, host: deps.host })) {
+            // The matching holder may predate this invocation. Its own waiter
+            // still needs finally cleanup; only a served result skips it.
+            jsonLine(deps.stdout, leaseJson({
+              result: { lease: status.holder },
+              waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+            }));
+            return 0;
+          }
         }
       }
-      jsonLine(deps.stdout, timeoutJson({
-        configuredSeconds: waitSeconds,
-        repo,
-        base,
-        waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
-        refundFailed,
-        evidence: timeoutEvidence(),
-      }));
-      return EXIT_TIMEOUT;
-    }
 
-    attempt += 1;
-    await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+      reportProgress();
+      if (interrupted || deps.nowMs() >= deadlineMs || deps.nowMs() - lastProgressMs >= stallSeconds * 1000) {
+        let refundFailed = false;
+        for (let refundTry = 1; refundTry <= 3; refundTry += 1) {
+          try {
+            refundMergeLeaseGateAttempt({ rootDir, repo, base, pr, head, now: deps.nowIso() });
+            break;
+          } catch (err) {
+            if (isMutationLockBusyError(err) && refundTry < 3) {
+              await deps.sleep(DEFAULT_SLEEP_MS);
+              continue;
+            }
+            refundFailed = true;
+            deps.stderr.write(`warning: merge lease gate attempt refund failed: ${String(err?.message || err)}\n`);
+            break;
+          }
+        }
+        jsonLine(deps.stdout, timeoutJson({
+          configuredSeconds: waitSeconds,
+          repo,
+          base,
+          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+          refundFailed,
+          evidence: { ...timeoutEvidence(), ...(interrupted ? { reason: 'lease-wait-interrupted', signal: interrupted } : {}) },
+        }));
+        return EXIT_TIMEOUT;
+      }
+
+      attempt += 1;
+      await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+    }
+  } finally {
+    try {
+      if (!waiterServed) await cleanupAcquireWaiter({ rootDir, repo, base, waiterId }, deps);
+    } finally {
+      for (const [signal, handler] of handlers) deps.signalSource.off(signal, handler);
+    }
   }
 }
 
@@ -753,7 +772,8 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     loadAwareTimeoutSeconds,
     nowIso,
     nowMs: () => Date.now(),
-    sleep: sleepSync,
+    sleep,
+    signalSource: process,
     ...overrides,
   };
 

@@ -145,6 +145,21 @@ process is dead or whose arrival timestamp is older than its deadline. A dead or
 expired waiter must not permanently block later contenders for that `(repo, base)`
 lane.
 
+LAC-2098 ordinary CLI waiters additionally record `acquisitionPid` on the owning
+host, separate from the parent/caller PID retained by the holder lease. Each
+invocation owns a unique waiter ID and must not adopt another invocation's
+request by matching parent/PR/head. Confirmed same-host acquisition absence
+permits early pruning; live/reused, unreadable and foreign-host processes remain
+protected until the existing deadline. Legacy rows retain their prior
+parent/deadline rules: an encoded CLI PID is uncertain because older invocations
+could adopt that ID. Timeout, runtime failure and SIGINT/SIGTERM/SIGHUP run
+bounded canonical cleanup for only the invocation's exact waiter ID, fenced by
+its acquisition PID/host under the mutation lock; missing or rebound metadata
+remains protected. Handled
+signals return retryable exit 75 and refund the provisional attempt; SIGKILL
+recovery uses dead-acquirer pruning. Returning an existing matching holder still
+cleans an unserved request without releasing that holder.
+
 Waiter writes are still advisory, but their read-modify-write mutations must run
 under the recoverable mutation lock so concurrent contenders do not silently drop
 or reorder each other's entries through last-writer-wins file replacement.

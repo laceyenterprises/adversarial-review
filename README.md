@@ -626,6 +626,16 @@ wakes the first daemon PR at its reserved head through the existing per-head cap
 The clean offline smoke verifies service at 299 seconds and an exact-head release
 wake; no deployment configuration or migration is needed.
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
+LAC-2098 separates the acquiring CLI's PID/lifetime from its parent holder PID.
+Each invocation owns a fresh waiter ID and bounded cleanup on timeout, failure
+and SIGINT/SIGTERM/SIGHUP. Only confirmed same-host acquisition absence allows
+early pruning; live/reused/unknown and foreign-host requests retain their existing
+deadlines. The clean smoke verifies dead-child/live-parent empty-lane progress;
+`cli-waiter-lifecycle` fixtures cover real fixture-child signals and lock failure.
+Runtime acceptance requires separate read-only observation after deployment; see
+the [RCA](docs/RCA-LAC-2098-cli-waiter-lifetime-2026-10-24.md) and
+[waiter contract](docs/data-model/merge-lease-waiters.md).
+
 LAC-2087 extends cleanup to posted-review candidate exits, including operator
 skip before any closure attempt. The clean smoke proves abandoned daemon waiter
 removal with a live watcher PID, preservation of other FIFO requests and next

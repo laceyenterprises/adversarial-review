@@ -157,10 +157,23 @@ if (scenario === 'clean') {
     await terminalReviewTick();
     assert.equal(reviewRequests, 1);
   }
-  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, readMergeLeaseHistory } = await import('../../src/ama/merge-lease.mjs');
+  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, readMergeLeaseHistory, upsertMergeLeaseWaiter, readMergeLeaseWaiters } = await import('../../src/ama/merge-lease.mjs');
   const atLeaseSecond = seconds => new Date(Date.now() + seconds * 1000).toISOString();
   const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main', now: atLeaseSecond(0),
     holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
+  // LAC-2098: a dead acquiring child cannot inherit its live parent's lifetime.
+  const cliLane = { ...leaseArgs, rootDir: join(rootDir, 'abandoned-cli') };
+  const deadPid = process.pid + 1; // Synthetic probe below; never inspect/kill it.
+  upsertMergeLeaseWaiter({ ...cliLane, pr: 10, head: 'canceled',
+    waiterId: 'canceled-cli', acquisitionPid: deadPid, effectiveDeadlineSeconds: 124558 });
+  const nextCli = acquireMergeLease({ ...cliLane, holderPr: 11, holderHead: 'next',
+    waiterId: 'live-cli', acquisitionPid: process.pid, registerWaiter: true,
+    pidAliveFn: pid => pid !== deadPid });
+  assert.equal(nextCli.acquired, true);
+  assert.equal(nextCli.prunedWaiters[0].acquisitionPid, deadPid);
+  assert.equal(nextCli.lease.holderPid, process.pid);
+  assert.deepEqual(readMergeLeaseWaiters(cliLane.rootDir, cliLane), []);
+  assert.equal(releaseMergeLease({ rootDir: cliLane.rootDir, ...nextCli.lease }).released, true);
   const holder = acquireMergeLease({ ...leaseArgs, holderPr: 1, holderHead: 'closer' });
   assert.equal(holder.acquired, true);
   const closerRequest = { ...leaseArgs, holderPr: 2, holderHead: 'next-closer', registerWaiter: true, waiterId: 'next-closer' };

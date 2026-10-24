@@ -3490,6 +3490,23 @@ the hammer does not re-read them for lane admission. Thus NOOWNER-01 releases
 on changed inputs and REMCONFLICT-01 conflict releases admit same-head
 re-dispatch to rebase under the ordinary lease and merge predicates.
 
+LAC-2098 binds CLI waiters to the acquiring process through optional
+`acquisitionPid`, while the resulting holder retains its parent/caller PID.
+Every invocation owns a fresh waiter ID. Timeout, runtime failure and handled
+SIGINT/SIGTERM/SIGHUP clean up only that ID with bounded mutation-lock retries.
+Same-host confirmed absence also prunes abandoned acquisitions with explicit
+`acquisitionPid`; legacy IDs can have been adopted by another CLI and retain
+their existing parent/deadline rules. Live/reused/unknown and foreign-host
+processes retain their requests until the existing deadline. Holder fencing and daemon
+priority are unchanged. The clean offline smoke verifies dead-child/live-parent
+empty-lane progress; `cli-waiter-lifecycle` tests also cover actual fixture-child
+signals, uncatchable exit recovery, unknown ownership and cleanup contention.
+After normal deployment, the runtime owner should observe an organic canceled
+CLI acquisition disappearing and the following live contender progressing.
+Record request/holder identities and service timestamps read-only; an empty lane
+alone does not establish recovery. Source publication is separate from this
+runtime acceptance. See [RCA evidence](RCA-LAC-2098-cli-waiter-lifetime-2026-10-24.md).
+
 The base-branch merge gate uses `data/merge-leases/<repo>__<base>.json` plus
 durable waiter and attempt files. Use
 `node bin/merge-lease.mjs status --repo <owner/name> --base <branch>` to inspect

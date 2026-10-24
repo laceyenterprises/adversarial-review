@@ -129,3 +129,25 @@ No historical full-corpus scan runs at deployment. Records are never pruned.
 
 The migration is `migrations/20261024_findings_backlog.sql`, installed by the
 existing review-state migration runner. All storage remains in `data/reviews.db`.
+
+`finding_batches` owns one active batch per repository and area (partial unique
+index), and at most one new batch per UTC date. An immediate SQLite transaction
+assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
+remain visible but cannot dispatch until merged. The watcher checks a cached UTC
+midnight deadline after its ordinary poll; only the daily sweep does database,
+GitHub or dispatch work, asynchronously from review admission.
+
+The sweep reuses `hq dispatch`, the configured remediation worker resolver and
+normal priority. It persists the batch before submission and uses its stable
+idempotency key after a lost receipt. A recorded launch fences further dispatch
+until completion, across days and restarts. The manifest and atomic outcome
+artifact live in `data/finding-batches/<batch-id>/`; retain them until collected.
+Workers re-check current main, drop stale/no-evidence findings with reasons and
+open one normal-review PR per area for valid fixes. An all-dropped batch needs
+no PR. Outcome JSON must cover every manifest ID exactly once. Applied outcomes
+require a merged PR in the same repository, the exact published head and the
+`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
+`outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
+`result_pr`. Batch failures retain `error`, never discard findings or launch a
+second worker blindly. Diagnose a missing artifact or failed worker before
+repairing its existing batch; no automatic timeout releases its fence.

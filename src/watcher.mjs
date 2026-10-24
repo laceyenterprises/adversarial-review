@@ -1,3 +1,4 @@
+import { createFindingBatchTicker } from './findings-batch.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -1859,11 +1860,13 @@ async function main() {
     }
   }
 
+  const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
 
   (async function pollLoop() {
     let nextStart = Date.now();
     await runHeartbeatPoll('startup pollOnce');
+    void findingBatchTicker.tick().catch(error => console.warn(`[findings-batch] daily sweep failed: ${error.message}`));
     nextStart += intervalMs;
     while (true) {
       // Fixed-rate cadence: subtract elapsed work from the next
@@ -1881,6 +1884,7 @@ async function main() {
         ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
         : 'scheduled pollOnce';
       await runHeartbeatPoll(source, { wakePayload: wake.payload || null });
+      void findingBatchTicker.tick().catch(error => console.warn(`[findings-batch] daily sweep failed: ${error.message}`));
       if (wake.woken) {
         nextStart = Date.now();
       }

@@ -33,8 +33,11 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     // constraints and indexes, using only a disposable in-memory reference DB.
     reference = new Database(':memory:');
     reference.exec(readFileSync(new URL('../../migrations/20261023_finalization_queue.sql', import.meta.url), 'utf8'));
-    const sql = "SELECT type,name,sql FROM sqlite_master WHERE (name LIKE 'finalization_queue_%' OR name LIKE 'idx_finalization_queue_%') AND name != 'finalization_queue_handoff' ORDER BY name";
-    if (JSON.stringify(db.prepare(sql).all()) !== JSON.stringify(reference.prepare(sql).all())) {
+    const baseline = reference.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all();
+    // Later additive migrations do not change the baseline capability. Verify
+    // every shipped baseline object by name, including its full definition.
+    const sql = `SELECT type,name,sql FROM sqlite_master WHERE name IN (${baseline.map(() => '?').join(',')}) ORDER BY name`;
+    if (JSON.stringify(db.prepare(sql).all(...baseline.map(row => row.name))) !== JSON.stringify(baseline)) {
       throw new Error('queue-schema-unavailable-or-incompatible');
     }
     const adapter = resolveQueueOwnerAdapter({ rootDir, db });

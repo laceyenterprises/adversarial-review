@@ -88,6 +88,24 @@ test('receipt reads and duplicate replays reuse the prepared entry lookup', asyn
   assert.deepEqual(prepared, initial, 'row parsing prepares no additional statements');
 });
 
+test('handoff inserts reuse their prepared statement across transactional admissions', t => {
+  const f = fixture(t), prepared = [];
+  const receipts = resolveQueueHandoffStore({ ...f.store, db: {
+    prepare(sql) { prepared.push(sql); return f.store.db.prepare(sql); },
+    pragma(...args) { return f.store.db.pragma(...args); },
+  } });
+  const initial = [...prepared];
+  assert.equal(initial.filter(sql => sql.includes('INSERT INTO finalization_queue_handoff')).length, 1);
+  for (let generation = 1; generation <= 3; generation++) {
+    const h = { ...f.h, handoffId: `prepared:${generation}`, admissionGeneration: generation };
+    const ack = receipts.commit(h, f.e, { at: handoffTime(0), load: { enabled: false } });
+    assert.equal(ack.readinessSeq, generation);
+    assert.deepEqual(receipts.read(h).ack, ack);
+  }
+  assert.deepEqual(prepared, initial, 'admissions prepare no statements inside the transaction');
+  assert.equal(count(f.store, 'finalization_queue_handoff'), 3);
+});
+
 test('duplicate and lost acknowledgement return the durable receipt without rereads or readiness changes', async t => {
   const f = fixture(t);
   const first = await f.service.submit(f.h);

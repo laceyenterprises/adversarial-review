@@ -157,8 +157,10 @@ The owner observation requires explicit `--capability owner`; missing or unsuppo
 capabilities exit 2 without emitting observations.
 
 Record `.capabilities.owner.available == true` and `.runtime.build != null`.
-Availability is computed from exact deployed table/index definitions, DB
-readability/ownership and the resolved local lock adapter. The build is a digest
+Availability is computed from exact deployed definitions of every table/index
+named by the MGQ-01 baseline migration, DB readability/ownership and the resolved
+local lock adapter. Later additive tables and indexes do not invalidate that
+baseline; missing or changed baseline objects remain incompatible. The build is a digest
 of the actual loaded queue module/schema bytes, not a release constant. Record
 it with the deployment revision. It identifies the probe process; it does not
 prove that an already-running watcher loaded those bytes.

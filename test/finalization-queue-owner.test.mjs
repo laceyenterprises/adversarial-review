@@ -256,6 +256,21 @@ test('probe reads deployed schema/claims and adapter; missing/incompatible store
   assert.deepEqual(readdirSync(missing), []);
 });
 
+test('baseline probe accepts additive queue objects while rejecting changed baseline definitions', t => {
+  const f = fixture(t);
+  f.store.db.exec(`CREATE TABLE finalization_queue_future (id TEXT PRIMARY KEY);
+    CREATE INDEX idx_finalization_queue_future ON finalization_queue_future(id);
+    CREATE INDEX idx_finalization_queue_lane_future ON finalization_queue_lane(owner_id)`);
+  const before = tree(f.root);
+  assert.equal(probeQueueOwner({ rootDir: f.root }).capabilities.owner.available, true);
+  assert.deepEqual(tree(f.root), before, 'capability observation remains read-only');
+  f.store.db.exec(`DROP INDEX idx_finalization_queue_event_lane;
+    CREATE INDEX idx_finalization_queue_event_lane ON finalization_queue_event(base, repository, seq)`);
+  const result = probeQueueOwner({ rootDir: f.root });
+  assert.equal(result.capabilities.owner.available, false);
+  assert.equal(result.capabilities.owner.reason, 'queue-schema-unavailable-or-incompatible');
+});
+
 test('migration converges an existing subject ledger without touching it', t => {
   const root = mkdtempSync(join(tmpdir(), 'mgq-migrate-'));
   mkdirSync(join(root, 'data'));

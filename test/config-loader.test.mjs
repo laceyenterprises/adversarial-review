@@ -7786,3 +7786,18 @@ test('QUOTAPAUSE-01 pause_pct and release_before_reset_hours mirror the Python s
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('RCV-01 recovery shared synthetic reader acceptance and rejection', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/recovery-parity.json', import.meta.url), 'utf8'));
+  const dir = mkdtempSync(join(tmpdir(), 'recovery-parity-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, JSON.stringify({version:1, worker_pool:{recovery:fixture.valid}}));
+    const cfg = loadConfig({topPath, modulePaths:[], env:{}});
+    for (const [key,value] of Object.entries(fixture.valid)) assert.equal(cfg.get(`worker_pool.recovery.${key}`), value);
+    for (const invalid of fixture.invalid) {
+      writeFileSync(topPath, JSON.stringify({version:1, worker_pool:{recovery:invalid}}));
+      assert.throws(() => loadConfig({topPath, modulePaths:[], env:{}}), AgentOSConfigError);
+    }
+  } finally { rmSync(dir, {recursive:true, force:true}); }
+});

@@ -34,8 +34,8 @@ for (const order of ['deferral-first', 'ordinary-first']) {
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const identity = { repo: 'fixture/repo', prNumber: 7 };
     const args = { jobKey: 'review', headSha: 'target', now: '2026-10-04T21:11:00Z', launchRequestId: 'park' };
+    recordHammerRetryDispatch(root, identity, { ...args, launchRequestId: 'earlier-failure' });
     recordHammerRetryDispatch(root, identity, args);
-    recordHammerRetryDispatch(root, identity, args); // earlier real failure
     if (order === 'deferral-first') {
       deferHammerRetryDispatch(root, identity, args);
       assert.equal(refundHammerRetryDispatch(root, identity, args).reason, 'already-refunded');

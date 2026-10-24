@@ -22,7 +22,10 @@
 // ceiling is consumed, the closer stops, fails loud via an operator alert, and
 // marks the PR suppressed so the watcher stops re-dispatching.
 
-import { mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import fsExt from 'fs-ext';
+import { randomUUID } from 'node:crypto';
+import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -79,14 +82,13 @@ export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive
 // lives in the base-branch gate-attempt records under data/merge-leases/ with
 // its own `retryable`, and neither budget draws on the other. Only this many exits per series are refunded;
 // after that an exit stays charged and the normal cap suppresses and alerts.
-// These older refunds leave lifetime charges intact, so that ceiling bounds
+// Legacy exit-only refunds leave lifetime charges intact, so that ceiling bounds
 // every PR. CLOSERREUSE-01 refunds a hammer that died of an infrastructure
 // cause without pushing from this same budget (src/ama/dead-hammer-rearm.mjs):
 // one refund per series, whichever way the hammer ended.
 export const HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET = 1;
-const RETRYABLE_LAUNCH_HISTORY = 10;
 
-const HAMMER_RETRY_CAP_SCHEMA_VERSION = 2;
+const HAMMER_RETRY_CAP_SCHEMA_VERSION = 3;
 
 function hammerRetryCapDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'hammer-retry-cap');
@@ -158,8 +160,68 @@ export function readHammerRetryCapLedger(rootDir, identity, { logger = console }
 function writeHammerRetryCapLedger(rootDir, identity, doc) {
   mkdirSync(hammerRetryCapDir(rootDir), { recursive: true });
   const filePath = hammerRetryCapFilePath(rootDir, identity);
-  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
+  const content = `${JSON.stringify(doc, null, 2)}\n`;
+  writeFileAtomic(filePath, content);
+  if (readFileSync(filePath, 'utf8') !== content) throw new Error('hammer ledger write verification failed');
   return filePath;
+}
+
+// Permanent charge/refund identities survive every head/series reset.
+function durableChargeFields(ledger) {
+  return Object.fromEntries(['dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch']
+    .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
+}
+
+export function creditHammerDispatchBudgets(ledger, launchRequestId, budgets) {
+  const charge = Object.values(ledger.dispatchCharges || {}).find(value => value.launchRequestId === launchRequestId);
+  if (charge) charge.refundedBudgets = { ...charge.refundedBudgets,
+    ...Object.fromEntries(Object.entries(budgets).filter(([, credited]) => credited)) };
+}
+
+function refundNoWorkUnlocked(rootDir, identity, options) {
+  const { jobKey, headSha, launchRequestId, executionVerdict: verdict, dispatchKey, now } = options;
+  const refuse = reason => ({ refunded: false, reason });
+  if (!validNoWorkVerdict(verdict, launchRequestId)) return refuse('execution-not-proven-no-work');
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (!ledger || ledger.__corrupt) return refuse('no-ledger');
+  const entries = Object.entries(ledger.dispatchCharges || {});
+  const entry = (dispatchKey && entries.find(([key]) => key === dispatchKey))
+    || entries.find(([, charge]) => charge.launchRequestId === launchRequestId);
+  if (!entry) return refuse('no-charged-attempt');
+  const [key, charge] = entry;
+  if (charge.launchRequestId !== launchRequestId || charge.attempt !== verdict.attempt
+    || charge.jobKey !== normalizeKey(jobKey) || charge.headSha !== normalizeKey(headSha)) return refuse('charge-identity-mismatch');
+  if (ledger.noWorkRefunds?.[key]) return refuse('already-refunded');
+  if (![ledger.attemptCount, ledger.targetAttemptCount, ledger.lifetimeAttemptCount]
+    .every(count => Number.isSafeInteger(count) && count >= 0) || (ledger.lifetimeAttemptCount < 1 && !charge.refundedBudgets?.lifetime)) {
+    return refuse('invalid-charge-counters');
+  }
+  const down = count => Math.max(0, Number(count || 0) - 1);
+  const credited = charge.refundedBudgets || {};
+  const seriesMatches = ledger.jobKey === charge.jobKey && !credited.pr;
+  const targetMatches = ledger.targetRemediationSha === charge.headSha
+    && ledger.targetChargeEpoch === charge.targetEpoch && !credited.head;
+  const lifetime = !credited.lifetime;
+  const transient = Boolean(charge.transientGrantId) && !credited.transient;
+  const transientHeads = { ...ledger.transientRetryHeads };
+  if (transient) transientHeads[charge.headSha] = down(transientHeads[charge.headSha]);
+  const doc = { ...ledger,
+    lifetimeAttemptCount: lifetime ? down(ledger.lifetimeAttemptCount) : ledger.lifetimeAttemptCount,
+    ...(seriesMatches ? { attemptCount: down(ledger.attemptCount), suppressed: false } : {}),
+    ...(targetMatches ? { targetAttemptCount: down(ledger.targetAttemptCount), targetSuppressed: false } : {}),
+    lifetimeSuppressed: false,
+    unexecutedLaunchRequestIds: [...new Set([...(ledger.unexecutedLaunchRequestIds || []), launchRequestId])],
+    transientRetryHeads: transientHeads,
+    noWorkRefunds: { ...ledger.noWorkRefunds, [key]: {
+      verdictId: verdict.verdictId, launchRequestId, attempt: verdict.attempt,
+      jobKey: charge.jobKey, headSha: charge.headSha, refundedAt: now || new Date().toISOString(),
+      budgets: { head: targetMatches, pr: seriesMatches, lifetime, transient },
+    } },
+    updatedAt: now || ledger.updatedAt,
+  };
+  creditHammerDispatchBudgets(doc, launchRequestId, doc.noWorkRefunds[key].budgets);
+  writeHammerRetryCapLedger(rootDir, identity, doc);
+  return { refunded: true, reason: 'unexecuted', receipt: doc.noWorkRefunds[key] };
 }
 
 function normalizeKey(value) {
@@ -183,7 +245,7 @@ export function normalizeHammerLifetimeDispatchCeiling(value) {
 function retryableFieldsForSeries(ledger) {
   const retryable = Math.max(0, Math.trunc(Number(ledger?.retryable) || 0));
   const retryableLaunchRequestIds = Array.isArray(ledger?.retryableLaunchRequestIds)
-    ? ledger.retryableLaunchRequestIds.map(String).slice(-RETRYABLE_LAUNCH_HISTORY)
+    ? ledger.retryableLaunchRequestIds.map(String)
     : [];
   if (retryable === 0 && retryableLaunchRequestIds.length === 0) return {};
   return { retryable, retryableLaunchRequestIds };
@@ -329,10 +391,12 @@ export function evaluateHammerRetryCap(ledger, {
  * reset when the job key advanced. Increments the attempt counter and appends the
  * dispatched head for observability. Returns the persisted ledger.
  */
-export function recordHammerRetryDispatch(rootDir, identity, {
+function recordHammerRetryDispatchUnlocked(rootDir, identity, {
   jobKey,
   headSha,
   dispatchKey = null,
+  launchRequestId = null,
+  waitBudget = null,
   preserveSuppression = false,
   lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
   now = null,
@@ -343,6 +407,21 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     && (!Array.isArray(existing.chargedDispatchKeys)
       || existing.chargedDispatchKeys.some(key => typeof key !== 'string'))) {
     throw new Error('cannot charge recovered dispatch: invalid charged dispatch keys');
+  }
+  const chargeKey = normalizeKey(dispatchKey) || normalizeKey(launchRequestId);
+  const priorCharge = existing?.dispatchCharges?.[chargeKey]
+    || (launchRequestId && Object.values(existing?.dispatchCharges || {}).find(charge => charge.launchRequestId === launchRequestId));
+  if (priorCharge) {
+    const charge = priorCharge;
+    if (charge.jobKey !== normalizeKey(jobKey) || charge.headSha !== normalizeKey(headSha)
+      || (charge.launchRequestId && launchRequestId && charge.launchRequestId !== launchRequestId)) {
+      throw new Error('hammer charge identity mismatch');
+    }
+    if (!charge.launchRequestId && launchRequestId) {
+      charge.launchRequestId = launchRequestId;
+      writeHammerRetryCapLedger(rootDir, identity, existing);
+    }
+    return existing;
   }
   // Receipt recovery may repeat after a crash between the charge and record
   // persistence. Keys survive series resets, just like lifetime charges.
@@ -360,6 +439,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     ? [...priorHeads, head]
     : priorHeads;
   const doc = {
+    ...durableChargeFields(existing),
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
     prNumber: Number(identity.prNumber),
@@ -368,6 +448,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     // Lifetime failure count survives fresh reviews; green lease waits are refunded.
     lifetimeAttemptCount: decision.nextLifetimeCount,
     targetRemediationSha: head || existingTargetSha,
+    targetChargeEpoch: targetShaChanged || !existing?.targetChargeEpoch ? randomUUID() : existing.targetChargeEpoch,
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
     // Refunded exits belong to the series, like attemptCount.
     ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
@@ -402,6 +483,17 @@ export function recordHammerRetryDispatch(rootDir, identity, {
       'suppressedJobKey', 'suppressedHeadSha', 'suppressedAttemptCount', 'alertedAt', 'targetAlertedAt',
     ].filter(key => Object.hasOwn(existing, key)).map(key => [key, existing[key]])) : {}),
   };
+  if (chargeKey) {
+    const pending = existing?.pendingTransientCharge;
+    const transient = pending?.headSha === head && pending.jobKey === doc.jobKey ? pending : null;
+    doc.dispatchCharges = { ...existing?.dispatchCharges, [chargeKey]: {
+      launchRequestId: normalizeKey(launchRequestId), attempt: 1, consumerVersion: 1, waitBudget,
+      targetEpoch: doc.targetChargeEpoch, refundedBudgets: {},
+      jobKey: doc.jobKey, headSha: head, chargedAt: now,
+      transientGrantId: transient?.id || null,
+    } };
+    if (transient) doc.pendingTransientCharge = null;
+  }
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;
 }
@@ -413,7 +505,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
  * re-alert (the alert transport being down leaves `alertEmitted=false`, which is
  * how a later tick retries the alert — fail-open, never crash).
  */
-export function markHammerRetryCapExhausted(rootDir, identity, {
+function markHammerRetryCapExhaustedUnlocked(rootDir, identity, {
   jobKey,
   headSha,
   attemptCount,
@@ -444,6 +536,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   const lifetimeSuppressed = Boolean(lifetime) || Boolean(existing?.lifetimeSuppressed);
   const targetSuppressed = Boolean(target) || (Boolean(existing?.targetSuppressed) && !targetShaChanged);
   const doc = {
+    ...durableChargeFields(existing),
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
     prNumber: Number(identity.prNumber),
@@ -455,6 +548,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
       existing?.lifetimeAttemptCount ?? existing?.attemptCount,
     ),
     targetRemediationSha: head || existingTargetSha,
+    targetChargeEpoch: targetShaChanged || !existing?.targetChargeEpoch ? randomUUID() : existing.targetChargeEpoch,
     targetAttemptCount: targetShaChanged
       ? 0
       : Math.max(0, Number(existing?.targetAttemptCount ?? existing?.attemptCount ?? 0)),
@@ -508,13 +602,18 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
  *
  * @returns {{ refunded: boolean, reason: string, retryable: number }}
  */
-export function refundHammerRetryDispatch(rootDir, identity, {
+function refundHammerRetryDispatchUnlocked(rootDir, identity, {
   jobKey,
   headSha,
   launchRequestId,
+  executionVerdict,
+  dispatchKey,
   budget = HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET,
   now = null,
 } = {}) {
+  if (executionVerdict !== undefined) return refundNoWorkUnlocked(rootDir, identity, {
+    jobKey, headSha, launchRequestId, executionVerdict, dispatchKey, now,
+  });
   const existing = readHammerRetryCapLedger(rootDir, identity);
   const series = retryableFieldsForSeries(existing);
   const retryable = series.retryable || 0;
@@ -540,17 +639,21 @@ export function refundHammerRetryDispatch(rootDir, identity, {
       ? Math.max(0, Math.trunc(Number(existing.targetAttemptCount) || 0) - 1)
       : existing.targetAttemptCount,
     retryable: retryable + 1,
-    retryableLaunchRequestIds: [...refundedLaunches, launch].filter(Boolean).slice(-RETRYABLE_LAUNCH_HISTORY),
+    retryableLaunchRequestIds: [...refundedLaunches, launch].filter(Boolean),
     updatedAt: now || existing.updatedAt || null,
   };
+  creditHammerDispatchBudgets(doc, launch, { pr: true, head: targetMatches });
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
 }
 
-// HAMREFUND-01: no execution is a separate refund, with no per-series grant.
-// Lifetime charges and suppression remain intact so head churn cannot bypass
-// the PR-wide ceiling. Keep bounded launch history across dispatches/reviews.
-export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, headSha, launchRequestId, now, foreignLaunch = false } = {}) {
+// RCV-08: canonical no-work evidence takes the full per-charge path above.
+// Legacy foreign-owner / label-gate settlement remains separate and cannot
+// authorize a full lifetime/transient refund without the shared verdict.
+function refundUnexecutedHammerDispatchUnlocked(rootDir, identity, { jobKey, headSha, launchRequestId, now, foreignLaunch = false, executionVerdict, dispatchKey } = {}) {
+  if (executionVerdict !== undefined) return refundNoWorkUnlocked(rootDir, identity, {
+    jobKey, headSha, launchRequestId, executionVerdict, dispatchKey, now,
+  });
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt) return { refunded: false, reason: 'no-ledger' };
   if (normalizeKey(ledger.jobKey) !== normalizeKey(jobKey)) return { refunded: false, reason: 'series-changed' };
@@ -564,18 +667,21 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, head
   }
   const down = (count) => Math.max(0, Number(count || 0) - 1);
   if (!ledger.attemptCount) return { refunded: false, reason: 'no-charged-attempt' };
-  writeHammerRetryCapLedger(rootDir, identity, {
+  const doc = {
     ...ledger,
     attemptCount: down(ledger.attemptCount),
     // REBASEPROV-01: an unrelated owner was never a hammer firing at all.
     ...(foreignLaunch ? { lifetimeAttemptCount: down(ledger.lifetimeAttemptCount), lifetimeSuppressed: false } : {}),
     targetAttemptCount: normalizeKey(ledger.targetRemediationSha) === normalizeKey(headSha)
       ? down(ledger.targetAttemptCount) : ledger.targetAttemptCount,
-    unexecutedLaunchRequestIds: [...launches, launch].slice(-RETRYABLE_LAUNCH_HISTORY),
+    unexecutedLaunchRequestIds: [...launches, launch],
     suppressed: false,
     targetSuppressed: false,
     updatedAt: now || ledger.updatedAt,
-  });
+  };
+  creditHammerDispatchBudgets(doc, launch, { pr: true,
+    head: normalizeKey(ledger.targetRemediationSha) === normalizeKey(headSha), lifetime: foreignLaunch });
+  writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'unexecuted' };
 }
 
@@ -592,7 +698,7 @@ export const HAMMER_TRANSIENT_RETRY_PER_HEAD = 1;
  *
  * @returns {{ granted: boolean, reason: string, headGrants: number }}
  */
-export function grantTransientHammerRetry(rootDir, identity, {
+function grantTransientHammerRetryUnlocked(rootDir, identity, {
   jobKey,
   headSha,
   lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
@@ -630,6 +736,7 @@ export function grantTransientHammerRetry(rootDir, identity, {
     suppressedHeadSha: null,
     suppressedAttemptCount: null,
     transientRetryHeads: { ...otherHeads, [head]: headGrants + 1 },
+    pendingTransientCharge: { id: randomUUID(), headSha: head, jobKey: existing.jobKey },
     lastTransientRetryAt: now || null,
     updatedAt: now || existing.updatedAt || null,
   };
@@ -671,13 +778,14 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
 }
 
 // Contention has its own bounded history, separate from ordinary retry refunds.
-export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false } = {}) {
+function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
   const fields = deferralFieldsForSeries(ledger);
   const launches = leaseWaitExhausted ? (fields.leaseWaitLaunches || []) : fields.deferralLaunches;
   if (fields.deferralLaunches.includes(launchRequestId) || fields.leaseWaitLaunches?.includes(launchRequestId)) return ledger;
-  const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true;
+  const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true
+    || ledger.unexecutedLaunchRequestIds?.includes(launchRequestId) === true;
   const refund = !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const deferredAt = now || new Date().toISOString();
@@ -696,6 +804,62 @@ export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequ
     deferralNextAt: leaseWaitExhausted ? deferredAt : new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
     updatedAt: deferredAt,
   };
+  creditHammerDispatchBudgets(doc, launchRequestId, { pr: refund,
+    head: refund && ledger.targetRemediationSha === headSha, lifetime: lifetimeRefund });
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;
+}
+
+// Same stable-inode flock discipline as closer intent/automated recovery.
+// All retry-ledger writers participate; atomic rename alone loses read/modify writes.
+function mutateHammerLedger(rootDir, identity, mutate) {
+  mkdirSync(hammerRetryCapDir(rootDir), { recursive: true });
+  const fd = openSync(hammerRetryCapFilePath(rootDir, identity) + '.lock', 'a', 0o600);
+  try {
+    try { fsExt.flockSync(fd, 'exnb'); }
+    catch (error) {
+      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) {
+        throw Object.assign(new Error('hammer retry ledger busy; retry on next observation'), { code: 'EBUSY' });
+      }
+      throw error;
+    }
+    return mutate();
+  } finally { closeSync(fd); }
+}
+
+export function recordHammerRetryDispatch(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => recordHammerRetryDispatchUnlocked(rootDir, identity, options));
+}
+
+export function markHammerRetryCapExhausted(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => markHammerRetryCapExhaustedUnlocked(rootDir, identity, options));
+}
+
+export function refundHammerRetryDispatch(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => refundHammerRetryDispatchUnlocked(rootDir, identity, options));
+}
+
+export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options));
+}
+
+export function grantTransientHammerRetry(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => grantTransientHammerRetryUnlocked(rootDir, identity, options));
+}
+
+export function deferHammerRetryDispatch(rootDir, identity, options = {}) {
+  return mutateHammerLedger(rootDir, identity, () => deferHammerRetryDispatchUnlocked(rootDir, identity, options));
+}
+
+// Shared by sibling hold-stop refunds: the updater and verified atomic write
+// both execute under the same PR-scoped fence as dispatch/refund writers.
+export function updateHammerRetryCapLedger(rootDir, identity, update) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    if (!ledger || ledger.__corrupt) return false;
+    const doc = update(ledger);
+    if (!doc) return false;
+    writeHammerRetryCapLedger(rootDir, identity, doc);
+    return true;
+  });
 }

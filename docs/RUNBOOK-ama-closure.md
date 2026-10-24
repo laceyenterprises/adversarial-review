@@ -224,6 +224,37 @@ ledger ticket/time query returns no rows at or after the attempt timestamp.
 The audited single-PR command defaults to dry-run; any row or unreadable ticket query
 retains ownership for that recovery path. Source changes authorize no production action.
 
+## Recovery no-work accounting (RCV-08)
+
+RCV-07 owns the single execution verdict; review service consumes its versioned
+export from the canonical ledger adapter without examining worker output.
+Credential/boot/hard-quota failures before work restore only recorded charges.
+Unknown and post-progress quota failures retain charges. Permanent receipts and
+a PR-scoped flock cover dispatch, full/legacy refunds, transient grants,
+suppression, deferral and hold-stop sibling writes. A busy writer leaves the
+attempt for the next ordinary observation. Existing health holds and six-hour
+slow-retry windows remain authoritative. Hammer heads keep their existing
+review/merge authority; merged/closed PRs stay terminal.
+
+Deploy through normal main-catchup submodule float. If a bounce is owed, its
+existing domain/restart owner performs it; this ticket grants workers no restart
+or configuration-flip authority. Then run the read-only probe from the deployed
+private optional overlay (initialized and caught up), independent of cwd:
+
+```bash
+node "${AGENT_OS_DEPLOY_CHECKOUT:?}/tools/adversarial-review/bin/recovery-status.mjs" --json
+```
+
+Record schema 1, `consumer.active`, `sourceHealthy`, each budget's `refundable`,
+configured values and resolution, observation ages, actual refund counts and
+`waitInventory.missing`. Active requires an organic runtime versioned charge
+within 24 hours; installed source or an empty ledger is not proof. Missing
+transient refunds remain zero observations; capability coverage comes from the
+observed versioned charge adapter. The probe never repairs state, migrates the
+shared ledger or emits transcripts/credentials. It reads at most 1,000 PR ledgers;
+overflow/corruption is unavailable coverage. No new PR check or smoke step is
+registered. Operator RCV-09 owns final enforce/rollback evidence.
+
 ## Load-aware per-call budgets
 
 The service scales GitHub lookups, quota-status reads, lock waits and

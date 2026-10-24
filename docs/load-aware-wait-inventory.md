@@ -415,3 +415,25 @@ bounding a hung org scan regardless of discovered repo count or host load.
 `resolveDeadlineMs` rejects non-positive or non-finite configured deadlines,
 including function results, before scheduling the watchdog or poll work. This
 is an absolute hang limit; extreme backlogs do not grant an unlimited poll pass.
+
+
+## RCV-08 progressing waits and SRE 600-second spawn report
+
+The existing inventory above remains the full service audit. This slice checks
+its spawn/merge/check paths and fixes the provision consumer's second scaling.
+`bin/recovery-status.mjs --json` reports configured spawn nominal/effective values
+from runtime charge receipts plus source inventory, timer ceiling and coverage.
+
+| Path | Nominal / existing outer bound | Scale and ceiling |
+| --- | --- | --- |
+| `ama/dispatch-closer.mjs:resolveAmaDispatchTimeoutMs` | 600,000 ms (SRE SPAWNCAPLOAD-01 case), existing config override; optional caller absolute `dispatchContext.deadlineMs` and abort signal | `progressingOperationTimeoutMs` samples/scales nominal once, caps at remaining absolute deadline and 2^31-1 ms; expired deadline refuses before launch. |
+| `ama/dispatch-closer.mjs:withProvisionTimeoutCappedAtDispatch` | Effective dispatch budget minus 90 s shell / 45 s subprocess cushions | Consumes effective input unchanged, retaining tighter existing provision overrides; never scales it again. |
+| `ama/dispatch-closer.mjs:runGhPrMergeWithTransientRetry` | 30,000 ms per merge command, existing bounded retry count | Each command scales its nominal once through the shared helper; central platform ceiling applies. |
+| `gh-cli.mjs:execGhWithRetry` (required-check reads) | 30,000 ms nominal, optional existing total timeout and abort signal | Sized once at entry; every attempt clips effective timeout to the remaining monotonic total deadline without scaling. |
+| Reviewer spawn/first-output/progress/stream/chunk waits | Existing reviewer config bases and chunk allocations (inventory above) | Already shared-helper consumers; zero first-output stays disabled; allocation/outer deadline wins. |
+
+Leases, freshness, retry cadence, real no-progress limits, SLOs and spend ceilings
+are unchanged. LOADTIMEOUTCACHE owns sampler/config caching; this slice changes
+neither cache. Synthetic clocks cover idle/load, one scale, tighter provision
+limits, outer deadline expiry, explicit ceiling and platform timer overflow.
+The 600-second incident is SRE-reported context, not a claimed live reproduction.

@@ -249,3 +249,21 @@ export function loadAwareTimeoutSeconds(baseSeconds, opts = {}) {
 export function loadAwareTimeoutMs(baseMs, opts = {}) {
   return timerDelayMs(scaledTimeout(baseMs, opts, opts.maxMs ?? DEFAULT_MAX_TIMEOUT_SECONDS * 1000));
 }
+
+/** Size a nominal progressing operation once, then apply absolute bounds.
+ * An expired outer deadline refuses work; it must never become a fresh timer.
+ * Inner consumers receive this effective result unchanged.
+ */
+export function progressingOperationTimeoutMs(nominalMs, {
+  deadlineMs = Infinity, nowMs = Date.now(), ceilingMs = MAX_TIMER_DELAY_MS,
+  ...loadOptions
+} = {}) {
+  if (typeof deadlineMs !== 'number' || Number.isNaN(deadlineMs)
+    || !Number.isFinite(nowMs) || !Number.isFinite(ceilingMs) || ceilingMs < 1) {
+    throw new TypeError('invalid progressing operation bounds');
+  }
+  const remaining = deadlineMs - nowMs;
+  if (remaining < 1) throw Object.assign(new Error('operation deadline expired'), { code: 'ETIMEDOUT' });
+  const effective = loadAwareTimeoutMs(nominalMs, loadOptions);
+  return Math.min(effective, Math.floor(remaining), Math.floor(ceilingMs), MAX_TIMER_DELAY_MS);
+}

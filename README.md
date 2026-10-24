@@ -1056,6 +1056,17 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+RCV-08 adds permanent no-work charge/refund receipts and serialized hammer budget
+accounting. The existing launch-terminal reconciliation edge now requires the
+RCV-07 versioned verdict for full refunds; terminal PR and hammer review authority
+remain unchanged. Focused offline `ama-hammer-retry-cap`, `ama-dead-hammer-rearm`,
+`hamrefund-01`, `closerreuse-01-replay`, `session-ledger-read-adapter` and
+`load-aware-operational-waits` fixtures cover accounting and waits. Existing smoke
+promises remain unchanged. After normal deployment, the owner runs the separate
+[read-only activation probe](docs/RUNBOOK-ama-closure.md#recovery-no-work-accounting-rcv-08);
+missing runtime observations remain pending for RCV-09 operator activation.
+
+
 LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.
 Current-head review, cross-model selection, verdict validation and merge gates
 remain required. Lifecycle states and disposable smoke promises are unchanged;

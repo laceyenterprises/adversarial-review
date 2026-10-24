@@ -352,6 +352,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {(lease: object) => any} args.releaseLeaseImpl
  * @param {(ctx: object) => Promise<{exitCode:number, stdout?:string, stderr?:string}>} args.runMergeImpl
  * @param {(ctx: object) => Promise<object>} [args.dismissStaleRequestChangesImpl]
+ * @param {(ctx: {liveGate: object}) => Promise<void>} [args.beforeMergeImpl] Runs after live eligibility, before each merge transport attempt.
  * @param {Function} [args.evaluateEligibilityImpl]
  * @param {Function} [args.writeAuditImpl]
  * @param {Function} [args.appendAuditImpl]
@@ -742,16 +743,6 @@ async function attemptDaemonCleanMergeInner({
   let guardReversals = [];
   let terminal = null; // { reason, permanent, reasons }
 
-  if (beforeMergeImpl) {
-    try { await beforeMergeImpl(); }
-    catch (error) {
-      appendAuditImpl({ ...auditKeys, metadata: auditMetadataDoc, now: now(),
-        attempt: { outcome: 'failed-without-merge', reason: 'attestation-record-failed',
-          permanent: false, error: String(error.message) } });
-      return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-        reason: 'attestation-record-failed', merged: false, error: String(error.message) };
-    }
-  }
   while (attempts < retryCap && !merged && !terminal) {
     attempts += 1;
 
@@ -932,6 +923,33 @@ async function attemptDaemonCleanMergeInner({
             : [],
           failOpenForMerge: true,
         }));
+      }
+    }
+
+    // Attest only after this attempt's live eligibility/capability checks. A
+    // retry must pass those checks again before reusing the recorded envelope.
+    if (docsFastPath) {
+      auditMetadataDoc.docsFastPath = live.docsFastPath;
+      // Append preserves top-level provenance, so refresh it through the
+      // metadata writer before recording authority or attempting the merge.
+      try {
+        writeAuditImpl({ ...auditKeys, metadata: auditMetadataDoc, now: now(),
+          attempt: { outcome: 'in_progress', path: closureAuthority,
+            attemptPhase: 'daemon-pre-merge', validatedHead, mergeMethod } });
+      } catch (error) {
+        return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+          reason: 'audit-init-failed', merged: false, attempts, leaseAcquired: true,
+          auditWritten: false, error: String(error.message) };
+      }
+    }
+    if (beforeMergeImpl) {
+      try { await beforeMergeImpl({ liveGate: live }); }
+      catch (error) {
+        appendAuditImpl({ ...auditKeys, now: now(),
+          attempt: { outcome: 'failed-without-merge', reason: 'attestation-record-failed',
+            permanent: false, error: String(error.message) } });
+        return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+          reason: 'attestation-record-failed', merged: false, error: String(error.message) };
       }
     }
 

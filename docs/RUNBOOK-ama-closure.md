@@ -5382,12 +5382,23 @@ The former broad `fast-merge:docs` authorization is retired.
 
 Required checks must be green on the exact head. The watcher publishes the
 existing gate context as a docs waiver, then uses the ordinary daemon lease and
-merge predicate. It records kind `docs-fast-path` as the existing `ama-daemon` merge authority, with
+merge predicate. That context certifies the review waiver; external CI and
+mergeability remain separate gates. A live review request withdraws the waiver
+with a pending status before returning to full review.
+Under the lease, each attempt revalidates live classification, review requests,
+exact head, required checks and merge eligibility before signing/recording.
+A base tip advance is accepted after classifying the new immutable base/head
+range; a changed base branch invalidates the base-scoped lease. It records kind
+`docs-fast-path` as the existing `ama-daemon` merge authority immediately before
+the merge transport attempt, with
 `policy=DOCSFASTPATH-01`
 through the existing signer and canonical ledger before merging. Ledger delivery
 failure defers without a reviewer or closer; repeat delivery reuses and verifies
 the existing signed head record. The AMA audit records closure authority
-`docs-fast-path` and the classified base/head. The merge kill switch and the
+`docs-fast-path` and the latest eligible classified base/head at terminal
+settlement. Recording authorizes an attempt; a later transport failure can still
+leave an unmerged head with an attestation, and retry must revalidate the live
+gate before reusing it. The merge kill switch and the
 remaining merge authority gates still apply.
 
 Deploy the companion signer/ledger migration before this daemon change. No new

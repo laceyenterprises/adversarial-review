@@ -51,7 +51,8 @@ const quiet = { log() {}, warn() {} };
 test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded attestation without review or closer', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'docs-fast-path-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  let merged = 0, attested = 0, published = 0, rollupReads = 0;
+  let merged = 0, attested = 0, rollupReads = 0;
+  const published = [], comparedRanges = [];
   let scenario = 'green';
   const repoPath = 'example/docs-service';
   let prNumber = 2;
@@ -63,21 +64,31 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
     fetchRollupImpl: async () => { rollupReads++; return {
       headSha: scenario === 'moved' && rollupReads > 1 ? 'f'.repeat(40) : head,
       title: 'Document the service', body: '', state: 'OPEN', labels: [],
-      mergeable: scenario === 'conflict' ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: 'CLEAN',
-      checks: [{ name: 'ci', status: 'COMPLETED', conclusion: scenario === 'red' ? 'FAILURE' : 'SUCCESS' },
+      mergeable: scenario === 'conflict' || (scenario === 'live-conflict' && rollupReads > 1)
+        ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: 'CLEAN',
+      checks: [{ name: 'ci', status: 'COMPLETED', conclusion: scenario === 'red'
+        || (scenario === 'live-red' && rollupReads > 1) ? 'FAILURE' : 'SUCCESS' },
         { context: 'agent-os/adversarial-gate', state: 'SUCCESS' }],
     }; },
     fetchPrimaryChangeImpl: async ({ headSha }) => ({ headSha, hasHammerCommits: false,
       ciCost: { headSha, ok: true } }),
-    emitDocsFastPathAttestationImpl: async () => {
+    emitDocsFastPathAttestationImpl: async ({ baseSha }) => {
       assert.equal(inspectMergeLease({ rootDir, repo: repoPath, base: 'main' }).lease.holderHead, head);
+      assert.ok(rollupReads > 1, 'live gate was read under the lease before attesting');
+      assert.equal(baseSha, scenario === 'base-advanced' ? 'a'.repeat(40) : base);
+      assert.equal(readAmaAuditEntry(rootDir, repoPath, prNumber, head).docsFastPath.baseSha, baseSha);
       attested++;
       if (scenario === 'attestation-outage') throw new Error('synthetic record outage');
     },
-    readDocsFastPathImpl: async args => scenario === 'late-review'
-      ? readDocsFastPath({ ...args, execGhWithRetryImpl: async () => ({ stdout: JSON.stringify({
-        state: 'open', labels: ['request-review'], head: { sha: head }, base: { sha: base, ref: 'main' },
-      }) }) }) : evidence,
+    readDocsFastPathImpl: args => readDocsFastPath({ ...args, execGhWithRetryImpl: async ({ args: command }) => {
+      if (command[1].includes('/compare/')) {
+        comparedRanges.push(command[1]);
+        return { stdout: JSON.stringify({ files: [{ filename: scenario === 'base-non-docs' ? 'src/code.mjs' : 'docs/guide.md' }] }) };
+      }
+      return { stdout: JSON.stringify({ state: 'open', labels: scenario === 'late-review' ? ['request-review'] : [],
+        head: { sha: head }, base: { sha: ['base-advanced', 'base-non-docs'].includes(scenario) ? 'a'.repeat(40) : base,
+          ref: scenario === 'retarget' ? 'release' : 'main' } }) };
+    } }),
     guardStackedBaseImpl: async () => null,
     execGhWithRetryImpl: async ({ args: command }) => {
       assert.deepEqual(command.slice(0, 2), ['pr', 'merge']);
@@ -89,19 +100,32 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   });
   const run = () => maybeRunDocsFastPath({ rootDir, repoPath, prNumber, cfg, subject, logger: quiet,
     readDocsFastPathImpl: async () => evidence,
-    publishStatusImpl: async () => { published++; },
+    publishStatusImpl: async (_root, { decision }) => { published.push(decision.state); },
     fetchProtectionImpl: async () => ({ requiredContexts: ['ci', 'agent-os/adversarial-gate'] }), runDaemonImpl });
-  for (scenario of ['red', 'conflict', 'moved', 'attestation-outage', 'late-review']) {
+  for (scenario of ['red', 'conflict', 'live-red', 'live-conflict', 'moved', 'attestation-outage', 'late-review', 'retarget', 'base-non-docs']) {
     rollupReads = 0; prNumber++;
+    const priorAttested = attested;
     assert.equal(await run(), scenario !== 'late-review', scenario);
     assert.equal(merged, 0, scenario);
+    assert.equal(attested - priorAttested, scenario === 'attestation-outage' ? 1 : 0, scenario);
+    assert.equal(published.at(-1), scenario === 'late-review' ? 'pending' : 'success', scenario);
     assert.equal(inspectMergeLease({ rootDir, repo: repoPath, base: 'main' }).lease, null, scenario);
   }
-  scenario = 'green'; rollupReads = 0; prNumber++;
-  assert.equal(await run(), true);
-  assert.equal(merged, 1);
-  assert.ok(published > 0);
-  assert.equal(readAmaAuditEntry(rootDir, repoPath, prNumber, head).closureAuthority, 'docs-fast-path');
+  for (scenario of ['green', 'base-advanced']) {
+    rollupReads = 0; prNumber++;
+    const priorMerged = merged;
+    assert.equal(await run(), true);
+    assert.equal(merged, priorMerged + 1);
+    const audit = readAmaAuditEntry(rootDir, repoPath, prNumber, head);
+    assert.equal(audit.closureAuthority, 'docs-fast-path');
+    assert.equal(audit.status, 'succeeded');
+    assert.equal(audit.reconciliation.needsRepair, false);
+    assert.equal(audit.docsFastPath.baseSha, scenario === 'base-advanced' ? 'a'.repeat(40) : base);
+    if (scenario === 'base-advanced') {
+      assert.ok(comparedRanges.at(-1).includes(`/compare/${'a'.repeat(40)}...${head}`));
+      assert.equal(audit.attempts.some(attempt => attempt.permanent === true), false);
+    }
+  }
   // Exercise the actual Node sign/record boundary; the companion suite runs
   // the production Python interpreter and real Postgres constraint/store.
   let signed, recorded, signCalls = 0;
@@ -139,7 +163,7 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   assert.equal('recorded_at' in recorded, false);
   cfg.autonomousMergeExecutionEnabled = false;
   assert.equal(await run(), true);
-  assert.equal(merged, 1);
+  assert.equal(merged, 2);
 });
 
 test('DOCSFASTPATH-01 request-review and operator requests select the full path, including a late request', async () => {

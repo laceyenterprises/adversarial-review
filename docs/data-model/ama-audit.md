@@ -207,5 +207,12 @@ No reviewer or finding count is invented. A failed attestation delivery appends
 `outcome=failed-without-merge`, `reason=attestation-record-failed`, `permanent=false`
 and diagnostic `error`, then releases the lease for a later retry. The signed
 `docs-fast-path` attestation lives in the canonical head-attestation ledger,
-through the existing sign/record interface. The audit binds the classified range;
-live classification and merge eligibility are rechecked after recording.
+through the existing sign/record interface. Live classification and merge
+eligibility are checked under the lease before recording on every transport
+attempt. A moving base tip requires a fresh docs-only range on the same base
+branch. Before recording, an `in_progress` write refreshes top-level
+`docsFastPath` metadata to the latest eligible range, including its base SHA;
+terminal appends preserve this metadata and the ordinary attempt history.
+A failed metadata write defers without attesting or merging. Recording authorizes
+an attempt, so a transport failure after recording
+can still leave an unmerged head with an attestation.

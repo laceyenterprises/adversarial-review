@@ -1106,9 +1106,9 @@ async function runDaemonCleanMergeAttemptInner({
         return JSON.parse(stdout);
       },
     }),
-    beforeMergeImpl: docsFastPath ? async () => {
+    beforeMergeImpl: docsFastPath ? async ({ liveGate }) => {
       await emitDocsFastPathAttestationImpl({ hqRoot, repo: repoPath, prNumber, headSha: validatedHead,
-        baseSha: docsFastPath.baseSha, execFileImpl, env, log: logger });
+        baseSha: liveGate.docsFastPath.baseSha, execFileImpl, env, log: logger });
     } : null,
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
@@ -1121,8 +1121,9 @@ async function runDaemonCleanMergeAttemptInner({
       return reportGateSnapshot({
         terminalReviewValidated: Boolean(terminalReviewHead
           && terminalReviewHead === (rollup?.headSha || rollup?.headRefOid || '')),
-        docsFastPath: freshDocs?.baseSha === docsFastPath?.baseSha
-          && freshDocs?.baseBranch === docsFastPath?.baseBranch ? freshDocs : null,
+        // A moving base tip is normal: the reader reclassifies its immutable
+        // base/head range. A retarget still invalidates the base-scoped lease.
+        docsFastPath: freshDocs?.baseBranch === docsFastPath?.baseBranch ? freshDocs : null,
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,

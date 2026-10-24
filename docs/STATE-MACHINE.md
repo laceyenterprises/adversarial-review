@@ -817,12 +817,17 @@ comparison prevents a moving PR from lending its classification to another head.
 `request-review`, `retrigger-review`, `fast-merge-veto`, a native requested
 reviewer/team, or a retained operator retrigger selects full review. Merge holds
 remain holds. The daemon records a signed `docs-fast-path` attestation through
-`hq attest sign`/`record` while holding the existing merge lease. Recording failure
-releases the lease and retries on a later poll. After recording, a live read
-revalidates classification, review requests, base, exact head and merge gates;
+`hq attest sign`/`record` while holding the existing merge lease. Before recording
+on each merge attempt, a live read revalidates classification, review requests,
+base branch, exact head and merge gates. A base tip advance is accepted only after
+the new base/head range classifies as docs-only; retargeting the base branch
+invalidates the lease's authority. Terminal audit metadata retains the refreshed
+eligible range. Recording failure releases the lease and retries on a later poll;
 `--match-head-commit` fences the merge itself. Required contexts use the shared
 check classifier, including the pipeline gate, which records the docs waiver as
-success. Kill switch, primary-change policy, protection, capability, protective
+success as a review waiver, independently of external CI. A late review request
+withdraws that waiver with a pending status and selects full review. Kill switch,
+primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
 finding count is invented. Pending/red checks wait without reviewer or closer.
 

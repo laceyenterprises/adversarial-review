@@ -34,7 +34,15 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
       readDocsFastPathImpl: read, candidate: { headSha: evidence.headSha, baseBranch: evidence.baseBranch,
         labels: subject.labels, branchProtection }, currentPrHeadSha: evidence.headSha,
       reviewState: {}, execFileImpl, logger });
-    if (result?.liveGate?.docsFastPath?.reviewRequested) return false;
+    if (result?.liveGate?.docsFastPath?.reviewRequested) {
+      try {
+        await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha: evidence.headSha,
+          decision: { state: 'pending', reason: 'docs-review-requested', description: 'Adversarial review requested; docs waiver withdrawn.' }, execFileImpl });
+      } catch (error) {
+        logger.warn?.(`[docs-fast-path] waiver withdrawal unavailable: ${error.message}`);
+      }
+      return false;
+    }
     logger.log?.(`[docs-fast-path] ${repoPath} PR ${prNumber}: ${result?.reason || result?.disposition}`);
   } catch (error) {
     logger.warn?.(`[docs-fast-path] merge deferred: ${error.message}`);

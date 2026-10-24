@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 
 const ENTITLED_VARS = ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'];
 
@@ -20,7 +21,7 @@ function shellValue(quoted) {
 }
 function parseRefreshOutput(output, names) {
   const text = output.trim();
-  if (TOKEN_SHAPE.test(text)) return { token: text, values: [text] };
+  if (TOKEN_SHAPE.test(text)) return { token: text, values: [text], source: 'bare' };
   const exports = new Map();
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -32,7 +33,7 @@ function parseRefreshOutput(output, names) {
   const token = name && exports.get(name);
   if (!TOKEN_SHAPE.test(token || '')) return null;
   const values = [...exports].filter(([key, value]) => value && !key.endsWith('_EXPIRES_AT')).map(([, value]) => value);
-  return { token, values, expiresAt: exports.get(`${name}_EXPIRES_AT`) || exports.get('GH_TOKEN_EXPIRES_AT') };
+  return { token, values, source: 'exports', expiresAt: exports.get(`${name}_EXPIRES_AT`) || exports.get('GH_TOKEN_EXPIRES_AT') };
 }
 
 // A proactive refresh may be skipped while the held token's known expiry is
@@ -109,12 +110,12 @@ export function hammerTokenSession(options = {}) {
     error.stderr = error.message;
     return error;
   }
-  function refresh() {
+  function refresh(timeout = 10_000) {
     if (!command) return;
     let output;
     try {
       output = execFileSync('/bin/sh', ['-c', command], {
-        env: credentialEnv, encoding: 'utf8', timeout: 10_000,
+        env: credentialEnv, encoding: 'utf8', timeout,
         killSignal: 'SIGKILL', maxBuffer: 16 * 1024, stdio: 'pipe',
       });
     } catch (error) {
@@ -129,6 +130,7 @@ export function hammerTokenSession(options = {}) {
     expiresAt = parsed.expiresAt;
     refreshedCredentials.set(credentialEnv, { ...parsed, variable, command, launchToken, launchExpiry });
     warnedProactiveFailure = false;
+    return parsed;
   }
   // Redaction returns the same object, minus secrets: callers route retries and
   // failures from its code, signal and status. A spawn-level child error (a
@@ -179,6 +181,22 @@ export function hammerTokenSession(options = {}) {
   }
   return {
     managed,
+    // Exercise the same refresh/parser without held-token fallback or a GitHub
+    // request. Only this allowlisted projection may cross the check boundary.
+    checkRefresh(now = Date.now) {
+      if (!command) throw failure('unavailable (no launch refresh command)');
+      try {
+        const parsed = refresh(loadAwareTimeoutMs(10_000));
+        const expiry = Date.parse(parsed.expiresAt || '');
+        return { parsed: true, source: parsed.source,
+          expiresInSeconds: Number.isFinite(expiry) ? Math.floor((expiry - now()) / 1000) : null };
+      } catch (error) {
+        if (error.refreshOutcome === 'failed (empty or invalid output)') {
+          return { parsed: false, source: 'invalid', expiresInSeconds: null };
+        }
+        throw error;
+      }
+    },
     prepare() {
       if (!managed) return childOptions;
       if (forced) {

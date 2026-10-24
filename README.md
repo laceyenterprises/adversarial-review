@@ -2508,3 +2508,17 @@ The caller owns pinned diff extraction, authorized read-only execution, budget
 reservations, quota measurement and score evidence. This bridge does not launch
 reviewers or change any live routing configuration. Synthetic tests exercise
 parsing/routing with network, process execution and publication writes forbidden.
+
+LVR-08 provides two bounded evidence commands for observe-mode activation:
+`node src/activation-check.mjs hammer-token` forces the existing in-process
+hammer refresh/parser, without held-token fallback or a GitHub operation, and
+emits only `{parsed, source, expiresInSeconds}`. It requires the caller's
+existing entitled refresh-command environment; absent launch entitlement or
+transport failure exits nonzero (inconclusive), never a healthy-token fallback.
+Invalid parser output emits `parsed:false` for the activation expectation to
+fail. No raw command, child stream, token or exception is printed or persisted.
+`node src/activation-check.mjs daemon-reservation` reads the watcher's poll
+interval and calls `daemonMergeReservationSeconds` with that effective value;
+its evidence is `{reservationSeconds, pollSeconds}`. Activation YAML lives in
+the consuming superproject and remains observe-only. Normal deployment must
+make both repository revisions available before that consumer declares success.

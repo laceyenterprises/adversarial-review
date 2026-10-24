@@ -1198,8 +1198,8 @@ export function createNoProgressLaneGate({
       // ownership. A retained hammer route must run each tick, including while
       // dispatch is queued; a named safety/operator refusal still wins.
       const selectedNextAction = value?.amaClosureResult?.nextAction || value?.nextAction;
-      const operatorHold = selectedNextAction ? selectedNextAction.action === 'operator-hold'
-        : value?.outcome === 'await-operator' || value?.operatorHoldReason || isSafetyRecoveryHold(value?.amaClosureResult);
+      const operatorHold = Boolean(value?.operatorHoldReason) || isSafetyRecoveryHold(value?.amaClosureResult)
+        || (selectedNextAction ? selectedNextAction.action === 'operator-hold' : value?.outcome === 'await-operator');
       const hammerRouteActive = !timedOut && value?.hammerRouteActive === true && !operatorHold;
       const progressClass = !hammerRouteActive && (value?.gateDecision?.operatorDecisionRequired === true
         || operatorHold)
@@ -1224,6 +1224,7 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
+        operatorHold,
         hammerRouteActive,
         nextAction: timedOut ? null : value?.amaClosureResult?.nextAction || value?.nextAction || null,
         operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,

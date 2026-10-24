@@ -223,7 +223,9 @@ export function createAmaHammerBackgroundQueue({
     entry.startedAtMs = nowMs();
     let settled;
     try {
-      settled = Promise.resolve(entry.run(entry.controller.signal));
+      settled = Promise.resolve(entry.run(entry.controller.signal, shared => {
+        if (!entry.controller.signal.aborted) entry.sharedNextAction = shared;
+      }));
     } catch (err) {
       settled = Promise.reject(err);
     }

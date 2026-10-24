@@ -462,7 +462,7 @@ function selectRow(facts) {
   if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'exact-head-review', deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (review.currentHeadVerdictAbsent && !terminalHead && policy?.reviewCeilingReached === true && !handedToReview) {
+  if (review.currentHeadVerdictAbsent && !carried && policy?.reviewCeilingReached === true && !handedToReview) {
     return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };
   }
   if (review.currentHeadVerdictAbsent && !carried) {

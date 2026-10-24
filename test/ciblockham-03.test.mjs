@@ -422,8 +422,10 @@ test('background pre-dispatch refusal leaves the interrupted intent and its leas
   let submission;
   args.amaHammerBackgroundQueueImpl = () => ({ submit(options) { submission = options; return { state: 'started' }; } });
   await maybeDispatchAmaClosureFor(args);
-  const result = await submission.run(new AbortController().signal);
+  let liveShared;
+  const result = await submission.run(new AbortController().signal, shared => { liveShared = shared; });
   assert.equal(result.reason, 'background-pr-draft');
+  assert.equal(result.nextActionShared, liveShared, 'the queue receives the same live refusal generation');
   submission.onSettled({ ok: true, result, elapsedMs: 0 });
   assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
   assert.deepEqual(readAmaCloserLease(args.rootDir, identity), lease);

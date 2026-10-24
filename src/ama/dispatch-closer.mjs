@@ -4908,9 +4908,10 @@ async function maybeDispatchAmaCloserAttempt({
         requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
+      sharedNextAction = evidenceStopHold.nextActionShared || sharedNextAction;
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, recoveryWait: true, reason: HAMMER_STOP_HOLD_REASON,
-        hammerStop: evidenceStopHold.hammerStop });
+        hammerStop: evidenceStopHold.hammerStop, nextActionShared: sharedNextAction });
       if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
     }
   }
@@ -5150,6 +5151,7 @@ async function maybeDispatchAmaCloserAttempt({
         logger,
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
+      sharedNextAction = hammerStopHold.nextActionShared || sharedNextAction;
       if (hammerStopHold.action === 'hold') {
         // No `reasons`: the orphan watchdog and automated recovery read this as
         // a bounded wait, never as a re-review or hammer request.
@@ -5159,6 +5161,7 @@ async function maybeDispatchAmaCloserAttempt({
           recoveryWait: true,
           reason: HAMMER_STOP_HOLD_REASON,
           hammerStop: hammerStopHold.hammerStop,
+          nextActionShared: sharedNextAction,
         });
       }
       if (hammerStopHold.action === 'release') hammerStopRelease = hammerStopHold;

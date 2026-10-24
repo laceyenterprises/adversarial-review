@@ -548,6 +548,12 @@ A passed review ceiling remains repair admission, never current-head merge proof
 Changed proof or queued PR facts create a new immutable generation. Unchanged
 preflight facts reuse the decision. Queued preflight reads current checks and
 labels in its existing PR fetch, and changes in either invalidate the generation.
+In-flight queue lookups expose that refreshed generation. Stop evaluation returns
+the same recovery pair used in its alert, and callers retain it through dispatch
+and reporting. Explicit operator and safety holds take precedence over an older
+automated snapshot in the no-progress lane, including during drain deferral.
+An exact head-pair semantic or attested clean carry bypasses the historical review
+ceiling and reaches ordinary daemon eligibility; it never waives the merge gates.
 A discovered watchdog owner updates that same generation without repeating its
 probe. Adopted probes re-read retry descendants rather than caching terminal
 absence across passes. Exact-head review requests still require the

@@ -649,6 +649,16 @@ if (scenario === 'clean') {
     predicate: 'synthetic-safety', refusal: { reasons: ['synthetic-safety'] } } });
   assert.equal(closureOwnerFromDecision(stopped.decision).actor, 'closure-recovery');
   assert.equal(stopped.decision.queue.intent, 'reconcile');
+  const { evaluateHammerStopHold } = await import('../../src/ama/hammer-stop-hold.mjs');
+  let stopPage;
+  const held = await evaluateHammerStopHold({ ...retrySubject, hqRoot: rootDir, sharedNextAction: wakeShared,
+    prMetadata: { headSha }, now: new Date().toISOString(),
+    readAuditImpl: () => ({ attempts: [{ head: headSha, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'synthetic-stop', startedAt: new Date().toISOString() }] }),
+    deliverAlertImpl: async (_text, options) => { stopPage = options; }, logger: quiet });
+  assert.equal(held.action, 'hold');
+  assert.equal(held.nextActionShared.decision.actor, 'closure-recovery');
+  assert.equal(held.nextActionShared.decision, stopPage.payload.nextAction);
 
   const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
   const closeoutAt = '2026-01-01T00:00:00.000Z';

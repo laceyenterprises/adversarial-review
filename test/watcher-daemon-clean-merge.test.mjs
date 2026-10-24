@@ -3736,7 +3736,7 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
   }
 });
 
-test('daemon route disagreement hands off to the capped hammer and names failing gates', async () => {
+test('selected final hammer skips speculative daemon merge and fallback logging', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];

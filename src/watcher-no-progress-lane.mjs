@@ -753,6 +753,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   fingerprint,
   decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
+  operatorHold = false,
   hammerRouteActive = false,
   nextAction = null,
   operatorReason = null,
@@ -772,7 +773,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   // construction: an unknown head is walked at full speed, every tick.
   if (head === null) return null;
   const selected = nextAction?.head === head ? nextAction : null;
-  if (selected) {
+  if (selected && !operatorHold) {
     // Alerts and automatic stops retain an automated recovery workflow. Only
     // explicit intent belongs in the operator lane; deadlines never stop work.
     progressClass = selected.action === 'operator-hold'
@@ -782,7 +783,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   }
   const existing = readNoProgressLane(rootDir, identity, { logger });
   const sameHead = normalizeHead(existing?.headSha) === head;
-  if (sameHead && selected?.queue?.deferredBy === 'drain') {
+  if (sameHead && !operatorHold && selected?.queue?.deferredBy === 'drain') {
     // Drain is a scheduling observation, never progress or a charged attempt.
     // Keep the pre-drain fingerprint, counters and first-progress clock intact.
     writeLedger(rootDir, identity, { ...existing, nextAction: selected,

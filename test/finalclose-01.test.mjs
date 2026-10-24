@@ -779,7 +779,7 @@ for (const [label, rowHead, settledHead] of [
         status: 'completed', revisionRef: settledHead, completedAt: observed,
         reviewBody: '## Blocking issues\n- **Current-head defect**\n  - **Problem:** synthetic regression\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' }));
     }
-    let dispatches = 0, dispatchedReviewState;
+    let dispatches = 0, observedReviewState;
     const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
       currentRevisionRef: headSha, labelNames: [],
       reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
@@ -792,10 +792,9 @@ for (const [label, rowHead, settledHead] of [
       fetchLatestHeadReviewBodiesImpl: async () => [body],
       proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
       runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }),
-      requestEligibleHammerWakeImpl: ({ shared }) => { dispatchedReviewState = shared.snapshot.observations.reviews.value; },
+      requestEligibleHammerWakeImpl: ({ shared }) => { observedReviewState = shared.snapshot.observations.reviews.value; },
       maybeDispatchAmaCloserImpl: async args => {
         dispatches++;
-        dispatchedReviewState = args.reviewState;
         return { dispatched: true };
       },
       logger: { log() {}, warn() {} },
@@ -803,8 +802,8 @@ for (const [label, rowHead, settledHead] of [
     assert.equal(result.dispatched, false, JSON.stringify(result));
     assert.equal(dispatches, 0);
     assert.ok(['review', 'remediate'].includes(result.nextAction.action));
-    assert.equal(dispatchedReviewState.headSha, settledHead, 'settled head comes from the review evidence');
-    assert.equal(dispatchedReviewState.postedAt, mismatched ? null : observed,
+    assert.equal(observedReviewState.headSha, settledHead, 'settled head comes from the review evidence');
+    assert.equal(observedReviewState.postedAt, mismatched ? null : observed,
       'a receipt cannot be borrowed from another reviewed head');
   });
 }

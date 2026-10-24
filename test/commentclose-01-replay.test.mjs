@@ -314,12 +314,17 @@ function stage7311FinalRound(t, label) {
 
 async function withHqRoot(hqRoot, fn) {
   const originalHqRoot = process.env.HQ_ROOT;
+  const originalDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
   process.env.HQ_ROOT = hqRoot;
+  // Keep the synthetic workspace independent of the host's deploy location.
+  process.env.AGENT_OS_DEPLOY_CHECKOUT = path.join(hqRoot, 'deploy-checkout');
   try {
     return await fn();
   } finally {
     if (originalHqRoot === undefined) delete process.env.HQ_ROOT;
     else process.env.HQ_ROOT = originalHqRoot;
+    if (originalDeployCheckout === undefined) delete process.env.AGENT_OS_DEPLOY_CHECKOUT;
+    else process.env.AGENT_OS_DEPLOY_CHECKOUT = originalDeployCheckout;
   }
 }
 

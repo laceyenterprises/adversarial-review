@@ -12,6 +12,7 @@ import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
@@ -35,6 +36,42 @@ function root(t) {
   t.after(() => rmSync(value, { recursive: true, force: true }));
   return value;
 }
+
+test('hammer intent fails closed when a matching decision has no queue', () => {
+  const selected = pair(base({ checks: { conclusion: 'FAILURE' } }));
+  for (const queue of [undefined, null]) {
+    assert.equal(hasHammerDispatchIntent({ ...selected, decision: { ...selected.decision, queue } }, identity), false);
+  }
+});
+
+for (const progress of [
+  { contentProof: { kind: 'context-only-rebase', semantic: true, fromHead: OLD, toHead: HEAD } },
+  { closerAuthoredStale: { carryForward: true, reviewedHead: OLD, currentHead: HEAD } },
+]) test(`clean ${Object.keys(progress)[0]} survives the review ceiling with exact-head proof`, () => {
+  const observations = { reviews: { ...clean, headSha: OLD }, progress,
+    policy: { autonomousMergeExecutionEnabled: true, strictMode: true, reviewCeilingReached: true } };
+  assert.deepEqual(tuple(pair(base(observations)).decision), ['daemon-merge', 'daemon', 'carried-clean-head']);
+  const invalid = Object.fromEntries(Object.entries(progress).map(([key, proof]) =>
+    [key, { ...proof, toHead: OTHER, currentHead: OTHER }]));
+  assert.deepEqual(tuple(pair(base({ ...observations, progress: invalid })).decision), ['hammer', 'hammer', 'review-ceiling']);
+  assert.equal(pair(base({ ...observations, reviews: { ...observations.reviews, blockingFindingCount: 1,
+    verdict: 'request-changes' } })).decision.action, 'hammer');
+});
+
+test('stop evaluation returns the same recovery generation that its page reports', async t => {
+  const shared = pair(base({ checks: { conclusion: 'FAILURE' } }));
+  const pages = [];
+  const result = await evaluateHammerStopHold({ rootDir: root(t), hqRoot: 'unused', ...identity,
+    sharedNextAction: shared, prMetadata: { headSha: HEAD }, now: AT,
+    readAuditImpl: () => ({ attempts: [{ head: HEAD, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'synthetic-stop', startedAt: AT }] }),
+    deliverAlertImpl: async (_text, options) => pages.push(options), logger: quiet });
+  assert.equal(result.action, 'hold');
+  assert.equal(result.nextActionShared.decision.actor, 'closure-recovery');
+  assert.equal(result.nextActionShared.decision, pages[0].payload.nextAction);
+  assert.ok(result.nextActionShared.snapshot.generation > shared.snapshot.generation);
+  assert.equal(shared.decision.actor, 'hammer');
+});
 
 test('closure invalidates an earlier wake decision when round evidence changes', async () => {
   const passSnapshot = base({ reviews: { ...clean, headSha: OLD } });

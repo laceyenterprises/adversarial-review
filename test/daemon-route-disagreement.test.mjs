@@ -222,7 +222,7 @@ test('DIRTYOWN-01: a pre-lease UNKNOWN decline is logged but never counted, park
   }
 });
 
-test('DIRTYOWN-01: the closer holds UNKNOWN+CLEAN like the daemon instead of routing it to the daemon', async () => {
+test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoking the closer', async () => {
   const rootDir = tempRoot();
   try {
     const closerCalls = [];

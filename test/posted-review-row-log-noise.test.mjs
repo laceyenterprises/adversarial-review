@@ -1337,6 +1337,25 @@ test('GHSCOPE-01: an unrelated parent-poll rate limit does not suppress healthy 
 });
 
 
+test('explicit holds override an automated snapshot in the persisted no-progress lane', async () => {
+  const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
+  const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
+  for (const deferredBy of [null, 'drain']) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'explicit-hold-'));
+    tempRoots.add(rootDir);
+    const headSha = 'a'.repeat(40);
+    const handler = { repoPath: 'fixture/repo', prNumber: 7, headSha };
+    const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => ({ review_status: 'posted' }),
+      logger: { warn() {}, log() {} } });
+    const value = { operatorHoldReason: 'operator-label-required:fixture-approved', hammerRouteActive: true,
+      nextAction: { head: headSha, action: 'hammer', actor: 'hammer', queue: { intent: 'dispatch', deferredBy } } };
+    for (let i = 0; i < 2; i++) await gate.record(handler, { value });
+    const ledger = readNoProgressLane(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber });
+    assert.equal(ledger.progressClass, 'operator-decision-required');
+    assert.equal(ledger.hammerRouteActive, false);
+  }
+});
+
 test('DRAINDEFER-01: posted-review hub carries drain evidence without changing other refusal accounting', async () => {
   const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
   const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');

@@ -28,6 +28,21 @@ function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
 
+test('in-flight lookup exposes revalidated decisions without changing the submitted pair', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  const initial = Object.freeze({ decision: Object.freeze({ generation: 0 }) });
+  const refreshed = Object.freeze({ decision: Object.freeze({ generation: 1 }) });
+  let update, finish;
+  queue.submit({ key: 'fixture/repo#1@head', sharedNextAction: initial,
+    run: (_signal, updateShared) => { update = updateShared; return new Promise(resolve => { finish = resolve; }); } });
+  assert.equal(queue.get('fixture/repo#1@head').nextAction, initial.decision);
+  update(refreshed);
+  assert.equal(queue.get('fixture/repo#1@head').nextAction, refreshed.decision);
+  assert.equal(initial.decision.generation, 0);
+  finish({ dispatched: true });
+  await queue.drain();
+});
+
 test('classification retry accepts a null signal with the real timer', async () => {
   const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
   let reads = 0;

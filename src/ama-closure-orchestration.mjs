@@ -2809,7 +2809,7 @@ async function dispatchAmaClosureFor({
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
         // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). The
         // signal belongs to this queue entry, not the step deadline.
-        run: async (backgroundSignal) => {
+        run: async (backgroundSignal, updateSharedNextAction) => {
           // A saturated queue can hold this closure across several watcher
           // ticks. Recheck live state at launch, after it gets a queue slot.
           let live;
@@ -2860,6 +2860,7 @@ async function dispatchAmaClosureFor({
             checksConclusion: Array.isArray(live?.statusCheckRollup)
               ? summarizeChecksConclusion(live.statusCheckRollup, { env, cfg }) : undefined,
           });
+          updateSharedNextAction(launchShared);
           const changedDecision = { nextActionShared: launchShared };
           if (live?.state !== 'OPEN' || live?.headSha !== dispatchContext.targetRemediationSha) {
             return { dispatched: false, reason: 'background-pr-state-changed', ...changedDecision };
@@ -2880,7 +2881,9 @@ async function dispatchAmaClosureFor({
           }
           const launched = await maybeDispatchAmaCloserImpl({ ...closerArgs, sharedNextAction: launchShared, signal: backgroundSignal,
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
-          return { ...launched, nextActionShared: launchShared };
+          const settledShared = launched?.nextActionShared || launchShared;
+          updateSharedNextAction(settledShared);
+          return { ...launched, nextActionShared: settledShared };
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
           if (ok && hammerWakeSink?.value && hammerWakeSink.closerInvoked) {

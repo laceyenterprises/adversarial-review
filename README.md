@@ -1242,6 +1242,12 @@ source counts across consumers/passes, head/effect invalidation, immutable histo
 terminal/retry launch evidence, runner-less checks and legacy action parity with
 synthetic I/O. No lifecycle state, transition or smoke promise changes.
 
+Closer decision snapshots retain queued preflight and stop-recovery generations
+through in-flight status reads and dispatch results. Explicit operator/safety
+holds override stale automated no-progress decisions, even during drain. Valid
+semantic and attested clean review carries retain ordinary merge eligibility at
+the review ceiling; exact-head checks and merge predicates remain mandatory.
+
 NXA-02: `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the pure, total
 successor to `decideClosureOwner`. NXA-03 adopts it for hammer wake routing and
 NXA-04 for remediation closeout; HAMATTEST-03 executes its head-bound exact-head

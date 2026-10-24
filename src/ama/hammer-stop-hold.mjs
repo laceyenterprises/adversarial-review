@@ -553,7 +553,8 @@ export async function evaluateHammerStopHold({
     if (dirty) persist();
     return { action: 'release', hammerStop, changed: entry.releasedBy || [] };
   }
-  const recovery = sharedNextAction ? observeClosureResult(sharedNextAction, { hammerStop }).decision : null;
+  const nextActionShared = observeClosureResult(sharedNextAction, { hammerStop });
+  const recovery = nextActionShared?.decision;
   const ownerSummary = `action=${recovery?.action || 'hammer'} actor=${recovery?.actor || 'closure-recovery'} `
     + `reason=${recovery?.reason || 'automated-stop'} head=${headSha} `
     + `ageMs=${Math.max(0, Date.parse(now) - Date.parse(entry.firstObservedAt))}. `;
@@ -592,7 +593,8 @@ export async function evaluateHammerStopHold({
     }
   }
   if (dirty) persist();
-  return { action: 'hold', hammerStop: { ...hammerStop, paged: Boolean(entry.pagedAt) || PAGED_IN_PROCESS.has(debounceKey) } };
+  return { action: 'hold', hammerStop: { ...hammerStop, paged: Boolean(entry.pagedAt) || PAGED_IN_PROCESS.has(debounceKey) },
+    ...(nextActionShared ? { nextActionShared } : {}) };
 
   function persist(holdEntry = entry) {
     try {

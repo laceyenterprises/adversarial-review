@@ -31,7 +31,7 @@ export function closureDecisionMatches(shared, { repo, prNumber, headSha }) {
 export function hasHammerDispatchIntent(shared, identity) {
   const decision = shared?.decision;
   return closureDecisionMatches(shared, identity) && decision.action === 'hammer'
-    && decision.actor === 'hammer' && decision.queue.intent === 'dispatch';
+    && decision.actor === 'hammer' && decision.queue?.intent === 'dispatch';
 }
 
 export async function resolveClosureNextAction({ input, passSnapshot = null, readLaunches, ...options }) {

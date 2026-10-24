@@ -8,7 +8,9 @@ const SHA = /^[0-9a-f]{40}$/i;
 const docsPath = path => typeof path === 'string' && path.startsWith('docs/')
   && !path.split('/').some(part => ['.', '..', 'prompts', 'personas', 'identities'].includes(part.toLowerCase()))
   && !/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/i.test(path)
-  && /\.(?:md|png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?)$/i.test(path);
+  && (/\.(?:md|png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?)$/i.test(path)
+    || (path.startsWith('docs/postmortems/evidence/')
+      && /\.(?:json|txt|ya?ml|diff|patch|log|csv)$/i.test(path)));
 
 export function isDocsOnlyFiles(files) {
   // Compare responses cap files at 300. Never authorize a potentially partial list.

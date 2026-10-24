@@ -14,7 +14,8 @@ function modelFamily(model) {
   return null;
 }
 
-export function replayRouteAllowed(builderInput, arm, { diagnostic = false, builderModel = null } = {}) {
+export function replayRouteAllowed(builderInput, arm, options = {}) {
+  const { diagnostic = false, builderModel = null } = options ?? {};
   const builder = normalizeBuilderClass(builderInput);
   if (arm?.worker_class && arm.worker_class !== (arm.harness === 'pi' ? 'pi' : `${arm.harness}-reviewer`)) return false;
   const family = modelFamily(arm?.model);
@@ -31,7 +32,7 @@ export function replayRouteAllowed(builderInput, arm, { diagnostic = false, buil
 export function parseReplayReview(body) {
   if (typeof body !== 'string' || Buffer.byteLength(body) > 65536) throw Error('invalid replay review');
   const parsed = parseReviewFindings(body);
-  if (parsed.blocking.state !== 'known') throw Error('missing review section');
+  if (parsed.blocking.state !== 'known' || parsed.nonBlocking.state !== 'known') throw Error('missing review section');
   return [
     ...parsed.blocking.findings.map(f => ({ ...f, blocking: true })),
     ...parsed.nonBlocking.findings.map(f => ({ ...f, blocking: false })),

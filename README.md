@@ -2410,7 +2410,14 @@ See the [handoff contract](docs/data-model/finalization-ledger.md#durable-closer
 `parseReplayReview`; `bin/osg-reviewer-replay.mjs` accepts bounded private JSON
 stdin operations `route`, `parse`, and `ranges`. It imports the existing routing
 and finding parsers, with no production reviewer, store, GitHub writer or
-attestation path. Native recommendations follow the canonical builder route;
+attestation path. Parsing requires both canonical findings sections (`Blocking
+Issues` and `Non-blocking Issues`) to be known; a missing section or unedited
+template placeholders in either section reject the review. Omitted or null
+route options use the ordinary non-diagnostic defaults. The bridge decodes
+streamed UTF-8 across chunk boundaries, caps input at 128 KiB and review bodies
+at 64 KiB, and emits one newline-terminated JSON result. Invalid input exits
+nonzero with a generic stderr diagnostic and no stdout result.
+Native recommendations follow the canonical builder route;
 unknown/same-family models are refused, including models concealed behind a
 third-party harness. DeepSeek through Pi can run diagnostically when the known
 builder family differs; that diagnostic permission cannot recommend a route.

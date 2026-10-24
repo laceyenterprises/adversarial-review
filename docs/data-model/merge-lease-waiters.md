@@ -9,6 +9,38 @@ Legacy bare arrays remain readable. Each waiter records `repo`, `base`, positive
 integer `pr`, exact `head`, `waiterId`, `arrivedAt`, `updatedAt`, numeric `attempt`,
 positive integer `holderPid`, `holderHost`, and `deadlineSeconds`.
 
+LAC-2098 adds optional positive integer `acquisitionPid` to ordinary CLI
+waiters. It identifies the acquiring CLI on `holderHost`; `holderPid` still
+identifies the parent/caller that owns the resulting holder lease. Each CLI
+invocation registers a fresh UUID-based waiter ID and never adopts a request by
+matching parent, PR and head. Cleanup uses `removeMergeLeaseWaiter` with optional `expectedAcquisition:
+{ pid, host }`: removal rechecks the ID and recorded acquisition PID/host under
+the mutation lock. Missing or rebound metadata preserves the uncertain request,
+including adoption by an older CLI. Canonical callers omitting this fence retain
+exact-ID removal. This invocation cleans up on timeout, interruption or runtime
+failure. SIGINT, SIGTERM and SIGHUP return
+retryable exit 75 with `reason: "lease-wait-interrupted"` and `signal`, refund the
+provisional gate attempt, and run cleanup in `finally`. Handled signals abort
+the pending poll timer; refund and cleanup waits remain uncanceled. Cleanup
+attempts the canonical removal under the per-base
+mutation lock at most three times, separated by 250ms waits. A failed cleanup
+warns; dead-acquirer pruning recovers after an uncatchable exit or lock failure.
+Successful acquisition already removes its waiter under the holder lock.
+
+Early pruning requires a same-host PID probe returning exactly `false` (the
+default probe treats only ESRCH as death). Live or reused PIDs, unknown/throwing
+probes, invalid identities, missing hosts and foreign hosts cannot authorize
+early pruning. No start-time mismatch authorizes pruning: a reused PID is
+conservatively retained until the existing arrival deadline. Legacy rows without
+`acquisitionPid` retain their existing
+`holderPid` rule: older CLIs could adopt another invocation's waiter ID, so even
+an apparently well-formed `cli_<pid>_<epoch-ms>_<pr>` ID cannot establish the
+current acquirer's identity. A dead PID encoded there never authorizes new early
+pruning; a live parent conservatively retains that row until cleanup or expiry.
+Daemon priority is exempt from process pruning. Expiry remains the bounded fallback for every request. These
+rules run under the existing mutation lock during selection and release-wake
+pruning; they neither release a holder nor change its identity fence.
+
 LEASEFAIR-01 adds optional `priority: "daemon"`. Missing priority means an
 ordinary closer. Daemon reservations precede closer requests; each class uses
 arrival order, preserving insertion order for identical timestamps. Refreshing

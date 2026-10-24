@@ -985,6 +985,16 @@ once with a timer-safe ceiling. Ineligibility, head movement and merge completio
 remove it immediately; an absent daemon expires. A holder release (including a
 retryable abort) wakes the first surviving daemon PR at its reserved head through
 the existing capped watcher wake path. No holder is preempted.
+LAC-2098 binds each ordinary CLI request to its acquiring process separately
+from the holder parent. Confirmed same-host acquisition absence prunes the
+request under the existing mutation lock; live/reused/unknown or foreign-host
+requests retain the existing expiry. Fresh invocation IDs prevent adoption or
+cleanup of another live acquisition. Bounded `finally` cleanup covers timeout,
+runtime failure and handled SIGINT/SIGTERM/SIGHUP. The clean smoke verifies
+dead-child/live-parent empty-lane progress. No states, holder fences, daemon
+priority or merge-authority edges change. See the
+[waiter contract](data-model/merge-lease-waiters.md).
+
 LAC-2087 puts the posted-review candidate exits inside this cleanup lifecycle:
 operator skip and terminal/head-change exits remove abandoned daemon ownership
 even when no next acquire runs. Only eligible daemon contention retains it;

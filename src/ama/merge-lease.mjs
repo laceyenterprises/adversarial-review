@@ -252,7 +252,7 @@ function pidIsLive(pid) {
   } catch (err) {
     if (err?.code === 'EPERM') return true;
     if (err?.code === 'ESRCH') return false;
-    return false;
+    return true; // Unreadable liveness never proves death.
   }
 }
 
@@ -447,8 +447,15 @@ function waiterProcessDead(waiter, host, pidAliveFn) {
   // Daemon reservations belong to a PR/head, not a particular watcher process.
   if (waiter.priority === 'daemon') return false;
   if (!waiter.holderHost || waiter.holderHost !== host) return false;
-  const pid = Number(waiter.holderPid);
-  return Number.isInteger(pid) && pid > 0 && !pidAliveFn(pid);
+  // Old CLIs could adopt another invocation's waiter ID, so the PID encoded
+  // in a legacy ID is not reliable acquisition identity. Preserve that contract.
+  const pid = Object.hasOwn(waiter, 'acquisitionPid') ? waiter.acquisitionPid : Number(waiter.holderPid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    // PID reuse is deliberately conservative: a present PID (even a different
+    // process) retains the request until its bounded deadline. No process kills.
+    return pidAliveFn(pid) === false;
+  } catch { return false; }
 }
 
 function pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base, now, host, pidAliveFn }) {
@@ -839,6 +846,7 @@ export function upsertMergeLeaseWaiter({
   head,
   holderPid,
   holderHost,
+  acquisitionPid,
   deadlineSeconds,
   waiterId = `mw_${randomUUID()}`,
   arrivedAt,
@@ -865,6 +873,7 @@ export function upsertMergeLeaseWaiter({
       attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
       holderPid: normalizeHolderPid(holderPid),
       holderHost: holderHost || hostname(),
+      ...(acquisitionPid != null ? { acquisitionPid: normalizeHolderPid(acquisitionPid) } : {}),
       deadlineSeconds: effectiveDeadlineSeconds ?? (priority === 'daemon' && deadlineSeconds == null
         ? daemonMergeReservationSeconds()
         : loadAwareTimeoutSeconds(parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS), { maxSeconds: Infinity })),
@@ -883,13 +892,16 @@ export function removeMergeLeaseWaiter({
   base,
   waiterId,
   updatedAt,
+  expectedAcquisition,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   if (!waiterId) return { removed: false, waiters: readMergeLeaseWaiters(rootDir, { repo, base }) };
   return withWaiterMutationLock({ rootDir, repo, base }, () => {
     const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
     const doc = readWaiterDoc(waitersPath);
-    const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
+    const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId
+      || (expectedAcquisition && (w.acquisitionPid !== expectedAcquisition.pid
+        || w.holderHost !== expectedAcquisition.host)));
     const removed = waiters.length !== doc.waiters.length;
     if (removed || doc.waiters.length > 0) {
       writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt || isoNow()));
@@ -952,6 +964,7 @@ export function acquireMergeLease({
   registerWaiter = false,
   waiterPriority,
   waiterDeadlineSeconds,
+  acquisitionPid,
   attempt = 1,
   pidAliveFn = pidIsLive,
   _afterHolderWrite,
@@ -978,6 +991,7 @@ export function acquireMergeLease({
       deadlineSeconds,
       priority: waiterPriority,
       effectiveDeadlineSeconds: waiterDeadlineSeconds,
+      acquisitionPid,
     });
     waiter = registered.waiter;
   }

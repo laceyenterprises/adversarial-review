@@ -368,7 +368,11 @@ new PR
   Deadlines measure total time from process start, are scaled once through the
   per-call budgets, and cannot exceed the unscaled chunk cap or timer limit.
   LAC-2100 allocates each chunk the smaller of the requested load-scaled call
-  budget and its equal share of the cap after existing chunk/process slack.
+  budget and its static equal share of the cap after existing chunk/process slack.
+  Explicit call allocations clamp agy print time to allocation minus 30 seconds
+  (one-second CLI floor); the call abort timer still bounds preparation/retries
+  and allocations below 31 seconds. Unused shares are not redistributed, and
+  preparation consumes the fixed five-minute preparation/posting reserve.
   The unconstrained `requiredMs` remains diagnostic; `timeoutMs` is the allocated
   chunk-loop budget. A cap too small for one millisecond per chunk and both
   slacks retains terminal `reviewer-chunk-budget-exceeded` (exit 77), with

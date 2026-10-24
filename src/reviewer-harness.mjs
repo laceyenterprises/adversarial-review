@@ -44,6 +44,7 @@ import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
 import { CHUNK_HEAD_LEGEND, annotateRemovedDiffLines, buildPostImageContext, splitHunkPostImages } from './reviewer-chunk-context.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
+  AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   resolveAgyPrintTimeoutMs,
   resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
@@ -2917,6 +2918,11 @@ async function reviewWithGemini(diff, extraContext = '', {
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
           timeout: callTimeoutMs,
+          // Leave agy's graceful timeout plus subprocess slack inside an
+          // explicit allocation. The CLI has a one-second floor; allocations
+          // below 31s still rely on the authoritative call timer.
+          ...(timeoutMs != null ? { printTimeoutMs: Math.min(resolveAgyPrintTimeoutMs(reviewEnv),
+            Math.max(1000, callTimeoutMs - AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS)) } : {}),
           signal,
           maxBuffer: 10 * 1024 * 1024,
           ...(identityRun ? { identity: identityRun } : {}),

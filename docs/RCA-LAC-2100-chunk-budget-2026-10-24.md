@@ -64,7 +64,9 @@ process timeout = timeoutMs + 300000         # fits C, no second scaling
 Both slack allowances retain their existing values. Integer division leaves
 less than `N` ms unused when capped. At the observed size/load, each of six
 calls receives 3,530,000 ms; the loop receives 21,300,000 ms and the process
-21,600,000 ms. Unconstrained plans retain their prior per-call and loop budgets.
+21,600,000 ms. Plans satisfying `N * R <= C - 120000 - 300000` retain
+their prior per-call and loop budgets. Near-cap plans the old code accepted now reserve
+process slack too, so their call and loop budgets can shrink.
 Requested budgets are maxima for the aggregate allocator; saturation can reduce
 even nominal per-call budgets, including explicit overrides. All configured
 caps still pass through the existing Node timer ceiling.
@@ -78,13 +80,28 @@ to increase caps. Prompt/context size or an undersized local configuration must
 be addressed within existing limits.
 
 The harness consumes this same plan for its aggregate abort timer and each
-Gemini call. Calls retain their existing shared retry/credential budget and
-abort handling. The reviewer process forwards the plan over existing IPC;
+Gemini call. For an explicit call allocation, the forwarded agy print timeout
+is the smaller of its configured load-scaled value and the allocation minus
+30 seconds of subprocess slack, with a one-second CLI floor. The argv duration
+rounds down to whole seconds. Allocations below 31 seconds still depend on the
+call abort timer; preparation and retries also consume the shared call budget.
+Calls without an explicit allocation keep their existing print timeout. Calls
+retain their existing shared retry/credential budget and abort handling. The
+reviewer process forwards the plan over existing IPC;
 the CLI-direct parent validates it, persists only the matching active open
 session's lease before extending its timer, and orphan recovery reads that
 persisted process budget. Process deadlines remain anchored to process start;
 the five-minute preparation/posting allowance is not renewed when the plan
-arrives. Preparation exceeding that allowance can still hit the outer deadline.
+arrives. Preparation consumes that same five-minute reserve: four minutes of
+preparation leaves about one minute for posting if chunks exhaust the plan.
+This round retains the fixed reserve rather than changing process/IPC deadline
+composition; measured preparation subtraction remains a possible follow-up.
+
+Equal per-call allocations are static. Fast chunks do not transfer unused time
+to later chunks, so a slow tail can time out while aggregate time remains. This
+round retains that deterministic allocation and its parent validation contract;
+redistributing remaining time is deferred. Neither limit permits accepting
+partial reviews or extending the aggregate cap.
 
 Sibling sites were traced: the planner has one production caller in
 `reviewAgyOversizedInChunks`; `reviewer.mjs` re-exports its harness API. Process
@@ -151,3 +168,15 @@ record its requested/allocated budgets and confirm agreement between chunk,
 process and persisted lease budgets, plus ordinary review completion or timeout.
 This observation is declared in `post-merge-verify.json`; it is separate from
 offline source validation and grants no live mutation or restart authority.
+
+## Final comment-only remediation
+
+The agy print-timeout clamp and its offline argv/subprocess regressions address
+one optional review concern; the budget wording above now names both slacks.
+Static shares and the fixed preparation/posting reserve are retained and their
+limits are explicitly documented above. Targeted validation after rebasing onto
+fresh main: 75 timeout/load/deadline tests and 211 reviewer harness tests passed.
+Lint passed with zero errors (148 warnings); contract typechecking, the offline
+research-finding demo, data-model catalog validation (74 entries), declaration
+JSON parsing and `git diff --check` passed. No persistent store shape or smoke
+promise changed. The full local suite was intentionally left to PR-head CI.

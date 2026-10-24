@@ -190,6 +190,46 @@ test('CHUNKTIME-01: timeout stops fake agy and releases its credential lease in 
   assert.deepEqual(events, ['stopped', 'released']);
 });
 
+for (const scenario of [
+  { name: 'observed saturated load', observedLoad: true, allocation: 3530000, printSeconds: 3500 },
+  { name: 'twenty idle chunks', allocation: 1059000, printSeconds: 1029 },
+  { name: 'fractional seconds', allocation: 1059123, printSeconds: 1029 },
+  { name: 'lower configured print budget', allocation: 1200000, printSeconds: 1140 },
+  { name: 'CLI minimum', allocation: 100, printSeconds: 1 },
+  { name: 'no explicit allocation', allocation: null, printSeconds: 1140 },
+]) {
+  test(`LAC-2100: agy print timeout respects ${scenario.name}`, async t => {
+    if (scenario.observedLoad) underObservedLoad(t);
+    else underMaxLoad(t, { maxMultiplier: 1 });
+    let calls = 0;
+    let releases = 0;
+    const result = await reviewWithGemini('+synthetic', '', {
+      timeoutMs: scenario.allocation, agyIdentity: null,
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      purgeStaleGeminiReviewerSessionDirsImpl: () => {},
+      checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic-checkout' }),
+      materializeGeminiCheckoutSessionImpl: () => ({ env: {}, cleanup() {} }),
+      assertAgyAuthImpl: async () => {},
+      releaseGeminiCredentialCheckoutImpl: async () => { releases += 1; },
+      spawnAgyReviewImpl: options => harness.spawnAgyReview({ ...options,
+        spawnWithInputImpl: async (_command, args, spawnOptions) => {
+          calls += 1;
+          assert.equal(args[args.indexOf('--print-timeout') + 1], `${scenario.printSeconds}s`);
+          const allocation = scenario.allocation ?? timeouts.resolveAgyReviewerSubprocessTimeoutMs({});
+          if (allocation >= 31000) {
+            assert.ok(scenario.printSeconds * 1000 + timeouts.AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS <= allocation);
+            assert.equal(spawnOptions.timeout, allocation);
+          }
+          return { stdout: '## Verdict\nComment only' };
+        },
+      }),
+    });
+    assert.match(result.reviewText, /Comment only/);
+    assert.equal(calls, 1);
+    assert.equal(releases, 1);
+  });
+}
+
 
 test('CHUNKTIME-01: termination forwards an abort to detached agy before self termination', async () => {
   const events = [];

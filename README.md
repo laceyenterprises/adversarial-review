@@ -962,14 +962,20 @@ matching session's persisted timeout and lease to that plan plus process slack.
 The load multiplier applies only to each requested call budget; neither composed deadlines
 nor the aggregate cap are scaled again. LAC-2100 bounds each chunk to the smaller
 of that requested budget and `floor((cap - 120000 - 300000) / chunks)` ms,
-reserving two minutes of chunk slack and five minutes of process slack. Plans
-retain `requestedPerChunkTimeoutMs`, unconstrained `requiredMs`, prompt bytes
+reserving two minutes of chunk slack and five minutes of process slack. Shares
+are static; a fast chunk does not increase a later chunk's allocation. Explicit
+call allocations also clamp agy's print timeout to the smaller of its configured
+value and the allocation minus 30 seconds, with a one-second CLI floor. Below
+31 seconds the call abort timer remains authoritative. Preparation and retries
+consume the call budget too. Plans retain `requestedPerChunkTimeoutMs`, unconstrained `requiredMs`, prompt bytes
 and the allocated deadline in diagnostics. An envelope unable to fit even one
 millisecond per chunk plus both slacks still refuses with exit 77 and a sized
 `minimumCapMs`; source/prompt sizing must be corrected within existing limits.
 Both process deadlines are bounded by the
 unscaled chunk cap (six hours by default) and Node's timer limit. Deadlines stay
-anchored to process start, and stale or terminal claims cannot be extended.
+anchored to process start: preparation consumes the same five-minute reserve
+as posting, so four minutes of preparation leaves about one minute for posting
+when chunks exhaust the plan. Stale or terminal claims cannot be extended.
 Offline regressions cover single/multiple chunks, maximum load, timer expiry,
 lease fencing and orphan recovery:
 `node test/run-tests.mjs reviewer-timeout.test.mjs reviewer-chunk-timeout.test.mjs reviewer-process-deadline.test.mjs process-group-spawn.test.mjs watcher-reviewer-pool.test.mjs`.
@@ -1036,8 +1042,8 @@ records the evidence/admission truth table and public export fixture refresh.
 LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.
 Current-head review, cross-model selection, verdict validation and merge gates
 remain required. Lifecycle states and disposable smoke promises are unchanged;
-focused offline fixtures cover observed sizing, saturation, parent/lease budgets
-and ownership fencing. Read-only organic acceptance after normal deployment is
+focused offline fixtures cover observed sizing, saturation, allocated agy print
+timeouts, parent/lease budgets and ownership fencing. Read-only organic acceptance after normal deployment is
 declared in `post-merge-verify.json`; see the [RCA](docs/RCA-LAC-2100-chunk-budget-2026-10-24.md).
 
 FINDINGSBATCH-01 retains non-blocking findings in the existing SQLite review

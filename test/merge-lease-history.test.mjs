@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ test('history persists grant, renewal and fenced release with original acquisiti
   assert.equal(releaseMergeLease({ ...args, ...held.lease, now: at(3) }).released, false);
   assert.equal(releaseMergeLease({ ...args, ...renewed.lease, now: at(4) }).released, true);
   const rows = readMergeLeaseHistory(args.rootDir, args);
-  assert.deepEqual(rows.map(r => r.event), ['grant', 'renew', 'release']);
+  assert.deepEqual(rows.map(r => r.event), ['grant', 'renew', 'requeue', 'release']);
   for (const row of rows) {
     assert.equal(row.holderRole, 'daemon');
     assert.equal(row.holderHead, args.holderHead);
@@ -31,7 +32,7 @@ test('history persists grant, renewal and fenced release with original acquisiti
     assert.equal(row.acquiredAt, at(0));
   }
   assert.equal(rows[2].releasedAt, at(4));
-  assert.equal(rows[2].reason, 'holder-release');
+  assert.equal(rows[3].reason, 'holder-release');
 });
 
 for (const dead of [true, false]) test(`history records ${dead ? 'dead holder steal' : 'foreign deadline expiry'}`, t => {
@@ -56,6 +57,6 @@ test('history retains only its bounded JSONL tail', t => {
   releaseMergeLease({ ...args, ...held.lease, now: at(1) });
   const rows = readMergeLeaseHistory(args.rootDir, args);
   assert.equal(rows.length, MERGE_LEASE_HISTORY_LIMIT);
-  assert.equal(rows[0].eventId, 'fixture-1');
+  assert.equal(rows[0].eventId, 'fixture-2');
   assert.equal(rows.at(-1).event, 'release');
 });

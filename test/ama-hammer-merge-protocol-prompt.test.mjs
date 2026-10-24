@@ -287,7 +287,7 @@ test('the no-merge closing status carries the line the closer reads (HAMBG-02)',
   );
   assert.match(mandate, /the comment must contain the line `HAM closing status — no merge\.`/);
   // The gate-cap park writes the same line.
-  assert.match(HAMMER_PROMPT, /HAM closing status — no merge\. The gate-attempt cap stopped this head/);
+  assert.match(HAMMER_PROMPT, /HAM closing status — no merge\. The lease admission cap/);
 });
 
 test('hammer protection fetch writes the github_plan sentinel for the free-plan 403 (HAMBG-02, agent-os)', () => {

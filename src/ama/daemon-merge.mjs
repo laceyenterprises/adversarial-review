@@ -1,4 +1,5 @@
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { buildMergeCommitBody } from './closing-keywords.mjs';
 /**
  * MSM-03 — daemon clean-path merge ("Path B").
@@ -274,6 +275,7 @@ function normalizeGateState(live = {}) {
     mergeable: live.mergeable,
     mergeStateStatus: live.mergeStateStatus,
     prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
+    isDraft: live.isDraft === true,
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
     labels: Array.isArray(live.labels) ? live.labels : undefined,
     branchProtectionRequired: live.branchProtectionRequired,
@@ -612,6 +614,7 @@ async function attemptDaemonCleanMergeInner({
       return null;
     }
   };
+  if (preLease.isDraft) return notTaken('pr-is-draft');
   let preEligibility = evaluateGate(preLease);
   if (canProbeNoCi(preLease, preEligibility)) {
     // Gate 3 may short-circuit probe work, but not ordinary ineligible heads.
@@ -678,8 +681,9 @@ async function attemptDaemonCleanMergeInner({
   try {
     for (let attempt = 0; ; attempt++) {
       leaseResult = await acquireLeaseImpl({ repo, base, prNumber, head: validatedHead });
-      if (leaseResult?.acquired || attempt >= DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS.length) break;
-      await sleep(DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS[attempt]);
+      if (leaseResult?.acquired || leaseResult?.parked || leaseResult?.reason === 'no-merge-backoff'
+        || attempt >= DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS.length) break;
+      await sleep(loadAwareTimeoutMs(DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS[attempt]));
     }
   } catch (err) {
     logger?.warn?.(
@@ -697,7 +701,8 @@ async function attemptDaemonCleanMergeInner({
   if (!leaseResult?.acquired) {
     return {
       disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-      reason: 'lease-contended',
+      reason: leaseResult?.reason || 'lease-contended',
+      ...(leaseResult?.parked ? { parked: true, retry: leaseResult.retry } : {}),
       queuePosition: leaseResult?.queuePosition ?? null,
       waitMessage: `waiting for the merge lease, position ${leaseResult?.queuePosition ?? 'unknown'}`,
       merged: false,
@@ -710,9 +715,13 @@ async function attemptDaemonCleanMergeInner({
   const lease = leaseResult.lease || leaseResult;
 
   // Everything past here holds the lease — release it on every exit path.
+  let releaseOutcome;
   const releaseLease = () => {
     try {
-      releaseLeaseImpl(lease);
+      releaseLeaseImpl(lease, { merged: releaseOutcome?.merged === true,
+        terminal: releaseOutcome?.permanent === true || releaseOutcome?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        yielded: releaseOutcome?.merged === false && releaseOutcome?.permanent !== true,
+        reason: releaseOutcome?.reason || 'holder-exception' });
     } catch (err) {
       logger?.warn?.(
         `[daemon-merge] lease release failed for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,
@@ -721,6 +730,7 @@ async function attemptDaemonCleanMergeInner({
   };
 
   try {
+  releaseOutcome = await (async () => {
   // ── Bootstrap the daemon-merge audit doc (in_progress). If we can't even
   // record intent, don't merge — release and defer. ─────────────────────────
   const auditKeys = { hqRoot, repo, prNumber, headSha: validatedHead };
@@ -858,6 +868,7 @@ async function attemptDaemonCleanMergeInner({
       elig = evaluateGate(live, noCiEvidence);
     }
     if (noCiEvidence) onGateEvidenceImpl?.({ ...live, requiredChecks: true });
+    if (live.isDraft) { terminal = { reason: 'pr-is-draft', permanent: true }; break; }
     guardReversals = elig.guardReversals || [];
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
@@ -1171,6 +1182,8 @@ async function attemptDaemonCleanMergeInner({
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
     ...(terminal.liveGate ? { liveGate: terminal.liveGate } : {}),
   };
+  })();
+  return releaseOutcome;
   } finally {
     releaseLease();
   }

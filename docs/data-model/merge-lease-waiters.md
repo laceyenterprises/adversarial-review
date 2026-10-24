@@ -37,13 +37,13 @@ conservatively retained until the existing arrival deadline. Legacy rows without
 an apparently well-formed `cli_<pid>_<epoch-ms>_<pr>` ID cannot establish the
 current acquirer's identity. A dead PID encoded there never authorizes new early
 pruning; a live parent conservatively retains that row until cleanup or expiry.
-Daemon priority is exempt from process pruning. Expiry remains the bounded fallback for every request. These
+Daemon reservations use the same confirmed same-host death rule for their owning watcher PID. Expiry remains the bounded fallback for uncertain identities. These
 rules run under the existing mutation lock during selection and release-wake
 pruning; they neither release a holder nor change its identity fence.
 
 LEASEFAIR-01 adds optional `priority: "daemon"`. Missing priority means an
-ordinary closer. Daemon reservations precede closer requests; each class uses
-arrival order, preserving insertion order for identical timestamps. Refreshing
+ordinary closer. All roles share arrival order, preserving insertion order for identical timestamps.
+The legacy priority field identifies the role and carries no scheduling boost. Refreshing
 a request retains its arrival and insertion order. Queue selection, atomic
 holder creation, and served-waiter removal share the existing per-base mutation
 lock, so a closer cannot read an empty queue then acquire ahead of a newly
@@ -52,12 +52,12 @@ releasing that lock; it never depends on reacquiring a cleanup lock. A failed
 waiter-removal write rolls back the new holder and propagates the error.
 
 `acquireDaemonMergeLease` registers `daemon_<pr>_<head>` on every acquisition
-attempt. This identity survives watcher passes and process restarts. A daemon
+attempt. This identity survives watcher passes. A dead same-host owner loses its arrival
+position; a replacement watcher re-enters at the tail. A daemon
 reservation expires after at least twice the watcher's configured poll interval
 (default 300 seconds), scaled once by the existing load-aware timeout policy.
 The stored whole-second deadline is capped at `floor((2^31 - 1) / 1000)`, so
-conversion to milliseconds remains within the JavaScript timer limit. Unlike a
-closer waiter, it is not removed merely because its original process exited.
+conversion to milliseconds remains within the JavaScript timer limit. A confirmed dead same-host owning watcher is pruned before selection.
 Direct `upsertMergeLeaseWaiter` callers may supply a nominal `deadlineSeconds`
 for daemon waiters, scaled once like closer deadlines. An already-sized
 `effectiveDeadlineSeconds` takes precedence for either class without rescaling.
@@ -107,7 +107,7 @@ once and clamps to the platform timer limit. The waiter receives that already
 sized ceiling without scaling again, preserving arrival order throughout the
 wait. A decreasing service position or a newly observed grant/release/steal/
 expiry resets the stall timer; arrivals and holder renewals do not. The overall
-ceiling remains fixed even under continuous daemon priority service. Ordinary
+ceiling remains fixed even under continuous service. Ordinary
 `--wait` and the compatibility `--wait-for-holder-deadline` retain their prior
 wall-clock semantics without the new flag. Dead-holder reclamation is unchanged.
 
@@ -117,3 +117,28 @@ live head/check snapshot and record a deferred audit before each of up to two
 in-run acquisition retries. They re-enter admission on every retry. Final green
 exhaustion records `leaseWaitExhausted: true`, which requests the next closer
 pass without charging failure counters. This does not waive any live merge gate.
+
+No-merge release re-enters behind all arrivals already present, with optional
+`notBefore` from the head's persistent exponential backoff. Delayed waiters do
+not block ready requests. A served holder stores its optional `waiter` snapshot
+so a fenced non-terminal release can reinsert a daemon reservation at its new
+arrival time. CLI reservations are never reinserted: the acquiring process has
+exited, and the next invocation registers a fresh identity at the tail. Persistent
+PR/head backoff still applies even though the old CLI row is absent. Terminal/merged releases do not
+requeue. The daemon preserves transient retry reservations and withdraws
+draft, closed, terminal, moved-head or declined reservations on its next pass.
+Parking removes the reservation; retry evidence survives withdrawal.
+
+CLI status/list projects `position` (one-based arrival order), `role`
+(`daemon` or `closer`) and the stored `arrivedAt`. Polling starts at 250ms,
+doubles to a nominal ceiling sized once by the load-aware helper: at least 30 seconds,
+increasing with the nominal wait budget (one sixtieth) up to the existing watcher
+poll interval,
+and clamps each sleep to the remaining caller/stall budget. HAMLEASE-01 progress
+reports have a 25-second minimum interval and appear on the next poll: the
+maximum gap is 25 seconds plus the once-scaled polling ceiling (before integer
+second rounding), excluding time spent in synchronous I/O. The final output
+obeys the same gap bound. Signal cancellation
+and fixed bounded cleanup retries retain their existing behavior.
+
+Acquire contention `queuePosition` describes ready service order, excluding earlier delayed arrivals. A delayed candidate retains its arrival position; the status/list `position` field continues to enumerate arrival order alongside `notBefore`. Holder, waiter and release-wake mutations use the same per-base lease mutation lock; release does not reacquire that non-reentrant lock.

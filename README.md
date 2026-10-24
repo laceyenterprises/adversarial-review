@@ -594,8 +594,15 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ## Hammer merge logic
 
-LEASEFAIR-01 gives deferred daemon merges a durable priority reservation ahead
-of the next closer acquisition, FIFO among daemon requests. Closers release
+Daemon and closer merge requests share FIFO arrival order. A failed holder
+re-enters at the tail with exponential backoff; consecutive chargeable failures
+park the head with `repeated-no-merge-release` after the existing attempt cap.
+Planned CI-wait yields and retryable aborts retain backoff but reset consecutive
+failure counting; non-permanent daemon failures yield too. Yields retain the
+gate charge; aborts refund it atomically with release identity. Only daemon
+reservations requeue; the next CLI invocation registers a fresh waiter. Both
+parking caps use the existing audit, closing-status and page path.
+Only confirmed dead same-host watcher identities permit early reservation pruning. Closers release
 before the first remote-CI wait, including read retries and UNKNOWN sampling, then
 reacquire and refresh the exact-head gate. LAC-2097 retains the exact validated
 head and CI across disjoint base advances when protection is explicitly
@@ -607,24 +614,34 @@ predicate before merge. Both CI waits share one absolute deadline, set before
 the first wait from the once-scaled nominal bound; rebase time, sleeps and gate
 reads consume the remaining budget. Expired reacquisition or base probing cannot
 start a retry source mutation. Conflict, red CI and expiry release with their
-actual reasons. Deferred daemon reservations retain priority before the retry
+actual reasons. Deferred daemon reservations retain their arrival before the retry
 acquires. Contention notices report the queue position; the existing
 bounded-wait page is a lease wait, not a safety hold. The lifecycle states are
-unchanged; the clean smoke verifies priority service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
+unchanged; the clean smoke verifies FIFO service without preemption. Additional offline regressions are in `hammer-self-rebase`, `ama-merge-lease`,
 `ama-daemon-merge`, `watcher-daemon-clean-merge` and `leasepark-ci-wait` tests.
+HAMLEASE-01 progress reports occur at least 25 seconds apart, with a maximum
+gap of 25 seconds plus the once-scaled polling ceiling (excluding synchronous
+I/O); the waiter data-model documents the ceiling calculation.
+
 LEASEFAIR-03 gives closers a progress-aware lease wait: a 900-second nominal
 stall bound and six-hour nominal ceiling, each load-scaled once. Service advances
-reset the stall timer; daemon priority remains. Exact-head green exhaustion gets
+reset the stall timer; all roles retain FIFO order. Exact-head green exhaustion gets
 two in-run retries and then next-pass recovery without failure charges. The
 per-base JSONL history retains 4096 lease events; the clean smoke verifies grants
 and releases for both roles, including the retry CI hold. See the
 [history contract](docs/data-model/merge-lease-history.md).
 LEASEFAIR-04 keeps daemon reservations through twice the configured watcher poll
 interval, scaled once for host load and capped below the timer limit. Ineligible,
-moved or merged heads release their reservation immediately. Holder release
+moved or merged heads release their reservation immediately. Confirmed dead
+same-host watchers lose their reservations before queue selection. Holder release
 wakes the first daemon PR at its reserved head through the existing per-head cap.
 The clean offline smoke verifies service at 299 seconds and an exact-head release
 wake; no deployment configuration or migration is needed.
+CLI polling doubles from 250ms to a once-load-scaled ceiling from 30 seconds for short waits to the existing
+watcher poll interval for long waits.
+Status/list includes arrival time, role and position; history records re-entry
+and parking with the release reason. Synthetic merge-lease and daemon-merge
+regressions cover starvation, backoff, parking, drafts and bounded polling.
 See the [waiter contract](docs/data-model/merge-lease-waiters.md).
 LAC-2098 separates the acquiring CLI's PID/lifetime from its parent holder PID.
 Each invocation owns a fresh waiter ID and bounded cleanup on timeout, failure

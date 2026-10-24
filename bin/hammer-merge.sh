@@ -580,7 +580,7 @@ HAM_REMOTE_CI_GATE_READ_FAILURES=0
 # The first wait is lease-free. The single retry retains its acquired lease
 # through CI so another cooperating merger cannot overtake it.
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
-if [ "$HAM_CI_BASE_RETRY" -eq 0 ]; then ham_release_merge_lease || return 1; fi
+if [ "$HAM_CI_BASE_RETRY" -eq 0 ]; then ham_release_merge_lease --yield || return 1; fi
 while :; do
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
     ham_ci_timeout
@@ -673,7 +673,7 @@ while :; do
   # repeats the live exact-head gate before any merge attempt. Keep this
   # attempt charged: a later red CI outcome must retain the gate-cap charge.
   if [ "$HAM_CI_BASE_RETRY" -eq 0 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
-    ham_release_merge_lease || return 1
+    ham_release_merge_lease --yield || return 1
   fi
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   ham_ci_sleep "$HAM_REMOTE_CI_POLL_SECONDS" || true

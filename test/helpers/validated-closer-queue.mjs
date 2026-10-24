@@ -50,16 +50,17 @@ ham_base_touches_pr_files validated-head "$3"
   const now = () => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds++)).toISOString();
   const request = pr => ({ ...identity, holderPr: pr, holderHead: heads[pr - 1] || base, waiterId: `closer-${pr}`, now: now() });
   const acquire = pr => acquireMergeLease(request(pr));
-  const release = lease => assert.equal(releaseMergeLease({ rootDir, ...lease, now: now(), requestWatcherWakeImpl: () => {} }).released, true);
+  const release = (lease, outcome = { merged: true }) => assert.equal(releaseMergeLease({ rootDir, ...lease, ...outcome,
+    now: now(), requestWatcherWakeImpl: () => {} }).released, true);
   const advance = text => { writeFileSync(join(cwd, 'unrelated'), text); commit('unrelated base advance'); git('push', '-q', 'origin', 'main'); };
   const blocker = acquire(99); assert.equal(blocker.acquired, true);
   assert.equal(acquire(1).acquired, false); assert.equal(acquire(2).acquired, false);
   advance('advance before queued validation\n'); release(blocker.lease);
   // Both already-validated heads take their first lease-free CI wait, then
   // rejoin FIFO. Neither can overtake the other's existing reservation.
-  const first = acquire(1); assert.equal(first.acquired, true); release(first.lease);
+  const first = acquire(1); assert.equal(first.acquired, true); release(first.lease, { yielded: true, reason: 'required-checks-wait' });
   assert.equal(acquire(1).acquired, false);
-  const second = acquire(2); assert.equal(second.acquired, true); release(second.lease);
+  const second = acquire(2); assert.equal(second.acquired, true); release(second.lease, { yielded: true, reason: 'required-checks-wait' });
   assert.equal(acquire(2).acquired, false);
   const merged = [];
   let sourceMutations = 0, ciRestarts = 0;
@@ -92,10 +93,15 @@ ham_base_touches_pr_files validated-head "$3"
     merged.push(pr); release(granted.lease);
     if (pr === 1) {
       const daemon = acquireDaemonMergeLease({ ...request(99), waiterId: 'daemon-advance' });
-      assert.equal(daemon.acquired, true, 'daemon priority remains ahead of the second closer');
-      advance('advance between queued closes\n'); release(daemon.lease);
+      assert.equal(daemon.acquired, false, 'later daemon cannot overtake the earlier second closer');
+      assert.equal(daemon.queuePosition, 2);
+      // An external main update can still occur between cooperating closers.
+      advance('advance between queued closes\n');
     }
   }
+  const daemon = acquireDaemonMergeLease({ ...request(99), waiterId: 'daemon-advance' });
+  assert.equal(daemon.acquired, true, 'daemon proceeds after both earlier closers');
+  release(daemon.lease);
   assert.equal(readMergeLeaseWaiters(rootDir, identity).length, 0);
   assert.equal(inspectMergeLease(identity).lease, null);
   for (const file of ['a', 'b']) assert.equal(readFileSync(join(cwd, file), 'utf8'), 'author intent\nHAM finding fixed\n');

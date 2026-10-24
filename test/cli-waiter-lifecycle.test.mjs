@@ -86,13 +86,13 @@ test('LAC-2098 explicit dead acquirer prunes only its request while preserving t
   assert.equal(following(args).acquired, true);
 });
 
-test('LAC-2098 daemon and unrecognized legacy IDs retain their existing ownership rules', t => {
+test('LAC-2098 dead daemon owner is pruned while unrecognized legacy IDs retain parent ownership', t => {
   const args = fixture(t);
   abandoned(args, { waiterId: 'cli_1189_1792813709282_9083' });
   abandoned(args, { waiterId: 'daemon-request', priority: 'daemon', holderPid: 1189 });
   assert.equal(following(args).acquired, false);
   assert.deepEqual(readMergeLeaseWaiters(args.rootDir, lane).map(w => w.waiterId),
-    ['daemon-request', 'cli_1189_1792813709282_9083', 'next']);
+    ['cli_1189_1792813709282_9083', 'next']);
 });
 
 function cliArgs(args) {

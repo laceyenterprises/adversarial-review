@@ -6326,7 +6326,7 @@ async function maybeDispatchAmaCloserAttempt({
               });
               return { ...res, acquired: Boolean(res?.acquired) };
             },
-            releaseLeaseImpl: (lease) => {
+            releaseLeaseImpl: (lease, outcome) => {
               releaseMergeLeaseImpl({
                 rootDir,
                 repo: lease.repo,
@@ -6335,6 +6335,7 @@ async function maybeDispatchAmaCloserAttempt({
                 holderPr: lease.holderPr,
                 holderHead: lease.holderHead,
                 acquiredAt: lease.acquiredAt,
+                ...outcome,
               });
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {

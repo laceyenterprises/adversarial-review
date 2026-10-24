@@ -1,10 +1,11 @@
 import { readAmaAuditEntry, writeAmaAuditEntry, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 
 import {
@@ -113,7 +114,8 @@ function makeHarness({
         if (!leaseAcquired) return { acquired: false, existingLease };
         return { acquired: true, lease };
       },
-      releaseLeaseImpl: (l) => {
+      releaseLeaseImpl: (l, outcome) => {
+        harness.releaseOutcome = outcome;
         calls.release += 1;
         harness.releasedLease = l;
       },
@@ -1515,4 +1517,59 @@ test('docs record retry budget includes legacy failures and refuses an unreadabl
     assert.equal(h.calls.acquire, 0);
     assert.equal(h.calls.auditWrites.length, 0);
   }
+});
+test('daemon release carries success, transient pre-merge failure and permanent refusal outcomes', async () => {
+  for (const kind of ['merged', 'attestation-record-failed', 'permanent-merge-rejection']) {
+    const h = makeHarness({ mergeResults: kind === 'permanent-merge-rejection'
+      ? [{ exitCode: 1, stderr: 'HTTP 403 forbidden' }] : undefined });
+    const args = baseArgs(h);
+    if (kind === 'attestation-record-failed') args.beforeMergeImpl = async () => { throw new Error('synthetic failure'); };
+    const result = await attemptDaemonCleanMerge(args);
+    assert.equal(result.reason, kind);
+    assert.deepEqual(h.releaseOutcome, { merged: kind === 'merged',
+      terminal: kind === 'permanent-merge-rejection', yielded: kind === 'attestation-record-failed', reason: kind });
+  }
+});
+
+test('repeated daemon gate read failures back off without parking and recover on the same head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'daemon-transient-release-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const h = makeHarness();
+  const identity = { rootDir, repo: 'fixture/repo', base: 'main' };
+  let seconds = 0;
+  const now = () => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  h.deps.acquireLeaseImpl = async () => acquireDaemonMergeLease({ ...identity,
+    holderPr: 7702, holderHead: HEAD, holderPid: process.pid, holderHost: hostname(), now: now() });
+  h.deps.releaseLeaseImpl = (lease, outcome) => releaseMergeLease({ rootDir, ...lease, ...outcome, now: now() });
+  // Admission sees green; the subsequent in-lease read is transiently unavailable.
+  for (let i = 0; i < 6; i++) {
+    h.deps.fetchLiveGateImpl = async () => { throw new Error('HTTP 503'); };
+    const result = await attemptDaemonCleanMerge(baseArgs(h));
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(result.leaseAcquired, true);
+    const [retry] = readMergeLeaseAttempts(rootDir, identity);
+    assert.equal(retry.parkedReason, null);
+    assert.equal(retry.consecutiveNoMergeReleases, 0);
+    seconds += 300;
+  }
+  h.deps.fetchLiveGateImpl = async () => greenGate();
+  assert.equal((await attemptDaemonCleanMerge(baseArgs(h))).merged, true);
+});
+
+test('drafted daemon reservation withdraws on next pass and cannot block a ready closer', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'draft-reservation-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const target = { rootDir, repo: 'fixture/repo', base: 'main', holderPid: process.pid, holderHost: hostname() };
+  const held = acquireMergeLease({ ...target, holderPr: 1, holderHead: 'held' });
+  acquireDaemonMergeLease({ ...target, holderPr: 2, holderHead: HEAD });
+  const closer = { ...target, holderPr: 3, holderHead: 'ready', registerWaiter: true, waiterId: 'ready' };
+  acquireMergeLease(closer);
+  const h = makeHarness({ liveGate: greenGate({ isDraft: true }) });
+  const result = await withDaemonMergeReservation({ ...target, pr: 2, head: HEAD },
+    () => attemptDaemonCleanMerge(baseArgs(h, { liveGate: greenGate({ isDraft: true }) })));
+  assert.equal(result.reason, 'pr-is-draft');
+  assert.equal(h.calls.acquire, 0);
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, target).map(w => w.pr), [3]);
+  releaseMergeLease({ rootDir, ...held.lease, merged: true });
+  assert.equal(acquireMergeLease(closer).acquired, true);
 });

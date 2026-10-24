@@ -1059,22 +1059,29 @@ guards still apply, and an already captured prompt path must remain unchanged.
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. LAC-2097 retains an exact validated head across disjoint advances under non-strict protection; strict/unknown protection and overlap require rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and exact-head CI wait while retaining that lease, then rebuilds audit and predicate authority. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
-LEASEFAIR-01 changes lease scheduling within these existing states. A daemon
-deferral retains a durable priority request for its PR/head, served before the
-next closer acquisition and FIFO among daemon requests. LEASEFAIR-04 retains
-that reservation for twice the configured watcher poll interval, load-scaled
-once with a timer-safe ceiling. Ineligibility, head movement and merge completion
-remove it immediately; an absent daemon expires. A holder release (including a
-retryable abort) wakes the first surviving daemon PR at its reserved head through
-the existing capped watcher wake path. No holder is preempted.
+Merge lease scheduling uses FIFO arrival across daemon and closer roles.
+A non-terminal no-merge release rejoins at the tail with persistent PR/head
+exponential backoff; delayed requests yield to ready waiters. Repeating chargeable failures through the existing attempt cap parks that head with
+`repeated-no-merge-release`; a new head or explicit reset recovers it. Planned
+CI-wait yields and retryable aborts reset the consecutive failure count, retain
+backoff and never create a park. Yields keep the gate charge; aborts refund it
+atomically with release identity. Non-permanent daemon failures yield. Grants
+alone preserve failure evidence. Only daemon reservations requeue; exited CLI
+invocations return under fresh IDs. Repeated-failure parks use the existing
+audit, closing-status comment and page path.
+Reservations retain their arrival across live watcher passes, with twice-poll
+load-scaled expiry. Confirmed dead same-host watcher reservations are pruned.
+Draft, terminal, moved-head and declined paths withdraw on the next pass.
+Release wakes the first ready daemon reservation using the existing cap.
+Closer polling doubles to a once-scaled ceiling bounded nominally by the watcher poll interval. No holder is
+preempted and all existing in-lease merge predicates remain authoritative.
 LAC-2098 binds each ordinary CLI request to its acquiring process separately
 from the holder parent. Confirmed same-host acquisition absence prunes the
 request under the existing mutation lock; live/reused/unknown or foreign-host
 requests retain the existing expiry. Fresh invocation IDs prevent adoption or
 cleanup of another live acquisition. Bounded `finally` cleanup covers timeout,
 runtime failure and handled SIGINT/SIGTERM/SIGHUP. The clean smoke verifies
-dead-child/live-parent empty-lane progress. No states, holder fences, daemon
-priority or merge-authority edges change. See the
+dead-child/live-parent empty-lane progress. Holder fences and merge-authority edges remain unchanged. See the
 [waiter contract](data-model/merge-lease-waiters.md).
 
 LAC-2087 puts the posted-review candidate exits inside this cleanup lifecycle:
@@ -1928,7 +1935,7 @@ ceiling, and records the holders it observed. Green exact-head wait expiry gets
 two in-run acquisition retries with fresh admission snapshots. Final green
 exhaustion is a retryable deferred audit, never a terminal no-merge; the next
 pass refunds failure charges and resumes without contention backoff. The daemon
-keeps priority. All holder transitions, including LEASEFAIR-02's CI retry hold,
+shares FIFO arrival order. All holder transitions, including LEASEFAIR-02's CI retry hold,
 are retained in the bounded per-base JSONL history.
 
 LAC-2087 serializes posted-review handling per review root/repository/PR within

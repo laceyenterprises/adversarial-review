@@ -4345,20 +4345,33 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
-Daemon acquisitions use a durable priority reservation per repo/base/PR/head.
-The existing 250/500 ms retries still bound work on a watcher tick; deferral now
-retains a place ahead of closer acquisitions instead of racing them again.
-Daemon requests are FIFO within their class, including equal timestamp arrivals;
-a refresh preserves the arrival order across watcher process changes. Closers
-cannot barge between queue selection and holder creation, which share one lock.
-The served waiter is removed before that lock releases, so subsequent lock
-contention cannot leave a served daemon reservation ahead of waiting closers.
-The current holder always finishes under its existing fence.
+Daemon and closer acquisitions use one FIFO arrival queue per repo/base.
+The legacy `priority: daemon` field identifies a role without a scheduling boost.
+A live refresh retains its arrival; a confirmed dead same-host watcher loses its
+reservation before selection. Queue selection, holder creation and served-waiter
+removal share one lock. The current holder always finishes under its fence.
 
-Service is bounded by the current holder's remaining critical section, earlier
-daemon requests, and the next eligible watcher pass after release. Repeated
-closer acquisitions add no delay. This assumes a running watcher and a holder
-that makes progress: a live same-host holder is never forcibly preempted on age.
+A non-terminal no-merge release re-enters behind all existing arrivals with
+persistent exponential backoff for its PR/head. Delayed reservations yield to
+ready waiters. The delay doubles from one second to the existing watcher poll
+interval, load-scaled once. Repeating one failure reason through the existing
+attempt cap parks the head with `repeated-no-merge-release`. Only chargeable
+failures count; `release --yield` (the hammer's first CI-wait release) and
+retryable aborts reset the consecutive count without clearing an existing park.
+Yields retain the gate charge; retryable aborts refund it atomically with release
+accounting. Non-permanent daemon failures use the yield outcome. Grants alone
+do not prove gate success and preserve failure evidence. Repeated-failure parks
+use the same audit, closing-status comment and page path as gate-attempt parks. Inspect
+`status`/`list` for arrival time, role, position and retry evidence; inspect
+history for `requeue`/`park` with the release reason. Recovery uses a new head
+or the existing `reset-attempts` command while that head is not holding the lease.
+Only daemon reservations requeue; CLI invocations return with a fresh ID at
+the tail, so exited/reused acquisition PIDs cannot leave a ghost reservation.
+Merged/terminal releases do not requeue. No new config or deployment migration
+is required.
+
+Service depends on earlier ready arrivals, a progressing holder, and the next
+eligible watcher pass. A live same-host holder is never forcibly preempted on age.
 Existing bounded closure-wait paging still reports a stuck holder, with
 "waiting for the merge lease, position N", rather than a safety-hold remedy.
 LEASEFAIR-04 sizes reservations from twice the configured watcher poll interval
@@ -4368,9 +4381,8 @@ its resolved runtime `pollIntervalMs` before the shared startup-file fallback.
 The shared module uses a 300-second poll interval when its config file cannot
 be read or parsed; watcher startup retains its existing config validation. A
 missed watcher tick must not abandon a reservation. Ineligibility, head movement
-and merge completion remove the reservation immediately; a vanished daemon
-expires at its stored
-deadline. Ordinary and retryable-abort holder releases request one watcher wake
+and merge completion remove the reservation immediately; a confirmed dead
+same-host watcher is pruned, and uncertain identities expire at the stored deadline. Ordinary and retryable-abort holder releases request one watcher wake
 for the first surviving daemon waiter's PR and exact head. The existing per-head
 wake cap applies; a failed wake write falls back to the next poll. See the
 [durable waiter schema](data-model/merge-lease-waiters.md).
@@ -4399,7 +4411,7 @@ A live watcher PID does not prove an acquire
 is still active. Other PRs' daemon reservations, ordinary FIFO waiters and the
 holder fence are preserved. Offline `daemon-waiter-lifecycle` fixtures reproduce
 acquire → hold/head change → no next acquire, with both empty and held lanes;
-the clean smoke also exercises next-closer progress and surviving daemon priority.
+the clean smoke also exercises next-closer progress and surviving daemon FIFO order.
 It also verifies competing-poll exclusion, admission after settlement, missing
 candidate-base cleanup and late failure logging without a test-owned rejection
 handler on the coexistence promise.
@@ -4756,7 +4768,7 @@ then selects the owner, including hammer for final comment-only findings in
 strict mode, without an operator step. The decision leaves lease files intact;
 the acquisition path reclaims them. Live pending leases and sticky succeeded
 outcomes retain their holds. The daemon retries lease contention after 250 and
-500 ms in the same tick, retaining its LEASEFAIR-01 priority reservation when
+500 ms in the same tick, retaining its FIFO reservation when
 still contended. Pending gates, uncertain/live ownership and deferred daemon
 attempts record a bounded wait in `data/ama-closure-waits/` (see the
 [wait data model](data-model/ama-closure-waits.md)); the default limit
@@ -5165,8 +5177,9 @@ configuration flip or migration is required.
 Closers pass `--wait-by-progress` to `bin/merge-lease.mjs acquire`. The existing
 900-second nominal wait is a no-progress interval; forward queue movement or
 lease service restarts it, subject to a six-hour nominal ceiling. Both bounds
-are load-scaled once and timer-clamped. Daemon priority and dead-holder rules
-are unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
+are load-scaled once and timer-clamped. Poll delays double from 250ms to a
+ceiling scaled once, from 30 seconds for short waits up to the watcher poll interval; every sleep respects the remaining budget.
+All roles share arrival order and dead-holder rules remain unchanged. LEASEFAIR-02's single retry still holds its lease through CI;
 its grant, renewal and release are included in the per-base history.
 
 Inspect `data/merge-leases/<repo-slug>__<base>.history.jsonl` for the newest 4096

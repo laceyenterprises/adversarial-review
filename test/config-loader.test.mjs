@@ -7801,3 +7801,15 @@ test('RCV-01 recovery shared synthetic reader acceptance and rejection', () => {
     }
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+
+test('RCV-01 sparse recovery config preserves overrides and fills omitted defaults', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/recovery-parity.json', import.meta.url), 'utf8'));
+  const dir = mkdtempSync(join(tmpdir(), 'recovery-defaults-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    const recovery = { rollout: 'enforce', sample_interval_seconds: 90 };
+    writeFileSync(topPath, JSON.stringify({ version: 1, worker_pool: { recovery } }));
+    const cfg = loadConfig({ topPath, modulePaths: [], env: {} });
+    assert.deepEqual(cfg.get('worker_pool.recovery'), { ...fixture.valid, ...recovery });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

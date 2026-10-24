@@ -31,6 +31,9 @@ test('OSG-01 defaults are inert', () => {
     assert.equal(cfg.get('osg.sample_rate'), 0.5);
     assert.deepEqual(cfg.get('osg.arms'), []);
     assert.equal(cfg.get('osg.policy.enabled'), false);
+    assert.deepEqual(cfg.get('osg.double_blind'), {
+      enabled: false, window_start: '', window_end: '', sample_rate: 0.05, weekly_cap: 10,
+    });
     assert.deepEqual(cfg.get('osg.budget'), {
       monthly_usd: 300, open_model_usd: 200, judge_usd: 70, jev_usd: 30,
       trial_share_pct: 15, double_blind_share_pct: 5,
@@ -39,14 +42,14 @@ test('OSG-01 defaults are inert', () => {
 });
 
 for (const layer of ['module', 'local']) {
-  for (const subtree of ['osg', 'osg.policy']) {
+  for (const subtree of ['osg', 'osg.policy', 'osg.double_blind']) {
   test(`OSG null ${subtree} subtree rejected in ${layer} layer`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'osg-layer-'));
     try {
       const topPath = join(dir, 'config.yaml');
       const overlay = join(dir, layer === 'module' ? 'module.yaml' : 'config.local.yaml');
       writeFileSync(topPath, JSON.stringify({ version: 1 }));
-      writeFileSync(overlay, JSON.stringify({ osg: subtree === 'osg' ? null : { policy: null } }));
+      writeFileSync(overlay, JSON.stringify({ osg: subtree === 'osg' ? null : { [subtree.split('.')[1]]: null } }));
       assert.throws(() => loadConfig({ topPath, modulePaths: layer === 'module' ? [overlay] : [], env: {} }), error => error.message.includes(`${subtree}: expected mapping`));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

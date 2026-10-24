@@ -140,6 +140,38 @@
       "__min": 0,
       "__max": 1,
       "__enforce_max": true
+    },
+    "double_blind": {
+      "__type": "dict",
+      "__strict": true,
+      "__keys": {
+        "enabled": {
+          "__type": "bool",
+          "__default": false
+        },
+        "window_start": {
+          "__type": "string",
+          "__default": ""
+        },
+        "window_end": {
+          "__type": "string",
+          "__default": ""
+        },
+        "sample_rate": {
+          "__type": "float",
+          "__default": 0.05,
+          "__min": 0,
+          "__max": 1,
+          "__enforce_max": true
+        },
+        "weekly_cap": {
+          "__type": "int",
+          "__default": 10,
+          "__min": 0,
+          "__max": 10000,
+          "__enforce_max": true
+        }
+      }
     }
   }
 }

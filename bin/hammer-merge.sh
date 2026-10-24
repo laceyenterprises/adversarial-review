@@ -697,7 +697,7 @@ fi
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")"; then
   # Queue service can outlast CI patience. A ready unchanged head can proceed;
   # a source mutation needs remaining time to validate its result.
-  if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+  if [ -n "${HAM_REMOTE_CI_DEADLINE:-}" ] && [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
     ham_ci_timeout
     return 20
   fi

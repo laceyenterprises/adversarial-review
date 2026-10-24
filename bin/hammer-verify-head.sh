@@ -545,7 +545,7 @@ ham_settle_rebase_snapshot() {
       if ham_is_full_sha "$snapshot_head" && [ "$snapshot_head" != "$from" ]; then
         if [ "$async_result" -eq 1 ]; then
           if ! ham_bounded_git_sync "$snapshot_head" \
-            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-rebase-result.mjs \
+            || ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-rebase-result.mjs" \
               "$from" "$snapshot_head" "$base" > "<<RUN_DIR>>/rebase-result-proof.json"; then
             HAM_PHASE_OUTCOME=rebase-result-unproven
             ham_release_merge_lease || return 1

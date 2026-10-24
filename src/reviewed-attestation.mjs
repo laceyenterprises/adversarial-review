@@ -150,10 +150,10 @@ function reviewedAttestationSignArgs(payload) {
     '--pr', String(payload.pr_number),
     '--head-sha', payload.head_sha,
     '--kind', payload.kind,
-    '--verdict', payload.verdict,
     '--payload-json', JSON.stringify(payload.payload || {}),
     '--ts', payload.ts,
   ];
+  if (payload.verdict !== null && payload.verdict !== undefined) args.push('--verdict', payload.verdict);
   if (payload.parent_head_sha) args.push('--parent-head-sha', payload.parent_head_sha);
   if (payload.findings_count !== null) {
     args.push('--findings-count', String(payload.findings_count));

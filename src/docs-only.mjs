@@ -6,7 +6,7 @@ import { isOperatorHeld } from './operator-hold-labels.mjs';
 const revisions = new Map();
 const SHA = /^[0-9a-f]{40}$/i;
 const docsPath = path => typeof path === 'string' && path.startsWith('docs/')
-  && !path.split('/').some(part => ['.', '..', 'prompts', 'personas', 'identities'].includes(part))
+  && !path.split('/').some(part => ['.', '..', 'prompts', 'personas', 'identities'].includes(part.toLowerCase()))
   && !/(?:^|\/)(?:AGENTS|CLAUDE|SKILL)\.md$/i.test(path)
   && /\.(?:md|png|jpe?g|gif|webp|svg|avif|ico|bmp|tiff?)$/i.test(path);
 

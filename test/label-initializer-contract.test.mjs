@@ -43,6 +43,11 @@ describe('label initializer contract', () => {
     }
   });
 
+  it('does not provision the retired docs review bypass', () => {
+    assert.equal(parsePipeLabels(initText).has('fast-merge:docs'), false);
+    assert.equal(parsePipeLabels(fastText).has('fast-merge:docs'), false);
+  });
+
   it('guards GitHub label API limits and verification truncation', () => {
     const labels = parsePipeLabels(initText);
     for (const [name, { description }] of labels) {

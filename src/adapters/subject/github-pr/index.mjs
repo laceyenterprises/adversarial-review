@@ -78,6 +78,7 @@ function refFromPR(repoPath, pr) {
 function normalizePRSnapshot(repoPath, pr) {
   const ref = refFromPR(repoPath, pr);
   const builderClass = builderClassFromTitle(pr?.title);
+  const reviewRequests = pr?.reviewRequests;
   return {
     ...ref,
     repo: repoPath,
@@ -90,8 +91,10 @@ function normalizePRSnapshot(repoPath, pr) {
     headRefName: pr?.head?.ref || pr?.headRefName || undefined,
     baseRefName: pr?.base?.ref || pr?.baseRefName || undefined,
     baseSha: pr?.base?.sha || pr?.baseRefOid || undefined,
-    requested_reviewers: pr?.requested_reviewers,
-    requested_teams: pr?.requested_teams,
+    requested_reviewers: pr?.requested_reviewers ?? (Array.isArray(reviewRequests)
+      ? reviewRequests.filter(request => request?.__typename !== 'Team') : reviewRequests),
+    requested_teams: pr?.requested_teams ?? (Array.isArray(reviewRequests)
+      ? reviewRequests.filter(request => request?.__typename === 'Team') : reviewRequests),
     labelsKnown: Array.isArray(pr?.labels),
     labels: Array.isArray(pr?.labels)
       ? pr.labels
@@ -341,7 +344,7 @@ function createGitHubPRSubjectAdapter({
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,baseRefOid,baseRefName,labels,createdAt,updatedAt,author,isCrossRepository',
+        'number,title,state,headRefOid,baseRefOid,baseRefName,labels,createdAt,updatedAt,author,isCrossRepository,reviewRequests',
       ], {
         maxBuffer: 10 * 1024 * 1024,
       }));

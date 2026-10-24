@@ -5374,6 +5374,7 @@ changes and offline tests do not alter host configuration or services.
 The watcher classifies docs-only PRs before review admission. All changed paths,
 including rename sources, must be Markdown or images under `docs/`; instructions,
 prompts, personas, identities, config and any path outside `docs/` keep full review.
+Instruction filenames and excluded directory names are matched case-insensitively.
 Uncertain/empty/capped inventories retain full review. No label is needed.
 `request-review` or the existing operator `retrigger-review` request opts out;
 native requested reviewers/teams and `fast-merge-veto` also select full review.
@@ -5399,6 +5400,7 @@ source tests do not claim live acceptance.
 Runtime cost: one compact immutable compare per newly observed base/head pair; unchanged classifications are bounded in-memory cache hits.
 Eligible merges reuse daemon check/lease/audit reads and refresh PR metadata
 under the lease. Discovery reuses its existing REST supplement for base identity
-and review requests; incomplete identity retains full review. Branch protection uses the existing six-hour cache. Signing and
+and review requests; the CLI fallback also preserves requested users and teams.
+Incomplete identity retains full review. Branch protection uses the existing six-hour cache. Signing and
 recording occur only after checks are green and a lease is held. No process, timer,
 CI job, per-tick scan or configuration key is added.

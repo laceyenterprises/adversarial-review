@@ -7,7 +7,9 @@ test('DOCSFASTPATH-01 classify every old and new path, cache revisions, reclassi
   assert.equal(isDocsOnlyFiles([{ filename: 'docs/guide.md' }, { filename: 'docs/images/flow.svg' }]), true);
   for (const filename of ['README.md', 'AGENTS.md', 'CLAUDE.md', 'SKILL.md', 'prompts/review.md',
     'personas/reader.md', 'identities/reader.md', 'projects/example/prompts/review.md',
-    'src/main.mjs', 'config.yaml', 'docs/config.yaml', 'docs/../src/code.md', 'docs/AGENTS.md']) {
+    'src/main.mjs', 'config.yaml', 'docs/config.yaml', 'docs/../src/code.md', 'docs/AGENTS.md',
+    'docs/prompts/review.md', 'docs/Prompts/review.md', 'docs/PROMPTS/review.md',
+    'docs/nested/Personas/writer.md', 'docs/nested/IDENTITIES/reader.md']) {
     assert.equal(isDocsOnlyFiles([{ filename: 'docs/guide.md' }, { filename }]), false, filename);
     assert.equal(isDocsOnlyFiles([{ filename: 'docs/guide.md', previous_filename: filename }]), false, filename);
   }
@@ -107,6 +109,8 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
     if (command[1] === 'sign') {
       signCalls++;
       assert.equal(options.env.HCP_SUBJECT, 'ama-daemon');
+      assert.equal(command.includes('--verdict'), false);
+      assert.ok(command.every(arg => typeof arg === 'string'));
       const value = name => command[command.indexOf(name) + 1];
       signed = { schema_version: 1, repo: repoPath, pr_number: prNumber, head_sha: head,
         parent_head_sha: null, kind: value('--kind'), producer_identity: 'ama-daemon',

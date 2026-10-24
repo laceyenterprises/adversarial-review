@@ -118,14 +118,20 @@ in-run acquisition retries. They re-enter admission on every retry. Final green
 exhaustion records `leaseWaitExhausted: true`, which requests the next closer
 pass without charging failure counters. This does not waive any live merge gate.
 
-No-merge release re-enters behind all arrivals already present, with optional
-`notBefore` from the head's persistent exponential backoff. Delayed waiters do
-not block ready requests. A served holder stores its optional `waiter` snapshot
-so a fenced non-terminal release can reinsert a daemon reservation at its new
-arrival time. CLI reservations are never reinserted: the acquiring process has
-exited, and the next invocation registers a fresh identity at the tail. Persistent
-PR/head backoff still applies even though the old CLI row is absent. Terminal/merged releases do not
-requeue. The daemon preserves transient retry reservations and withdraws
+Daemon no-merge releases re-enter behind all arrivals already present, with
+optional `notBefore` from the head's persistent exponential backoff. Delayed
+waiters do not block ready requests. A served holder stores its optional `waiter`
+snapshot so a fenced non-terminal release can reinsert a daemon reservation at
+its new arrival time. CLI reservations are never reinserted: the acquiring
+process has exited. The next invocation registers a fresh identity but restores
+its PR's original closer arrival from the attempt record, including across a
+head change. Its `notBefore` respects both exact-head and remembered-release
+backoff. Restored closer waiters carry optional `registeredAt`, preserved on
+refresh, so their invocation deadline starts at registration rather than the
+older FIFO arrival. Ordinary fresh waiters and daemon expiry are unchanged.
+Terminal/merged releases and parking clear remembered arrivals across heads;
+terminal/merged releases do not requeue. The daemon preserves transient retry
+reservations and withdraws
 draft, closed, terminal, moved-head or declined reservations on its next pass.
 Parking removes the reservation; retry evidence survives withdrawal.
 

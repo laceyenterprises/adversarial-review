@@ -917,6 +917,8 @@ test('six planned CLI yields retain charges without failure parking or stale CLI
       '--owner-pid', '8601', '--wait', '0'], { maxGateAttempts: 100,
       startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
     assert.equal(acquired.code, 0);
+    const lease = inspectMergeLease({ rootDir, repo: REPO, base: BASE }).lease;
+    assert.equal(lease.waiter.arrivedAt, '2026-06-20T18:00:00.000Z');
     const released = await runCli(rootDir, ['release', ...args, '--lease-id', jsonOutput(acquired.io).leaseId,
       '--yield', '--reason', 'required-checks-wait'], {
       startMs: Date.parse('2026-06-20T18:00:00Z') + i * 300_000 });
@@ -927,6 +929,7 @@ test('six planned CLI yields retain charges without failure parking or stale CLI
   assert.equal(retry.attempts, 6);
   assert.equal(retry.consecutiveNoMergeReleases, 0);
   assert.equal(retry.parkedReason, null);
+  assert.equal(retry.queueArrivedAt, '2026-06-20T18:00:00.000Z');
 });
 
 test('repeated-failure CLI park supplies a closing status and reset instruction', async t => {

@@ -400,7 +400,7 @@ test('a live daemon refresh preserves its arrival behind an earlier closer acros
   assert.equal(refreshed.waiter.arrivedAt, first.waiter.arrivedAt);
 });
 
-test('no-merge holder rejoins behind waiting closer, backs off and parks repeated failures', t => {
+test('daemon no-merge holder rejoins behind waiting closer, backs off and parks repeated failures', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
@@ -417,6 +417,8 @@ test('no-merge holder rejoins behind waiting closer, backs off and parks repeate
     assert.equal(Date.parse(released.retry.nextEligibleAt) - Date.parse(at(seconds)), 1000 * 2 ** (count - 1));
     if (count === 1) {
       assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.pr), [103, 102]);
+      assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY)[1].arrivedAt, at(seconds));
+      assert.equal(released.retry.queueArrivedAt, undefined);
       const closer = acquire(rootDir, { ...closerArgs, now: at(seconds) });
       assert.equal(closer.acquired, true, 'ready closer is served within one failed holder cycle');
       releaseMergeLease({ rootDir, ...closer.lease, now: at(seconds), merged: true });
@@ -436,6 +438,135 @@ test('no-merge holder rejoins behind waiting closer, backs off and parks repeate
   assert.equal(history.filter(row => row.event === 'requeue').length, 4);
   assert.equal(history.find(row => row.event === 'park').reason,
     're-queued after no-merge release: synthetic-pre-merge-failure');
+});
+
+for (const newHead of [false, true]) {
+  test(`closer retains its original arrival and backoff on ${newHead ? 'a new' : 'the same'} head`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+    const args = { registerWaiter: true, pidAliveFn: () => true };
+    const blocker = acquire(rootDir);
+    const queued = acquire(rootDir, { ...args, holderPr: 201, waiterId: 'original', now: at(1) });
+    acquire(rootDir, { ...args, holderPr: 202, waiterId: 'later', now: at(2) });
+    releaseMergeLease({ rootDir, ...blocker.lease, now: at(3), merged: true });
+    const held = acquire(rootDir, { ...args, holderPr: 201, waiterId: 'original', now: at(4) });
+    assert.equal(held.acquired, true);
+    const released = releaseMergeLease({ rootDir, ...held.lease, now: at(4), yielded: true,
+      reason: 'required-checks-wait' });
+    assert.equal(released.retry.queueArrivedAt, queued.waiter.arrivedAt);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.pr), [202]);
+    const resumedArgs = { ...args, holderPr: 201, holderHead: newHead ? 'rebased-head' : held.lease.holderHead,
+      waiterId: 'fresh-invocation' };
+    const delayed = acquire(rootDir, { ...resumedArgs, now: at(4) });
+    assert.equal(delayed.acquired, false);
+    assert.equal(delayed.reason, 'no-merge-backoff');
+    assert.equal(delayed.waiter.arrivedAt, queued.waiter.arrivedAt);
+    assert.equal(delayed.waiter.notBefore, released.retry.nextEligibleAt);
+    const later = acquire(rootDir, { ...args, holderPr: 202, waiterId: 'later', now: at(4) });
+    assert.equal(later.acquired, true, 'a delayed earlier arrival lets ready waiters proceed');
+    acquire(rootDir, { ...args, holderPr: 203, waiterId: 'last', now: at(4.5) });
+    releaseMergeLease({ rootDir, ...later.lease, now: at(5), merged: true });
+    assert.equal(acquire(rootDir, { ...args, holderPr: 203, waiterId: 'last', now: at(5) }).acquired, false);
+    const resumed = acquire(rootDir, { ...resumedArgs, now: at(5) });
+    assert.equal(resumed.acquired, true, 'eligible closer resumes ahead of later arrivals');
+    releaseMergeLease({ rootDir, ...resumed.lease, now: at(5), reason: 'published' });
+    const records = readMergeLeaseAttempts(rootDir, IDENTITY).filter(r => r.pr === 201);
+    assert.deepEqual(records.filter(r => r.queueArrivedAt).map(r => r.queueArrivedAt), [queued.waiter.arrivedAt]);
+    assert.equal(records.find(r => r.head === resumed.lease.holderHead).consecutiveNoMergeReleases, 1);
+  });
+}
+
+test('restored closer arrival does not expire a fresh invocation or extend its deadline on refresh', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { registerWaiter: true, waiterId: 'first', waiterDeadlineSeconds: 10, pidAliveFn: () => true };
+  const held = acquire(rootDir, args);
+  releaseMergeLease({ rootDir, ...held.lease, now: '2026-06-20T18:01:00Z', reason: 'published' });
+  const next = acquire(rootDir, { ...args, waiterId: 'next', now: '2026-06-20T18:01:00Z' });
+  assert.equal(next.waiter.arrivedAt, held.waiter.arrivedAt);
+  assert.equal(next.waiter.registeredAt, '2026-06-20T18:01:00Z');
+  assert.equal(readMergeLeaseWaiters(rootDir, IDENTITY).length, 1);
+  const refreshed = acquire(rootDir, { ...args, waiterId: 'next', now: '2026-06-20T18:01:00.500Z' });
+  assert.equal(refreshed.waiter.registeredAt, next.waiter.registeredAt);
+  assert.equal(acquire(rootDir, { holderPr: 202, pidAliveFn: () => true, now: next.waiter.notBefore }).acquired, false,
+    'restored waiter remains queued until its own invocation deadline');
+  assert.equal(acquire(rootDir, { holderPr: 202, pidAliveFn: () => true, now: '2026-06-20T18:01:10Z' }).acquired, true,
+    'refresh does not extend the invocation deadline');
+});
+
+test('arrival memory is isolated by repository, base and PR and legacy holders use their grant', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const held = acquire(rootDir);
+  const released = releaseMergeLeaseForRetryableAbort({ rootDir, ...held.lease, now: held.lease.acquiredAt });
+  assert.equal(released.retry.queueArrivedAt, held.lease.acquiredAt);
+  const now = '2026-06-20T18:00:02Z';
+  for (const identity of [{ repo: 'other/project' }, { base: 'release' }, { holderPr: 202 }]) {
+    const fresh = acquire(rootDir, { ...identity, registerWaiter: true, now });
+    assert.equal(fresh.acquired, true);
+    assert.equal(fresh.waiter.arrivedAt, now);
+  }
+});
+
+test('closer parks at the configured consecutive-release cap and forgets arrivals across heads', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const previousCap = process.env.AMG_MAX_GATE_ATTEMPTS;
+  process.env.AMG_MAX_GATE_ATTEMPTS = '3';
+  t.after(() => {
+    if (previousCap === undefined) delete process.env.AMG_MAX_GATE_ATTEMPTS;
+    else process.env.AMG_MAX_GATE_ATTEMPTS = previousCap;
+  });
+  let now = '2026-06-20T18:00:00Z';
+  const args = { registerWaiter: true, pidAliveFn: () => true };
+  const original = acquire(rootDir, { ...args, waiterId: 'first', now });
+  let released = releaseMergeLease({ rootDir, ...original.lease, now, reason: 'published' });
+  now = released.retry.nextEligibleAt;
+  for (let count = 1; count <= 3; count++) {
+    const held = acquire(rootDir, { ...args, holderHead: 'new-head', waiterId: `try-${count}`, now });
+    assert.equal(held.acquired, true);
+    released = releaseMergeLease({ rootDir, ...held.lease, now, reason: 'synthetic-failure' });
+    assert.equal(released.retry.consecutiveNoMergeReleases, count);
+    assert.equal(released.retry.queueArrivedAt, count < 3 ? original.waiter.arrivedAt : undefined);
+    now = released.retry.nextEligibleAt;
+  }
+  assert.equal(released.retry.parkedReason, 'repeated-no-merge-release');
+  assert.ok(readMergeLeaseAttempts(rootDir, IDENTITY).every(r => !r.queueArrivedAt));
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+  assert.equal(acquire(rootDir, { ...args, holderHead: 'new-head', now }).parked, true);
+  const fresh = acquire(rootDir, { ...args, holderHead: 'fresh-head', now });
+  assert.equal(fresh.acquired, true);
+  assert.equal(fresh.waiter.arrivedAt, now);
+});
+
+for (const outcome of [{ merged: true }, { terminal: true }, { reason: 'holder-pr-closed' }]) {
+  test(`terminal closer release clears remembered arrival across heads: ${JSON.stringify(outcome)}`, t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = { registerWaiter: true, pidAliveFn: () => true };
+    const held = acquire(rootDir, { ...args, waiterId: 'first' });
+    const released = releaseMergeLease({ rootDir, ...held.lease, now: held.lease.acquiredAt });
+    const next = acquire(rootDir, { ...args, waiterId: 'next', holderHead: 'new-head', now: released.retry.nextEligibleAt });
+    assert.equal(next.acquired, true);
+    releaseMergeLease({ rootDir, ...next.lease, now: released.retry.nextEligibleAt, ...outcome });
+    assert.ok(readMergeLeaseAttempts(rootDir, IDENTITY).every(r => !r.queueArrivedAt));
+    const fresh = acquire(rootDir, { ...args, waiterId: 'fresh', holderHead: 'fresh-head',
+      now: '2026-06-20T18:01:00Z' });
+    assert.equal(fresh.waiter.arrivedAt, '2026-06-20T18:01:00Z');
+  });
+}
+
+test('gate-attempt parking also clears remembered closer arrival', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const held = acquire(rootDir, { registerWaiter: true, waiterId: 'first' });
+  releaseMergeLease({ rootDir, ...held.lease, now: held.lease.acquiredAt });
+  const args = { rootDir, ...IDENTITY, pr: held.lease.holderPr, head: 'new-head',
+    now: held.lease.acquiredAt, maxAttempts: 1 };
+  recordMergeLeaseGateAttempt(args);
+  assert.equal(recordMergeLeaseGateAttempt(args).parked, true);
+  assert.ok(readMergeLeaseAttempts(rootDir, IDENTITY).every(r => !r.queueArrivedAt));
 });
 
 test('same-head retry state survives waiter withdrawal and a new acquiring process', async t => {

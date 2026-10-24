@@ -127,7 +127,7 @@ function hammerDispatchDeps(overrides = {}) {
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
-      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: `dispatch_hammer_${execCalls.length}`, launchRequestId: execCalls.length === 1 ? 'lrq_hammer' : `lrq_hammer_${execCalls.length}` }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -2998,7 +2998,7 @@ function spawnThenDieDeps(overrides = {}) {
       const err = new Error('worker_killed ~36s into planning');
       // hq already emitted the launch identifiers before the worker died — this is
       // what makes the closer treat it as an ambiguous (spawned) launch.
-      err.stdout = JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      err.stdout = JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: `dispatch_hammer_${execCalls.length}`, launchRequestId: execCalls.length === 1 ? 'lrq_hammer' : `lrq_hammer_${execCalls.length}` });
       err.stderr = 'worker_killed';
       throw err;
     },
@@ -3886,3 +3886,207 @@ for (const advanced of [false, true]) {
     assert.equal(deps.execCalls.length, 0, 'no second closer is launched');
   });
 }
+
+// RCV-08 consumes the shared producer export; these fixtures never classify
+// stderr or copy real worker state.
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
+import { refundUnexecutedHammerDispatch, refundHammerRetryDispatch, grantTransientHammerRetry } from '../src/ama/hammer-retry-cap.mjs';
+import { recoveryStatus } from '../src/recovery-status.mjs';
+
+function recoveryFixture(t) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'rcv-08-refund-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'synthetic/recovery', prNumber: 8 };
+  const charge = (launchRequestId, overrides = {}) => recordHammerRetryDispatch(rootDir, identity,
+    { jobKey: 'review', headSha: 'head', launchRequestId, dispatchKey: launchRequestId,
+      now: '2026-10-24T12:00:00Z', waitBudget: { nominalMs: 600_000, dispatchTimeoutMs: 600_000 }, ...overrides });
+  const refund = (launchRequestId, overrides = {}) => refundUnexecutedHammerDispatch(rootDir, identity,
+    { jobKey: 'review', headSha: 'head', launchRequestId, executionVerdict: noWorkVerdict(launchRequestId), ...overrides });
+  return { rootDir, identity, charge, refund, read: () => readHammerRetryCapLedger(rootDir, identity) };
+}
+
+for (const reason of ['credential_before_work', 'boot_killed_before_work', 'hard_quota_before_work']) {
+  test(`RCV-08 ${reason} restores charged counters once through either refund API`, t => {
+    const f = recoveryFixture(t);
+    f.charge('launch');
+    assert.equal(f.refund('launch', { executionVerdict: noWorkVerdict('launch', { reason }) }).refunded, true);
+    assert.equal(f.read().attemptCount, 0);
+    assert.equal(f.read().targetAttemptCount, 0);
+    assert.equal(f.read().lifetimeAttemptCount, 0);
+    assert.equal(refundHammerRetryDispatch(f.rootDir, f.identity, { jobKey: 'review', headSha: 'head',
+      launchRequestId: 'launch', executionVerdict: noWorkVerdict('launch') }).reason, 'already-refunded');
+    assert.equal(f.read().retryable || 0, 0, 'no-work does not consume bounded exit refund');
+  });
+}
+
+test('RCV-08 unknown, progress, remediation failure, incompatible and wrong-attempt verdicts stay charged', t => {
+  const f = recoveryFixture(t);
+  f.charge('launch');
+  for (const overrides of [{ verdict: 'unknown' }, { verdict: 'work_started' }, { verdict: 'work_started', reason: 'productive_progress' },
+    { schemaVersion: 2 }, { producer: 'untrusted' }, { attempt: 2 }, { evidenceRefs: [] }, { observedAt: 'bad' }]) {
+    assert.equal(f.refund('launch', { executionVerdict: noWorkVerdict('launch', overrides) }).refunded, false);
+  }
+  for (const overrides of [{ headSha: 'other' }, { jobKey: 'other' }, { launchRequestId: 'other' }]) {
+    assert.equal(f.refund('launch', overrides).refunded, false);
+  }
+  assert.equal(f.refund('uncharged').refunded, false);
+  assert.equal(f.read().lifetimeAttemptCount, 1);
+});
+
+test('RCV-08 permanent receipts survive more than ten launches, new series and restart/replay', t => {
+  const f = recoveryFixture(t);
+  for (let i = 0; i < 25; i++) { f.charge(`launch-${i}`); assert.equal(f.refund(`launch-${i}`).refunded, true); }
+  f.charge('real', { jobKey: 'new-review', headSha: 'new-head' });
+  const before = f.read();
+  assert.equal(f.refund('launch-0').reason, 'already-refunded');
+  assert.deepEqual(f.read(), before);
+  // A crash after counters+receipt commit but before dispatch-record update
+  // replays exactly this same call after restart; the same receipt wins.
+  assert.equal(Object.keys(before.noWorkRefunds).length, 25);
+  assert.equal(before.lifetimeAttemptCount, 1);
+});
+
+test('RCV-08 a delayed old-head verdict restores its lifetime charge without debiting the new head/series', t => {
+  const f = recoveryFixture(t);
+  f.charge('old');
+  f.charge('new', { jobKey: 'new-review', headSha: 'new-head' });
+  assert.equal(f.refund('old').refunded, true);
+  assert.equal(f.read().attemptCount, 1);
+  assert.equal(f.read().targetAttemptCount, 1);
+  assert.equal(f.read().lifetimeAttemptCount, 1);
+});
+
+test('RCV-08 transient allowance is restored only for the launch that consumed it', t => {
+  const f = recoveryFixture(t);
+  f.charge('real-1'); f.charge('real-2');
+  assert.equal(grantTransientHammerRetry(f.rootDir, f.identity, { jobKey: 'review', headSha: 'head' }).granted, true);
+  f.charge('no-work');
+  assert.equal(f.read().transientRetryHeads.head, 1);
+  assert.equal(f.refund('no-work').refunded, true);
+  assert.equal(f.read().transientRetryHeads.head, 0);
+  assert.equal(f.read().attemptCount, 1);
+  assert.equal(f.read().lifetimeAttemptCount, 2);
+  assert.equal(f.refund('no-work').refunded, false);
+  assert.equal(f.read().transientRetryHeads.head, 0);
+});
+
+test('RCV-08 activation reports observed adapter adoption, live config, ages and missing evidence honestly', async t => {
+  const f = recoveryFixture(t);
+  const args = { rootDir: f.rootDir, nowMs: Date.parse('2026-10-24T12:01:00Z'),
+    readVerdictsImpl: async () => ({ ok: true, source: 'synthetic-export', verdicts: [] }),
+    configImpl: () => ({ get: () => 600_000 }) };
+  assert.equal((await recoveryStatus(args)).consumer.active, false);
+  f.charge('launch');
+  const status = await recoveryStatus(args);
+  assert.equal(status.consumer.active, true);
+  assert.equal(status.consumer.ageSeconds, 60);
+  assert.equal(status.consumer.sourceHealthy, true);
+  assert.deepEqual(status.waitInventory.missing, []);
+  for (const budget of Object.values(status.budgets)) assert.equal(budget.refundable, true);
+  assert.equal((await recoveryStatus({ ...args, nowMs: args.nowMs + 86400_000 })).consumer.active, false);
+  assert.equal((await recoveryStatus({ ...args, readVerdictsImpl: async () => { throw new Error('synthetic secret'); } })).consumer.sourceHealthy, false);
+  assert.equal(JSON.stringify(await recoveryStatus(args)).includes('synthetic secret'), false);
+});
+
+
+test('RCV-08 charge timestamps default to the current time and remain stable on replay', t => {
+  const f = recoveryFixture(t);
+  const before = Date.now();
+  f.charge('omitted', { now: undefined });
+  f.charge('null', { now: null });
+  const after = Date.now();
+  const charges = f.read().dispatchCharges;
+  for (const key of ['omitted', 'null']) {
+    const timestamp = Date.parse(charges[key].chargedAt);
+    assert.ok(timestamp >= before && timestamp <= after);
+    assert.equal(new Date(timestamp).toISOString(), charges[key].chargedAt);
+  }
+  f.charge('omitted', { now: '2026-10-25T00:00:00Z' });
+  assert.equal(f.read().dispatchCharges.omitted.chargedAt, charges.omitted.chargedAt);
+  f.charge('explicit');
+  assert.equal(f.read().dispatchCharges.explicit.chargedAt, '2026-10-24T12:00:00Z');
+});
+
+test('RCV-08 recovered charges retain only fresh timestamped dispatch wait evidence', async t => {
+  const f = recoveryFixture(t);
+  const args = { rootDir: f.rootDir, nowMs: Date.parse('2026-10-24T12:01:00Z'),
+    readVerdictsImpl: async () => ({ ok: true, verdicts: [] }),
+    configImpl: () => ({ get: () => 600_000 }) };
+  const missing = ['runtime-dispatch-wait-observation'];
+  f.charge('recovered-only', { waitBudget: null, now: '2026-10-24T12:00:30Z' });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, missing);
+  // Written later, but observed earlier: timestamp order, not insertion order, wins.
+  f.charge('actual-dispatch');
+  const status = await recoveryStatus(args);
+  assert.equal(status.consumer.observedAt, '2026-10-24T12:00:30Z');
+  assert.equal(status.consumer.ageSeconds, 30);
+  assert.deepEqual(status.waitInventory.observedDispatch,
+    { nominalMs: 600_000, dispatchTimeoutMs: 600_000 });
+  assert.deepEqual(status.waitInventory.missing, []);
+  // The consumer remains fresh at this boundary, but the earlier wait has expired.
+  const staleWait = await recoveryStatus({ ...args, nowMs: Date.parse('2026-10-25T12:00:01Z') });
+  assert.equal(staleWait.consumer.active, true);
+  assert.deepEqual(staleWait.waitInventory.missing, missing);
+  f.charge('invalid-timestamp', { now: 'invalid' });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, []);
+  f.charge('invalid-budget', { now: '2026-10-24T12:00:45Z', waitBudget: { dispatchTimeoutMs: 2 ** 31 } });
+  assert.deepEqual((await recoveryStatus(args)).waitInventory.missing, missing);
+});
+
+import { spawnSync as recoverySpawnSync } from 'node:child_process';
+
+test('RCV-08 crash after atomic rename recovers the committed refund and releases its lock', t => {
+  const f = recoveryFixture(t);
+  f.charge('crash-launch');
+  const script = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { refundUnexecutedHammerDispatch } from './src/ama/hammer-retry-cap.mjs';
+    import { noWorkVerdict } from './test/fixtures/execution-verdict.mjs';
+    const rename = fs.renameSync;
+    fs.renameSync = (...args) => { rename(...args); process.exit(0); };
+    syncBuiltinESMExports();
+    refundUnexecutedHammerDispatch(process.argv[1], {repo:'synthetic/recovery',prNumber:8},
+      {jobKey:'review',headSha:'head',launchRequestId:'crash-launch',executionVerdict:noWorkVerdict('crash-launch')});
+  `;
+  const result = recoverySpawnSync(process.execPath, ['--input-type=module', '-e', script, f.rootDir],
+    { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.refund('crash-launch').reason, 'already-refunded');
+  assert.equal(f.read().lifetimeAttemptCount, 0);
+  f.charge('after-restart');
+  assert.equal(f.read().lifetimeAttemptCount, 1);
+});
+
+test('RCV-08 duplicate native receipts cannot charge one launch twice under a new dispatch key', t => {
+  const f = recoveryFixture(t);
+  f.charge('launch');
+  f.charge('launch', { dispatchKey: 'different-key' });
+  assert.equal(f.read().lifetimeAttemptCount, 1);
+  assert.equal(f.refund('launch', { dispatchKey: 'different-key' }).refunded, true);
+  assert.equal(f.read().lifetimeAttemptCount, 0);
+});
+
+test('RCV-08 returning to an old target SHA does not refund the new target epoch', t => {
+  const f = recoveryFixture(t);
+  f.charge('old');
+  f.charge('middle', { headSha: 'middle-head' });
+  f.charge('returned');
+  assert.equal(f.refund('old').refunded, true);
+  assert.equal(f.read().targetAttemptCount, 1);
+  assert.equal(f.read().lifetimeAttemptCount, 2);
+});
+
+test('RCV-08 canonical verdict after an exit refund returns only the remaining lifetime allowance', t => {
+  const f = recoveryFixture(t);
+  f.charge('launch');
+  assert.equal(refundHammerRetryDispatch(f.rootDir, f.identity,
+    { jobKey: 'review', headSha: 'head', launchRequestId: 'launch' }).refunded, true);
+  assert.equal(f.read().attemptCount, 0);
+  assert.equal(f.read().lifetimeAttemptCount, 1);
+  assert.equal(f.refund('launch').refunded, true);
+  assert.equal(f.read().lifetimeAttemptCount, 0);
+  assert.equal(f.read().attemptCount, 0);
+  assert.deepEqual(f.read().noWorkRefunds.launch.budgets,
+    { head: false, pr: false, lifetime: true, transient: false });
+});

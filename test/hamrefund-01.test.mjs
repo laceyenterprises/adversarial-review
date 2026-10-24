@@ -1,3 +1,4 @@
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 // HAMREFUND-01: offline replays of the signal and tool-host deaths.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -119,6 +120,8 @@ function closerDeps({ nextLaunch = NEXT_LRQ, launchStatus = 'failed', launchRows
     }
   };
   return {
+    readExecutionVerdictsImpl: async ({ launchRequestId }) => ({ ok: true,
+      verdicts: launchRows[launchRequestId] ? [noWorkVerdict(launchRequestId)] : [] }),
     readPullRequestStateImpl: () => null,
     statusProbes,
     launches,
@@ -213,7 +216,8 @@ function seedDeadHammer(rootDir, {
     terminalOutcome: 'failed-without-merge', now: deadAt,
   });
   for (let index = 0; index < chargedDispatches; index += 1) {
-    recordHammerRetryDispatch(rootDir, identity, { jobKey: head, headSha: head, now: dispatchedAt });
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: head, headSha: head, now: dispatchedAt,
+      launchRequestId: index === chargedDispatches - 1 ? launchRequestId : `lrq_prior_${index}` });
   }
 }
 
@@ -234,13 +238,13 @@ for (const [label, launchRequestId, row] of [
     assert.equal(result.reason, 'dispatch-refusal-slow-retry-wait');
     assert.equal(deps.launches.length, 0);
     assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 0);
-    assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).lifetimeAttemptCount, 1);
+    assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).lifetimeAttemptCount, 0);
     assert.equal(deps.alerts.length, 1);
-    assert.match(deps.alerts[0], /SIGTERM|SIGKILL|codex-tool-host-unavailable/);
+    assert.match(deps.alerts[0], /credential_before_work/);
   });
 }
 
-test('HAMREFUND-01: three deaths retain lifetime charges; cadence and both pages persist across launches', async (t) => {
+test('HAMREFUND-01: certified no-work deaths restore lifetime charges; cadence and both pages persist across launches', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-series-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seedDeadHammer(rootDir, { retryCount: 1 });
@@ -269,7 +273,7 @@ test('HAMREFUND-01: three deaths retain lifetime charges; cadence and both pages
     assert.equal(died.result.reason, 'dispatch-refusal-slow-retry-wait');
     const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
     assert.equal(ledger.attemptCount, 0);
-    assert.equal(ledger.lifetimeAttemptCount, index + 2);
+    assert.equal(ledger.lifetimeAttemptCount, 0);
     assert.equal(ledger.unexecutedLaunchRequestIds.length, index + 2);
     const wait = await tick(now + 60_000);
     assert.equal(wait.deps.launches.length, 0);
@@ -408,7 +412,7 @@ test('HAMREFUND-01: lifetime ceiling and suppression survive signal refunds and 
   assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeSuppressed, true);
 });
 
-test('HAMREFUND-01: refund history stays bounded across fresh series and suppression writes', (t) => {
+test('HAMREFUND-01: refund history remains permanent across fresh series and suppression writes', (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-history-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER };
@@ -421,8 +425,8 @@ test('HAMREFUND-01: refund history stays bounded across fresh series and suppres
   }
   markHammerRetryCapExhausted(rootDir, identity, { jobKey: 'new-series', headSha: 'new-head', attemptCount: 0 });
   const history = readHammerRetryCapLedger(rootDir, identity).unexecutedLaunchRequestIds;
-  assert.equal(history.length, 10);
-  assert.equal(history[0], 'lrq_history_3');
+  assert.equal(history.length, 13);
+  assert.equal(history[0], 'lrq_history_0');
   assert.equal(history.at(-1), 'lrq_history_12');
 });
 
@@ -492,9 +496,8 @@ test('LABELGATE-01: later signal reconciliation cannot credit the same launch tw
   assert.equal(result.reason, 'dispatch-refusal-slow-retry-wait');
   assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: HEAD }).unexecutedRefundCount, 1);
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 0);
-  assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 1);
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 0);
 });
-
 
 test('LABELGATE-01: ordinary exit refund cannot reuse durable label/non-execution credit', t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-cross-refund-'));

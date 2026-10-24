@@ -175,7 +175,7 @@ test('hold-only refunds preserve real attempts and their durable keys survive th
   assert.equal(ledger.operatorHoldRefundedAt, refundedAt);
 });
 
-test('hold-only refund retains only the newest ten unexecuted launch IDs', t => {
+test('RCV-08 hold-only refund retains permanent unexecuted launch identities', t => {
   const { rootDir } = fixture(t);
   const identity = { repo, prNumber };
   const ledger = recordHammerRetryDispatch(rootDir, identity, { jobKey: headSha, headSha, now: heldAt });
@@ -185,7 +185,7 @@ test('hold-only refund retains only the newest ten unexecuted launch IDs', t => 
     noExecution: true, launchRequestId: 'new-launch' };
   assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), true);
   assert.deepEqual(readHammerRetryCapLedger(rootDir, identity).unexecutedLaunchRequestIds,
-    [...oldIds.slice(1), 'new-launch']);
+    [...oldIds, 'new-launch']);
   assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), false);
 });
 

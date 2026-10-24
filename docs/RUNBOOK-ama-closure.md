@@ -3454,6 +3454,41 @@ intentional AMG-04 park and exits successfully after logging the waited seconds,
 so a contended base does not churn through repeated long retry windows. Other
 non-zero acquire exits remain hard failures; inspect their CLI output and stderr.
 
+#### CLI output completion (LAC-2094)
+
+`merge-lease status` and its `list` alias emit one complete newline-terminated
+JSON document to a pipe or regular file, including every retained attempt.
+The fields remain `key`, `holder`, `waiters`, `attempts`, and `inspectedAt`,
+with the existing holder/waiter/attempt fields and ages. The CLI sets
+`process.exitCode` after command completion and lets Node drain stdout/stderr;
+forcing `process.exit()` after `stdout.write()` can discard pending pipe bytes
+while reporting success. The finite sibling CLI wrappers use the same lifecycle.
+There is no buffer-size workaround, history truncation, or parse-error suppression.
+
+Command results retain exits 0/64/70/75. Unexpected exceptions escaping
+`merge-lease` command handling are diagnosed on stderr and mapped to retryable
+exit 75 at the CLI boundary, allowing the diagnostic to drain.
+Non-Error thrown values are formatted with a string fallback so diagnostics
+do not mask the original failure. The `ama-audit` and `ama-check` entrypoints
+run CLI logic only on direct invocation; importing them does not set exit status
+or emit CLI output.
+An asynchronous output failure such as
+EPIPE produces a nonzero process failure and stderr diagnostic; consumers must
+require both a successful exit and valid JSON. Output completion requires the
+consumer to read: a stalled pipe can apply backpressure. Existing caller
+subprocess deadlines still bound execution and can interrupt delivery; command
+wait budgets and internal subprocess timeouts are unchanged.
+
+The offline [regression evidence and sibling sweep](validation/cli-output-lifecycle.md)
+cover large output, a slow reader, a closed reader, and an unread pipe killed by
+the caller deadline. This changes no persistent schema/data model, config key,
+lease FIFO/ownership, merge authority, lifecycle state/transition, or declared
+smoke promise; `state-machines.json` and `post-merge-verify.json` are unchanged.
+Source publication is not deployment or runtime acceptance. Keep LAC-2094
+nonterminal until a separate accepted recovery proof from the deployed CLI
+confirms complete parseable piped output and the command result, without a
+service restart or merge-state mutation as part of this source change.
+
 ### Merged PR but DAG step did not advance
 
 When AMA or merge-agent merges a PR through `gh pr merge`, the watcher records

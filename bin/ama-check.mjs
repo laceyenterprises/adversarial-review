@@ -22,7 +22,7 @@ import { fleetStopReason } from '../src/fleet-stop.mjs';
 
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
@@ -640,4 +640,6 @@ async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-process.exit(await main());
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = await main();
+}

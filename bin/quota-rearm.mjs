@@ -265,7 +265,7 @@ function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
 const isDirectInvocation =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
-  process.exit(main(process.argv.slice(2)));
+  process.exitCode = main(process.argv.slice(2));
 }
 
 export {

@@ -1694,6 +1694,25 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
+REVIEWEVIDENCE-01: new PR blockers need a resolvable head file/line and a concrete
+input/state plus wrong outcome. Unsupported findings remain visible as
+non-blocking with a reason. Evidence-backed fixer disputes close on an unchanged
+head without re-review; retained replies and body/head-bound admission feed the
+existing merge gates. The offline regression uses real SQLite and a Node
+reproduction (`test/review-evidence.test.mjs`). Existing smoke coverage and merge
+safety remain; SRE samples 20 deployed reviews and repeats the noise audit as
+recorded in `post-merge-verify.json` and the closure runbook.
+Missing repository metadata or an absent/malformed head SHA preserves blockers;
+grounding retains fenced reproductions and wrapped card explanations. Factual
+dispute citations accept complete comma- or semicolon-separated range lists.
+Failed reads and exhausted file budgets preserve blockers and verdicts. Hosted
+result verdicts follow the grounded body. Complete citations disambiguate repeated
+titles; known non-blocking acknowledgements can accompany evidence-only completion
+but claimed blocker repairs cannot.
+Focused evidence fixtures cover these cases; lifecycle states and deployed
+smoke promises are unchanged.
+
+
 The shared consumer records every step, pages once with module/step/commit on
 failure, opens no revert PR and does not hold later deploys. This repository
 only declares `onFailure=page`; notification delivery belongs to that consumer.

@@ -331,6 +331,7 @@ function classifyBlockersFromBody(body, verdict) {
   const blocking = classifyBlockingFindings(body, { lastVerdict: verdict || null });
   const nonBlocking = classifyNonBlockingFindings(body, { lastVerdict: verdict || null });
   return {
+    reviewBodySha256: createHash('sha256').update(String(body).trim()).digest('hex'),
     operatorLabelFindings: classifyOperatorGatedFindings(body),
     blockingFindingState: blocking.state,
     blockingFindingCount: blocking.count,
@@ -715,7 +716,7 @@ function pickAdversarialGateStatus({
   });
   const decideHammerAdjudicated = () => decide(
     'success',
-    'Hammer withdrew every blocking finding on exact-head evidence; its adjudication is final.',
+    'Every blocking finding was withdrawn with exact-head evidence; no re-review is required.',
     'hammer-adjudicated'
   );
 

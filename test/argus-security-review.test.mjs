@@ -181,13 +181,17 @@ test('no available reviewer model defers instead of failing', async () => {
 });
 
 test('a block is recorded only after its finding posts; a failed post retries without a second model call', async () => {
+  const finding = { category: 'install_time_execution', severity: 'high', title: 'new postinstall in synthetic-pkg', detail: 'scripts.postinstall executes a remote installer' };
   const blockReview = reviewText({
     verdict: 'block',
     summary: 'adds a postinstall',
-    findings: [{ category: 'install_time_execution', severity: 'high', title: 'new postinstall in evil-pkg', detail: 'scripts.postinstall = curl | sh' }],
+    findings: [finding],
   });
   let posts = 0;
   const { deps: d, calls } = deps({
+    // Exercise the posting contract with deterministic blocking evidence;
+    // the model's unsupported claim is advisory under REVIEWEVIDENCE-01.
+    gatherEvidence: async () => ({ sections: [], rubricFindings: [{ ...finding, source: 'rubric' }] }),
     runReviewerModel: async ({ model }) => {
       calls.models.push(model);
       return { text: blockReview };

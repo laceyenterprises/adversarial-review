@@ -5,6 +5,7 @@ import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview }
 import {
   blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments, readHammerWithdrawals,
   resolveHammerAdjudication,
+  evidenceDigest,
 } from './hammer-adjudication.mjs';
 
 // HAMFINAL-01: remove only the GitHub veto whose complete blocker list has
@@ -48,6 +49,7 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
       blockingFindingState: blockers.state, blockingFindingCount: blockers.count,
       blockingFindingIdentities: blockingFindingIdentitiesFromBody(review.body),
       reviewedHead: review.commit_id, currentHead: headSha,
+      reviewBodySha256: evidenceDigest(review.body),
     }, withdrawals);
     if (!adjudication.allBlockingWithdrawn) {
       if (review.state === 'DISMISSED') throw new Error('dismissed review withdrawal authority is missing or invalid');
@@ -60,9 +62,10 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
       || liveReview.id !== review.id) throw new Error('withdrawn review changed before dismissal');
     await assertLiveHead();
     if (liveReview.state === 'DISMISSED') continue;
+    const source = withdrawals.some(w => w.resolution === 'withdrawn-by-remediator') ? 'withdrawn with dispute evidence' : 'withdrawn-by-hammer';
     await dismiss(`${prPath}/reviews/${review.id}/dismissals`,
-      `HAMFINAL-01: all ${blockers.count} blocking findings withdrawn-by-hammer at exact head ${headSha}; `
-      + 'durable admission and HAM comment evidence verified. Other reviews and merge gates remain enforced.');
+      `HAMFINAL-01: all ${blockers.count} blocking findings ${source} at exact head ${headSha}; `
+      + 'durable dispute evidence verified. Other reviews and merge gates remain enforced.');
     dismissed.push(review.id);
   }
   return { dismissed };

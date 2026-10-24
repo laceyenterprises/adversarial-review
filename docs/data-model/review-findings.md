@@ -1,5 +1,46 @@
 # Review finding records
 
+## Blocking evidence and factual disputes (REVIEWEVIDENCE-01)
+
+New PR review output passes through the existing head-grounding pass before
+posting or capture. It requires a repository-relative file and valid line/range
+on the reviewed head, plus `Input or state: ...; Wrong outcome: ...` in Problem.
+Unsupported cards become non-blocking and retain an `Evidence downgrade:` reason
+in their parsed Problem; pass metadata retains the grounding reason too. JSON
+model findings use path/detail and retain `evidenceDowngradeReason`. Historical
+bodies retain their original interpretation; the corpus does not fetch files.
+Missing repository metadata or an absent/malformed head SHA preserves the
+original blockers and verdict. Grounding retains raw card Markdown and fenced
+reproductions rather than rebuilding cards from parsed fields.
+Failed file reads and exhausted file budgets preserve blockers and verdicts;
+only confirmed absence or invalid citation/behaviour evidence permits demotion.
+Hosted result verdicts follow the grounded body before settlement.
+
+Completed, validated replies retain optional `pushback[].evidence` with the
+reviewed `headSha`, original `citation`, and either `code`, `reproduction`,
+`output` or `test`, `output`. An unambiguous matching factual dispute gets
+`review_finding_remediations.reason = disputed-with-evidence`; the full payload
+is retained in `review_finding_replies.payload_json`; linked remediation records
+return only `dispute_evidence_json`, avoiding repeated full-reply payloads. Its historical status is `withdrawn`. Ordinary pushback
+remains unaddressed. A completed reply can close individual disputed findings
+while other findings still require repair.
+Evidence citations accept comma- and semicolon-separated line ranges, such as
+`src/worker.mjs:10-15; 20-25, 30`, and must match the original path and complete
+ordered range list. This changes no persistent schema or payload fields.
+The complete citation disambiguates identical titles during both completion and
+withdrawal admission. Known non-blocking acknowledgements in `addressed` can
+accompany evidence-only completion; claimed blocker repairs cannot.
+
+The same completion transaction caches admitted evidence in the existing
+withdrawal table, keyed by repository, PR and finding identity. It binds the
+original reviewed head, exact review-body digest, reply ID and evidence digest.
+This admission participates in closure authority through the existing shared
+adjudicator. Other finding observations still grant no authority. Projection
+failure preserves the durable completed job and evidence for offline replay;
+missing admission leaves closure blocked rather than requesting another review.
+Gate readers never parse reply artifacts or execute reproduction commands.
+
+
 **Owner:** review-body capture and remediation completion observations
 **Store:** `data/reviews.db`
 **Schema:** `migrations/20261021_review_findings.sql`
@@ -65,7 +106,7 @@ errors warn and preserve the existing completion result; stored bodies and jobs
 remain available for offline repair. Body-capture errors likewise preserve the
 stored review body and explicitly warn that backfill is required. Normal,
 recovered orphan, daemon-bounce and historical body capture all use the same
-finding writer. This observation layer does not change posting, review verdicts,
+finding writer. Apart from factual-dispute admission above, this observation layer does not change posting, review verdicts,
 attestation, dispatch, closure predicates or lifecycle transitions.
 
 ## Hammer evidence

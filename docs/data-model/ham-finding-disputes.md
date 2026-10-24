@@ -1,5 +1,31 @@
 # Data Model - HAM Finding Disputes
 
+## Remediation evidence admission (REVIEWEVIDENCE-01)
+
+The existing table also caches service-admitted `withdrawn-by-remediator`
+resolutions at remediation completion. Two nullable TEXT columns are added by
+`ensureReviewStateSchema`: `reply_id` identifies the retained completed reply;
+`review_body_sha256` hashes the trimmed original review body. `head_sha` and
+`finding_reviewed_head` both identify the evidenced reviewed head, and
+`evidence_sha256` hashes the serialized evidence. The full evidence lives in
+the existing finding-reply link. No synthetic GitHub comment ID is created.
+
+Only a validated completed job/round with unambiguous title/location coverage
+can cache a factual dispute. The evidence needs the cited code plus a short
+reproduction and output, or a test command with output disproving the failure.
+Policy disagreement alone is insufficient. An in-flight reservation or a Hammer
+withdrawal on the same head is preserved. A later Hammer adjudication remains
+subject to its existing live authority and comment-provenance checks.
+
+The existing keyed withdrawal query reads both resolutions. Remediator
+admission requires matching review-body digest, finding identity, reviewed head
+and evaluated head; it never carries across a head change. The shared dismissal
+helper accepts the durable service reply instead of a HAM comment for this
+resolution and still rechecks the authoritative review and live PR head before
+removing a GitHub review veto. Required checks, structural restrictions, leases
+and merge authorization remain separate. No new tick query or review is added.
+
+
 Finding-record projections retain admitted dispute evidence by finding and
 reviewed head. Insert/update triggers copy observations to
 `review_finding_disputes`; replacing this table's latest dispute does not erase

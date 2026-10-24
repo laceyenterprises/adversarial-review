@@ -1,3 +1,4 @@
+import { findingLineRanges } from './finding-lines.mjs';
 import { maskReviewFences } from './review-markdown.mjs';
 
 // Parse the `## Blocking Issues` section into structured findings. The
@@ -77,7 +78,9 @@ function extractReviewSection(body, headingPattern) {
   return section === null ? null : section.join('\n');
 }
 
-function parseReviewFindingsSection(reviewBody, headingPattern) {
+// Fresh grounding retains incomplete cards to demote them instead of dropping
+// them. Historical consumers keep their existing incidental-heading boundary.
+function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompleteCards = false } = {}) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const rawSection = extractReviewSection(reviewBody, headingPattern);
   if (rawSection === null) return null;
@@ -180,7 +183,7 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
     // H3 like `### Reproduction` inside one card from inflating the
     // expected blocking-issue count.
     const h3Match = raw.match(/^[ \t]*###[ \t]+(.+?)[ \t]*$/);
-    if (h3Match && cardHasRequiredFields(index)) {
+    if (h3Match && (includeIncompleteCards || cardHasRequiredFields(index))) {
       if (current) findings.push(current);
       current = { title: h3Match[1].trim() };
       continue;
@@ -191,7 +194,7 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
     // inside one card doesn't inflate the expected blocking-issue
     // count.
     const bulletBoldTitle = parseBulletBoldTitle(raw);
-    if (bulletBoldTitle && (cardHasRequiredFields(index) || !current || !current.problem)) {
+    if (bulletBoldTitle && (includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
       if (current) findings.push(current);
       current = { title: bulletBoldTitle };
       continue;
@@ -270,8 +273,8 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
   return fallbackTitle ? [{ title: fallbackTitle }] : findings;
 }
 
-function parseBlockingFindingsSection(reviewBody) {
-  return parseReviewFindingsSection(reviewBody, /^##[ \t]+Blocking[ \t]+Issues?[ \t]*$/i);
+function parseBlockingFindingsSection(reviewBody, options) {
+  return parseReviewFindingsSection(reviewBody, /^##[ \t]+Blocking[ \t]+Issues?[ \t]*$/i, options);
 }
 
 function parseNonBlockingFindingsSection(reviewBody) {
@@ -312,4 +315,34 @@ function parseReviewFindings(body) {
   };
 }
 
-export { isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };
+// The prompt uses explicit labels so missing trigger/outcome evidence is
+// decidable without asking another model to interpret the review.
+function hasFailingBehaviour(problem) {
+  const text = String(problem || '');
+  return /\bInput or state:\s*\S[\s\S]*?;\s*Wrong outcome:\s*\S/i.test(text)
+    && !/<(?:concrete trigger|observed or directly demonstrated failure)>/i.test(text);
+}
+
+function findingEvidenceLocation(finding) {
+  const raw = String(finding?.file || '').replace(/`/g, '').trim();
+  const citation = /^(.*?):(\d+(?:\s*[-–]\s*\d+)?(?:\s*[,;]\s*\d+(?:\s*[-–]\s*\d+)?)*)$/.exec(raw);
+  const path = citation ? citation[1] : raw;
+  if (!path || path.startsWith('/') || path.split('/').some(p => ['..', '.', ''].includes(p))) return null;
+  const ranges = findingLineRanges(finding?.lines || citation?.[2], path);
+  if (!ranges.length || ranges.some(r => !Number.isSafeInteger(r.start) || !Number.isSafeInteger(r.end)
+    || r.start < 1 || r.end < r.start)) return null;
+  return { path, ranges };
+}
+
+async function blockingEvidenceReason(finding, headContent) {
+  const location = findingEvidenceLocation(finding);
+  if (!location) return 'missing-location';
+  if (!hasFailingBehaviour(finding?.problem)) return 'missing-behaviour';
+  const head = await headContent(location.path);
+  // An unavailable read is not evidence that the finding is unsupported.
+  if (!head.ok) return head.reason === 'missing-at-head' ? head.reason : null;
+  const count = head.content ? head.content.replace(/\n$/, '').split('\n').length : 0;
+  return location.ranges.some(r => r.end > count) ? 'lines-beyond-head' : null;
+}
+
+export { blockingEvidenceReason, findingEvidenceLocation, hasFailingBehaviour, isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };

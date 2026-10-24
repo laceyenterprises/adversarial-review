@@ -1,9 +1,27 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Evidence-only completion (REVIEWEVIDENCE-01)
+
+Validated replies are retained at `remediationReply.payload` and on the current
+round. Factual `pushback[].evidence` carries the reviewed head, exact original
+citation and either cited code/reproduction/output or test/output. See
+[review finding records](review-findings.md) for retained evidence and admission.
+If every blocker has that evidence, the reconciler independently observes the
+same open live head and completes the existing round with re-review suppressed
+(`blocking-findings-disputed-with-evidence`), even if the worker requested it.
+A watcher wake projects closure; the merge gates still decide whether to land.
+Known non-blocking acknowledgements in `addressed` do not prevent this path;
+claimed blocker repairs do. Complete evidence citations disambiguate duplicate
+titles during completion and withdrawal admission.
+Ordinary pushback, unreadable or moved heads, partial coverage and unresolved
+blockers keep their existing handling. The comment-delivery result does not
+reopen an evidenced dispute. No new queue status, retry or config key is added.
+
+
 After durable completion, the queue best-effort projects the round's reply and
 local commit evidence into [review finding records](review-findings.md).
 Failures preserve job completion and leave the stored job available for offline
-replay; no queue state, retry budget or merge decision changes.
+replay. Factual-dispute admission is the explicit closure exception described below; other observations change no queue state, retry budget or merge decision.
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`

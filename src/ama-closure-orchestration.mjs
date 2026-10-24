@@ -1677,6 +1677,7 @@ async function dispatchAmaClosureFor({
       ? gateSnapshot.settledReview.blockingFindingIdentities
       : null,
     hammerWithdrawnFindings: Array.isArray(gateSnapshot.hammerWithdrawals) ? gateSnapshot.hammerWithdrawals : [],
+    reviewBodySha256: gateSnapshot.settledReview?.reviewBodySha256 || null,
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,

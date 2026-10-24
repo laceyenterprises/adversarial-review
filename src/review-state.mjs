@@ -180,7 +180,7 @@ function ensureReviewStateSchema(db) {
   // Upgrade helper-created HAMINTENT-02 stores without resetting their budgets.
   // HAMFINAL-01 columns record the hammer's final `withdrawn-by-hammer` adjudication.
   for (const column of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256', 'reserved_at',
-    'resolution', 'resolved_at', 'finding_reviewed_head', 'evidence_sha256']) {
+    'resolution', 'resolved_at', 'finding_reviewed_head', 'evidence_sha256', 'reply_id', 'review_body_sha256']) {
     addColumnIfMissing(db, `ALTER TABLE ham_finding_disputes ADD COLUMN ${column} TEXT`);
   }
   db.exec(`CREATE TABLE IF NOT EXISTS review_failure_archive (

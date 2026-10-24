@@ -79,6 +79,7 @@ import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { resolvePendingCiCompletion, resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
+import { allBlockingDisputed } from './kernel/remediation-reply.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -1851,6 +1852,7 @@ async function reconcileFollowUpJob({
     let operationalBlockerRecovery = null;
     let completionLifecycle = null;
     let pendingCiCompletion = false;
+    let evidenceOnlyCompletion = false;
 
     if (replyProbe.state === 'valid') {
       ({ reply: parsedReply, job, remediationReply, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
@@ -1858,8 +1860,15 @@ async function reconcileFollowUpJob({
         resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
       }));
       const reply = parsedReply;
+      remediationReply = { ...remediationReply, payload: reply };
+      if (allBlockingDisputed(job, reply, job.revisionRef)) {
+        completionLifecycle ||= await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+        evidenceOnlyCompletion = completionLifecycle?.source === 'live' && completionLifecycle.prState === 'open'
+          && completionLifecycle.headSha === job.revisionRef && !completionLifecycle.newerReviewPending;
+        if (evidenceOnlyCompletion) rereview = { requested: false, status: 'suppressed', reason: 'blocking-findings-disputed-with-evidence' };
+      }
 
-      if (reply.reReview.requested && job?.finalRound !== 'comment-only') {
+      if (reply.reReview.requested && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2335,7 +2344,7 @@ async function reconcileFollowUpJob({
           rereview = { ...buildRereviewResult({ requested: true, reason: reply.reReview.reason,
             outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
         }
-      } else {
+      } else if (!evidenceOnlyCompletion) {
         rereview = buildRereviewResult({
           requested: false,
           reason: null,
@@ -2386,7 +2395,7 @@ async function reconcileFollowUpJob({
     if (job?.finalRound === 'comment-only') ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
       rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
       resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log }));
-    if (!closeout && (workerPublishedHead || (parsedReply && job.finalRound === 'comment-only') || pendingCiCompletion)) {
+    if (!closeout && !evidenceOnlyCompletion && (workerPublishedHead || (parsedReply && job.finalRound === 'comment-only') || pendingCiCompletion)) {
       completionLifecycle ||= lifecycle;
       closeoutCiGate = finalRound.ciGate || await inspectRemediationCiRegressionImpl({
         repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
@@ -2485,7 +2494,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested && !finalRound.completed && !pendingCiCompletion
+    if (!rereview.requested && !finalRound.completed && !pendingCiCompletion && !evidenceOnlyCompletion
       && !(closeout && job.finalRound !== 'comment-only'
         && (parsedReply?.reReview?.requested || workerPublishedHead))) {
       const published = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
@@ -2649,7 +2658,7 @@ async function reconcileFollowUpJob({
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
-    if (closeout && !rereview.requested && !completed.alreadyTerminal) {
+    if ((closeout || evidenceOnlyCompletion) && !rereview.requested && !completed.alreadyTerminal) {
       try {
         requestWatcherWakeImpl({
           rootDir,

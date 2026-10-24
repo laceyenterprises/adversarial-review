@@ -132,7 +132,8 @@ test('REVIEWCHUNK-01: a chunked review that blocks on removed lines is demoted a
 
   const prompts = [];
   const chunked = await reviewAgyOversizedInChunks(diff, '', {
-    env: {},
+    // This fixture tests grounding, not host-load-dependent timeout planning.
+    env: { ADVERSARIAL_REVIEWER_TIMEOUT_MS: '1000', ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1000' },
     maxBytes,
     reviewWithGeminiImpl: async (chunkDiff, chunkContext) => {
       prompts.push({ chunkDiff, chunkContext });

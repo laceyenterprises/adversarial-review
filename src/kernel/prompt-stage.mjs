@@ -23,6 +23,9 @@ const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const SIMPLICITY_REVIEW_GUIDANCE = readFileSync(
   new URL('../../prompts/shared/simplicity-and-cost.md', import.meta.url), 'utf8',
 ).trim();
+const REVIEW_EVIDENCE_GUIDANCE = readFileSync(
+  new URL('../../prompts/shared/review-evidence.md', import.meta.url), 'utf8',
+).trim();
 
 /**
  * Classified failure raised when a domain's `promptSet` cannot be resolved.
@@ -183,12 +186,13 @@ function loadStagePrompt({
   const guidance = readFileSync(
     join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'), 'utf8',
   ).trim();
-  return `${prompt}\n\n${guidance}`;
+  return `${prompt}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${guidance}`;
 }
 
 export {
   PromptSetResolutionError,
   SIMPLICITY_REVIEW_GUIDANCE,
+  REVIEW_EVIDENCE_GUIDANCE,
   loadStagePrompt,
   pickReviewerStage,
   pickRemediatorStage,

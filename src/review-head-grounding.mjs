@@ -15,7 +15,10 @@
 //     was determinable; or
 //   - it carries no code-like quote, cites plain line numbers, and every cited
 //     line is past the end of the head file.
-// Any quote present at head keeps the card blocking. Any fetch failure, an
+// REVIEWEVIDENCE-01: production requires resolvable coordinates and explicit
+// input/state plus wrong-outcome evidence before the legacy quote check.
+// Legacy callers can retain quote-only inspection for stored historical bodies.
+// Any quote present at head keeps the card blocking in that legacy mode. Any fetch failure, an
 // unparseable card, or an unexpected error keeps the card blocking. The pass
 // never adds a finding or a gate; it can only move a card from Blocking to
 // Non-blocking and, when no blocking card remains, the Verdict from
@@ -25,6 +28,9 @@ import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { beginReviewerPass } from './reviewer-pass-tokens.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { maskReviewFences } from './kernel/review-markdown.mjs';
+import { blockingEvidenceReason, findingEvidenceLocation, parseBlockingFindingsSection } from './kernel/review-findings.mjs';
+import { execFileSync } from 'node:child_process';
 
 const HEAD_GROUNDING_TAG = 'unverified at head (quoted code absent)';
 const DEFAULT_MAX_HEAD_FILES = 25;
@@ -42,14 +48,9 @@ function isNoneLine(line) {
 function splitSections(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const sections = [{ heading: null, lines: [] }];
-  let fence = null;
-  for (const line of lines) {
-    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (fenceMatch) {
-      if (!fence) fence = fenceMatch[1][0];
-      else if (fenceMatch[1][0] === fence) fence = null;
-    }
-    if (!fence && /^##\s+\S/.test(line) && !/^###/.test(line)) {
+  const visible = maskReviewFences(lines.join('\n')).split('\n');
+  for (const [index, line] of lines.entries()) {
+    if (/^##\s+\S/.test(visible[index]) && !/^###/.test(visible[index])) {
       sections.push({ heading: line, lines: [] });
     } else {
       sections[sections.length - 1].lines.push(line);
@@ -68,16 +69,29 @@ function findSection(sections, pattern) {
   return sections.findIndex((section) => pattern.test(section.heading || ''));
 }
 
-// Split a section body into a preamble and cards. H3 cards (`### Title`) use
-// unindented `- **File:**` sub-bullets, so when any H3 is present only H3
-// lines start a card; otherwise every unindented bullet does.
+// Split raw cards without treating fenced examples or field bullets as titles.
+// H3 reproduction subheadings stay inside their card unless followed by fields.
 function splitCards(lines) {
-  const useH3 = lines.some((line) => /^###\s+\S/.test(line));
-  const isBoundary = useH3 ? (line) => /^###\s+\S/.test(line) : (line) => /^[-*+]\s+/.test(line);
+  const visible = maskReviewFences(lines.join('\n')).split('\n');
+  const isBoldTitle = (line) => {
+    const title = /^-\s+\*\*(.+?)\*\*/.exec(line)?.[1].replace(/:\s*$/, '');
+    return title && !/^(Category|File|Lines|Problem|Why it matters|Recommended fix)$/i.test(title);
+  };
+  const isH3 = (line) => /^###\s+\S/.test(line);
+  const useStructuredTitles = visible.some(line => isBoldTitle(line) || isH3(line));
+  const h3HasFields = (index) => {
+    for (let next = index + 1; next < visible.length; next++) {
+      if (isBoldTitle(visible[next]) || isH3(visible[next])) break;
+      if (/^\s*(?:[-*+]\s+)?\*\*(?:File|Lines|Problem)(?::\*\*|\*\*\s*:)/i.test(visible[next])) return true;
+    }
+    return false;
+  };
   const preamble = [];
   const cards = [];
-  for (const line of lines) {
-    if (isBoundary(line)) {
+  for (const [index, line] of lines.entries()) {
+    const current = visible[index];
+    if (isBoldTitle(current) || (isH3(current) && (cards.length === 0 || h3HasFields(index)))
+      || (!useStructuredTitles && /^[-*+]\s+/.test(current))) {
       cards.push([line]);
     } else if (cards.length > 0) {
       cards[cards.length - 1].push(line);
@@ -188,26 +202,32 @@ function quotePresent(quote, compactContent) {
 
 function isMissingFileError(err) {
   const text = `${err?.stderr || ''}\n${err?.message || ''}`;
-  return /\bHTTP\s+404\b/i.test(text) || /\bnot found\b/i.test(text);
+  return /\bHTTP\s+404\b|\bnot found\b|does not exist|exists on disk, but not in/i.test(text);
 }
 
 function demotedCard(cardLines, reason, headSha) {
   const [first, ...rest] = cardLines;
   const title = cardTitle(cardLines);
-  const header = /^\s*###\s+/.test(first)
-    ? `### ${title} — ${HEAD_GROUNDING_TAG}`
-    : `- **${title} — ${HEAD_GROUNDING_TAG}**`;
+  const tag = ['removed-side', 'absent', 'lines-beyond-head'].includes(reason) ? HEAD_GROUNDING_TAG : 'insufficient blocking evidence';
+  const header = !fieldValue(cardLines, 'File') ? `- Title: ${title} — ${tag}` : /^\s*###\s+/.test(first)
+    ? `### ${title} — ${tag}`
+    : `- **${title} — ${tag}**`;
   const detail = reason === 'removed-side'
     ? 'the quoted code appears only on the removed side of the diff'
     : reason === 'lines-beyond-head'
       ? 'every cited line is past the end of the file at head'
-      : 'the quoted code is not present in the cited file at head';
+      : ['absent', 'removed-side'].includes(reason) ? 'the quoted code is not present in the cited file at head' : reason;
   const indent = /^\s*###\s+/.test(first) ? '' : '  ';
-  return [
+  const result = [
     header,
     ...rest,
-    `${indent}- **Head grounding:** ${HEAD_GROUNDING_TAG} — ${detail} (head ${String(headSha).slice(0, 12)}); demoted from blocking.`,
+    `${indent}- **Head grounding:** ${tag} — ${detail} (head ${String(headSha).slice(0, 12)}); demoted from blocking.`,
   ];
+  // Keep the reason in the parsed finding as well as the rendered review.
+  const problemIndex = result.findIndex(line => /\*\*Problem(?::\*\*|\*\*\s*:)/i.test(line));
+  if (problemIndex >= 0) result[problemIndex] += ` Evidence downgrade: ${reason}.`;
+  else result.push(`${indent}- **Problem:** Evidence downgrade: ${reason}.`);
+  return result;
 }
 
 function insertNonBlocking(sections, cards) {
@@ -234,44 +254,85 @@ function rewriteVerdictToCommentOnly(sections) {
   return true;
 }
 
+export function createHeadContentReader({ repo, headSha, checkoutDir = null, fetchFileAtRefImpl = fetchRepoFileAtRef,
+  maxFiles = DEFAULT_MAX_HEAD_FILES, deletedFiles = new Set() } = {}) {
+  const contentCache = new Map();
+  const headContent = (path) => {
+    if (!repo || !/^[a-f0-9]{40}$/i.test(headSha || '')) return Promise.resolve({ ok: false, reason: 'missing-head' });
+    if (!contentCache.has(path)) {
+      if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
+      const read = async () => {
+        if (checkoutDir && /^[a-f0-9]{40}$/i.test(headSha)) {
+          try {
+            return execFileSync('git', ['--no-replace-objects', '-C', checkoutDir, 'show', `${headSha}:${path}`],
+              { encoding: 'utf8', timeout: 2000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+                env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' } });
+          } catch (error) {
+            if (isMissingFileError(error)) throw error;
+            /* The checkout may lack the PR object; use the existing exact-ref reader. */
+          }
+        }
+        return fetchFileAtRefImpl(repo, path, headSha);
+      };
+      contentCache.set(path, read().then(
+        (content) => ({ ok: true, content: String(content ?? '') }),
+        (err) => (isMissingFileError(err) && deletedFiles.has(path)
+          ? { ok: true, content: '' }
+          : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
+      ));
+    }
+    return contentCache.get(path);
+  };
+  return headContent;
+}
+
 async function groundBlockingFindingsAtHead(reviewText, {
   repo,
   headSha,
   diff = '',
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   maxFiles = DEFAULT_MAX_HEAD_FILES,
+  requireEvidence = false,
+  checkoutDir = null,
   log = console,
 } = {}) {
   const grounding = { headSha: headSha || null, checked: 0, kept: 0, demoted: [] };
   const original = String(reviewText ?? '');
-  if (!repo || !String(headSha || '').trim() || !original) {
+  if (!original || !String(repo || '').trim() || !/^[a-f0-9]{40}$/i.test(headSha || '')) {
     return { reviewText: original, grounding: { ...grounding, skipped: 'missing-input' } };
   }
   try {
     const sections = splitSections(original);
     const blockingIndex = findSection(sections, /^##\s+Blocking issues\b/i);
     if (blockingIndex < 0) return { reviewText: original, grounding };
-    const { preamble, cards } = splitCards(sections[blockingIndex].lines);
+    let { preamble, cards } = splitCards(sections[blockingIndex].lines);
+    // Unstructured prose still needs evidence checks, but retain its raw text.
+    if (requireEvidence && cards.length === 0 && preamble.some(line => line.trim())) {
+      cards = [trimTrailingBlank(preamble)];
+      preamble = [];
+    }
     if (cards.length === 0) return { reviewText: original, grounding };
 
     const diffFiles = indexDiff(diff);
-    const contentCache = new Map();
-    const headContent = (path) => {
-      if (!contentCache.has(path)) {
-        if (contentCache.size >= maxFiles) return Promise.resolve({ ok: false, reason: 'file-budget' });
-        contentCache.set(path, fetchFileAtRefImpl(repo, path, headSha).then(
-          (content) => ({ ok: true, content: String(content ?? '') }),
-          (err) => (isMissingFileError(err) && diffFiles.get(path)?.deleted
-            ? { ok: true, content: '' }
-            : { ok: false, reason: isMissingFileError(err) ? 'missing-at-head' : 'fetch-failed' }),
-        ));
-      }
-      return contentCache.get(path);
-    };
+    const headContent = createHeadContentReader({ repo, headSha, checkoutDir, fetchFileAtRefImpl, maxFiles,
+      deletedFiles: new Set([...diffFiles.values()].filter(f => f.deleted).map(f => f.path)) });
 
     const keptCards = [];
     const demotedCards = [];
     for (const card of cards) {
+      if (isNoneLine(card.join('\n').trim())) continue;
+      const parsed = parseBlockingFindingsSection(`## Blocking issues\n${card.join('\n')}`)?.[0];
+      const location = findingEvidenceLocation(parsed);
+      let evidenceReason = null;
+      if (requireEvidence) {
+        evidenceReason = await blockingEvidenceReason(parsed, headContent);
+        if (evidenceReason) {
+          grounding.checked++;
+          grounding.demoted.push({ title: cardTitle(card), files: location ? [location.path] : [], reason: evidenceReason });
+          demotedCards.push(demotedCard(card, evidenceReason, headSha));
+          continue;
+        }
+      }
       const quotes = cardQuotes(card);
       const lineNumbers = citedLineNumbers(card);
       const files = cardFiles(card, diffFiles);

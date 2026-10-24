@@ -29,7 +29,9 @@ import { argusReviewerFailure, argusFailureDefers, argusReviewerDeferral } from 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SIMPLICITY_REVIEW_GUIDANCE } from './kernel/prompt-stage.mjs';
+import { REVIEW_EVIDENCE_GUIDANCE, SIMPLICITY_REVIEW_GUIDANCE } from './kernel/prompt-stage.mjs';
+import { createHeadContentReader } from './review-head-grounding.mjs';
+import { blockingEvidenceReason } from './kernel/review-findings.mjs';
 import { extractSimplicityNote } from './kernel/verdict.mjs';
 
 import { defangUntrustedMarkdown } from './adapters/comms/github-pr-comments/pr-comments.mjs';
@@ -82,9 +84,24 @@ const MAX_COMMENT_CHARS = 60_000;
 let promptTemplateCache = null;
 export function loadArgusReviewPromptTemplate(rootDir = ROOT) {
   if (rootDir === ROOT && promptTemplateCache) return promptTemplateCache;
-  const text = `${readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8').trim()}\n\n${SIMPLICITY_REVIEW_GUIDANCE}`;
+  const text = `${readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8').trim()}\n\n${REVIEW_EVIDENCE_GUIDANCE}\n\n${SIMPLICITY_REVIEW_GUIDANCE}`;
   if (rootDir === ROOT) promptTemplateCache = text;
   return text;
+}
+
+export async function groundArgusReviewEvidence(review, options) {
+  if (!review || !Array.isArray(review.findings)) return review;
+  if (!String(options?.repo || '').trim() || !/^[a-f0-9]{40}$/i.test(options?.headSha || '')) return review;
+  const read = createHeadContentReader(options);
+  for (const finding of review.findings) {
+    if (finding.severity !== 'high') continue;
+    const reason = await blockingEvidenceReason({ file: finding.path, problem: finding.detail }, read);
+    if (reason) Object.assign(finding, { severity: 'medium', demotedFrom: 'high', evidenceDowngradeReason: reason });
+  }
+  if (review.verdict === ARGUS_VERDICTS.BLOCK && !review.findings.some(finding => finding.severity === 'high')) {
+    review.verdict = ARGUS_VERDICTS.APPROVE;
+  }
+  return review;
 }
 
 function normalizeCategory(value) {
@@ -478,7 +495,7 @@ export async function reviewArgusJob({
       model: ran.model,
       execution: ran.execution,
       modelAttempts: ran.attempts,
-      modelReview: ran.review,
+      modelReview: await groundArgusReviewEvidence(ran.review, { repo: job.repo, headSha: job.headSha, checkoutDir: workDir }),
       rubricFindings: evidence.rubricFindings || [],
       rubric: evidence.rubric || null,
       dependency: evidence.dependency || null,

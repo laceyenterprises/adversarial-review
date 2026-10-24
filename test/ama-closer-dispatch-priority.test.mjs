@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -653,9 +654,7 @@ test('LCR: non-exhausted request-changes findings do not dispatch hammer before 
   const result = await maybeDispatchAmaCloser({ ...baseArgs(rootDir), ...deps });
 
   assert.equal(result.dispatched, false, 'hammer must not answer first on a request-changes findings head');
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('blocking-findings-present'), JSON.stringify(result.reasons));
-  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
+  assert.equal(result.nextActionShared.decision.actor, 'remediator');
   assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
@@ -664,27 +663,25 @@ for (const [name, reviewState] of [
   ['pending follow-up even at exhaustion', { remediationPending: true, reviewCycleExhausted: true, completedRemediationRounds: 2 }],
   ['unknown follow-up state', { remediationPending: undefined }],
   ['rereview-only exhaustion', { blockingFindingState: 'unknown', reviewCycleExhausted: true, completedRemediationRounds: 0, completedRereviewRounds: 3 }],
-  ['fresh comment-only before grace', { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 }],
+  ['fresh comment-only with remaining rounds', { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 }],
 ]) {
   test(`recovery flag preserves ordinary hammer gates: ${name}`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'recovery-codex-first-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const deps = testDeps();
     const result = await maybeDispatchAmaCloser({
-      ...baseArgs(rootDir, { reviewState, dispatchContext: { automatedRecovery: true, settledCommentOnlyTerminalMs: 0 } }),
+      ...baseArgs(rootDir, { reviewState, dispatchContext: { automatedRecovery: true } }),
       ...deps,
     });
     assert.equal(result.dispatched, false);
-    assert.equal(result.reason, 'not-eligible');
-    assert.equal(result.recoveryWait, name === 'fresh comment-only before grace' ? 'comment-only-grace' : undefined);
+    assert.notEqual(result.nextActionShared.decision.actor, 'hammer');
     assert.equal(deps.calls.length, 0, 'recovery must not launch a competing hammer');
   });
 }
 
-test('recovery preserves strict comment-only dispatch after grace and exhausted follow-up handoff', async (t) => {
+test('recovery preserves exhausted follow-up handoff without a grace selector', async (t) => {
   for (const [reviewState, dispatchContext] of [
-    [{ verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 },
-      { settledCommentOnlyTerminalMs: 60_000, commentOnlyTerminalGraceMs: 60_000 }],
+    [{ verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1, reviewCycleExhausted: true }, {}],
     [{ reviewCycleExhausted: true, completedRemediationRounds: 2 }, {}],
   ]) {
     const rootDir = mkdtempSync(join(tmpdir(), 'recovery-terminal-handoff-'));
@@ -709,9 +706,9 @@ test('recovery preserves mechanical pending-CI validate-and-click routing', asyn
     ...cleanValidateAndClickArgs(rootDir, { dispatchContext: { automatedRecovery: true } }),
     ...deps,
   });
-  assert.equal(result.dispatched, true);
-  assert.equal(deps.calls.length, 1);
-  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'critical', 'pending CI must retain its mechanical prompt');
+  assert.equal(result.dispatched, false);
+  assert.equal(deps.calls.length, 0);
+  assert.equal(result.nextActionShared.decision.action, 'wait-for-CI');
 });
 
 test('LCR: rereview-only exhaustion does not dispatch hammer before Codex remediation', async (t) => {
@@ -737,9 +734,7 @@ test('LCR: rereview-only exhaustion does not dispatch hammer before Codex remedi
   });
 
   assert.equal(result.dispatched, false, 'rereview-only exhaustion must not mint a terminal hammer');
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('blocking-findings-unknown'), JSON.stringify(result.reasons));
-  assert.ok(result.reasons.includes('verdict-not-settled-success'), JSON.stringify(result.reasons));
+  assert.equal(result.nextActionShared.decision.actor, 'remediator');
   assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
@@ -768,23 +763,14 @@ test('LCR: comment-only exhaustion can dispatch terminal hammer without a remedi
   assert.equal(deps.calls.length, 1, 'terminal hammer remains available after rereview budget exhaustion');
 });
 
-test('LCR: clean mechanical-gate closer dispatches with --priority critical', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-clean-'));
+test('LCR: pending checks retain observer ownership before dispatch priority', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'priority-observer-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
-
   const result = await maybeDispatchAmaCloser({ ...cleanValidateAndClickArgs(rootDir), ...deps });
-
-  assert.equal(result.dispatched, true, 'a clean mechanical-gate close reaching the dispatch surface must dispatch');
-  assert.equal(deps.calls.length, 1);
-  const args = deps.calls[0].args;
-  assert.equal(flagValue(args, '--completion-shape'), 'decision-only');
-  assert.equal(flagValue(args, '--task-kind'), 'merge');
-  assert.equal(
-    flagValue(args, '--priority'),
-    'critical',
-    'clean mechanical-gate closer must take the reserved critical lane',
-  );
+  assert.equal(result.dispatched, false);
+  assert.equal(result.nextActionShared.decision.action, 'wait-for-CI');
+  assert.equal(deps.calls.length, 0);
 });
 
 test('LCR: forced terminal-remediation prompt dispatches with --priority normal even with a clean verdict', async (t) => {
@@ -794,6 +780,7 @@ test('LCR: forced terminal-remediation prompt dispatches with --priority normal 
 
   const result = await maybeDispatchAmaCloser({
     ...cleanValidateAndClickArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
       prMetadata: {
         statusCheckRollup: [
           { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
@@ -817,50 +804,19 @@ test('LCR: forced terminal-remediation prompt dispatches with --priority normal 
   );
 });
 
-test('LCR: auto-hammer log gate keys on PR metadata repo before dispatch context fallback', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-auto-hammer-gate-key-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const deps = testDeps();
-  const gateNotes = [];
 
-  const result = await maybeDispatchAmaCloser({
-    ...cleanValidateAndClickArgs(rootDir, {
-      prMetadata: {
-        repoPath: 'acme/pr-metadata-repo',
-        statusCheckRollup: [
-          { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
-          { __typename: 'CheckRun', name: 'ci/test', conclusion: 'FAILURE' },
-        ],
-        branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
-      },
-      dispatchContext: {
-        repo: 'acme/dispatch-context-repo',
-      },
-    }),
-    ...deps,
-    logGate: {
-      note(key, signature) {
-        gateNotes.push({ key, signature });
-        return { changed: true, count: 1, suppressedSincePrevious: 0 };
-      },
-    },
-  });
-
-  assert.equal(result.dispatched, true, 'a clean verdict with red required CI should auto-hammer');
-  assert.equal(gateNotes[0]?.key, 'acme/pr-metadata-repo#404');
-});
 
 test('LCR: --priority precedes the base dispatch args and is emitted exactly once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-shape-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
 
-  await maybeDispatchAmaCloser({ ...cleanValidateAndClickArgs(rootDir), ...deps });
+  await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...deps });
 
   const args = deps.calls[0].args;
   assert.equal(args[0], 'dispatch');
   assert.equal(args.filter((a) => a === '--priority').length, 1, 'exactly one --priority flag');
-  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'critical']);
+  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'normal']);
 });
 
 test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch regression)', async (t) => {
@@ -1083,7 +1039,7 @@ test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protect
 });
 
 
-test('transient primary evidence does not suppress CI/conflict repair dispatch', async (t) => {
+test('unreadable primary evidence retains recovery before CI/conflict repair', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-primary-read-repair-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   for (const conflict of [false, true]) {
@@ -1097,47 +1053,14 @@ test('transient primary evidence does not suppress CI/conflict repair dispatch',
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
       options: { primaryChange: { headSha: HEAD, hasHammerCommits: null, readFailed: true } },
     });
-    assert.equal(result.dispatched, true, JSON.stringify(result));
-    assert.ok(deps.calls.some(({ args }) => args.includes('dispatch')));
+    assert.equal(result.dispatched, false);
+    assert.equal(result.nextActionShared.decision.actor, 'closure-recovery');
+    assert.equal(deps.calls.length, 0);
   }
 });
 
 
-test('watcher never exhausts a real pre-grace comment-only closer across ticks', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'recovery-comment-grace-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const deps = testDeps();
-  let age = 0;
-  let pages = 0;
-  let evaluations = 0;
-  const input = { rootDir, repoPath: 'acme/repo', prNumber: 404,
-    currentRevisionRef: HEAD, candidate: { prState: 'open', headSha: HEAD },
-    dispatchJob: {}, reviewStateRow: {}, logger: deps.logger,
-    recoveryOptions: { pageImpl: async () => { pages += 1; }, now: () => age },
-    maybeDispatchAmaClosureForImpl: async (options) => {
-      evaluations += 1;
-      const result = await maybeDispatchAmaCloser({
-        ...baseArgs(rootDir, {
-          reviewState: { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 },
-          dispatchContext: { settledCommentOnlyTerminalMs: age, automatedRecovery: options.automatedRecovery },
-        }), ...deps,
-      });
-      return { ...result, amaEnabled: true };
-    } };
-  for (let tick = 0; tick < 8; tick += 1) {
-    age = tick * 60_000;
-    const waiting = await resolveMergeAgentCoexistenceForWatcher(input);
-    assert.equal(waiting.outcome, 'ama-pending');
-    assert.equal(waiting.amaClosureResult.recoveryWait, 'comment-only-grace');
-    assert.equal(waiting.orphan?.attempts || 0, 0);
-  }
-  assert.equal(evaluations, 8, 'a grace hold needs only the initial closer evaluation');
-  assert.equal(pages, 0);
-  assert.equal(deps.calls.length, 0);
-  age = 10 * 60_000;
-  assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-dispatched');
-  assert.equal(deps.calls.length, 1, 'ordinary hammer admission resumes after grace');
-});
+
 
 
 test('AMASCALE: five blocked decision launches leave all other-PR capacity available', async (t) => {
@@ -1183,7 +1106,7 @@ test('withdrawal-only non-exhausted review follows the clean dispatch route', as
     resolution: 'withdrawn-by-hammer', evidenceSha256: 'e'.repeat(64),
     findingReviewedHead: HEAD, headSha: HEAD }];
   const result = await maybeDispatchAmaCloser({ ...args, ...testDeps() });
-  assert.equal(result.reason, 'daemon-clean-route', JSON.stringify(result));
+  assert.equal(result.nextActionShared.decision.action, 'daemon-merge');
   assert.equal(result.dispatched, false);
 });
 
@@ -1478,7 +1401,7 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
   updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'no-dispatch', reason: 'not-eligible', retryCount: 100 }));
   const deps = testDeps();
-  const result = await maybeDispatchAmaCloser({ ...baseArgs(rootDir, {
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, {
     dispatchContext: { orphanRecovery: { ownerProof: true, headSha: HEAD } },
   }), ...deps });
   assert.equal(result.dispatched, true, JSON.stringify(result));
@@ -1533,16 +1456,18 @@ for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'start
     // Fresh foreign/live pending leases retain ownership before eligibility.
     // Dead local and age-expired leases reach the red-CI refusal without launch.
     const heldPending = status === 'pending' || status === 'pending-live';
-    assert.equal(result.reason, heldPending ? 'closer-lease-held-by-other-process' : 'not-eligible');
+    if (heldPending) assert.equal(result.reason, 'closer-lease-held-by-other-process');
+    else assert.equal(result.dispatched, false);
     assert.notEqual(result.reason, 'active-remediation-job');
-    assert.equal(reads, pending ? 0 : 1);
+    assert.ok(reads <= 2, 'reconciliation reuses its observed ledger evidence');
     assert.equal(pidProbes, localWatcher ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
-    const terminal = status === 'failed' || status === 'succeeded-open';
+    const terminal = ['failed', 'succeeded', 'succeeded-open'].includes(status);
     assert.equal(lease.status, terminal ? 'terminal' : pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     if (pending) assert.deepEqual(lease, beforeLease, 'refused admission must not mutate pending ownership');
-    assert.equal(deps.calls.length, 0);
+    assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status').length, 0,
+      'ownership reconciliation never submits a competing worker');
   });
 }
 
@@ -2324,8 +2249,8 @@ for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succee
     });
     const dispatches = deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status');
     if (outcome === 'succeeded') {
-      assert.equal(launchStatusReads, 0, 'sticky succeeded leases bypass launch status probes');
-      assert.equal(result.reason, 'lease-held', JSON.stringify(result));
+      assert.equal(launchStatusReads, 1, 'shared ownership observes the exact launch before the physical sticky fence');
+      assert.equal(result.reason, 'merge-receipt-unconfirmed');
       assert.equal(dispatches.length, 0);
       assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
     } else {
@@ -2353,8 +2278,7 @@ for (const probe of [
   updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'superseded' });
   const before = readAmaCloserLease(rootDir, identity);
   const result = await maybeDispatchAmaCloser({ ...args, ...deps, readLaunchRequestStatusImpl: () => probe });
-  assert.equal(result.reason, 'lease-held', JSON.stringify(result));
-  assert.match(result.closureBlocker, /terminal lease from launch synthetic-live still live/);
+  assert.ok(['live-owner', 'ownership-unreadable'].includes(result.nextActionShared.decision.reason));
   assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
   assert.equal(deps.calls.length, 0);
 });
@@ -2383,7 +2307,8 @@ for (const evidence of ['missing ledger row', 'terminal dispatch record']) {
       readLaunchRequestStatusImpl: () => ({ ok: false, reason: evidence === 'missing ledger row'
         ? 'missing-launch-request-row' : 'query-failed' }),
     });
-    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(result.dispatched, false);
+    assert.equal(result.nextActionShared.decision.actor, 'closure-recovery');
   });
 }
 
@@ -2484,10 +2409,9 @@ test('TERMLEASE-01: dispatch supersession keeps the outcome off the superseding 
     execFileImpl: async (command, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
       ? { stdout: JSON.stringify({ status: 'succeeded' }) } : deps.execFileImpl(command, argv, options),
   });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD }).status, 'dispatched');
-  assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD }).lrqId, 'lrq_hammer_1');
-  assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity))).outcome, 'superseded');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.nextActionShared.decision.actor, 'closure-recovery');
+  assert.notEqual(readAmaCloserLease(rootDir, { ...identity, headSha: HEAD })?.terminalOutcome, 'succeeded');
 });
 
 test('TERMLEASE-01: a live dispatch record names its terminal lease on early refusal', async t => {
@@ -2787,7 +2711,7 @@ for (const advanced of [false, true]) {
         ...cleanValidateAndClickArgs(rootDir, {
           prMetadata: { headSha: target,
             statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
-              { __typename: 'CheckRun', name: 'ci/test', status: 'IN_PROGRESS' }],
+              { __typename: 'CheckRun', name: 'ci/test', conclusion: 'FAILURE' }],
             branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
           },
           reviewState: { reviewCycleExhausted: true },

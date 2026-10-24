@@ -297,20 +297,13 @@ test('overdue alerts use the closure-wait path only when enabled, and a failed d
   assert.equal(pages.length, 1);
 });
 
-test('rescue classifier: legacy answer is byte-identical with a failing shadow sink', async () => {
-  const input = { reviewState: { verdict: 'approved', headSha: OLD }, currentHead: HEAD, roundsLeft: true,
-    mergeable: 'MERGEABLE', checks: 'SUCCESS' };
-  const before = JSON.stringify(classifyClosureOwnership(input));
+test('rescue projection preserves the shared answer with a failing shadow sink', async () => {
+  const decision = nextAction(base());
+  const before = JSON.stringify(classifyClosureOwnership(decision));
   setNextActionShadowSinkForTesting(() => { throw new Error('synthetic sink failure'); });
-  assert.equal(JSON.stringify(classifyClosureOwnership(input)), before);
+  assert.equal(JSON.stringify(classifyClosureOwnership(decision)), before);
   await settleNextActionShadowsForTesting();
-  const records = [];
-  setNextActionShadowSinkForTesting(r => records.push(r));
-  assert.equal(JSON.stringify(classifyClosureOwnership(input)), before);
-  await settleNextActionShadowsForTesting();
-  // Rescue input has no PR state: the shadow refreshes, which disagrees.
-  assert.equal(records[0]?.source, 'rescue-classifier');
-  assert.equal(records[0]?.next.reason, 'pr-unknown');
+  assert.equal(classifyClosureOwnership(decision).closureOwner.actor, decision.actor);
 });
 
 function postedArgs(captured, prState) {

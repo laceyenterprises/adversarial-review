@@ -480,14 +480,14 @@ NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,
 round?, evidenceRefs, decisionKey}`. NXA-03 adopts this decision for hammer wake
 routing, NXA-04 for remediation closeout, and NXA-05 for closer routing and recovery ownership. HAMATTEST-03 also
 executes its head-bound exact-head review decision through the ownerless
-watchdog, including after the old review-round ceiling. The retained legacy adapter is available for caller-only source rollback. The decision grants no merge authority. The exact-head, provenance,
+watchdog, including after the old review-round ceiling. NXA-07 removes the replaced policy; rollback restores source revision `4d06237c`. The decision grants no merge authority. The exact-head, provenance,
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
 The shadow (`src/pr-next-action-shadow.mjs`, reached through the import-free
 consumer seam `src/pr-next-action-consumer.mjs`) runs at closure orchestration
-(final legacy owner), the posted-review handler, the no-progress lane, the
-closer handoff, the rescue classifier, the hammer-owner route page and the
+(selected shared workflow), the posted-review handler, the no-progress lane, the
+closer handoff, historical rescue telemetry, the hammer-owner route page and the
 watcher handoff wake. Closure evidence registers one enriched decision per pass;
 an earlier bare snapshot read cannot prevent that enrichment. Later consumers
 reuse the enriched pair, including while its launch evidence read is pending.
@@ -1764,8 +1764,8 @@ A proven comment-only final-round handoff also resumes when CI fails
 remaining non-blocking findings or strict non-blocking remediation enabled. The
 hammer owns CI repair before exact-head green checks and merge; it does not need
 a conflict to take ownership. This includes heads reported as
-`BLOCKED`, `UNSTABLE` or `BEHIND`. Blocking or unknown blocking findings,
-structural blocks, hard-stop labels and merge-lease rules retain their gates.
+`BLOCKED`, `UNSTABLE` or `BEHIND`. Findings remain repair input; structural restrictions, hard-stop labels and
+merge-lease rules retain their gates. Repair admission grants no merge waiver.
 The hammer prompt already requires fixing failing checks before merge.
 
 A proven final-round head that conflicts with base also reaches the hammer with
@@ -2578,9 +2578,8 @@ R13 operator-approved daemon lane; established owners, holds, structural safety
 refusals and retry caps still take precedence. Exhaustion from another head
 cannot authorize repair on the current head.
 
-The legacy disagreement counter and decline classifiers are retained for a
-caller-local source rollback. They no longer select the runtime owner, count
-polls toward dispatch or park a PR. Both merge paths still use the single
+NXA-07 deletes the disagreement-based route policy and decline classifiers.
+Historical counter files remain diagnostic evidence; they grant no admission. Both merge paths still use the single
 `classifyCheckRollup` classifier. Its closer scope excludes the service's own
 status context; mutation-time daemon eligibility retains its existing scope.
 
@@ -3313,27 +3312,12 @@ For a refused head, inspect the explicit diagnostic CLI evidence described above
 and repair the PR branch or restore missing history/patch access. A new head re-evaluates
 the predicate. If evidence recovery needs another worker, an attributable operator
 can apply `merge-agent-requested` scoped to the current head and latest PR update.
-The existing operator-fallback lane accepts both the closer's
-`primary-change-repair-required` and the daemon's `primary-change-needs-operator`,
-with `needsOperator: true`. The orchestrator promotes the daemon refusal to
-the top-level result before the closer runs. A nested daemon refusal is accepted
-only under that promoted `primary-change-needs-operator` result or the daemon's
-own `daemon-failed-closed` wrapper; wrapper support is defensive compatibility,
-not a shape the current primary-change producer emits. `manualCloseRequired`
-is a paging signal and does not authorize this recovery lane.
-Co-occurring non-primary-change safety reasons in either the top-level or nested
-daemon result, including `operatorReason`, prevent fallback using the shared
-recovery safety classifier. This exception does not include other safety holds:
-risk/two-key policy, security, destructive-change holds, hard-stop labels
-(including `no-merge-hold`) and hammer-cap suppression retain adjudication.
-An unresolved `dispatch-status-unknown` probe retains AMA ownership even after
-its dispatched lease expires: lease age cannot prove the hammer has stopped.
-A nested primary-change refusal cannot override that top-level ownership result
-or hammer-cap suppression. The checked-in #7716 fixture has the already-supported
-closer shape (`primary-change-repair-required`, `needsOperator: true`); it does
-not establish the cause of that PR's production hold. Diagnose a live recurrence
-from its watcher result, label event, review row and closer lease state before
-attributing recovery to nested-result handling.
+The existing operator-fallback executor requires a typed primary-change repair
+result and the same subject/head's selected hammer dispatch intent. Diagnostic
+reason strings or nested refusal shapes cannot grant admission. Shared ownership
+reconciliation, safety recovery, caps and explicit holds keep their selected
+owner. Identity freshness, blocking labels and physical lease checks apply
+independently; the operator request grants no merge waiver.
 Before taking over a settled primary-change refusal, the watcher checks for a
 live closer lease at any head, including a lease keyed to the previous head.
 Both inline and background modes evaluate the closer first; newly queued/running
@@ -3361,12 +3345,11 @@ post-acquisition ownership probe excludes its own watcher PID from that lease
 check; competing leases and other live ownership evidence still hold dispatch.
 Queued jobs, other leases, refusal reasons and unreadable ledger results alone
 do not prove ownership. A proven owner clears the clock; head movement does not.
-After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override), request
-current-head review when no authoritative review exists and re-review remains
-open, otherwise request HAM repair. Settled Comment-only verdicts share the
-review service's refusal predicate; terminal final-round ledger evidence and
-exhausted review cycles select HAM even after head movement.
-Historical stops and retry counters do not prevent that dispatch.
+After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override),
+execute only a selected reviewer or hammer dispatch after proving ownership is
+absent. Historical projection, a wake or an unreadable retry chain cannot
+substitute for that proof. Automatic stops and retry exhaustion retain recovery
+ownership through the shared decision rather than an independent rescue table.
 Each external action reserves one of two per-head attempts before launch;
 proven transient waits refund that reservation. In addition to existing
 coexistence/background and rate-limit waits, `stacked-base-read-failed` and
@@ -3756,26 +3739,15 @@ handoff uses the live candidate's labels for scoped fallback and hard skips,
 rather than the earlier discovery snapshot: a newly applied request is eligible
 for scope validation, a removed request grants no override, and newly applied
 hard-stop labels retain ownership. Ordinary AMA safety gates still apply.
-A stale review requests one current-head re-review through the review-state CAS.
-Missing findings sections request a re-review once per head; a subsequent malformed review may
-retry the closer, subject to its ordinary terminal-remediation gates. A
-strict-mode comment-only review with standing non-blocking findings reaches the
-hammer after the existing terminal grace, proven final-round resume, or cycle
-exhaustion admits it. The shared kernel findings parser supplies both
-eligibility counts and the attestation's total blocking plus non-blocking count.
-
-Recovery retries re-enter the ordinary closer gates and leases. They authorize
-remediation dispatch, never a merge waiver. Hard-stop labels, risk policy,
-security holds and destructive-change safety holds still require adjudication.
-Recovery only widens worker-class admission; it never bypasses mechanical
-pending-CI routing, actionable-reason checks or Codex-first ownership. Refusals
-containing `remediation-pending`, `remediation-state-unknown` or
-`blocking-findings-present` wait for the follow-up lane without spending recovery
-attempts or paging. The ordinary closer remains responsible for admitting an
-exhausted Request-changes cycle after remediation ownership is released and
-completed-remediation evidence is satisfied.
-Missing identity or safety evidence remains fail-closed and retries automatically.
-A live closed or merged candidate never starts recovery.
+Recovery projects `nextAction(snapshot)`: exact-head review uses the existing
+review-state CAS; findings and failed CI select remaining remediation or a final
+hammer. Pending checks and unknown evidence retain a bounded observer. An explicit
+hold alone returns operator ownership. Automatic safety refusals and exhausted
+retries keep a recovery owner, action and anchored deadline; pages do not refuse
+otherwise authorized work. Reason text is diagnostic, not a repair allowlist.
+Every execution re-enters the ordinary identity, content, attestation, CI,
+protection, arming and lease gates. A live closed or merged candidate never
+starts recovery.
 
 Launch recovery uses the existing closer liveness predicates and ledger adapter
 (the AMACAP-01 accounting seam). Proven terminal or phantom launches release
@@ -3785,111 +3757,12 @@ Recovery state is durable under `data/follow-up-jobs/ama-automated-recovery/`,
 keyed by repo, PR and head, and protected by a crash-releasing kernel flock.
 The action cap follows `amaRetainLoopCapFor(dispatchJob.remediationPlan.maxRounds)`.
 Only confirmed dispatches, triggered re-reviews, and non-cancellation action
-errors spend attempts. Active hammers/remediators, background launches, lease
-contention, uncertain dispatch status, comment-only grace, and proven final-round
-CI waits return `ama-pending` without consuming the budget. Configuration/draft
-refusals and explicit `needsOperator` results retain adjudication without paging.
+errors spend attempts. Live ownership, deferred dispatch and read/proof waits
+retain their anchored deadline without consuming attempts. Historical UNKNOWN
+counters remain readable; they no longer choose eligibility or an owner.
+Recovery reports include the selected action, actor, reason, head and age.
+Existing alert debounce, delivery retry and refund behavior remain in effect.
 Abort and coexistence-timeout errors propagate without charging recovery.
-
-HAMUNKNOWN-01 tracks settled `background-pr-mergeable-unknown` cycles separately
-from charged recovery actions. K cycles are tolerated, using the same
-remediation-derived cap; more than K cycles exhaust only after 30 minutes
-(`stuckDeadlineMs`) since the first UNKNOWN in that series. Queue/in-flight
-observations, probe-unavailable results and coexistence timeouts neither spend
-nor reset this series. Gate-level `closer-head-mergeability-unknown` and nonempty
-`not-eligible` results containing only `pr-mergeability-unknown` or
-`labels-unavailable` are also neutral, preserving the series and any UNKNOWN
-event. A different resolved blocker resets its count and clock.
-Recovery supplies a lane-only `urgent` boolean: UNKNOWN waits and backgrounded
-probes remain urgent only through K settled cycles, with no exhaustion event.
-Beyond K, normal backoff applies while the wall-clock floor runs; scheduled
-probes still escalate. Ordinary `ama-pending` returns carry no closure reason
-or recovery snapshot, so submission/settlement alternation does not change
-the lane decision fingerprint or spend its reset cap.
-UNKNOWN exhaustion names `background-pr-mergeable-unknown`
-in the existing SEV1 event and page. When a different resolved blocker arrives,
-its UNKNOWN-origin event clears so hammer/re-review recovery can resume;
-successful `pagedReasons` receipts remain for per-head, per-reason deduplication.
-A later different exhaustion reason pages again on the same head. Legacy
-`paged` receipts migrate before clearing the event; see the data-model doc.
-
-A refused action or exhausted action cap must remain non-progressing for 30
-minutes (`stuckDeadlineMs`), independent of tick count. Re-review queue states
-`pending`, `reviewing`, and `pending-upstream` are exempt from the recovery
-re-review deadline; their own stall monitoring owns queue latency. An unchanged
-posted snapshot without an active review expires after 30 minutes. At either
-non-progress deadline the watcher returns `recovery-exhausted`, persists and logs
-`ama.automated_recovery.exhausted` with severity SEV1, reason, PR, head and
-attempts, and queues one page per head and reason with a stable outbox identity.
-The outbox also deduplicates by reason and honors matching legacy receipts.
-Failed page enqueue
-retries without duplicating a successfully queued page. A new head starts a new
-recovery budget. The merge kill switch continues to disable execution.
-Store fields, lock semantics, retention, and safe reset procedure are documented
-in [AMA Automated Recovery](data-model/ama-automated-recovery.md). There is no
-automatic pruning of state or stable lock files.
-
-CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
-the second Codex OAuth account. It keeps the hammer route and merge-capability
-identity. The cross-model fallback default remains `[hammer-claude]`.
-
-LANEFAILOVER-01: unpinned Codex workers resolve accounts before dispatch using
-the same fleet quota, weekly measurement, freshness and broker readiness
-evidence as the reviewer account classifier. CODEXORDER-01 adds
-`roles.codex_worker_account_order` (`personal-first` or `corporate-first`, default
-`personal-first`), with env override `AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER`.
-This one value selects the preferred account for the AMA closer, merge-agent
-recovery and Codex remediation lanes. Personal capacity maps to `hammer` or
-`codex`; corporate capacity maps to `hammer-corp` or `remediator-codex-corp`.
-
-Confirmed exhaustion or broker unavailability permits an independently ready
-second account. CODEXFALLTHRU-01 also permits independently measured, available
-and broker-ready second-account capacity when preferred-account evidence is
-unknown or stale. Unknown evidence neither admits that account nor proves it
-exhausted. If no account qualifies, any unknown evidence returns
-`codex-account-evidence-unknown`; otherwise the hold reason is
-`no-ready-codex-account`. Each fresh dispatch resolves again in the configured
-order. Codex reviewers remain **corporate first** and hold on unknown/stale
-preferred-account evidence.
-
-Explicit worker-class pins retain their previous behavior: a concrete
-file/env/CLI class value wins over code defaults or builder routing, including
-a personal pin. Already account-specific corporate classes are preserved.
-For example, the AMA `roles.adversarial.merge_authority.worker_class` supports
-`hammer-corp`. Cross-model fallback lists, HHR/AFH grounding, single-hop failover
-and merge eligibility retain their existing contracts. Account substitution
-does not send a cross-model fallback alert.
-
-Each dispatch emits one account line with its class and reason, for example
-`codex_account=corporate worker_class=hammer-corp reason=corporate-ready` or
-`codex_account=personal worker_class=hammer reason=corporate-unavailable-personal-ready`.
-Unknown corporate evidence followed by ready personal capacity reports
-`reason=corporate-evidence-unknown-personal-ready`; personal-first reasons use
-the corresponding personal-to-corporate wording.
-
-Rollout: ship this reader and the companion host strict-loader support before
-an operator sets the new key. Checked-in runtime YAML leaves it unset. After
-both readers ship, the operator can select either order and verify the existing
-account dispatch logs against observed quota and broker readiness. Inspect
-explicit class pins if automatic routing does not engage. Use synthetic fixtures
-for failover tests; do not alter live quota state to test routing.
-
-HAM context emits an under-8192-byte summary; use `bin/primary-change-context.mjs` for full patches. Commit identity stays local; merge decisions fetch primary evidence lazily and forward cancellation. The hammer in-lease merge re-fetches evidence independently of its claim. Transient evidence errors cannot suppress CI/conflict repair dispatch. Current commit provenance selects the first hammer parent, including login plus recorded-launch provenance for untagged hammer repairs after the builder boundary. Base merges use the first parent only after verifying the second parent belongs to the base ancestry.
-
-Primary evidence readers use an explicit runtime root when supplied, otherwise
-`HAM_ROOT_DIR`, otherwise the code checkout. Deployments with a separate runtime
-root must set `HAM_ROOT_DIR` for CLI and head-closer processes; the daemon and
-rendered hammer lease gate pass their configured root. `ama-check --primary-change`
-is required for all calls; an explicit no-HAM evidence result is still required.
-Launch records never select the primary head directly: the first proven hammer commit's parent does. They corroborate login-only untagged pushes after the builder boundary. A launch without a matching subsequent push anchors nothing. Unreadable launch evidence is retryable; unsupported ancestry or missing builder evidence escalates as a structural unknown. Tagged history does not require launch evidence unless login-only commits also need classification.
-Each evaluation reads a compare endpoint once; pre-lease and in-lease evaluations
-remain independent to preserve fresh evidence. GitHub compare bounds are fewer
-than 250 commits and fewer than 300 files; larger or truncated comparisons remain
-structural unknowns. Omitted patches pass only with identical trusted blobs.
-A diverged launch without HAM trailers remains unknown: untagged automation
-cannot be excluded from that evidence (follow-up LAC-1832). Non-HAM remediation
-trailers cannot authorize primary reversals (follow-up LAC-1833). In-place repairs
-remain allowed, but preserving author intent takes precedence over those waivers.
 
 ### AMACAP-01 / AMASCALE-01 closer launch capacity and reconciliation
 
@@ -4811,7 +4684,7 @@ retry and lifetime caps. Reclaiming the handed lease for that hammer is locked
 and still uses atomic single-claim acquisition.
 
 `nextAction` exposes the shared workflow alongside orchestration results;
-`decideClosureOwner` remains the rollback/legacy adapter. Diagnostic `merge-agent-stuck` and
+`decideClosureOwner` projects a supplied shared decision or snapshot. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
 remain enforced. LEASEDEADPID-01 shares pending/dispatched reclaim predicates
 with closer dispatch: a dead local watcher's pending lease or a reclaimable
@@ -5107,12 +4980,11 @@ persistence failures log a warning for filesystem recovery.
 
 ## Final-round closeout recovery (FINALCLOSE-01)
 
-A final-round coexistence read timeout retries dispatch admission on the same
-tick using the local round ledger. This route dispatches a hammer and cannot
-merge from the watcher: it supplies no merge certificate and leaves head,
-checks, mergeability, provenance and operator gates to the hammer under its
-lease. Ordinary non-final heads retain the timeout refusal. Background dispatch
-retains the per-PR queue and checks the live head before launch.
+A coexistence read timeout retains an owned snapshot refresh. Immutable proof
+work continues in the bounded cache and a later eligible pass consumes it without
+repeating reads. There is no second final-round timeout admission policy.
+Background dispatch retains the per-PR queue, original decision and deadline,
+then revalidates the live head and shared generation before launch.
 
 HAMNOREREVIEW-01 keeps closure with the hammer. Publication first tries the
 captured starting-base proof; if it cannot prove that base, the hammer assumes
@@ -5538,3 +5410,30 @@ Deployment restores the daemon's automatic reconciliation, including legacy abse
 Canonical identity and unidentified-row absence guarantees in LAC-2096 apply to PostgreSQL. The legacy SQLite ticket reader requires projected ticket/head columns: a producer-shaped SQLite ledger without them remains fenced/unsupported for ticket-wide recovery; do not interpret its unreadable result as absence. SQLite ledgers with projected columns do not supply the PostgreSQL unidentified-row guarantee.
 
 Before deploying, verify the configured reader can SELECT launch_requests, launch_request_logical_job_claims and worker_runs, with ticket_ref and launch_request_id on claims and task_key and launch_request_id on worker_runs. Missing privileges fail closed; do not omit existing linked evidence to turn a failed grant into an apparent absence. Required CI discovers native PostgreSQL tools through pg_config --bindir or PATH and fails if unavailable. Each payload and lineage document is expanded once per candidate row into small typed identity fields; the legacy whole-table pre-16 text fallback still scales with row count and remains an explicit operational limit.
+
+
+## One successor policy after deletion (NXA-07)
+
+`nextAction(snapshot)` owns selection for all adopted closure consumers.
+Compatibility owner/rescue outputs and no-progress scheduling project its
+chosen action, actor, deadline and queue intent. A new reason is diagnostic
+evidence, never an admission registration. Background preflight revalidates
+PR facts and replaces the generation; it does not refuse repair independently
+because mergeability is UNKNOWN. Deterministic safety restrictions retain
+priority over CI/conflict repair.
+
+Removed: the legacy closure/rescue tables, repair reason allowlists,
+final-round resume/grace selection, daemon decline route classifiers,
+and independent automated/orphan/no-progress eligibility. Retained: pure
+merge predicates and structural restrictions, semantic reversal and content
+proof, strict/domain and terminal hammer judgement, arming, HCP/identity,
+exact-head required checks/protection, lease fencing, claim/idempotency,
+terminal no-merge reconciliation, bounded retries, immutable caches/history,
+wake delivery, drain observations, queues and external class-cap diagnostics.
+
+The shared adapter matrix and handoff smoke use fabricated evidence only.
+Operator/SRE acceptance still requires each earlier caller's first live hammer
+observation. Missing organic evidence remains pending and is not a runtime
+refusal. No worker production action is part of this change. After deletion,
+rollback restores prior source revision `4d06237c`, including its matching
+owner declarations and tests; there is no second permanent policy switch.

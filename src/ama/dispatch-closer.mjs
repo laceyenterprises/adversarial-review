@@ -13,7 +13,7 @@ import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
-import { closureOwnerFromDecision, closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction } from './closure-next-action.mjs';
+import { closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -22,15 +22,13 @@ import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
-import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import {
   HAMMER_OWNER_ROUTES,
   composeCiBlockedHammerPrompt,
   composeReviewCycleCapHammerPrompt,
   hammerOwnerRouteOf,
-  ciBlockedHammerReasonsCovered,
 } from './review-cycle-cap-route.mjs';
-import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-change.mjs';
+import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
  *
@@ -186,17 +184,13 @@ import {
 } from './hammer-outcome-truth.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
-import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
-  HAMMER_EVIDENCE_FAILURES,
-  HAMMER_GITHUB_READ_FAILURES,
   HAMMER_STOP_HOLD_REASON,
-  isInfrastructureStop,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
 import {
@@ -294,56 +288,8 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'verdict-not-settled-success',
 ]);
 
-// Auto-hammer (2026-06-19): before the remediation cycle is exhausted, route
-// only mechanical eligibility-miss reasons that a hammer can clear without
-// becoming the first responder to a reviewer findings round. Standing blocking
-// or non-blocking findings belong to the normal Codex remediation lane until the
-// bounded review cycle is exhausted.
-//
-// Once the bounded remediation cycle IS exhausted, the contract changes: the
-// hammer is the terminal rescue lane. It gets dispatched for any eligibility
-// miss, remediates the final adversarial review comments (blocking and
-// non-blocking), fixes red CI, posts the audit closeout, and then re-validates
-// the exact live head fail-closed before merge. The validated strict-mode HAM
-// terminal remediation is the exhausted-round adversarial-verdict merge
-// authority; no fresh settled-success verdict or operator-approved override is
-// required for the adversarial verdict gate.
-const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
-  'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
-  'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
-]);
-const STRICT_NON_BLOCKING_REFUSAL_REASONS = new Set([
-  'non-blocking-findings-present',
-  'non-blocking-findings-unknown',
-]);
-const HAMMER_ROUTE_ACTION_REASONS = new Set([
-  'blocking-findings-present',
-  'non-blocking-findings-present',
-  'non-blocking-findings-unknown',
-  'verdict-not-settled-success',
-  'pr-not-mergeable',
-  'ci-not-green',
-]);
-const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
-  'ama-disabled',
-  'pr-not-open',
-  'pr-is-draft',
-  'risk-class-not-permitted',
-  'branch-protection-missing-gate',
-  DUPLICATE_FAMILY_UNRESOLVED_REASON,
-  'fast-merge-state-unsupported',
-]);
 const AMA_CLOSER_MERGE_RETRY_CAP = DAEMON_MERGE_DEFAULTS.retryCap;
 const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
-
-// HMR-01: default terminal-unmerged grace before a settled comment-only PR may
-// reach the hammer. Mirrors the TTM tracker's `terminalUnmergedMinutes` (10m),
-// which is the same threshold `review:terminal_but_unmerged` already tickets on.
-export const DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS = 10 * 60 * 1000;
-
-function hasStrictNonBlockingRefusalReason(reasons = []) {
-  return reasons.some((reason) => STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason));
-}
 
 export function resolveAmaCloserDispatchPriority({
   useHammerTerminalRemediationPrompt,
@@ -372,189 +318,6 @@ export function resolveAmaCloserDispatchPriority({
       : 'validate-and-click',
     protectiveBoost: null,
   };
-}
-
-function finiteNumberOrNull(value) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function hasCommentOnlyTerminalResumeReason(reasons = []) {
-  return hasStrictNonBlockingRefusalReason(reasons) ||
-    (reasons.length === 1 && reasons[0] === 'verdict-not-settled-success');
-}
-
-function hasCommentOnlyFinalRoundResumeReason(reasons = []) {
-  return reasons.some((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason)) ||
-    hasCommentOnlyTerminalResumeReason(reasons.filter((reason) => reason !== 'stale-review-head'));
-}
-
-export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
-  if (!Array.isArray(reasons) || reasons.length === 0) return false;
-  if (options.reviewHandoff === true) return reasons.every(reason =>
-    HAMMER_ROUTE_ACTION_REASONS.has(reason) || reason === 'pr-mergeability-unknown');
-  // FIX (stale-review-head spin, #5053): a self-certified stale reviewed head --
-  // the terminal closer's OWN remediation commit, proven upstream by
-  // `getHeadCloserCommitSuppression` (an external push cannot forge the closer
-  // committer identity) -- is not a genuine block. Strip `stale-review-head` up
-  // front when that proof armed the flag, so BOTH the exhausted and non-exhausted
-  // remediability checks below ignore it. Without the flag (external push,
-  // `suppressed:false`) it is left in place and still blocks -- that is the safety
-  // invariant. Previously the flag was honored only in the exhausted branch, so a
-  // comment-only / non-blocking review whose head the hammer moved never resumed.
-  const effectiveReasons = options?.allowStaleReviewHeadHammerResume === true
-    ? reasons.filter((reason) => reason !== 'stale-review-head')
-    : reasons;
-  // A PROVEN closer-commit self-cert resume: the resume flag armed AND the
-  // original miss actually carried `stale-review-head` (the head the closer's own
-  // commit advanced). This narrows the #5093 clean-review resume below to the
-  // closer-commit-identity case only -- an external (non-closer) stale head never
-  // arms the flag, so it still parks for a fresh review.
-  const closerStaleHeadResume =
-    options?.allowStaleReviewHeadHammerResume === true &&
-    reasons.includes('stale-review-head');
-  // HAMREDCI-01: a proven final-round push hands CI repair to the hammer too.
-  // Mechanical misses are actionable even with no remaining findings/verdict
-  // miss; the reason allowlist below still excludes structural and safety holds.
-  // Exact-head green checks remain mandatory at merge, after terminal validation.
-  const commentOnlyFinalRoundResume = options?.commentOnlyFinalRoundResume === true &&
-    !reasons.includes('blocking-findings-present') &&
-    !reasons.includes('blocking-findings-unknown') &&
-    hasCommentOnlyFinalRoundResumeReason(reasons);
-  const commentOnlyFinalRoundReasonsCovered = () => reasons.every((reason) => (
-    reason === 'stale-review-head' ||
-    reason === 'verdict-not-settled-success' ||
-    STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
-    HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason)
-  ));
-  if (options?.reviewCycleExhausted === true) {
-    if (effectiveReasons.includes('stale-review-head')) {
-      // CYCLECAPHAM-01: the review cycle cap trips on the remediation push the
-      // watcher would have reviewed next, so that head is unreviewed by
-      // construction. No review follows the cap: the hammer adjudicates that
-      // head as final reviewer and must still certify it (validated HAM commit
-      // with Reviewed-Head) before any merge predicate passes. CIBLOCKHAM-01
-      // passes the same flag: its red remediation push is parked unreviewed
-      // because reviewer admission requires green CI.
-      if (options?.reviewCycleCapReached === true) return true;
-      // COMMENTCLOSE-02: the comment-only final round is often the round that
-      // exhausts the budget (agent-os#7334: round 2 of 2), and its proven push is
-      // a stale reviewed head by construction. That one stale head may resume
-      // the hammer's terminal validation; any other still parks.
-      return commentOnlyFinalRoundResume && commentOnlyFinalRoundReasonsCovered();
-    }
-    return true;
-  }
-  // The hammer must have something it can actually act on before the final
-  // rescue lane: a not-mergeable state (conflict / behind) to rebase+resolve, red
-  // CI to fix, or the narrow self-certified closer-commit stale-head resume.
-  // Standing reviewer findings deliberately do NOT count here; a request-changes
-  // review must be remediated by the Codex follow-up lane first.
-  //
-  // FIX (#5093, follow-on to #5053): a fully-clean / settled review whose head the
-  // closer's own commit advanced fails the settled-success verdict gate purely
-  // BECAUSE the clean review is anchored to the pre-advance head -- so the ONLY
-  // reason left after stripping the self-certified `stale-review-head` is
-  // `verdict-not-settled-success` (zero findings, zero CI/mergeability miss). That
-  // is not "nothing actionable": the closer self-certifies the head, so the hammer
-  // resumes and re-validates the settled verdict fail-closed before merge. Treat
-  // `verdict-not-settled-success` as actionable for this narrow closer-commit case
-  // ONLY (`closerStaleHeadResume`); a bare `['stale-review-head']` (no
-  // verdict/finding/CI reason) still parks -- #5053's "no purposeless hammer" --
-  // and an external (non-closer) stale head never arms the flag.
-  // HMR-01 — a settled comment-only PR could never reach the hammer at all.
-  //
-  // Its only miss is either a strict non-blocking refusal or the zero-finding
-  // settled-success reason. Neither is in HAMMER_AUTO_REMEDIABLE_MISS_REASONS
-  // (that set is `pr-not-mergeable` and `ci-not-green` only). The exhaustion
-  // branch above cannot rescue it either: `reviewCycleExhaustedFromRounds`
-  // requires completed remediation or re-review rounds to reach the budget, and
-  // a strict-mode comment-only verdict may spawn one final non-blocking round,
-  // but that need not exhaust the PR-wide round budget. So the counter may
-  // remain below the cap,
-  // `reviewCycleExhausted` never flips, and the PR parks: terminal, clean,
-  // green, mergeable, and structurally unable to earn a hammer.
-  //
-  // Observed 2026-08-24: five PRs simultaneously `terminal_but_unmerged` with
-  // `verdict=comment-only` (#5845 #5846 #5847 #5851 #5854), rounds 0-3, ages
-  // 14-69m and climbing, every one logging `AMA hammer route retained ownership:
-  // not-eligible`.
-  //
-  // The operator contract is Codex-first, Hammer-last: the hammer is the
-  // remediator of LAST resort. So this does not fire on a fresh comment-only
-  // verdict -- only once the PR has been terminal-but-unmerged past the same
-  // grace `review:terminal_but_unmerged` already tickets on. The caller supplies
-  // the measured duration; when it is absent this branch is inert and behaviour
-  // is exactly as before.
-  const commentOnlyTerminalMs = finiteNumberOrNull(options?.settledCommentOnlyTerminalMs);
-  const commentOnlyTerminalGraceMs = Number.isFinite(Number(options?.commentOnlyTerminalGraceMs))
-    ? Number(options.commentOnlyTerminalGraceMs)
-    : DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
-  const commentOnlyTerminalResume =
-    commentOnlyTerminalMs !== null &&
-    commentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
-    hasCommentOnlyTerminalResumeReason(effectiveReasons);
-  if (commentOnlyFinalRoundResume) {
-    return commentOnlyFinalRoundReasonsCovered();
-  }
-
-  const hasActionable =
-    effectiveReasons.includes('pr-not-mergeable') ||
-    effectiveReasons.includes('ci-not-green') ||
-    commentOnlyTerminalResume ||
-    (closerStaleHeadResume && effectiveReasons.includes('verdict-not-settled-success'));
-  if (!hasActionable) return false;
-  const hasMechanicalMiss =
-    effectiveReasons.includes('pr-not-mergeable') ||
-    effectiveReasons.includes('ci-not-green');
-  // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
-  // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
-  return effectiveReasons.every((reason) => (
-    HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason) ||
-    (hasMechanicalMiss && reason === 'verdict-not-settled-success') ||
-    // DIRTYOWN-01: a transient `mergeable=UNKNOWN` read beside a real mechanical
-    // miss must not strand it; the hammer re-reads mergeability at its own head.
-    (hasMechanicalMiss && reason === 'pr-mergeability-unknown') ||
-    (closerStaleHeadResume && !effectiveReasons.includes('ci-not-green') && (
-      reason === 'verdict-not-settled-success' || reason === 'non-blocking-findings-present'
-    )) ||
-    // HMR-01: the settled comment-only resume covers exactly the strict
-    // non-blocking refusal plus its paired verdict reason, or the zero-finding
-    // bare verdict reason after the measured terminal-unmerged grace. A
-    // co-occurring BLOCKING finding is still not covered here, so it continues
-    // to fail this `every` and park -- that is the safety invariant, unchanged.
-    (commentOnlyTerminalResume && (
-      STRICT_NON_BLOCKING_REFUSAL_REASONS.has(reason) ||
-      reason === 'verdict-not-settled-success'
-    ))
-  ));
-}
-
-function hammerRouteReasonsFromTrace(verdict) {
-  const reasons = [];
-  const trace = verdict?.trace || {};
-  const blocking = trace.verdict?.blockingFindings;
-  const nonBlocking = trace.verdict?.nonBlockingFindings;
-  if (blocking?.known === true && Number(blocking.count) > 0) {
-    reasons.push('blocking-findings-present');
-  }
-  if (nonBlocking?.known === true && Number(nonBlocking.count) > 0) {
-    reasons.push('non-blocking-findings-present');
-  }
-  if (trace.mergeability?.mergeableState && trace.mergeability.mergeableState !== 'MERGEABLE') {
-    reasons.push('pr-not-mergeable');
-  }
-  if (trace.ciGreen?.green === false) {
-    reasons.push('ci-not-green');
-  }
-  return reasons;
-}
-
-function isHammerRouteStructurallyBlocked(reasons) {
-  if (!Array.isArray(reasons)) return false;
-  return reasons.some((reason) => (
-    HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS.has(reason) ||
-    String(reason || '').startsWith('label-')
-  ));
 }
 
 export function terminalHammerReviewCycleExhausted(reviewState) {
@@ -591,13 +354,6 @@ export function terminalHammerReviewCycleExhausted(reviewState) {
   if (!hasRemediationRoundEvidence) return true;
   const completedRemediationRounds = Number(reviewState?.completedRemediationRounds);
   return Number.isFinite(completedRemediationRounds) && completedRemediationRounds > 0;
-}
-
-function isPendingCiMechanicalGateMiss(verdict, reasons) {
-  if (!Array.isArray(reasons) || reasons.length !== 1 || reasons[0] !== 'ci-not-green') {
-    return false;
-  }
-  return verdict?.trace?.ciGreen?.conclusion === 'PENDING';
 }
 
 export function namedAmaNoDispatchReason(reason, reasons = []) {
@@ -1522,18 +1278,6 @@ export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME = 'failed-without-merge';
 export { AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './closer-lease.mjs';
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
-// NOOWNER-01: eligibility misses a hammer may be re-admitted for after it
-// stopped on the same head and an input it read changed.
-// Standing blocking findings are not here: Codex stays their first responder.
-const HAMMER_STOP_REDISPATCH_REASONS = new Set([
-  'stale-review-head',
-  'verdict-not-settled-success',
-  'blocking-findings-unknown',
-  'non-blocking-findings-present',
-  'non-blocking-findings-unknown',
-  'ci-not-green',
-  'pr-not-mergeable',
-]);
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
@@ -2697,14 +2441,6 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
 // reconcilePreReceiptIntent owns the fenced settlement now (LAC-2081).
 export function settleRefusedHammerWake() { return null; }
 
-function errorDiagnosticLines(err) {
-  return [err?.message, err?.stderr, err?.stdout]
-    .filter(Boolean)
-    .flatMap((value) => String(value).split('\n'))
-    .map(line => line.trim())
-    .filter(Boolean);
-}
-
 function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, dispatchContext }) {
   const reasons = [];
   if (verdict?.eligible) reasons.push('latest_review_settled_success');
@@ -3706,7 +3442,6 @@ export const __testables__ = Object.freeze({
   resolveAgentOsPythonBin,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
-  isHammerRouteStructurallyBlocked,
   fetchMergeCommitShaBestEffort,
   emitWorkerGitMergeSignalBestEffort,
 });
@@ -4589,6 +4324,7 @@ export async function maybeDispatchAmaCloser(args) {
   const targetRepo = args.dispatchContext?.repo || args.prMetadata?.repo || args.repo;
   const targetPrNumber = args.dispatchContext?.prNumber ?? args.prMetadata?.prNumber ?? args.prNumber;
   const dispatchContext = args.dispatchContext && { ...args.dispatchContext, repo: targetRepo };
+  const decisionSink = { value: args.sharedNextAction };
   let admissionCompleted = false;
   let preservePredecessor = false;
   try {
@@ -4602,9 +4338,9 @@ export async function maybeDispatchAmaCloser(args) {
           && (terminalPr || !targetHead || record.headSha === targetHead))) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
+          processExecFileSyncImpl: args.processExecFileSyncImpl,
           readLegacyIntentLaunchesImpl: args.readLegacyIntentLaunchesImpl,
           processKillImpl: args.processKillImpl, env: args.env || process.env,
-          processExecFileSyncImpl: args.processExecFileSyncImpl,
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
           deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
           readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
@@ -4666,6 +4402,7 @@ export async function maybeDispatchAmaCloser(args) {
     }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
+      observeSharedDecision: shared => { decisionSink.value = shared; },
       prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
       // Preserve the production snapshot contract through the retry wrapper.
       useLaunchSnapshot: args.useLaunchSnapshot ?? !args.readLaunchRequestStatusImpl,
@@ -4693,7 +4430,7 @@ export async function maybeDispatchAmaCloser(args) {
         result.existingLease = lease;
       }
     }
-    return result;
+    return bindClosureNextAction(result, decisionSink.value);
   } finally {
     // Interrupted admission cannot prove that predecessor ownership ended.
     for (const { record, logger } of admissionCompleted ? pendingCleanup.values() : []) {
@@ -4707,6 +4444,7 @@ export async function maybeDispatchAmaCloser(args) {
 
 async function maybeDispatchAmaCloserAttempt({
   sharedNextAction = null,
+  observeSharedDecision = () => {},
   cleanupScratchImpl,
   reviewState,
   prMetadata,
@@ -4715,7 +4453,6 @@ async function maybeDispatchAmaCloserAttempt({
   dispatchContext,
   execFileImpl = execFileAsync,
   processKillImpl = process.kill,
-  processExecFileSyncImpl,
   processExecFileImpl,
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
@@ -4739,13 +4476,13 @@ async function maybeDispatchAmaCloserAttempt({
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   guardStackedBaseImpl = guardStackedBase,
   emitProtectivePredecessorFindingImpl = null,
-  logGate = dispatchCloserLogGate,
   logger = console,
   env = process.env,
   operatorLabelClassificationRetryDelaysMs = [],
   signal = null,
   now = null,
 }) {
+  const selectShared = shared => { observeSharedDecision(shared); return shared; };
   let releaseIntentLock;
   const updateDispatchRecord = (root, identity, mutate) =>
     updateAmaCloserDispatchRecord(root, identity, mutate, { cleanupScratchImpl, intentLock: releaseIntentLock });
@@ -4897,8 +4634,7 @@ async function maybeDispatchAmaCloserAttempt({
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
     // With no audit stop, the evaluator still retires legacy on-disk packaging holds.
-    if (!stop || stop.refusal || isInfrastructureStop(stop) || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
-      || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
+    {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         sharedNextAction,
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
@@ -4911,11 +4647,20 @@ async function maybeDispatchAmaCloserAttempt({
         requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
-      sharedNextAction = evidenceStopHold.nextActionShared || sharedNextAction;
+      sharedNextAction = selectShared(evidenceStopHold.nextActionShared || sharedNextAction);
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, recoveryWait: true, reason: HAMMER_STOP_HOLD_REASON,
         hammerStop: evidenceStopHold.hammerStop, nextActionShared: sharedNextAction });
-      if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
+      if (evidenceStopHold.action === 'release') {
+        hammerStopRelease = evidenceStopHold;
+        const controls = sharedNextAction?.snapshot.observations.controls?.value;
+        if (controls?.stop && [stop?.stopKey, stop?.predicate].includes(controls.stop.fingerprint)) {
+          sharedNextAction = reviseClosureNextAction(sharedNextAction, { controls: {
+            ...controls, stop: null,
+            ...(controls.safetyRefusal?.reason === stop?.predicate ? { safetyRefusal: null } : {}),
+          } });
+        }
+      }
     }
   }
 
@@ -4963,7 +4708,6 @@ async function maybeDispatchAmaCloserAttempt({
     eligibilityOptions.closerAuthoredStale = dispatchContext.closerAuthoredStale;
   }
   if (
-    dispatchContext?.finalRoundDispatchOnly !== true &&
     dispatchContext?.allowStaleReviewHeadHammerResume === true &&
     !eligibilityOptions.hamTerminalRemediation &&
     !eligibilityOptions.hamTerminalRemediationGroundTruth &&
@@ -5007,49 +4751,76 @@ async function maybeDispatchAmaCloserAttempt({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
-  const primaryReadRepair = (verdict.reasons.includes('primary-change-read-failed') || verdict.reasons.includes('history-read-failed'))
-    && verdict.reasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  if (!ownerProofRecovery && (verdict.reasons.includes('primary-change-read-failed') || verdict.reasons.includes('history-read-failed')) && !primaryReadRepair) {
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'gate-read-failed', reasons: verdict.reasons });
-  }
-  const orphanAdmit = ownerProofRecovery;
-  if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    const exactReviewEvidence = primaryChangeExactReviewEvidence(verdict.trace);
-    const missingEvidence = verdict.trace?.primaryChange?.missingEvidence || exactReviewEvidence;
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
-      ...(missingEvidence ? { missingEvidence } : {}),
-      ...(exactReviewEvidence ? { exactHeadReview: true } : {}) });
-  }
-  const reviewHandoffLease = dispatchContext?.repo && prMetadata?.headSha
-    ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, {
-      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
-    }) : null;
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
-  const reviewHandoffShared = reviewHandoffLease?.status === 'handed-to-review'
-    ? closureDecisionMatches(sharedNextAction, decisionIdentity) ? sharedNextAction
-      : await resolveClosureNextAction({ input: { reviewState, currentHead: prMetadata.headSha,
-        lease: reviewHandoffLease, roundsLeft: false,
-        strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false },
-        subjectKey: `${dispatchContext.repo}#${prNumber}`, observedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
-        autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
-        checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-        candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
-          isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels }) : null;
-  const reviewHandoffOwner = reviewHandoffShared ? closureOwnerFromDecision(reviewHandoffShared.decision) : null;
-  const reviewHandoffFindings = hasHammerDispatchIntent(reviewHandoffShared, decisionIdentity);
-  if (reviewHandoffOwner?.owner === 'review') {
-    const wait = await observeClosureWait({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
-      reason: `handed-to-review:${prMetadata.headSha}`, pageImpl: deliverAlertImpl, env });
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'handed-to-review',
-      recoveryWait: true, retryAfterMs: wait.retryAfterMs, boundedWait: wait,
-      needsOperator: wait.exhausted });
+  const reviewHandoffLease = prMetadata.headSha
+    ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, decisionIdentity) : null;
+  const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
+    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
+  // Standalone entry points build the same evidence contract. Adopted callers
+  // pass their pair; no dispatch reason or worker class selects a successor.
+  if (!closureDecisionMatches(sharedNextAction, decisionIdentity)) {
+    const cap = evaluateHammerRetryCap(readHammerRetryCapLedger(dispatchContext.rootDir || SUBMODULE_ROOT,
+      { repo: dispatchContext.repo, prNumber }), { jobKey: reviewState.headSha,
+      headSha: prMetadata.headSha, lifetimeDispatchCeiling: cfg?.hammerLifetimeDispatchCeiling });
+    sharedNextAction = await resolveClosureNextAction({ input: {
+      reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
+      checks: verdict.trace.ciGreen.conclusion, retryExhausted: cap.capExhausted,
+      lifetimeExhausted: cap.lifetimeCapExhausted,
+      roundsLeft: typeof reviewState?.remediationPending === 'boolean'
+        ? !terminalHammerReviewCycleExhausted(reviewState) : null,
+      reviewCeilingReached: dispatchContext?.reviewCycleCapReached === true,
+      closerAuthoredStale: dispatchContext?.closerAuthoredStale,
+      strictMode: cfg?.strictMode !== false,
+      strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
+      operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
+    }, subjectKey: `${dispatchContext.repo}#${prNumber}`,
+    observedAt: dispatchContext.dispatchedAt || new Date().toISOString(),
+    autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
+    checksRollup: prMetadata.statusCheckRollup, rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+    candidate: { headSha: prMetadata.headSha, prState: prMetadata.isOpen === true ? 'OPEN' : null,
+      isDraft: prMetadata.isDraft, mergeable: prMetadata.mergeableState }, labels: prMetadata.labels,
+    readLaunches: reviewHandoffLease?.lrqId ? async () => {
+      const probe = earlyLaunchRequestProbe?.launchRequestId === reviewHandoffLease.lrqId
+        ? earlyLaunchRequestProbe.probe : await readLaunchRequestStatusImpl({
+          rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+          launchRequestId: reviewHandoffLease.lrqId, includeRetryChain: true, signal });
+      return { state: probe?.ok ? 'complete' : 'unknown', value: { closer: {
+        headSha: prMetadata.headSha, launchRequestId: reviewHandoffLease.lrqId,
+        probe, outcome: launchRequestOwned(probe) === false ? 'no-merge' : null, retryable: true,
+      } }, provenance: { sourceRef: 'closer-ledger' } };
+    } : undefined });
   }
-  let forceHammerTerminalRemediationPrompt = false;
-  let forceHammerWorkerClass = false;
-  const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
+  sharedNextAction = reviseClosureNextAction(sharedNextAction, {
+    ...(verdict.repairAdmission.ok ? {} : { controls: {
+      ...sharedNextAction.snapshot.observations.controls?.value,
+      safetyRefusal: { deterministic: true, reason: verdict.reasons[0] },
+    } }),
+    reviews: { ...sharedNextAction.snapshot.observations.reviews?.value, ...reviewState,
+      ...(verdict.trace.verdict.hammerAdjudication?.settled === true ? {
+        verdict: 'approved', blockingFindingState: 'known',
+        blockingFindingCount: verdict.trace.verdict.blockingFindings.count,
+      } : {}),
+    },
+    ...(reviewState.remediationPending === true ? { remediation: {
+      ...sharedNextAction.snapshot.observations.remediation?.value,
+      job: { status: 'in_progress', headSha: prMetadata.headSha },
+    } } : {}),
+    progress: { ...sharedNextAction.snapshot.observations.progress?.value,
+      primaryChange: verdict.trace.primaryChange },
+  });
+  if (!verdict.trace.primaryChange.ok) {
+    observeSharedDecision(sharedNextAction);
+    const primaryChangeRepair = sharedNextAction.decision.actor === 'hammer';
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: primaryChangeRepair ? 'primary-change-repair-required' : 'gate-read-failed',
+      primaryChangeRepair, needsOperator: primaryChangeRepair, reasons: verdict.reasons,
+      missingEvidence: verdict.trace.primaryChange.missingEvidence,
+      nextActionShared: sharedNextAction });
+  }
+  observeSharedDecision(sharedNextAction);
+  if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
+  const orphanAdmit = ownerProofRecovery;
   let queuedParkAudit = null;
   if (prMetadata?.headSha && verdict.trace?.hamTerminalRemediation?.ok === true) {
     try {
@@ -5064,223 +4835,17 @@ async function maybeDispatchAmaCloserAttempt({
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
     && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(queuedParkReason);
-  // A validated HAM already covered the original findings retained in trace.
-  // Mechanical misses still require repair; certification cannot waive them.
-  const parkRouteReasons = eligibleHammerRouteReasons.filter((reason) =>
-    !['blocking-findings-present', 'non-blocking-findings-present'].includes(reason));
-  // GitHub's asynchronous mergeability calculation is waitable, including
-  // alongside pending CI. Keep other eligibility misses on the repair/hold path.
-  const parkWaitReasons = verdict.reasons.filter(reason => reason !== 'pr-mergeability-unknown');
-  const resumeCertifiedPark = certifiedContentionPark
-    && parkRouteReasons.length === 0
-    && (verdict.eligible || parkWaitReasons.length === 0 || isPendingCiMechanicalGateMiss(verdict, parkWaitReasons));
-  const parkRepairReasons = (verdict.eligible ? parkRouteReasons : verdict.reasons)
-    .filter(reason => !reason.startsWith('operator-label-required:'));
-  const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
-    && parkRepairReasons.length > 0
-    && parkRepairReasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason))
-    && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
-  if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
-    if (!ownerProofRecovery && !verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'current-head-ham-terminal-remediation-needs-operator',
-        reasons: verdict.reasons,
-        needsOperator: true,
-      });
-    }
-    // MSM-04: the standalone AMA closer is gone. Fully green clean PRs are
-    // handled by the daemon path before this function is called; dirty,
-    // conflicted/behind, or red-CI PRs get exactly one hammer under the existing
-    // dispatch lease/idempotency machinery. A finding-free PR whose only miss is
-    // pending required CI remains a mechanical validate-gate-and-click close, not
-    // terminal remediation. Structural hard-stops still block.
-    const workerClassForMiss = String(cfg?.workerClass || 'hammer');
-    // Codex-first guard: live orchestration reports completedRemediationRounds.
-    // That evidence must prove Codex/remediator had a turn before terminal
-    // Hammer authority can arm; rereview-only exhaustion is not enough.
-    // CYCLECAPHAM-01 / CIBLOCKHAM-01: a capped PR, or a red-CI head with no
-    // remediation job left, is a final-hammer close. Codex-first still holds: a
-    // remediator that owns the reviewed head is never preempted.
-    const ciBlockedRoute = hammerOwnerRouteOf(dispatchContext) === 'ci-blocked';
-    // CIBLOCKHAM-02: stale verdict/findings describe the pre-remediation head.
-    // Failed required CI with no remediator is owned by the hammer immediately.
-    // A parked route whose live checks are only pending still waits.
-    const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
-      && reviewState?.remediationPending !== true;
-    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
-    // Label reasons supplement ci-not-green; test the route without that
-    // annotation before resolving/paging the independent label hold below.
-    const routeReasons = (verdict.eligible ? eligibleHammerRouteReasons
-      : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed' && reason !== 'history-read-failed')
-        : verdict.reasons).filter(reason => !reason.startsWith('operator-label-required:'));
-    if (!ownerProofRecovery && isHammerRouteStructurallyBlocked(routeReasons)) {
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'not-eligible',
-        reasons: routeReasons,
-      });
-    }
-    if (ciBlockedRoute && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: 'required-checks-pending', recoveryWait: true });
-    }
-    // NOOWNER-01: a hammer that stopped without merging on the live head is not
-    // dispatched again until an input it read changes (src/ama/hammer-stop-hold.mjs).
-    // A stale review only defers to the hold when the live head's tip is
-    // closer-authored, because policy never re-reviews that head; on any other
-    // head the exact-head re-review stays the owner. The hammer-owner routes keep
-    // their own final no-merge decision.
-    if (!ownerProofRecovery && hammerOwnerRouteOf(dispatchContext) === null
-      && (!verdict.reasons.includes('stale-review-head') || dispatchContext?.liveHeadCloserAuthored === true)) {
-      const hammerStopHold = evidenceStopHold || await evaluateHammerStopHoldImpl({
-        sharedNextAction,
-        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
-        hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
-        repo: dispatchContext?.repo,
-        prNumber,
-        headSha: prMetadata?.headSha || dispatchContext?.targetRemediationSha || null,
-        reviewedSha: dispatchContext?.reviewedSha || null,
-        prMetadata,
-        reviewState,
-        strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-        fetchPrimaryChangeImpl,
-        execFileImpl,
-        excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
-        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
-        deliverAlertImpl,
-        logger,
-        now: dispatchContext?.dispatchedAt || new Date().toISOString(),
-      });
-      sharedNextAction = hammerStopHold.nextActionShared || sharedNextAction;
-      if (hammerStopHold.action === 'hold') {
-        // No `reasons`: the orphan watchdog and automated recovery read this as
-        // a bounded wait, never as a re-review or hammer request.
-        return noAmaDispatch({
-          dispatched: false,
-          skipMergeAgent: true,
-          recoveryWait: true,
-          reason: HAMMER_STOP_HOLD_REASON,
-          hammerStop: hammerStopHold.hammerStop,
-          nextActionShared: sharedNextAction,
-        });
-      }
-      if (hammerStopHold.action === 'release') hammerStopRelease = hammerStopHold;
-    }
-    const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
-    // HMR-01: a settled comment-only PR may have only its one final round, so
-    // `reviewCycleExhausted` need not flip and `workerClassForMiss` can be `unknown`.
-    // Both of the existing entry conditions below are therefore permanently
-    // false for it. Admit it on the same measured terminal-unmerged grace the
-    // eligibility check uses, so "hammer as remediator of last resort" is
-    // reachable for the clean-but-non-blocking class at all.
-    const settledCommentOnlyTerminalMs = finiteNumberOrNull(
-      dispatchContext?.settledCommentOnlyTerminalMs,
-    );
-    const commentOnlyTerminalGraceMs = Number.isFinite(
-      Number(dispatchContext?.commentOnlyTerminalGraceMs),
-    )
-      ? Number(dispatchContext.commentOnlyTerminalGraceMs)
-      : DEFAULT_COMMENT_ONLY_HAMMER_TERMINAL_MS;
-    const commentOnlyTerminalAdmit =
-      settledCommentOnlyTerminalMs !== null &&
-      settledCommentOnlyTerminalMs >= commentOnlyTerminalGraceMs &&
-      hasCommentOnlyTerminalResumeReason(routeReasons);
-    const commentOnlyFinalRoundAdmit = dispatchContext?.commentOnlyFinalRoundResume === true &&
-      hasCommentOnlyFinalRoundResumeReason(routeReasons);
-    const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
-      && automatedHammerReasonsCovered(routeReasons);
-    // NOOWNER-01: the hammer stopped on this exact head and an input it read
-    // has changed since. Re-admit it, including on a stale review of a
-    // hammer-rebased head (the hold above only releases there). The hammer
-    // keeps every merge predicate; the per-PR retry cap below still applies.
-    const hammerStopRedispatchAdmit = hammerStopRelease !== null
-      && reviewState?.remediationPending !== true
-      && routeReasons.length > 0
-      && routeReasons.every((reason) => HAMMER_STOP_REDISPATCH_REASONS.has(reason));
-    // Ordinary recovery widens worker-class admission only. Orphan recovery also
-    // admits covered primary-repair/closer-head reasons after its ownerless grace.
-    // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const ciBlockedReasonsCovered = ciBlockedHammerReasonsCovered(routeReasons, {
-      ciBlockedHammerOwner: ciBlockedRoute,
-      checksConclusion: verdict.trace?.ciGreen?.conclusion,
-      remediationPending: reviewState?.remediationPending,
-    });
-    const finalRoundDispatchAdmit = dispatchContext?.finalRoundDispatchOnly === true
-      && reviewState?.remediationPending !== true
-      && routeReasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',
-        'blocking-findings-present', 'blocking-findings-unknown', 'non-blocking-findings-present',
-        'non-blocking-findings-unknown', 'ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
-    const autoHammer = finalRoundDispatchAdmit || ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
-      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
-      && (
-        eligibleHammerRouteReasons.length > 0 ||
-        routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
-        reviewCycleExhausted ||
-        commentOnlyTerminalAdmit ||
-        commentOnlyFinalRoundAdmit
-      )
-      && isHammerRemediableEligibilityMiss(routeReasons, {
-        reviewCycleExhausted,
-        reviewCycleCapReached: reviewCycleCapRoute,
-        allowStaleReviewHeadHammerResume:
-          dispatchContext?.allowStaleReviewHeadHammerResume === true,
-        settledCommentOnlyTerminalMs,
-        commentOnlyTerminalGraceMs,
-        commentOnlyFinalRoundResume: commentOnlyFinalRoundAdmit,
-        commentOnlyFinalRoundConflicting: dispatchContext?.commentOnlyFinalRoundConflicting === true,
-      }));
-    if (!autoHammer) {
-      if (pendingCiMechanicalGateMiss) {
-        logger.log?.(
-          '[ama-closer] mechanical-gate close: dispatching validate-and-click closer ' +
-          'for pending required CI without terminal-remediation prompt'
-        );
-        // fall through to dispatch below (no terminal-remediation prompt)
-      } else {
-        return noAmaDispatch({
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: 'not-eligible',
-          reasons: routeReasons,
-          ...(settledCommentOnlyTerminalMs !== null
-            && settledCommentOnlyTerminalMs < commentOnlyTerminalGraceMs
-            && hasCommentOnlyTerminalResumeReason(routeReasons)
-            ? { recoveryWait: 'comment-only-grace' } : {}),
-        });
-      }
-    } else {
-      forceHammerTerminalRemediationPrompt = true;
-      // Log-feed noise control: this branch re-evaluates the same ineligible PR
-      // every tick. Log once per (repo, pr, head, reasons) transition instead of
-      // every poll; a new head or changed reasons still logs.
-      const autoHammerGateRepo =
-        prMetadata?.repoPath ||
-        prMetadata?.repo ||
-        prMetadata?.base?.repo?.full_name ||
-        prMetadata?.head?.repo?.full_name ||
-        dispatchContext?.repo ||
-        'unknown';
-      const autoHammerGateKey = `${autoHammerGateRepo}#${prNumber}`;
-      const autoHammerSignature =
-        `${prMetadata?.headSha ?? ''}#${(routeReasons || []).join(',')}`;
-      if (logGate.note(autoHammerGateKey, autoHammerSignature).changed) {
-        logger.log?.(
-          `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
-          `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
-          `final findings/checks then re-validate the gate fail-closed`
-        );
-      }
-      // fall through to the dispatch below (hammer template, remediation mode)
-      forceHammerWorkerClass = true;
-    }
-  }
+  // Certification and parking are execution evidence. The shared workflow
+  // determines whether this attempt observes, resumes the daemon, or repairs.
+  const repairCertifiedPark = certifiedContentionPark && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
+  const daemonOwned = sharedNextAction.decision.action === 'daemon-merge'
+    && sharedNextAction.decision.actor === 'daemon' && sharedNextAction.decision.queue?.intent === 'daemon';
+  const resumeCertifiedPark = certifiedContentionPark && daemonOwned;
+  const forceHammerTerminalRemediationPrompt = hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = forceHammerWorkerClass ? String(cfg?.workerClass || 'hammer') : String(cfg?.workerClass || 'hammer');
+  const workerClass = String(cfg?.workerClass || 'hammer');
   // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
   // that actually have findings to remediate. With `hammer` now the default
   // worker class, gating purely on `workerClass === 'hammer'` would route every
@@ -5312,7 +4877,7 @@ async function maybeDispatchAmaCloserAttempt({
     : readFileSync(templatePath, 'utf8');
 
   const repo = dispatchContext.repo;
-  const reviewedSha = dispatchContext.reviewedSha;
+  const reviewedSha = dispatchContext.reviewedSha || reviewState.headSha;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
   const headAdvancedDuringDispatch =
     Boolean(reviewedSha && targetRemediationSha && reviewedSha !== targetRemediationSha);
@@ -6204,7 +5769,7 @@ async function maybeDispatchAmaCloserAttempt({
           outcome: 'superseded',
         }));
       } else if (
-        (certifiedPark || (currentHeadFinalHammerTerminalRemediation &&
+        daemonOwned && (certifiedPark || (currentHeadFinalHammerTerminalRemediation &&
         validatedHamTerminalRemediation && mergedSignalUnknown)) &&
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed'))
       ) {
@@ -6220,7 +5785,7 @@ async function maybeDispatchAmaCloserAttempt({
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
             reason: 'hammer-merge-ready-checks-pending', recoveryWait: true });
         }
-        if (certifiedPark && verdict.reasons.includes('pr-mergeability-unknown')) {
+        if (certifiedPark && verdict.trace?.mergeability?.mergeableState === 'UNKNOWN') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
             reason: 'hammer-merge-ready-mergeability-unknown', recoveryWait: true });
         }
@@ -6235,6 +5800,7 @@ async function maybeDispatchAmaCloserAttempt({
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => attemptDaemonCleanMergeImpl({
             receiptProducerClass: 'closer-hammer',
+            getNextAction: () => sharedNextAction.decision,
             repo,
             prNumber,
             base: baseBranch,
@@ -6992,15 +6558,23 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
 
-  if (verdict.eligible && eligibleHammerRouteReasons.length === 0
-    && !hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
-    && dispatchContext?.forceHammerAfterDaemonFailure !== true
-    && dispatchContext?.finalRoundDispatchOnly !== true && !ownerProofRecovery) {
-    return noAmaDispatch({
-      dispatched: false,
-      skipMergeAgent: true,
-      reason: 'daemon-clean-route',
-    });
+  // Reconciliation above can supersede an earlier live-worker projection.
+  // Keep retry descendants from the ledger probe; status alone proves no absence.
+  if (existingRecord?.launchRequestId && prefetchedLaunchRequestProbe?.ok) {
+    sharedNextAction = reviseClosureNextAction(sharedNextAction, { launches: { closer: {
+      headSha: prMetadata.headSha, launchRequestId: existingRecord.launchRequestId,
+      probe: prefetchedLaunchRequestProbe,
+      outcome: launchRequestOwned(prefetchedLaunchRequestProbe) === false ? 'no-merge' : null,
+      retryable: true, attempt: existingRecord.retryCount ?? null,
+    } } });
+  }
+  observeSharedDecision(sharedNextAction);
+  const capReport = sharedNextAction.decision.row === 'R07-stop'
+    && (sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.retryExhausted
+      || sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.lifetimeExhausted);
+  if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark && !capReport) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: sharedNextAction.decision.reason, recoveryWait: true, eligibilityRejected: !verdict.eligible, nextActionShared: sharedNextAction });
   }
 
   // A same-PR remediation worker owns the branch. Check before the append-only
@@ -7129,6 +6703,12 @@ async function maybeDispatchAmaCloserAttempt({
         });
       }
     }
+    sharedNextAction = reviseClosureNextAction(sharedNextAction, { policy: {
+      ...sharedNextAction.snapshot.observations.policy?.value,
+      hammerCap: { headSha: prMetadata.headSha, retryExhausted: hammerRetryCapDecision.capExhausted,
+        lifetimeExhausted: hammerRetryCapDecision.lifetimeCapExhausted },
+    } });
+    observeSharedDecision(sharedNextAction);
     if (hammerRetryCapDecision.capExhausted) {
       const hammerSeriesCapExhausted = hammerRetryCapDecision.alreadySuppressed
         || hammerRetryCapDecision.nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
@@ -7176,6 +6756,11 @@ async function maybeDispatchAmaCloserAttempt({
         now: dispatchContext.dispatchedAt,
       });
     }
+  }
+
+  if (!hasHammerDispatchIntent(sharedNextAction, decisionIdentity) && !resumeCertifiedPark) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: sharedNextAction.decision.reason, nextActionShared: sharedNextAction });
   }
 
   // Persist the prompt under watcher-owned repo state and pass that path

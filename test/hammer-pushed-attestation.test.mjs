@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { publishPushedHammerAttestation } from '../src/ama/hammer-pushed-attestation.mjs';
 import { exactHammerValidation, fetchHammerHeadRange, hammerAttestationChain } from '../src/ama/hammer-head-validation.mjs';
 import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
+import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 
 const baseHead = 'a'.repeat(40), pushedHead = 'b'.repeat(40), nextHead = 'c'.repeat(40);
@@ -135,6 +135,8 @@ test('HAMATTEST-02: ownership and rescue execute the shared unproven-head decisi
   const closureOwner = decideClosureOwner({ closerAuthoredStale, attested: true,
     reviewState: { headSha: baseHead, verdict: 'approved' }, currentHead: pushedHead,
     roundsLeft: false, reviewCeilingReached: true });
-  assert.deepEqual(closureOwner, { owner: 'review', reason: 'exact-head-review' });
+  assert.equal(closureOwner.action, 'review');
+  assert.equal(closureOwner.actor, 'reviewer');
+  assert.equal(closureOwner.reason, 'exact-head-review');
   assert.equal(classifyRescue({ closureOwner }).decision, 'rereview-eligible');
 });

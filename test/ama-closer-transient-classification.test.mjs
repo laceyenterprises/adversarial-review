@@ -317,6 +317,7 @@ function eligibleInputs(rootDir) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const reviewState = {
     verdict: 'comment-only',
+    reviewCycleExhausted: true,
     headSha,
     riskClass: 'low',
     remediationPending: false,
@@ -670,7 +671,7 @@ test('ownerproof recovery cannot waive unproven primary reversal', async t => {
   assert.equal(prompt, undefined);
 });
 
-test('ownerproof recovery requests HAM repair even for pending-CI-only misses', async t => {
+test('ownerproof evidence retains the shared observer for pending CI', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-orphan-mechanical-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
@@ -687,10 +688,8 @@ test('ownerproof recovery requests HAM repair even for pending-CI-only misses', 
       calls.push(args); throw new Error('test provisioning refusal');
     },
   });
-  assert.ok(calls.some(args => args.includes('dispatch')));
-  const dispatchArgs = calls.find(args => args.includes('dispatch'));
-  assert.equal(dispatchArgs[dispatchArgs.indexOf('--priority') + 1], 'normal');
-  assert.match(prompt, /REMORPHAN-01 owner-of-last-resort pass/);
+  assert.equal(calls.length, 0);
+  assert.equal(prompt, undefined);
 });
 
 for (const state of ['deferred-by-drain', 'dispatch-deferred-transient']) {

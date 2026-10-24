@@ -3474,7 +3474,9 @@ for (const stranded of [false, true, 'shared-rule']) test(`HAMCLOSE-04/HAMATTEST
         let requests = 0;
         const recover = () => recoverOrphan({ ...identity, candidate: { prState: 'open' },
           reviewStateRow: db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get(),
-          result: { amaEnabled: true, closerAuthoredStale: decision },
+          result: { amaEnabled: true, closerAuthoredStale: decision, nextAction: {
+            action: 'review', actor: 'reviewer', reason: 'exact-head-review', head: identity.headSha,
+            queue: { intent: 'dispatch', deferredBy: null } } },
           hasOwnerImpl: async () => ({ owned: false }),
           requestRereviewImpl: options => { requests++; return requestReviewRereview({ ...options, db }); },
           pageImpl: () => assert.fail('synthetic review request must succeed') });

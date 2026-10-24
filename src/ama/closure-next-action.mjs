@@ -12,16 +12,7 @@ export function bindClosureNextAction(result, shared) {
 }
 export const readClosureNextAction = result => decisionsByResult.get(result);
 
-// NXA-05: compatibility outputs describe the selected workflow, including
-// recovery. A page or a capacity observation cannot replace its actor.
-export function closureOwnerFromDecision(decision) {
-  const owner = { review: 'review', remediate: 'remediation', hammer: 'hammer',
-    'daemon-merge': 'daemon-merge', 'wait-for-CI': 'wait',
-    'operator-hold': 'operator-hold', done: 'done' }[decision.action];
-  return Object.freeze({ owner, actor: decision.actor, action: decision.action,
-    reason: decision.reason, head: decision.head, deadline: decision.deadline,
-    decisionKey: decision.decisionKey, queue: decision.queue });
-}
+export { closureOwnerFromDecision } from './closure-owner.mjs';
 
 export function closureDecisionMatches(shared, { repo, prNumber, headSha }) {
   return Boolean(shared?.snapshot?.subjectKey === `${repo}#${prNumber}`
@@ -81,6 +72,7 @@ export function revalidateClosurePr(shared, live, { checksConclusion } = {}) {
   for (const name of ['isDraft', 'mergeable', 'mergeStateStatus', 'labels']) {
     if (Object.hasOwn(live, name)) pr[name] = live[name];
   }
+  if (prior.mergeStateStatus != null && Object.hasOwn(live, 'mergeable') && !Object.hasOwn(live, 'mergeStateStatus')) pr.mergeStateStatus = null;
   const changed = ['state', 'headSha', 'headRefOid', 'isDraft', 'mergeable', 'mergeStateStatus', 'labels'].some(name => {
     const normalize = value => typeof value === 'string' && !['headSha', 'headRefOid'].includes(name) ? value.toUpperCase() : value;
     return JSON.stringify(normalize(pr[name])) !== JSON.stringify(normalize(prior[name]));

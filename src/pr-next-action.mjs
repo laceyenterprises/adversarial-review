@@ -10,12 +10,8 @@
 // protection policy and lease CAS before any mutation. Repair admission (a red
 // or DIRTY head needing a hammer) is not merge permission.
 //
-// NXA-03/04/05/06 adopt this policy for wake, closeout and closer/recovery
-// ownership. `decideClosureOwner` (src/ama/closure-owner.mjs) remains a source
-// rollback adapter. For remaining observational consumers, `fromLegacyClosureOwner` (src/pr-next-action-consumer.mjs)
-// expresses every legacy owner/reason in this vocabulary so the shadow
-// (src/pr-next-action-shadow.mjs) compares one table against the other. docs/NEXT-ACTION-REASON-INVENTORY.md
-// maps legacy reasons to rows; it is design documentation, not a registry.
+// Every caller projects this decision. Reason text is diagnostic evidence,
+// never an admission registry. Rollback uses a prior source revision.
 import { createHash } from 'node:crypto';
 import { classifyCheckRollup } from './checks-summary.mjs';
 import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';

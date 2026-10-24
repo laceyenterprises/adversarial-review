@@ -4,12 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  isDaemonFailClosedHammerRemediable,
-  isDaemonNotTakenHammerRemediable,
-  isDaemonNotTakenTransientRead,
-  maybeDispatchAmaClosureFor,
-} from '../src/ama-closure-orchestration.mjs';
+import { maybeDispatchAmaClosureFor } from "../src/ama-closure-orchestration.mjs";
 import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
 import { observeDaemonResult } from '../src/ama/closure-next-action.mjs';
 import { parkRecordPath } from '../src/daemon-merge-park-log.mjs';
@@ -19,12 +14,11 @@ import {
   clearDaemonRouteDisagreement,
   daemonRouteDisagreementFilePath,
   daemonRouteTransientReadFilePath,
-  observeDaemonRouteDisagreement,
   readDaemonRouteDisagreement,
   recordDaemonRouteDisagreement,
 } from '../src/daemon-route-disagreement.mjs';
 
-// Retained CIDEDUPE-01 helper/ledger behavior is covered for source rollback.
+// Historical ledger storage remains diagnostic; selection uses nextAction.
 // Runtime daemon selection and handoff consume the common next action.
 
 const HEAD = 'a'.repeat(40);
@@ -162,31 +156,6 @@ test('ledger counts per head, resets on a new head, and escalates only past the 
   }
 });
 
-test('only pre-lease gate declines the hammer can fix are hammer-remediable', () => {
-  assert.equal(isDaemonNotTakenHammerRemediable(CI_NOT_GREEN), true);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-not-mergeable', 'stale-head'] }), true);
-  assert.equal(isDaemonNotTakenHammerRemediable(DUPLICATE_FAMILY), false);
-  // DIRTYOWN-01: GitHub's still-computing UNKNOWN is a transient read, not a conflict.
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), false);
-  // ...but an UNKNOWN riding along a real remediable miss must not turn it into a park.
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'pr-mergeability-unknown'] }), true);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['lease-not-held', 'pr-mergeability-unknown'] }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: [] }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'prior-daemon-terminal-failure' }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED }), false);
-});
-
-test('DIRTYOWN-01: only all-transient pre-lease declines are transient reads', () => {
-  const unknown = { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] };
-  assert.equal(isDaemonNotTakenTransientRead(unknown), true);
-  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: ['labels-unavailable', 'pr-mergeability-unknown'] }), true);
-  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'pr-mergeability-unknown'] }), false);
-  assert.equal(isDaemonNotTakenTransientRead(CI_NOT_GREEN), false);
-  assert.equal(isDaemonNotTakenTransientRead({ ...CI_NOT_GREEN, reasons: [] }), false);
-  assert.equal(isDaemonNotTakenTransientRead({ ...unknown, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED }), false);
-  assert.equal(isDaemonNotTakenTransientRead({ ...unknown, reason: 'prior-daemon-terminal-failure' }), false);
-});
 
 test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoking the closer', async () => {
   const rootDir = tempRoot();
@@ -210,105 +179,6 @@ test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoki
     const result = await maybeDispatchAmaClosureFor(args);
     assert.equal(closerMergeableState, null, 'the selected observer does not launch a closer');
     assert.equal(result.nextAction.action, 'wait-for-CI');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('DIRTYOWN-01: a post-lease gate-not-eligible with UNKNOWN beside a remediable gate is hammer-remediable', () => {
-  const failed = (reasons) => ({
-    disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-    reason: 'gate-not-eligible',
-    permanent: false,
-    reasons,
-  });
-  assert.equal(isDaemonFailClosedHammerRemediable(failed(['ci-not-green', 'pr-mergeability-unknown'])), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(failed(['stale-head', 'pr-mergeability-unknown'])), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(failed(['pr-mergeability-unknown'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(failed(['lease-not-held', 'pr-mergeability-unknown'])), false);
-});
-
-test('DIRTYOWN-01: a head stuck on transient reads past the bound logs one stuck event and never parks', () => {
-  const rootDir = tempRoot();
-  try {
-    const logs = [];
-    const warns = [];
-    const logger = { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) };
-    const daemonCleanMerge = { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] };
-    const observe = (headSha, minutes) => observeDaemonRouteDisagreement({
-      rootDir,
-      repo: REPO,
-      prNumber: PR,
-      headSha,
-      daemonCleanMerge,
-      hammerRemediable: false,
-      transientRead: true,
-      now: new Date(Date.UTC(2026, 8, 29, 0, minutes)).toISOString(),
-      logger,
-    });
-    const stuckEvents = () => jsonEvents(logs, 'ama.mergeability_unknown_stuck');
-    const stuckMinutes = MERGEABILITY_UNKNOWN_STUCK_MS / 60_000;
-
-    assert.equal(observe(HEAD, 0).stuck, false);
-    assert.equal(observe(HEAD, stuckMinutes - 1).stuck, false);
-    assert.equal(stuckEvents().length, 0, 'inside the bound nothing is reported');
-    assert.ok(existsSync(daemonRouteTransientReadFilePath(rootDir, { repo: REPO, prNumber: PR })));
-
-    const stuck = observe(HEAD, stuckMinutes + 1);
-    assert.equal(stuck.stuck, true);
-    assert.equal(stuck.escalate, false);
-    assert.equal(stuck.parkResult, null);
-    assert.equal(stuckEvents().length, 1);
-    assert.equal(stuckEvents()[0].headSha, HEAD);
-    assert.equal(stuckEvents()[0].elapsedMs, (stuckMinutes + 1) * 60_000);
-    assert.deepEqual(stuckEvents()[0].daemonReasons, ['pr-mergeability-unknown']);
-
-    observe(HEAD, stuckMinutes + 5);
-    assert.equal(stuckEvents().length, 1, 'the stuck event fires once per head');
-
-    // A new head restarts the clock.
-    assert.equal(observe('head-next', stuckMinutes + 6).stuck, false);
-    assert.equal(observe('head-next', 2 * stuckMinutes + 7).stuck, true);
-    assert.equal(stuckEvents().length, 2);
-    assert.equal(stuckEvents()[1].headSha, 'head-next');
-
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
-    assert.equal(existsSync(daemonRouteDisagreementFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
-
-    clearDaemonRouteDisagreement(rootDir, { repo: REPO, prNumber: PR });
-    assert.equal(existsSync(daemonRouteTransientReadFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('DIRTYOWN-01: a transient read reports the caller head and ignores a ledger kept on another head', () => {
-  const rootDir = tempRoot();
-  try {
-    const logs = [];
-    const logger = { log: (m) => logs.push(String(m)), warn: () => {} };
-    const id = { repo: REPO, prNumber: PR };
-    for (let i = 0; i < 2; i += 1) {
-      recordDaemonRouteDisagreement(rootDir, id, { headSha: 'head-old', daemonCleanMerge: CI_NOT_GREEN, logger });
-    }
-
-    const result = observeDaemonRouteDisagreement({
-      rootDir,
-      repo: REPO,
-      prNumber: PR,
-      headSha: HEAD,
-      daemonCleanMerge: { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] },
-      hammerRemediable: false,
-      transientRead: true,
-      logger,
-    });
-    assert.equal(result.headSha, HEAD);
-    assert.equal(result.count, 0);
-    const event = jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1);
-    assert.equal(event.headSha, HEAD, 'the log names the head this tick observed');
-    assert.equal(event.disagreements, 0, 'another head\'s count is not reported against this one');
-    assert.equal(readDaemonRouteDisagreement(rootDir, id, { headSha: 'head-old', logger }).count, 2, 'the ledger is not touched');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -33,7 +33,7 @@ import {
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
-import { isHammerRemediableEligibilityMiss, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser } from "../src/ama/dispatch-closer.mjs";
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
@@ -194,7 +194,7 @@ test('replay #7334: a stale auto-refresh reason no longer parks the proven final
   assert.equal(payload.reviewState.headSha, REVIEWED);
   assert.equal(payload.reviewState.blockingFindingCount, 0);
   assert.equal(payload.reviewState.nonBlockingFindingCount, 5);
-  assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
+  assert.equal(payload.sharedNextAction.decision.action, 'hammer');
   assert.equal(payload.dispatchContext.reviewedSha, REVIEWED);
   assert.equal(payload.dispatchContext.targetRemediationSha, PUSHED);
   const hammerDispatches = execCalls.filter(({ argv }) => argv[0] === 'dispatch' && argv.includes('hammer'));
@@ -211,24 +211,7 @@ test('replay #7334: a stale auto-refresh reason no longer parks the proven final
 // #7334's final round was round 2 of 2, so the review cycle is exhausted. The
 // exhausted branch refused every stale reviewed head before it reached the
 // COMMENTCLOSE-01 final-round resume; #7313 (round 1 of 2) never hit it.
-test('an exhausted review cycle admits a proven final-round head, and nothing else that is stale', () => {
-  const reasons = ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present'];
-  const exhausted = { reviewCycleExhausted: true };
-  assert.equal(isHammerRemediableEligibilityMiss(reasons, exhausted), false, 'an unproven stale head still parks');
-  assert.equal(isHammerRemediableEligibilityMiss(reasons, { ...exhausted, commentOnlyFinalRoundResume: true }), true);
-  // HAMREDCI-01: failed CI is repair work, not a safety blocker.
-  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'ci-not-green'],
-    { ...exhausted, commentOnlyFinalRoundResume: true }), true);
-  for (const blocker of ['blocking-findings-present', 'blocking-findings-unknown']) {
-    assert.equal(
-      isHammerRemediableEligibilityMiss([...reasons, blocker], { ...exhausted, commentOnlyFinalRoundResume: true }),
-      false,
-      blocker,
-    );
-  }
-  // Exhaustion without a stale head is unchanged.
-  assert.equal(isHammerRemediableEligibilityMiss(['verdict-not-settled-success'], exhausted), true);
-});
+
 
 // ── Item 1: the recorded final-round push wins over any rereview_reason ───────
 

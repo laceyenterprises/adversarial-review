@@ -4,9 +4,6 @@
 // adapters rather than inside the claim loop. Extracting it also pulls
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
-import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
-import { isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
-import { readAmaCloserLease, AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './ama/closer-lease.mjs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { readdir, stat, rm } from 'node:fs/promises';
@@ -20,30 +17,6 @@ import {
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { writeFollowUpJob } from './follow-up-jobs.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
-import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
-import { ciBlockedHammerReasonsCovered } from './ama/review-cycle-cap-route.mjs';
-
-// Retained legacy adapter for source rollback; adopted routing uses nextAction.
-export function hammerWakeEligibility(eligibility, { dispatchReason, ciBlockedHammerOwner,
-  reviewCeilingReached, reviewState, headSha, checksConclusion } = {}) {
-  const stale = Boolean(reviewState?.headSha && headSha && reviewState.headSha !== headSha);
-  // CEILINGPUSH-01: a ceiling-routed external push belongs to terminal
-  // remediation. These are dispatch misses, not permission to merge the head.
-  // The closer still verifies every finding and records exact-head HAM proof.
-  if (reviewCeilingReached === true && stale && reviewState?.remediationPending !== true
-    && eligibility?.reasons?.length > 0
-    && eligibility.reasons.every(reason => ['stale-head', 'verdict-not-eligible'].includes(reason))) {
-    return { eligible: true, reasons: [] };
-  }
-  if (dispatchReason !== 'exhausted-final-hammer' || reviewState?.reviewCycleExhausted !== true) return eligibility;
-  const reasons = (eligibility?.reasons || []).map(reason => reason === 'stale-head' && stale
-    ? 'stale-review-head' : reason === 'verdict-not-eligible' && stale
-      ? 'verdict-not-settled-success' : reason);
-  if (!ciBlockedHammerReasonsCovered(reasons, { ciBlockedHammerOwner, checksConclusion,
-    remediationPending: reviewState?.remediationPending })) return eligibility;
-  return { eligible: true, reasons: [] };
-}
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.
@@ -147,8 +120,8 @@ function scheduleHammerWakeAuditSweep(rootDir) {
  * Reserve and fire the event-driven close-lane wake. This deliberately wakes
  * the watcher: that watcher owns the existing AMA daemon/Hammer decision and
  * closer lease, so the hook cannot become a parallel merge authority. Shared
- * callers provide an immutable snapshot/decision pair; eligibility is retained
- * only for the legacy source rollback adapter.
+ * callers provide an immutable snapshot/decision pair
+ * as the only source of routing intent.
  */
 function requestEligibleHammerWake({
   rootDir = ROOT,
@@ -156,9 +129,7 @@ function requestEligibleHammerWake({
   repo,
   prNumber,
   headSha,
-  reviewedHeadSha,
   eligibilityReason = HAMMER_WAKE_ELIGIBILITY_REASON,
-  eligibility = { eligible: false, reasons: ['eligibility-not-observed'] },
   observedAt = new Date().toISOString(),
   nowMs = Date.now(),
   requestWatcherWakeImpl = requestWatcherWake,
@@ -166,24 +137,9 @@ function requestEligibleHammerWake({
   retryAttempt = 0,
   shared = null,
 } = {}) {
-  // Suppression hands this exact worker push to the hammer. It is eligible
-  // for a wake, while merge authority still requires HAM terminal validation.
-  // Keep every other policy miss, including CI, and never inherit an unrelated
-  // unreviewed push. The same terminal job record owns re-review suppression.
-  if (!shared && eligibility?.reasons?.includes('stale-head')) {
-    const finalRound = findCommentOnlyFinalRoundPushJob(rootDir, {
-      repo, prNumber, reviewedHead: reviewedHeadSha, workerPushedHeadSha: headSha,
-    }, log);
-    if (finalRound && normalizeEffectiveReviewVerdict(finalRound.reviewBody) === 'comment-only') {
-      const reasons = eligibility.reasons.filter((reason) => reason !== 'stale-head');
-      eligibility = { ...eligibility, eligible: reasons.length === 0, reasons };
-    }
-  }
-  // The legacy adapter above is retained for source rollback. Adopted callers
-  // supply the already-resolved pair; transport must not read a second policy
-  // snapshot or infer launch absence from a wake or a terminal worker audit.
+  // A wake transports the selected workflow; it never selects an owner.
   const decision = shared?.decision;
-  const retryEvidence = decision?.reason === 'retry-no-merge'
+  const retryEvidence = decision?.row === 'R08-retry' || decision?.attempt != null
     ? shared.snapshot?.observations?.launches?.value?.closer : null;
   const retryLaunch = retryEvidence?.launchRequestId || null;
   // Fleet descendants reuse the ancestor receipt. Their completed IDs must
@@ -192,6 +148,7 @@ function requestEligibleHammerWake({
     .map(row => row?.launch_request_id || row?.launchRequestId || row?.id).filter(id => typeof id === 'string' && id))].sort();
   const retryIdentity = retryIds.length ? `${retryLaunch || 'retry'}:${createHash('sha256')
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
+  let eligibility = { eligible: false, reasons: [] };
   if (shared) {
     const ownsWake = (decision?.action === 'hammer' && decision.actor === 'hammer'
       && decision.queue?.intent === 'dispatch')
@@ -207,7 +164,7 @@ function requestEligibleHammerWake({
     prNumber: Number(prNumber),
     headSha: String(headSha || '').trim(),
     eligibilityReason: String(eligibilityReason || '').trim(),
-    ...(shared ? { wakeAttemptKey: retryIdentity || (decision?.reason === 'retry-no-merge' && decision.attempt != null
+    ...(shared ? { wakeAttemptKey: retryIdentity || (decision?.attempt != null
       ? `retry-${decision.attempt}` : 'initial') } : {}),
   };
   const eligibilityReasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
@@ -232,18 +189,6 @@ function requestEligibleHammerWake({
     if (outcome !== 'failed') {
       auditPath = hammerWakeAuditPath(rootDir, identity);
       let retryOfLaunchRequestId = retryLaunch || null;
-      if (!shared) try {
-        const lease = readAmaCloserLease(rootDir, identity);
-        if (lease?.status === 'terminal' && AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES.has(lease.terminalOutcome)) {
-          const record = readAmaCloserDispatchRecord(rootDir, { ...identity,
-            headSha: lease.rekeyedFromHeadSha || identity.headSha });
-          // A worker may finalize its audit before its process has exited.
-          // Only observed launch terminality releases a delivered wake.
-          if (record?.launchRequestId === lease.lrqId && isTerminalLaunchRequestStatus(record.terminalLaunchStatus)) {
-            retryOfLaunchRequestId = lease.lrqId || null;
-          }
-        }
-      } catch { /* Missing evidence preserves wake deduplication. */ }
       const reserved = {
         schemaVersion: HAMMER_WAKE_AUDIT_SCHEMA_VERSION,
         event: 'hammer_wake',
@@ -351,8 +296,7 @@ function requestEligibleHammerWake({
                   rootDir,
                   reviewStateDb,
                   ...identity,
-                  reviewedHeadSha,
-                  shared,
+                                  shared,
                   eligibility,
                   observedAt,
                   nowMs,
@@ -366,8 +310,7 @@ function requestEligibleHammerWake({
                     rootDir,
                     reviewStateDb,
                     ...identity,
-                    reviewedHeadSha,
-                    shared,
+                                      shared,
                     eligibility,
                     observedAt,
                     nowMs,

@@ -57,7 +57,6 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/ama-closure-orchestration.mjs:504` | `180000 ms` | createAmaProofCache |
 | `src/ama-closure-orchestration.mjs:1240` | `cfg.dispatchTimeoutMs` | dispatchAmaClosureFor |
 | `src/ama-closure-orchestration.mjs:1792` | `5000 ms` | dispatchAmaClosureFor |
-| `src/ama-closure-orchestration.mjs:2477` | `FINAL_ROUND_CI_WAIT_DEADLINE_MS = 7200000 ms` | dispatchAmaClosureFor |
 | `src/ama-closure-orchestration.mjs:2650` | `cfg.dispatchTimeoutMs` | dispatchAmaClosureFor |
 | `src/ama-closure-orchestration.mjs:2914` | `DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS = 5000 ms` | resolveMergeAgentCoexistenceWithinEvaluation |
 | `src/ama-hammer-background-dispatch.mjs:285` | `DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS = 900000 ms` | createAmaHammerBackgroundQueue |

@@ -7,7 +7,7 @@ import { readClosureImmutable, withClosureEvaluationReadCache } from '../src/clo
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
-import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
+import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 import { handlePostedReviewRow } from '../src/posted-review-row.mjs';
 
 const subjectKey = 's-01';
@@ -359,12 +359,12 @@ test('active launch worker reads prefer the resolved row ID over absent or unres
   }
 });
 
-test('representative legacy owner outputs remain identical after immutable collection', async () => {
+test('shared owner evidence remains identical after immutable collection', async () => {
   const clean = { reviewState: { verdict: 'approved', headSha: head,
     blockingFindingState: 'known', blockingFindingCount: 0,
     nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 }, currentHead: head };
   for (const [input, owner] of [[clean, 'daemon-merge'], [{ ...clean, checks: 'PENDING' }, 'wait'],
-    [{ ...clean, checks: 'FAILURE' }, 'hammer'], [{ ...clean, mergeable: 'CONFLICTING' }, 'conflict-rebase'],
+    [{ ...clean, checks: 'FAILURE' }, 'remediation'], [{ ...clean, mergeable: 'CONFLICTING' }, 'hammer'],
     [{ ...clean, reviewState: {} }, 'review'], [{ ...clean, reviewState: { verdict: 'request-changes', headSha: head } }, 'remediation']]) {
     const before = decideClosureOwner(input);
     const snapshot = await createMergeAgentSnapshotPass().collect({ subjectKey, head, sources: { candidate: source(input) } });

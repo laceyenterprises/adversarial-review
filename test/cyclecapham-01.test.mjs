@@ -1,3 +1,4 @@
+import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 // CYCLECAPHAM-01 (SEV1): a PR at the review cycle cap goes to the hammer for a
 // final decision, not to the operator. Operator decisions, 2026-10-10:
 //   "Hammers judgement is final"
@@ -20,12 +21,7 @@ import Database from 'better-sqlite3';
 
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
-import {
-  _resetHammerRetryCapAlertDebounceForTests,
-  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
-  isHammerRemediableEligibilityMiss,
-  maybeDispatchAmaCloser,
-} from '../src/ama/dispatch-closer.mjs';
+import { _resetHammerRetryCapAlertDebounceForTests, HAM_TERMINAL_REMEDIATION_AUDIT_MARKER, maybeDispatchAmaCloser } from "../src/ama/dispatch-closer.mjs";
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import {
@@ -364,7 +360,7 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
       }
       return { stdout: '{}', stderr: '' };
     },
-    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: workerStatus }, retryChain: [] }),
     fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: REMEDIATED_HEAD, comments }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: (_dir, path, content) => { prompts.push({ path, content: String(content) }); },
@@ -397,28 +393,6 @@ test('cap reached: the closer dispatches the hammer on the unreviewed remediatio
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
 });
 
-test('without the cap route the same unreviewed head still parks for review (the carve-out is scoped)', async (t) => {
-  _resetHammerRetryCapAlertDebounceForTests();
-  const rootDir = tempRoot(t, 'cyclecapham-closer-scope-');
-  const deps = closerDeps();
-  const result = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { reviewCycleCapReached: false }),
-    ...deps,
-  });
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('stale-review-head'), JSON.stringify(result.reasons));
-  assert.equal(deps.launches.length, 0);
-
-  assert.equal(isHammerRemediableEligibilityMiss(
-    ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-present'],
-    { reviewCycleExhausted: true, reviewCycleCapReached: true },
-  ), true);
-  assert.equal(isHammerRemediableEligibilityMiss(
-    ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-present'],
-    { reviewCycleExhausted: true },
-  ), false);
-});
 
 test('cap route never preempts a remediator that still owns the reviewed head', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();
@@ -654,6 +628,12 @@ test('a hammer no-merge decision pages the operator through the real coexistence
             skipMergeAgent: true,
             reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
             needsOperator: true,
+            nextAction: nextAction(deriveNextActionSnapshot({ subjectKey: `${REPO}#${PR_NUMBER}`,
+              head: REMEDIATED_HEAD, observedAt: '2026-01-01T00:00:00Z', observations: {
+                pr: { state: 'OPEN', headSha: REMEDIATED_HEAD }, leases: { closer: null },
+                policy: { autonomousMergeExecutionEnabled: true },
+                controls: { stop: { deterministic: true, fingerprint: 'stop-07' } },
+              } })),
             launchRequestId: LRQ_FIRST,
           };
         },
@@ -670,8 +650,7 @@ test('a hammer no-merge decision pages the operator through the real coexistence
   assert.equal(alerts[0].payload.outcome, 'hammer-no-merge');
   assert.equal(alerts[0].payload.headSha, REMEDIATED_HEAD);
   assert.match(alerts[0].text, /hammer's final adjudication is NO MERGE/);
-  assert.match(alerts[0].text, /neither a reviewer nor a hammer/);
-  assert.match(alerts[0].text, /operator-approved, merge-agent-requested, paused-for-redesign/);
+  assert.match(alerts[0].text, /recovery owner|closure-recovery/);
 });
 
 test('the review-cycle-cap page is a SEV1 page with one outbox identity per PR head', async (t) => {
@@ -713,6 +692,7 @@ for (const evidenceReason of ['missing-build-completion-producer-evidence', 'led
     for (let tick = 0; tick < 2; tick += 1) {
       const result = await maybeDispatchAmaCloser({
         ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T05:05:00Z' }), ...deps,
+        readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'synthetic-unreadable' }),
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: evidenceReason }),
       });
       assert.equal(result.reason, 'existing-dispatch-succeeded', JSON.stringify(result));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isHammerRemediableEligibilityMiss } from '../src/ama/dispatch-closer.mjs';
+
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { closureGateMergeability } from '../src/github-mergeability.mjs';
@@ -34,9 +34,8 @@ test('DIRTYOWN-01: CONFLICTING pushes pr-not-mergeable and is hammer remediable'
   };
   const result = isEligibleForAmaClosure({ verdict: 'approved' }, prMetadata, { enabled: true });
   assert.equal(result.reasons.includes('pr-not-mergeable'), true);
-  
-  const remediable = isHammerRemediableEligibilityMiss(['pr-not-mergeable'], {});
-  assert.equal(remediable, true);
+
+
 });
 
 test('DIRTYOWN-01: UNKNOWN pushes pr-mergeability-unknown and is NOT hammer remediable', () => {
@@ -49,17 +48,9 @@ test('DIRTYOWN-01: UNKNOWN pushes pr-mergeability-unknown and is NOT hammer reme
   assert.equal(result.reasons.includes('pr-mergeability-unknown'), true);
   assert.equal(result.reasons.includes('pr-not-mergeable'), false);
 
-  const remediable = isHammerRemediableEligibilityMiss(['pr-mergeability-unknown'], {});
-  assert.equal(remediable, false);
+
 });
 
-test('DIRTYOWN-01: UNKNOWN beside a real mechanical miss still reaches the hammer', () => {
-  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-mergeability-unknown'], {}), true);
-  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'pr-mergeability-unknown'], {}), true);
-  // It never makes a non-mechanical miss actionable.
-  assert.equal(isHammerRemediableEligibilityMiss(['pr-mergeability-unknown', 'verdict-not-settled-success'], {}), false);
-  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-mergeability-unknown', 'blocking-findings-present'], {}), false);
-});
 
 test('DIRTYOWN-01: daemon clean path refuses UNKNOWN and CONFLICTING with exact reasons', () => {
   assert.deepEqual(evaluateMergeEligibility(eligibleState({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })), {

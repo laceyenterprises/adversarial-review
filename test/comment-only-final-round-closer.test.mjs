@@ -10,11 +10,11 @@ import { join } from 'node:path';
 
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
 import {
-  FINAL_ROUND_CI_WAIT_DEADLINE_MS,
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { findCommentOnlyFinalRoundPushJob } from '../src/comment-only-final-round.mjs';
 
 const REPO = 'fixture/project';
@@ -180,7 +180,7 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
     assert.deepEqual(liveHeads, [REVIEWED], 'live reconcile reads the reviewed head, not the pushed one');
     assert.equal(payload.reviewState.verdict, 'comment-only');
     assert.equal(payload.reviewState.headSha, REVIEWED);
-    assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
+    assert.equal(payload.sharedNextAction.decision.action, 'hammer');
     assert.equal(payload.dispatchContext.targetRemediationSha, PUSHED);
     assert.equal(payload.reviewState.nonBlockingFindingCount, reviewBody === ZERO_FINDINGS_BODY ? 0 : 1);
     assert.notEqual(payload.reviewState.headSha, payload.prMetadata.headSha);
@@ -210,13 +210,10 @@ for (const { name, conclusion, mergeable, mergeStateStatus, blocker, reviewBody 
       readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
       logger: { log() {}, info() {}, warn() {}, error() {} },
     });
-    if (blocker) {
-      assert.equal(dispatched.dispatched, false);
-      assert.equal(dispatched.reason, 'not-eligible');
-      assert.ok(dispatched.reasons.includes(`blocking-findings-${blocker}`));
-      assert.equal(execCalls.length, 0, 'blocking findings never launch the hammer');
-      return;
-    }
+    // Findings are repair admission, including on the final round. They remain
+    // forbidden merge authority without exact-head HAM validation.
+    assert.equal(isEligibleForAmaClosure(payload.reviewState, payload.prMetadata,
+      payload.cfg, { env: {} }).eligible, false);
     assert.equal(dispatched.dispatched, true, JSON.stringify(dispatched));
     const hammerDispatches = execCalls.filter(({ args }) => args[0] === 'dispatch' && args.includes('hammer'));
     assert.equal(hammerDispatches.length, 1, 'exactly one hammer dispatch');
@@ -329,7 +326,7 @@ for (const { name, rollup: pendingRollup } of WAITING_ROLLUPS) {
     const warnings = [];
     const closure = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
       candidate: { ...closureArgs(rootDir).candidate, statusCheckRollup: pendingRollup },
-      now: () => PUSHED_AT_MS + FINAL_ROUND_CI_WAIT_DEADLINE_MS + 1,
+      now: () => PUSHED_AT_MS + 2 * 60 * 60 * 1000 + 1,
       logger: { log() {}, warn: (line) => warnings.push(line) },
       maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'] }),
     }));

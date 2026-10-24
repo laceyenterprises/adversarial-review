@@ -299,8 +299,8 @@ for (const amaClosureResult of [
   ...['hammer-lifetime-dispatch-ceiling', 'hammer-retry-cap-exceeded', 'pr-is-draft', 'hard-stop-label']
     .map(reason => ({ reason, needsOperator: true })),
   { reason: 'background-pr-draft', needsOperator: true, operatorReason: 'pr-is-draft' },
-  { reason: 'not-eligible', reasons: ['two-key-required'] },
-  { reason: 'pr-is-draft' },
+  { reason: 'not-eligible', reasons: ['two-key-required'], needsOperator: true },
+  { reason: 'pr-is-draft', needsOperator: true },
   { needsOperator: true },
 ]) {
   test(`HAMLANE-01 pending hold preserves context and retires restart intent: ${JSON.stringify(amaClosureResult)}`, async () => {

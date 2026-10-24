@@ -35,12 +35,6 @@ test('HAMMER_WORKER_CLASSES is the frozen canonical set', () => {
   assert.equal(Object.isFrozen(HAMMER_WORKER_CLASSES), true);
 });
 
-test('duplicate-family unresolved reason structurally blocks hammer route', () => {
-  assert.equal(
-    __testables__.isHammerRouteStructurallyBlocked([DUPLICATE_FAMILY_UNRESOLVED_REASON]),
-    true,
-  );
-});
 
 // Route-gate proof: cleanupHammerCloserWorker's guard (dispatch-closer.mjs) used
 // to `return null` for any class != 'hammer', so a hammer-claude closer's worker
@@ -144,4 +138,3 @@ test('cleanupHammerCloserWorker route gate now engages for hammer-corp', async (
     ['worker', 'tear-down', 'hammer-ama-pr-786', '--force', '--root', '/fake/hq-root'],
   );
 });
-

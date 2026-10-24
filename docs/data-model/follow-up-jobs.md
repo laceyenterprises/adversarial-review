@@ -511,16 +511,14 @@ heads and projects verified `(reviewedHead, workerPushedHeadSha)` pairs as
 timestamp) for follow-up suppression and `status` for the terminal directory it
 came from, and `pushProof` for the recorded proof method. Both read `completed/`,
 `stopped/`, `failed/` and `stopped-archived/<YYYY-MM>/`: an archived stopped job
-keeps its recorded push, its withheld head and its review key. AMA requires the current PR head to equal a
-pair's pushed head, the settled review to match its reviewed head, and GitHub
-compare to report the pushed head `ahead` (or `diverged` for a
-`git-cherry-replay` proof); the closer then reads the verdict from the
-matching terminal job's `reviewBody` (`findCommentOnlyFinalRoundPushJob`). While
-PR-head CI on that head is pending, AMA holds the PR without spending the
-retain-loop cap for up to two hours after the pair's `completedAt`
-(`FINAL_ROUND_CI_WAIT_DEADLINE_MS`); past that it logs
-`final-round-ci-pending-timeout` and the cap applies again. A later head can be
-reviewed normally.
+keeps its recorded push, its withheld head and its review key. The shared
+snapshot retains the exact reviewed/pushed-head binding, suppression and proof
+evidence. `nextAction` owns the handoff: pending checks retain their
+anchored observer; proven final-push evidence, failed CI or findings select the
+appropriate repair workflow. The former two-hour final-round exception and
+reason-based timeout route no longer select eligibility. Deadline expiry reports
+age and ownership without refusing work. Existing compare/range, semantic
+reversal and attestation proof still apply before mutation.
 Job scans skip a file removed during a queue transition and warn on malformed
 JSON without discarding other jobs.
 

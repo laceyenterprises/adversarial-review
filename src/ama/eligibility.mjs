@@ -1506,6 +1506,12 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   return {
     eligible: effectiveReasons.length === 0,
     reasons: effectiveReasons,
+    // Existing structural restrictions apply to repair admission as well as
+    // merge permission. Findings, CI and mergeability remain repairable facts;
+    // diagnostic reason strings do not grant dispatch permission.
+    repairAdmission: { ok: amaEnabled && mergeability.isOpen && !mergeability.isDraft
+      && (riskPermitted || (reviewCycleExhausted && riskClassFinalHammerWaivable))
+      && protectionOk && blockingLabels.length === 0 && !fastMerge.active },
     trace,
   };
 }

@@ -58,6 +58,7 @@ function closerArgs(rootDir, { repo, prNumber, reviewedSha, headSha, reviewState
   return {
     reviewState: {
       verdict: 'comment-only',
+      reviewCycleExhausted: true,
       headSha: reviewedSha,
       riskClass: 'low',
       remediationPending: false,
@@ -126,13 +127,15 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
       if (dispatch) return dispatch(cmd, args);
       return { stdout: JSON.stringify({ ticketRef: args[args.indexOf('--ticket') + 1], dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
-    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readLaunchRequestStatusImpl: () => status ? ({ ok: true, row: status, retryChain: [] })
+      : ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readPullRequestStateImpl: () => null,
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    readBuildCompletionProducerEvidenceImpl: () => status ? ({ ok: true, row: { signal_kind: 'merged' } })
+      : ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
     deliverAlertImpl: async (text, options) => { alerts.push({ text, options }); },
     logger: SILENT,
@@ -777,7 +780,12 @@ test('Case 4: UNKNOWN mergeability keeps the stop hold until a known reading all
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).heads[PODIUM_HEAD].inputs.mergeability, null);
 
   const released = closerDeps({ alerts });
-  const result = await maybeDispatchAmaCloser({ ...args('2026-10-10T20:00:00Z', 'MERGEABLE'), ...released });
+  const pending = await maybeDispatchAmaCloser({ ...args('2026-10-10T20:00:00Z', 'MERGEABLE'), ...released });
+  assert.equal(pending.dispatched, false);
+  assert.equal(pending.nextActionShared.decision.action, 'wait-for-CI');
+  const ready = args('2026-10-10T20:01:00Z', 'MERGEABLE');
+  ready.prMetadata.statusCheckRollup = [{ name: 'synthetic-check', conclusion: 'FAILURE' }];
+  const result = await maybeDispatchAmaCloser({ ...ready, ...released });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(hqLaunches(released).length, 1);
   assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')).heads[PODIUM_HEAD].releasedBy, ['mergeability']);
@@ -906,8 +914,9 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
   // The dependency merged and main moved: the hammer gets one more run on this head.
   const released = closerDeps({ alerts });
   const result = await maybeDispatchAmaCloser({ ...args('2026-10-10T21:00:00Z', 'ffee00112233'), ...released });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(hqLaunches(released).length, 1);
+  assert.equal(result.dispatched, false);
+  assert.equal(result.nextActionShared.decision.action, 'review');
+  assert.equal(hqLaunches(released).length, 0, 'closer identity alone cannot carry the reviewed verdict');
 });
 
 // REMCONFLICT-01 (SEV1): on 2026-10-10 PR 8022 was CONFLICTING and sat in this
@@ -991,7 +1000,8 @@ test('Case 3: a stale review on a worker-pushed head is not held; the exact-head
     }),
     ...closerDeps(),
   });
-  assert.notEqual(result.reason, HAMMER_STOP_HOLD_REASON);
+  assert.equal(result.reason, HAMMER_STOP_HOLD_REASON);
+  assert.equal(result.dispatched, false);
 });
 
 function reviewDbWithPostedPass(t) {
@@ -1042,7 +1052,7 @@ test('Case 3: a suppressed AMA-recovery re-review is declined back to posted, an
   });
   assert.equal(rereviews.length, 0, 'a declined closer-head re-review is not requested again');
   assert.equal(outcome.outcome, 'ama-pending');
-  assert.equal(outcome.recovery.action, 'rereview-declined-closer-head');
+  assert.equal(outcome.recovery.action, 'observe');
 });
 
 // ── Case 2 ──────────────────────────────────────────────────────────────────
@@ -1206,7 +1216,10 @@ test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer
     observeHoldRelease({ db, repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
       liveLabels: [], now: '2026-10-11T17:00:00Z' });
     const released = closerDeps();
-    const result = await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:01:00Z' }), ...released });
+    const pending = await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:01:00Z' }), ...released });
+    assert.equal(pending.dispatched, false);
+    const result = await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:02:00Z',
+      rollup: [{ name: 'synthetic-check', conclusion: 'FAILURE' }] }), ...released });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(hqLaunches(released).length, 1);
     const state = JSON.parse(readFileSync(join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'laceyenterprises-podium-pr-15.json'), 'utf8'));

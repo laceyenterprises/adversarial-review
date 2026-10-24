@@ -1,4 +1,4 @@
-# Shared next action: rows and legacy reason inventory (NXA-02)
+# Shared next action: decision rows and adapter inventory (NXA-07)
 
 Spec: `pr-next-action@c216a174c80e`. Module: [`src/pr-next-action.mjs`](../src/pr-next-action.mjs).
 Consumer seam (adapters, evidence builders, lazy hook): [`src/pr-next-action-consumer.mjs`](../src/pr-next-action-consumer.mjs).
@@ -12,21 +12,16 @@ the disagreement.
 
 ## Status
 
-NXA-03 adopts the shared decision for hammer wakes, NXA-04 for remediation
-closeout, and NXA-05 for closer routing and recovery projections. Other callers
-remain observational. Source adoption grants no production-operation authority;
-live rollout acceptance remains with the operator/SRE. Adopted final hammer
-pages report the selected workflow instead of replacing it with an operator hold.
-Existing exact-head approvals reuse the daemon actor validator; a review ceiling
-admits repair without supplying merge proof.
+NXA-07 completes source adoption after NXA-03 through NXA-06. `nextAction`
+is the only successor policy. Wake, remediation closeout, closer, daemon,
+rescue, automated recovery and no-progress consumers project its immutable
+snapshot/decision pair. `closure-owner.mjs` contains only compatibility output
+projection. Historical reason translation remains observational telemetry.
 
-There is one active successor policy owner per adopted caller.
-`decideClosureOwner` remains a source rollback adapter for those callers and
-serves the remaining legacy consumers. `fromLegacyClosureOwner` expresses every
-legacy output in the new vocabulary so the shadow compares the two tables. The
-adapter translates faithfully and does not correct: a legacy `page` stays
-`operator-hold` there, so the shadow shows where the new table names a recovery
-owner instead.
+New diagnostic reason text requires no registration and cannot authorize or
+refuse a dispatch. Source rollback uses revision `4d06237c`; no permanent
+alternate policy remains. Organic rollout evidence is still operator/SRE work;
+no offline fixture or source adoption claims that acceptance.
 
 ## Contract
 
@@ -102,91 +97,38 @@ admission/retry and evidence recovery 5 min; observer 30 min (the legacy
 pending-gate bound); live owners use their own deadline, or else the
 unscaled closer-lease reclaim ages.
 
-## Legacy reason → row
+## Adapter projections
 
-### `decideClosureOwner` (`src/ama/closure-owner.mjs`)
-
-| Legacy owner / reason | Adapted (action / actor / reason) | New row |
+| Consumer | Projection | Retained execution mechanisms |
 |---|---|---|
-| `close` / `empty-diff` | hammer / closure-recovery / `empty-diff-close` | R05 |
-| `page` / `primary-change-needs-operator` | operator-hold / operator / `primary-change-repair` | R05 (`primary-change-repair`, hammer) |
-| `wait` / other primary-change reasons | wait-for-CI / watcher / `snapshot-refresh` | R05 refresh or R04 |
-| `wait` / `dispatch-status-*` (parked or deferred launch) | hammer / hammer / `live-owner` | R03 |
-| `wait` / `in-flight:*` | hammer / hammer / `live-owner` | R03, or R04 when liveness is unreadable |
-| `page` / `in-flight-lease-expired` | operator-hold / operator / `lease-expired` | R04 |
-| `review` / `exact-head-review` (closer rereview) | review / reviewer / `exact-head-review` | R13 |
-| `hammer` / `ci-blocked-remediation-exhausted` | hammer / hammer / `ci-red-final` | R09 |
-| `hammer` / `review-ceiling-stale-head` | hammer / hammer / `review-ceiling` | R13 |
-| `page` / `review-rounds-exhausted` | operator-hold / operator / `review-findings-final` | R09 / R13 / R14 by evidence |
-| `page` / `hammer-retry-cap`, `hammer-lifetime-cap` | operator-hold / operator / `retry-exhausted`, `lifetime-exhausted` | R07 |
-| `hammer` / `review-findings` | hammer / hammer / `review-findings-final` | R14 |
-| `remediation` / `review-findings` | remediate / remediator / `review-findings` | R14 |
-| `follow-up-drain` / `clean-review-drain` | remediate / remediator / `clean-review-drain` | R03 (job in progress) or R15 |
-| `conflict-rebase` / `conflict-rebase` | hammer / hammer / `conflict-rebase` | R10 |
-| `hammer` / `required-checks-red` | hammer / hammer / `ci-red-final` | R09 (remediation first if a round is left) |
-| `wait` / `pending-mergeability`, `pending-required-checks` | wait-for-CI / ci / `mergeability-unknown`, `checks-pending` | R11 |
-| `page` / `pending-gate-budget-exhausted` | operator-hold / operator / `checks-pending` | R11 (overdue report, no refusal) |
-| `daemon-merge` / `clean-exact-head` | daemon-merge / daemon / `clean-exact-head` | R15 |
+| Hammer wake | selected unowned hammer or daemon intent; deferral suppresses transport only | attempt-aware wake election, retention, delivery retry |
+| Remediation closeout | `closeoutRereview` retains the decision and durable admission intent | round accounting, publication/final-push proof, watcher claim CAS |
+| Closer | shared hammer intent; predicate results replace observations | structural restrictions, exact-head proofs, terminal settlement, bounded retries, class caps, leases |
+| Daemon | selected daemon actor; live facts invalidate the generation | HCP/identity, required checks/protection, arming, shared merge lease |
+| Rescue | action/actor/queue to compatibility diagnostics | recovery and unreadable ownership never become launch permission |
+| Automated recovery | selected reviewer/hammer dispatch, otherwise owned observation | flock, request reservation, attempt cap, alert debounce/refund |
+| Orphan recovery | selected reviewer/hammer dispatch after ownership proof | durable idle/attempt history, process/ledger proof, request CAS |
+| No-progress | explicit hold selects operator lane; other workflows keep their actor | durable debt, drain observation, scheduler backoff and starvation recovery |
 
-Two expected corrections are visible in this table. Legacy routes failed CI only
-after a clean verdict, while the new table sends it to a remaining remediation
-round first (R09). Legacy treats a non-`FAILURE` terminal check state (for
-example `TIMED_OUT`) as pending; the new table treats it as failed.
-
-### Closure orchestration final owner (`src/ama-closure-orchestration.mjs`)
-
-| Legacy | Adapted | Row |
-|---|---|---|
-| result `dispatched` → `hammer` / `dispatched` | hammer / hammer / `live-owner` | R03 |
-| result `daemon-merged` | daemon-merge / daemon / `merged-this-pass` | R01 on the next pass |
-| `boundedWait` → `wait` / `page` with the wait reason | as above, by reason | as above |
-| `handed-to-review` wait | review / reviewer / `handed-to-review` | R13 |
-
-### Posted-review handler (`src/posted-review-row.mjs`)
-
-| Legacy outcome | Adapted | Row |
-|---|---|---|
-| `pr-terminal` (merged/closed) | done / none / `merged`, `closed` | R01 |
-| `operator-skip-label` | operator-hold / operator / `hold-label` | R02 |
-| `await-operator` (stacked-base hold) | operator-hold / operator / `needs-operator` | R04/R05 by evidence |
-| closure-owner outcomes | compared at closure orchestration (same pass decision) | — |
-
-### No-progress lane (`src/watcher-no-progress-lane.mjs`)
-
-| Legacy lane | Adapted | Row |
-|---|---|---|
-| `operator-blocked` (`operator-decision-required`) | operator-hold / operator / `operator-decision-required` | R07 or the semantic row; only explicit holds are R02 |
-| `deferred-by-drain` | not an ownership claim | drain overlay (`queue.deferredBy: drain`) |
-| `active`, `slow` | scheduling only; not compared | — |
-
-### Rescue classifier (`src/merge-agent-rescue-classifier.mjs`)
-
-`classifyClosureOwnership` maps the legacy owner to rescue decisions
-(`page-required`, `wait-closer`, …). The shadow compares the underlying legacy
-owner. Rescue input carries no PR state, so its shadow decision is `R00`. Read
-those records as an evidence gap, not as a policy disagreement.
-
-### Hammer-owner route (`src/hammer-owner-route.mjs`) and watcher handoff wake (`src/pollonce-phases.mjs`)
-
-| Legacy | Adapted | Row |
-|---|---|---|
-| route page `hammer-no-merge` | operator-hold / operator / `hammer-final-no-merge` | R07 |
-| route page `hammer-cap-exhausted` | operator-hold / operator / `retry-exhausted` | R07 |
-| handoff wake wait `handed-to-review:<head>` | review / reviewer / `handed-to-review` | R13 |
+Deleted policy includes reason allowlists for repair, final-round resume/grace
+selection, daemon decline classifiers/counter-based escalation, background
+mergeability admission refusal, the legacy closure-owner and rescue tables,
+and independent no-progress/orphan/automated-recovery successor selection.
+Existing pure merge predicates and structural repair restrictions remain.
 
 ## Shadow consumers
 
 | Source tag | Where | Evidence |
 |---|---|---|
-| `closure-orchestration` | final legacy owner in `maybeDispatchAmaClosureFor` (covers both `decideClosureOwner` calls and page overrides) | NXA-01 pass snapshot when present, plus closure-owner input; the launch observation comes from NXA-01's ledger seam inside the shadow's own promise (bounded at 5 s) |
+| `closure-orchestration` | selected shared workflow in `maybeDispatchAmaClosureFor` | NXA-01 pass snapshot when present, plus closure-owner input; the launch observation comes from NXA-01's ledger seam inside the shadow's own promise (bounded at 5 s) |
 | `posted-review` | handler outcomes above | the same pass decision the orchestration registered |
 | `no-progress-lane` | lane gate | a legacy note that the next pass decision for the same subject and head compares |
 | `dispatch-closer-handoff` | handed-to-review owner in the closer | closer review state, PR metadata, handoff lease |
-| `rescue-classifier` | `classifyClosureOwnership` | closure-owner input |
+| Historical `rescue-classifier` records | read-only rollout evidence | no independent classifier remains |
 | `hammer-owner-route` | route-ending page | the same pass decision registered by its coexistence call |
 | `watcher-handoff-wake` | `pollOnce` handoff wait | subject, handoff lease, raw review row |
 
-Legacy decisions and their inputs are unchanged. Consumers import only the
+Historical telemetry adapters do not select execution. Consumers import only the
 consumer seam, which imports nothing. It evaluates and copies the evidence
 synchronously, then loads the shadow lazily, so a short-lived process that never
 reaches a shadow call pays no load cost. The shadow never throws, never rejects,
@@ -215,9 +157,11 @@ availability never gate execution.
 
 ## Rollout
 
-Before the first caller switches, an authorized operator/SRE classifies at least
+The retained operator/SRE rollout procedure calls for classifying at least
 20 distinct **live** disagreement cases, including at least one candidate mistake
-and one expected correction. Repeats of one case count once. Run:
+and one expected correction. Repeats of one case count once. This source
+deletion does not establish that live evidence; the procedure remains separate
+from worker validation and does not introduce runtime admission conditions. Run:
 
 ```bash
 node bin/next-action-disagreements.mjs --root <deployed root> \
@@ -239,5 +183,5 @@ Known limits of the shadow evidence:
   probe runs. A lease that the load-aware executor still honours can therefore
   read as `lease-expired`.
 - Consumers without durable anchors produce `anchorSource: observed` deadlines.
-- The rescue classifier and bare pass snapshots lack PR state or ownership
-  evidence and decide `R00`/`R04`.
+- Partial snapshots lacking PR state or ownership evidence select an owned
+  refresh/reconciliation through `R00`/`R04`.

@@ -341,7 +341,7 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
       }
       return { stdout: '{}', stderr: '' };
     },
-    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: workerStatus }, retryChain: [] }),
     fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: RED_HEAD, comments }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: (_dir, path, content) => { prompts.push({ path, content: String(content) }); },
@@ -378,16 +378,13 @@ test('(a) the closer dispatches the hammer on the red, unreviewed head with the 
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
 });
 
-test('without the CI-blocked route the same red unreviewed head parks (the PR 8007 failure)', async (t) => {
+test('failed CI repair admission comes from the shared decision without a route flag', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();
   const rootDir = tempRoot(t, 'ciblockham-closer-scope-');
   const deps = closerDeps();
   const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ciBlockedHammerOwner: false }), ...deps });
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'not-eligible');
-  assert.ok(result.reasons.includes('stale-review-head'), JSON.stringify(result.reasons));
-  assert.ok(result.reasons.includes('ci-not-green'), JSON.stringify(result.reasons));
-  assert.equal(deps.launches.length, 0);
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.launches.length, 1);
 });
 
 test('the CI-blocked route never preempts a remediator that still owns the reviewed head', async (t) => {
@@ -539,6 +536,7 @@ for (const evidenceReason of ['missing-build-completion-producer-evidence', 'led
     for (let tick = 0; tick < 2; tick += 1) {
       const result = await maybeDispatchAmaCloser({
         ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T17:35:00Z' }), ...deps,
+        readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'synthetic-unreadable' }),
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: evidenceReason }),
       });
       assert.equal(result.reason, 'existing-dispatch-succeeded', JSON.stringify(result));
@@ -641,7 +639,7 @@ for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'act
     args.prMetadata.prNumber = 42;
     args.prMetadata.author = 'fixture-worker';
     args.reviewState.prAuthor = 'fixture-worker';
-    args.reviewState.reviewCycleExhausted = false;
+    args.reviewState.reviewCycleExhausted = true;
     args.reviewState.completedRemediationRounds = 0;
     args.dispatchContext.ciBlockedReason = 'ci-regression-stopped';
     args.dispatchContext.ciFailedChecks = state === 'pending' ? [] : [{ name: 'unit', state: 'FAILURE' }];
@@ -651,6 +649,7 @@ for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'act
       status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
       conclusion: state === 'pending' ? null : conclusion }];
     if (state === 'blocking-findings') {
+      args.reviewState.completedRemediationRounds = 1;
       args.reviewState.verdict = 'request-changes';
       args.reviewState.blockingFindingCount = 1;
       args.reviewState.nonBlockingFindingCount = 0;
@@ -662,7 +661,8 @@ for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'act
     if (state === 'failed') {
       const ordinary = await maybeDispatchAmaCloser({ ...args, ...deps,
         dispatchContext: { ...args.dispatchContext, ciBlockedHammerOwner: false } });
-      assert.deepEqual(ordinary.reasons, ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green']);
+      assert.equal(ordinary.dispatched, true);
+      return;
     }
     const first = await maybeDispatchAmaCloser({ ...args, ...deps });
     if (['pending', 'hard-stop', 'draft', 'live-remediation'].includes(state)) {

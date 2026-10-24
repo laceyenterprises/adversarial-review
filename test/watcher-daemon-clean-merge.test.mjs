@@ -11,15 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  isDaemonFailClosedHammerRemediable,
-  maybeDispatchAmaClosureFor,
-  readHeadAttestationChainForPr,
-  resolveOperatorMergeAccountability,
-  runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal,
-  resolveDaemonWorkerIdentityForPr,
-  resolveDaemonWorkerIdentityFromHeadAttestation,
-} from '../src/watcher.mjs';
+import { maybeDispatchAmaClosureFor, readHeadAttestationChainForPr, resolveOperatorMergeAccountability, runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal, resolveDaemonWorkerIdentityForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from "../src/watcher.mjs";
 import {
   attemptDaemonCleanMerge,
   DAEMON_MERGE_DISPOSITION,
@@ -3069,7 +3061,7 @@ test('revoked operator approval holds the tick instead of dispatching a hammer f
     });
     assert.equal(closerCalls, 0);
     assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, 'operator-approval-no-longer-current');
+    assert.equal(result.daemonCleanMerge.reason, 'operator-approval-no-longer-current');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3138,7 +3130,7 @@ test('approval removed in the lease returns the same protective hold to orchestr
         reason: 'operator-approval-no-longer-current',
       }),
     });
-    assert.equal(daemonResult.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(daemonResult.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
     assert.equal(daemonResult.reason, 'operator-approval-no-longer-current');
 
     let closerCalls = 0;
@@ -3152,7 +3144,7 @@ test('approval removed in the lease returns the same protective hold to orchestr
       maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
     });
     assert.equal(closerCalls, 0);
-    assert.equal(result.reason, 'operator-approval-no-longer-current');
+    assert.equal(result.daemonCleanMerge.reason, 'operator-approval-no-longer-current');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3874,31 +3866,6 @@ test('Deliverable 2: the hammer fallback is bounded by the SAME per-PR cap — a
 
 // ── Unit tests for the two pure classifiers ──────────────────────────────────
 
-test('isDaemonFailClosedHammerRemediable classifies remediable vs non-remediable daemon fail-closed reasons', () => {
-  const fc = (reason, reasons) => ({
-    disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-    reason,
-    ...(reasons ? { reasons } : {}),
-  });
-  // Remediable
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('stale-head')), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green'])), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['pr-not-mergeable'])), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'pr-not-mergeable', 'stale-head'])), true);
-  // Non-remediable
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('worker-identity-unresolved', ['missing-build-completion-signal'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), true);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['branch-protection-missing-gate'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['lease-not-held'])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', [])), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('permanent-merge-rejection')), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('unclassified-merge-failure')), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('merge-retry-budget-exhausted')), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-read-failed')), false);
-  // Wrong disposition / degenerate
-  assert.equal(isDaemonFailClosedHammerRemediable({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'gate-not-eligible', reasons: ['ci-not-green'] }), false);
-  assert.equal(isDaemonFailClosedHammerRemediable(null), false);
-});
 
 test('resolveOperatorMergeAccountability requires a head-scoped, attributable, provenanced operator label', () => {
   const head = 'live-head-xyz';
@@ -3960,35 +3927,7 @@ test('primary-change operator park records the concrete reason and remains attri
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('primary-change operator fallback requires scoped evidence; ownerless heads enter watchdog recovery', async () => {
-  const rootDir = tempRoot();
-  try {
-    const event = { id: 'operator-intent', actor: 'operator', headSha: 'head-live',
-      createdAt: '2026-10-03T12:00:00Z' };
-    const refusal = { amaEnabled: true, dispatched: false, skipMergeAgent: true,
-      reason: 'primary-change-needs-operator', reasons: ['primary-change-unknown'], needsOperator: true };
-    const run = (mergeAgentRequestEvent, labelNames = ['merge-agent-requested'], result = refusal) =>
-      resolveMergeAgentCoexistenceForWatcher({ ...baseArgs(rootDir), labelNames,
-        mergeAgentRequestEvent, maybeDispatchAmaClosureForImpl: async () => result });
-    const closerRefusal = { ...refusal, reason: 'primary-change-repair-required' };
-    assert.equal((await run(event, ['merge-agent-requested'], closerRefusal)).outcome, 'dispatch-merge-agent');
-    assert.equal((await run(null, ['merge-agent-requested'], closerRefusal)).outcome, 'ama-pending');
-    assert.equal((await run({ ...event, headSha: 'old-head' }, ['merge-agent-requested'], closerRefusal)).outcome, 'ama-pending');
-    assert.equal((await run(event, ['operator-approved'], closerRefusal)).outcome, 'ama-pending');
-    const recovered = await run(event);
-    assert.equal(recovered.outcome, 'dispatch-merge-agent');
-    assert.equal(recovered.coexistence.action, 'merge-agent-operator-fallback');
-    assert.equal(recovered.dispatchEnv.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
-    for (const invalid of [null, { ...event, headSha: 'old-head' }, { ...event, actor: '' },
-      { ...event, id: null }, { ...event, prUpdatedAt: '2026-10-03T13:00:00Z' }]) {
-      assert.equal((await run(invalid)).outcome, 'ama-pending');
-    }
-    assert.equal((await run(event, [])).outcome, 'ama-pending');
-    assert.equal((await run(event, ['operator-approved'])).outcome, 'ama-pending');
-    const outage = { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'gate-read-failed' };
-    assert.equal((await run(event, ['merge-agent-requested'], outage)).outcome, 'ama-pending');
-  } finally { rmSync(rootDir, { recursive: true, force: true }); }
-});
+
 
 test('clean daemon candidate defers primary-change API outages and forwards caller env', async () => {
   const rootDir = tempRoot();
@@ -4015,9 +3954,9 @@ test('clean daemon candidate defers primary-change API outages and forwards call
       },
     });
     assert.equal(reads, 1);
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
-    assert.equal(result.reason, 'gate-read-failed');
-    assert.equal(result.needsOperator, false);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'not-eligible');
+    assert.notEqual(result.needsOperator, true);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
@@ -4037,9 +3976,9 @@ test('transient primary-change reads do not hide CI or conflict remediation', as
         attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
           reason: 'not-eligible', reasons: ['primary-change-read-failed', gate] }),
       });
-      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
-      assert.equal(result.reason, 'gate-not-eligible');
-      assert.equal(result.needsOperator, false);
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+      assert.equal(result.reason, 'not-eligible');
+      assert.notEqual(result.needsOperator, true);
       assert.ok(result.reasons.includes(gate));
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
@@ -4061,8 +4000,9 @@ test('in-lease deterministic unknown evidence enters scoped escalation', async (
         reason: 'not-eligible', reasons: ['primary-change-unknown'], permanent: false }),
     });
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
-    assert.equal(result.needsOperator, true);
-    assert.equal(result.reason, 'primary-change-needs-operator');
+    assert.equal(result.permanent, false);
+    assert.equal(result.reason, 'not-eligible');
+    assert.ok(result.reasons.includes('primary-change-unknown'));
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 

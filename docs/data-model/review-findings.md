@@ -136,8 +136,9 @@ assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
 remain visible but cannot dispatch until merged. The watcher checks a cached UTC
 midnight deadline after its ordinary poll; only the daily sweep does database,
 GitHub or dispatch work, asynchronously from review admission. The deadline
-advances after successful sweep completion; startup failures retry on the next
-poll and an in-flight sweep fences overlapping ticks. Per-batch errors remain
+advances after successful sweep completion; startup failures and fleet-stop
+interruptions retry on the next poll with the existing claimed batches and dispatch
+keys. An in-flight sweep fences overlapping ticks. Per-batch errors remain
 recorded for the next daily sweep.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
@@ -155,8 +156,10 @@ GitHub transport. Marker lines accept surrounding whitespace, bold or HTML
 comments, while still requiring the exact batch ID. Normal review may rebase the batch PR;
 completion records the worker outcome and PR merge, without granting merge authority.
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
-`result_pr`. Batch failures retain `error`, never discard findings or launch a
-second worker blindly. Diagnose a missing artifact or failed worker before
+`result_pr`. Batch failures retain `error` until valid manifest and batch PR
+evidence is confirmed, at which point even an unmerged PR clears the stale error
+without settling findings. Failures never discard findings or launch a second
+worker blindly. Diagnose a missing artifact or failed worker before
 repairing its existing batch; no automatic timeout releases its fence.
 
 `pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is

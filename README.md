@@ -1032,9 +1032,11 @@ review, checks, leases and execution switches remain required. The daily worker
 re-checks current main and opens one normal-review PR per area. Collection reads
 the batch PR's body and merge state through the retrying GitHub transport;
 plain, bold or HTML-comment marker lines may include surrounding whitespace.
-A failed sweep startup retries on the next poll without advancing the daily
-deadline; concurrent polls cannot overlap a sweep. No new smoke promise or CI
-gate is added; offline behavior cases cover capture, batch, closure and reporting.
+A failed sweep startup or fleet-stop interruption retries on the next poll
+without advancing the daily deadline; claimed batches retain their dispatch keys
+and concurrent polls cannot overlap a sweep. Valid batch PR evidence clears any
+prior batch error while outcomes remain pending until merge. No new smoke promise
+or CI gate is added; offline behavior cases cover capture, batch, closure and reporting.
 The SRE session verifies three merged captures before
 backing up config, disabling strict mode and bouncing the watcher, then confirms
 next-day batch PRs and complete applied/dropped coverage. Read per-area size,

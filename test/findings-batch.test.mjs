@@ -198,8 +198,10 @@ test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and
     response = { state: 'OPEN', headRefOid: head, body: `Batch repairs\r\n${marker}\r\n` };
     await runFindingBatches(options);
     assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
-    // A recognized marker reaches the lifecycle check without writing a new error.
-    assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, 'permission denied');
+    // Valid evidence clears a prior read/validation error without settling outcomes.
+    assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, null);
+    assert.equal(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    db.prepare("UPDATE finding_batches SET error='prior validation error'").run();
   }
   response = { ...response, state: 'MERGED', mergedAt: '2026-01-02T04:00:00Z', headRefOid: 'b'.repeat(40) };
   await runFindingBatches(options);
@@ -208,6 +210,44 @@ test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and
   assert.equal(db.prepare('SELECT result_pr FROM finding_backlog').get().result_pr, 8);
   assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, null);
   assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+});
+
+test('FINDINGSBATCH-01 ticker resumes claimed batches next poll after a fleet stop clears', async t => {
+  for (const haltFile of ['active.json', 'merge-kill.json']) await t.test(haltFile, async t => {
+    const { rootDir, db, pass } = fixture(t);
+    pass(1, body.replace('## Verdict', body.slice(body.indexOf('- **Explain'), body.indexOf('## Verdict'))
+      .replace('src/result.mjs', 'docs/result.md') + '## Verdict'));
+    db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+    const haltDir = join(rootDir, 'control', 'halt');
+    mkdirSync(haltDir, { recursive: true });
+    const haltPath = join(haltDir, haltFile);
+    const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
+    let sweeps = 0;
+    const keys = [];
+    const ticker = createFindingBatchTicker({ rootDir, env: { HQ_ROOT: rootDir },
+      db: { transaction(fn) { sweeps++; return db.transaction(fn); }, prepare: (...args) => db.prepare(...args) },
+      execFileImpl: async (bin, args) => {
+        keys.push(args[args.indexOf('--idempotency-key') + 1]);
+        // Engage the stop after one dispatch, leaving the other claimed batch pending.
+        if (keys.length === 1) writeFileSync(haltPath, '{}');
+        return { stdout: JSON.stringify({ launchRequestId: `fixture-launch-${keys.length}` }) };
+      } });
+    const now = Date.parse('2026-01-02T01:00:00Z');
+    await ticker.tick(now);
+    const batches = db.prepare('SELECT batch_id,launch_id FROM finding_batches').all();
+    assert.equal(batches.length, 2);
+    assert.equal(batches.filter(b => b.launch_id === null).length, 1);
+    await ticker.tick(now + 30_000);
+    assert.equal(keys.length, 1);
+    rmSync(haltPath);
+    await ticker.tick(now + 60_000);
+    assert.equal(keys.length, 2);
+    assert.deepEqual(new Set(keys), new Set(batches.map(b => `findings-batch-${b.batch_id}`)));
+    assert.equal(db.prepare('SELECT count(*) n FROM finding_batches WHERE launch_id IS NULL').get().n, 0);
+    assert.equal(sweeps, 3);
+    await ticker.tick(now + 90_000);
+    assert.equal(sweeps, 3);
+  });
 });
 
 test('FINDINGSBATCH-01 ticker retries failed startup and fences overlapping polls until success', async t => {

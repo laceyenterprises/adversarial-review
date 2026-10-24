@@ -88,7 +88,10 @@ export function settleFindingBatch(db, batch, result, pr = null) {
         || !hasBatchMarker(pr?.body, batch.batch_id)) {
         throw Error('batch-pr-evidence-mismatch');
       }
-      if (String(pr.state).toUpperCase() !== 'MERGED' && !pr.mergedAt) return false;
+      if (String(pr.state).toUpperCase() !== 'MERGED' && !pr.mergedAt) {
+        db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=? AND error IS NOT NULL').run(batch.batch_id);
+        return false;
+      }
     }
     for (const f of result.findings) db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
       WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), result.prNumber ?? null, batch.batch_id, f.findingId);
@@ -111,7 +114,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   claimFindingBatches(db, day);
   for (const batch of db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL').all()) {
     try {
-      if (fleetStopReason({ env, logger })) return;
+      if (fleetStopReason({ env, logger })) return { completed: false };
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       const outputPath = join(dir, 'outcomes.json');
       let result;
@@ -144,10 +147,11 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${error.message}`);
     }
   }
+  return { completed: true };
 }
 
 // One clock comparison per watcher poll. Database work, remote reads and dispatch
-// run once a UTC day after success; a failed sweep retries on the next poll.
+// run once a UTC day after success; startup failures and fleet stops retry next poll.
 // Restarts retain the durable per-area fences.
 export function createFindingBatchTicker(options) {
   let next = 0;
@@ -156,8 +160,8 @@ export function createFindingBatchTicker(options) {
     if (now < next || running) return;
     running = true;
     try {
-      await runFindingBatches({ ...options, day: new Date(now).toISOString().slice(0, 10) });
-      next = (Math.floor(now / 86400000) + 1) * 86400000;
+      const { completed } = await runFindingBatches({ ...options, day: new Date(now).toISOString().slice(0, 10) });
+      if (completed) next = (Math.floor(now / 86400000) + 1) * 86400000;
     } finally { running = false; }
   } };
 }

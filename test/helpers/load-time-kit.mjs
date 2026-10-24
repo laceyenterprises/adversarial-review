@@ -79,6 +79,8 @@ export class FakeClock {
     if (!Number.isFinite(wall)) throw new RangeError('wall must be finite');
     this.wall = wall;
     this.timers = mock.timers;
+    // Node implicitly mocks the matching clear APIs; listing clearTimeout or
+    // clearInterval explicitly in apis is unsupported (ERR_INVALID_ARG_VALUE).
     this.timers.enable({ apis: ['setTimeout', 'setInterval'] });
     const clock = this;
     const NativeDate = Date;

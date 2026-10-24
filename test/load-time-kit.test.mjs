@@ -62,6 +62,24 @@ for (const [name, source] of [
   });
 }
 
+test('fake clock implicitly mocks clearance APIs and cancels both timer types', async t => {
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const nativeClearInterval = globalThis.clearInterval;
+  const clock = new FakeClock(t);
+  assert.notEqual(globalThis.clearTimeout, nativeClearTimeout);
+  assert.notEqual(globalThis.clearInterval, nativeClearInterval);
+  const events = [];
+  const timeout = setTimeout(() => events.push('cancelled timeout'), 10);
+  const interval = setInterval(() => events.push('cancelled interval'), 10);
+  setTimeout(() => events.push('live timeout'), 10);
+  clearTimeout(timeout);
+  clearInterval(interval);
+  await clock.advance(10);
+  assert.deepEqual(events, ['live timeout']);
+  await clock.advance(100);
+  assert.deepEqual(events, ['live timeout']);
+});
+
 test('mock timers and Date are restored between tests', () => {
   assert.ok(Math.abs(Date.now() - new Date().getTime()) < 1000);
   assert.ok(Date.now() > 1_000_000);

@@ -36,6 +36,12 @@ function makeFixtureRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'research-finding-e2e-'));
   mkdirSync(join(rootDir, 'domains'), { recursive: true });
   mkdirSync(join(rootDir, 'prompts', 'research-finding'), { recursive: true });
+  mkdirSync(join(rootDir, 'prompts', 'shared'));
+  writeFileSync(
+    join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'),
+    readFileSync(join(ROOT, 'prompts', 'shared', 'simplicity-and-cost.md'), 'utf8'),
+    'utf8',
+  );
   writeFileSync(
     join(rootDir, 'domains', 'research-finding.json'),
     readFileSync(join(ROOT, 'domains', 'research-finding.json'), 'utf8'),

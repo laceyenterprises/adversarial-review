@@ -44,6 +44,7 @@ import {
 } from './kernel/remediation-reply.mjs';
 import {
   extractReviewVerdict,
+  extractSimplicityNote,
   normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
   sanitizeReviewPayloadBestEffort,
@@ -593,6 +594,7 @@ function buildRemediationReply({
     pushback,
     blockers,
     operationalBlockers,
+    ...((job.simplicityNote ?? extractSimplicityNote(job.reviewBody)) ? { simplicityNoteApplied: false } : {}),
     reReview: {
       requested: Boolean(reReviewRequested),
       reason: reReviewRequested
@@ -946,6 +948,7 @@ function normalizeFollowUpJob(job) {
     revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
     critical: classification.critical,
+    simplicityNote: job?.simplicityNote ?? extractSimplicityNote(job?.reviewBody),
     recommendedFollowUpAction: {
       ...recommendedFollowUpAction,
       ...(job.recommendedFollowUpAction || {}),
@@ -2203,6 +2206,7 @@ function buildFollowUpJob({
     ...(nonBlockingOnly && normalizeEffectiveReviewVerdict(reviewBody) === 'comment-only'
       ? { finalRound: 'comment-only' } : {}),
     reviewSummary: extractReviewSummary(reviewBody),
+    simplicityNote: extractSimplicityNote(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs
     // are always enforcement carriers. Keep the field explicit for consumers

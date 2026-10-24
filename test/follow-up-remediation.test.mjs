@@ -11876,7 +11876,10 @@ test('reconcileFollowUpJob posts a public PR comment on no-progress stop with th
 
 test('reconcileFollowUpJob posts a public PR comment on completed (re-review queued)', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const { claimed } = makeQueuedJob(rootDir, { prNumber: 51 });
+  const { claimed } = makeQueuedJob(rootDir, {
+    repo: 'synthetic/project', prNumber: 51, linearTicketId: 'SYNTH-01',
+    reviewBody: '## Summary\nRepair synthetic retry.\n\n## Verdict\nRequest changes\n\n## Simplicity and cost (advisory)\nReuse syntheticCache; save ~40 lines.',
+  });
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
   const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
   mkdirSync(artifactDir, { recursive: true });
@@ -11891,6 +11894,7 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
     prNumber: claimed.job.prNumber,
     outcome: 'completed',
     summary: 'Addressed three findings.',
+    simplicityNoteApplied: true,
     validation: ['npm test', 'lint'],
     blockers: [],
     reReview: { requested: true, reason: 'Want adversarial confirmation of the fixes.' },
@@ -11937,6 +11941,9 @@ test('reconcileFollowUpJob posts a public PR comment on completed (re-review que
   }));
 
   assert.equal(result.action, 'completed');
+  assert.equal(result.job.simplicityNote, 'Reuse syntheticCache; save ~40 lines.');
+  assert.equal(result.job.completion.simplicityNoteApplied, true);
+  assert.equal(result.job.remediationPlan.rounds.at(-1).completion.simplicityNoteApplied, true);
   assert.equal(commentCalls.length, 1);
   assert.equal(commentCalls[0].workerClass, 'codex');
   assert.match(commentCalls[0].body, /re-review queued/);

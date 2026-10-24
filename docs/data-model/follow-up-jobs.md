@@ -10,6 +10,34 @@ replay; no queue state, retry budget or merge decision changes.
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
+## Simplicity advisory (REVIEWSIMPLE-01)
+
+Each review's existing job stores `simplicityNote`: the text of the optional
+final `## Simplicity and cost (advisory)` section, or `null` when absent/empty.
+Normalization preserves an existing non-null note, including when `reviewBody`
+is omitted, and derives it from `reviewBody` for older records. Count non-null
+notes by distinct `(repo, prNumber)` to measure the share of PRs with advice.
+The note is outside both finding lists and the verdict; it changes no strict
+gate, dispatch decision, remediation round budget or retry cap. A settled clean
+review with only a note still owes no remediation round.
+
+Within an already-running round, the reply may report the boolean
+`simplicityNoteApplied`, with its reason and estimated savings in `summary`.
+It is copied to `completion.simplicityNoteApplied` and the current round's
+`completion.simplicityNoteApplied`; missing or non-boolean reports become `null`
+(unknown), never a validation failure or a new retry. Count only explicit
+`true` as applied; keep `false` and unknown separate. Existing reply artifacts
+also retain this field. Historical completed records may omit it.
+
+The Hammer receives the same advice from its existing bounded context snapshot
+(`review.simplicityNote`, capped at 1,200 bytes). The boolean
+`review.simplicityNoteTruncated` reports whether that cap removed any text;
+it is false for absent notes. Fetch the full review when either
+`review.findingsTruncated` or `review.simplicityNoteTruncated` is true.
+It records `simplicityNoteApplied: true|false`
+and a reason in its existing closing audit text, outside all finding counts.
+No new store, config key, label or merge authority is introduced.
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

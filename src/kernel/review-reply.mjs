@@ -19,9 +19,9 @@ import { maskReviewFences } from './review-markdown.mjs';
 //     header (which the Antigravity prompt asks for) may precede the first
 //     required heading;
 //   - no required heading outside fenced code may appear twice;
-//   - `## Verdict` must be the last section, may hold no heading or code
-//     fence, and its last line must be a recognised verdict, so nothing
-//     follows the verdict.
+//   - `## Verdict` may be followed only by the optional final simplicity
+//     advisory. The verdict itself may hold no heading or code fence and
+//     its last line must be a recognised verdict.
 //
 // A rejection throws `ReviewerReplyRejectedError`, whose `[reviewer-output]`
 // tag routes the attempt onto the watcher's bounded `reviewer-output` retry.
@@ -155,10 +155,17 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   if (duplicated.length > 0) reasons.push(`repeated required sections ${duplicated.join(', ')}`);
 
   const verdictHeading = headings.filter((heading) => heading.name === 'Verdict').at(-1);
+  const advisoryHeadings = unfencedLines.flatMap((line, index) =>
+    /^##[ \t]+Simplicity and cost \(advisory\)[ \t]*$/i.test(line) ? [index] : []);
+  const advisoryStart = advisoryHeadings[0];
+  if (advisoryHeadings.length > 1 || (advisoryStart !== undefined && (
+    advisoryStart <= (verdictHeading?.index ?? Infinity)
+    || unfencedLines.slice(advisoryStart + 1).some((line) => /^##[ \t]+/.test(line))
+  ))) reasons.push('Simplicity and cost advisory must appear once as the final section');
   if (!verdictHeading) {
     reasons.push('no Verdict section');
   } else {
-    const verdictLines = lines.slice(verdictHeading.index + 1).filter((line) => line.trim());
+    const verdictLines = lines.slice(verdictHeading.index + 1, advisoryStart).filter((line) => line.trim());
     if (verdictLines.length === 0) {
       reasons.push('missing verdict line');
     } else if (verdictLines.some((line) => ANY_HEADING_RE.test(line))) {

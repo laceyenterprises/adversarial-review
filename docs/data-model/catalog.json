@@ -272,6 +272,9 @@
     },
     {
       "id": "follow-up-jobs",
+      "simplicityNote": "Optional advisory section text or null; normalization preserves existing non-null notes and otherwise derives from reviewBody; excluded from findings, gates and round accounting (REVIEWSIMPLE-01)",
+      "hammerSimplicitySnapshot": "review.simplicityNote is capped at 1200 UTF-8 bytes; review.simplicityNoteTruncated is a boolean (false when absent). Fetch the full review if it or review.findingsTruncated is true.",
+      "simplicityNoteApplied": "Optional reply observation; boolean or null in completion and remediationPlan.rounds[].completion. Unknown never creates a validation failure or retry.",
       "terminalEventEvidence": "Normalized events and status probes retain SDK terminal/succeeded booleans, including explicit false and wire-only terminal outcomes.",
       "branchResolution": { "reason": "branch-unresolved", "state": "blocked", "queueState": "pending", "retrySeconds": 60, "readTimeoutMs": 8000, "settledCleanBypassesResolution": true, "attempts": "failed lookups including creation; legacy holds count as one", "maxAttempts": 3, "exhaustedStopCode": "branch-unresolved", "operatorRequeueResetsAttempts": true },
       "unpublishedWorkFields": ["jobId", "commitSha", "workspaceDir", "reported"],
@@ -840,6 +843,7 @@
     },
     {
       "id": "argus-security-jobs",
+      "simplicityNote": "Optional advisory text or null on cached modelReview and result; displayed outside findings with no verdict or dispatch authority (REVIEWSIMPLE-01)",
       "title": "Argus Security Review Jobs",
       "path": "docs/data-model/argus-security-jobs.md",
       "store": "data/argus-security-jobs/",

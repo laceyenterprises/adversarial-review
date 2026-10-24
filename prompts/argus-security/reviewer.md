@@ -72,7 +72,7 @@ axis it belongs to.
 
 ## Output contract
 
-Return GitHub-flavored Markdown with exactly these headings, in this order:
+Return GitHub-flavored Markdown with these required headings, in this order:
 
 ## Argus Security Review
 One short paragraph: what changed and your conclusion.
@@ -106,4 +106,4 @@ A single JSON object between the literal tags `<argus-review-json>` and
 Exactly one of: `Approve` (no `high` finding), `Request changes` (at least one
 `high` finding), or `Comment only` (verification is needed).
 
-No preamble, no epilogue, no text outside these three sections.
+No preamble or epilogue. Only the optional final advisory defined in the shared guidance may follow these three sections.

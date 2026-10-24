@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,7 +15,9 @@ import { buildReviewerPromptPrefix } from '../src/reviewer.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function readPrompt(...parts) {
-  return readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  const prompt = readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  return parts.at(-1).startsWith('reviewer.')
+    ? `${prompt}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
 }
 
 function renderReviewerViaStage(args) {
@@ -208,6 +211,25 @@ test('remediator prompts treat data-model and module explainer doc currency as i
     assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
     assert.match(prompt, /skipped superproject-doc obligation/);
   }
+});
+
+test('loadStagePrompt reads shared reviewer guidance from the supplied root', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'prompt-stage-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(join(rootDir, 'prompts', 'fixture'), { recursive: true });
+  mkdirSync(join(rootDir, 'prompts', 'shared'));
+  writeFileSync(join(rootDir, 'prompts', 'shared', 'simplicity-and-cost.md'), ' Fixture guidance.\n');
+  for (const stage of ['first', 'middle', 'last']) {
+    writeFileSync(join(rootDir, 'prompts', 'fixture', `reviewer.${stage}.md`), ` Fixture ${stage}.\n`);
+    assert.equal(loadStagePrompt({ rootDir, promptSet: 'fixture', actor: 'reviewer', stage }),
+      `Fixture ${stage}.\n\nFixture guidance.`);
+  }
+  rmSync(join(rootDir, 'prompts', 'shared'), { recursive: true });
+  assert.throws(() => loadStagePrompt({ rootDir, promptSet: 'fixture', actor: 'reviewer', stage: 'first' }),
+    { code: 'ENOENT' }, 'a missing custom fragment must not silently use package guidance');
+  writeFileSync(join(rootDir, 'prompts', 'fixture', 'remediator.first.md'), ' Fixture remediation.\n');
+  assert.equal(loadStagePrompt({ rootDir, promptSet: 'fixture', actor: 'remediator', stage: 'first' }),
+    'Fixture remediation.');
 });
 
 test('loadStagePrompt rejects unsafe prompt path segments', () => {

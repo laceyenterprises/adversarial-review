@@ -10,6 +10,7 @@
 // imports (and re-exports) them for its dispatch-decision logic.
 
 import { fileURLToPath } from 'node:url';
+import { formatSimplicityNoteContext } from './prompt-context.mjs';
 
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER = 'final-pass-blocker-remediation';
@@ -59,6 +60,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
   }
+  const simplicityContext = formatSimplicityNoteContext(job.simplicityNote, 'existing closing audit text');
+  if (simplicityContext) lines.push(simplicityContext);
   lines.push('', '## CI-cost hard gate (CIGUARD-01)',
     `Before every merge, resolve the live head and run \`node ${ciCostChecker} ${mergeRepoLiteral} ${mergePrLiteral} HEAD_SHA\`. Refuse a failed check or unauthorized workflow cost growth. Only a live ci-cost-approved label applied by a configured human operator authorizes cost growth; operator-approved never waives this gate. On refusal, leave the PR open for authorization and a CI rerun.`, '');
   if (job.ciBootstrap?.mode === 'no-ci-bootstrap') {

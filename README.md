@@ -90,8 +90,8 @@ npm install && bash demo/research-finding-walkthrough.sh
 The walkthrough:
 
 1. Builds a temporary fixture root.
-2. Copies the `research-finding` domain config and the six staged prompt
-   files.
+2. Copies the `research-finding` domain config, the six staged prompt
+   files, and the shared simplicity/cost guidance.
 3. Drives a markdown subject through the reviewer (a deterministic stub),
    the verdict parser, the remediation-reply validator, the JSONL
    transcript adapter, the re-review path, and convergence.
@@ -999,6 +999,15 @@ falls back to short-window `measurement` only when `weeklyMeasurementReason` is
 absent; a present reason key, including null, retains an unknown-evidence hold. See [reader ownership, capture provenance and exact refresh commands](docs/producer-contract-readers.md).
 
 ## State machines and smoke verification (SMV v1)
+
+REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
+observational applied flag to existing remediation completions/audit text.
+The note has no lifecycle, verdict, strict-mode or round-budget authority.
+Offline fixtures `simplicity-note.test.mjs` and `simplicity-note-prompts.test.mjs`
+cover those boundaries. After normal deployment, the SRE session separately
+samples the next 20 reviews, counts notes, and confirms none changed verdicts
+or added rounds; this read-only observation is declared in
+`post-merge-verify.json`, outside the smoke harness.
 
 LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
 absolute ceiling scales from 360 seconds, but 120 seconds without child output

@@ -10,6 +10,7 @@ import { GH_LOOKUP_MAX_BUFFER } from '../src/gh-cli.mjs';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractSimplicityNote } from '../src/kernel/verdict.mjs';
 
 const [repo, number, flag, statePath] = process.argv.slice(2);
 if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') || (flag && (flag !== '--state-file' || !statePath))) {
@@ -51,6 +52,7 @@ try {
   const currentReviews = Array.isArray(reviews) ? reviews.filter((r) => r.commit_id === head) : [];
   const verdict = currentReviews.filter((r) => /^## Adversarial Review\b/m.test(r.body || '')).at(-1);
   const findingsBytes = verdict ? Buffer.byteLength(verdict.body || '') : 0;
+  const simplicityNote = extractSimplicityNote(verdict?.body);
   const localRoot = resolve(process.env.HAM_ROOT_DIR || join(dirname(fileURLToPath(import.meta.url)), '..'));
   const state = statePath ? JSON.parse(readFileSync(statePath, 'utf8')) : {};
   if (!statePath) {
@@ -106,7 +108,7 @@ try {
     statedIntent: compact(pr.body, 800),
     pr: { repo, number: Number(number), state: pr.state, merged: Boolean(pr.merged_at), draft: Boolean(pr.draft), mergeable: pr.mergeable, mergeableState: pr.mergeable_state, base: pr.base?.ref },
     head,
-    review: verdict ? { state: verdict.state, author: verdict.user?.login, submittedAt: verdict.submitted_at, findings: compact(verdict.body, 1800), findingsBytes, findingsTruncated: findingsBytes > Buffer.byteLength(compact(verdict.body, 1800)) } : null,
+    review: verdict ? { state: verdict.state, author: verdict.user?.login, submittedAt: verdict.submitted_at, simplicityNote: simplicityNote ? compact(simplicityNote, 1200) : null, simplicityNoteTruncated: Boolean(simplicityNote && Buffer.byteLength(simplicityNote) > Buffer.byteLength(compact(simplicityNote, 1200))), findings: compact(verdict.body, 1800), findingsBytes, findingsTruncated: findingsBytes > Buffer.byteLength(compact(verdict.body, 1800)) } : null,
     requiredChecks: protection.required_status_checks?.contexts || protection.required_status_checks?.checks?.map((c) => c.context) || [],
     checks: (checks.statusCheckRollup || []).slice(0, 40).map((c) => ({ name: c.name || c.context, conclusion: c.conclusion || c.state || c.status })),
     diffStat: { files: pr.changed_files ?? null, additions: pr.additions ?? null, deletions: pr.deletions ?? null },

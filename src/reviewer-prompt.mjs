@@ -182,7 +182,7 @@ Antigravity runtime instructions:
 - Use at most one narrowly targeted lookup inside the provided reviewer checkout only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools. Never search absolute host paths such as /Users, /private, /tmp, or another checkout.
 - Emit ONLY the final Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, uncertainty, or internal reasoning.
 - Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
-- End with "## Verdict" as the last section. Its last line must be exactly one of: "Comment only", "Request changes", or "Approve". Write nothing after that line.
+- The last line of "## Verdict" must be exactly one of: "Comment only", "Request changes", or "Approve". Only the optional final simplicity advisory from the shared guidance may follow it.
 - Never copy the output template itself: every placeholder such as <Title>, <path>, <range> or <one paragraph> must be replaced by real content, and a reply that echoes the template is rejected and never posted.
 - Verdict is a pure function of the structured Blocking issues list: if "## Blocking issues" is empty / "- None.", the Verdict MUST be "Comment only"; emit "Request changes" only when at least one blocking issue is listed. Non-blocking issues never escalate the verdict.`;
 }

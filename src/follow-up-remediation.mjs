@@ -2414,6 +2414,8 @@ async function reconcileFollowUpJob({
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,
       workerModel,
+      simplicityNoteApplied: typeof parsedReply?.simplicityNoteApplied === 'boolean'
+        ? parsedReply.simplicityNoteApplied : null,
       ...finalRound.completionFields,
       ...(workerPublishedHead && job.finalRound !== 'comment-only' ? { workerPushedHeadSha: workerPublishedHead.headSha } : {}),
       ...(closeout ? { finalRemediationPush: closeout.snapshot.observations.remediation.value.finalPush != null } : {}),

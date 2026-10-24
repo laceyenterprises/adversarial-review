@@ -14,7 +14,9 @@ import { loadDomainConfig } from '../src/domain-config.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function readPrompt(...parts) {
-  return readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  const prompt = readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  return parts.at(-1).startsWith('reviewer.')
+    ? `${prompt}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
 }
 
 // Assemble every reviewer/remediator stage prompt from a domain's *declared*
@@ -38,8 +40,7 @@ test('code-pr domain resolves to the code-pr prompt set with byte-identical asse
   // The value flows from domains/code-pr.json, not a hardcoded literal.
   assert.equal(assembled.promptSet, 'code-pr');
 
-  // Byte-for-byte parity with the literal prompts/code-pr/*.md files: the
-  // config-driven path must produce exactly what the old constant produced.
+  // Domain selection preserves each stage's bytes plus shared reviewer guidance.
   for (const actor of ['reviewer', 'remediator']) {
     for (const stage of ['first', 'middle', 'last']) {
       assert.equal(

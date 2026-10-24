@@ -19,8 +19,8 @@ Do NOT praise. Be specific, skeptical, and direct.
 Output requirements:
 - Return valid GitHub-flavored Markdown only
 - Do not include any preamble, explanation, code fences, XML, JSON, or text before the first required heading
-- Do not include any epilogue or trailing notes after the Verdict section
-- Use exactly these top-level section headings, spelled exactly this way, in exactly this order, each appearing exactly once:
+- Only the optional final advisory defined in the shared guidance may follow the Verdict section
+- Use these required top-level section headings, spelled exactly this way, in this order, each appearing exactly once:
   1. ## Summary
   2. ## Blocking issues
   3. ## Non-blocking issues

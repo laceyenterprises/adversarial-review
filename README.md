@@ -1440,6 +1440,33 @@ warnings. After deployment, confirm org discovery completes without
 `TimeoutOverflowWarning` or immediate `POLL_DEADLINE_EXCEEDED` exits. See the
 [call-site audit](docs/load-aware-wait-inventory.md#watchertimer-01-timer-safety-audit).
 
+LVR-12 adds the opt-in offline kit at `test/helpers/load-time-kit.mjs`, extending
+the existing idle-host timeout fixture. Its camelCase exports correspond to the
+LVR-11 helpers: `underMaxLoad(t, { maxMultiplier })`, `assertTimerCeiling(ms,
+{ baseMs, ceilingMs })`, `assertScaledOnce(ms, { baseMs, multiplier, ceilingMs,
+scaleInputs })`, `FakeClock`, and `runConcurrently(actions, { schedule, timeoutMs })`.
+`underMaxLoad` configures synthetic load and CPU evidence at the selected policy
+maximum (default 6, supported range 1–20), with test-context cleanup. Assertions
+honor the nominal floor, policy cap and platform timer ceiling; pass `scaleInputs`
+when a saturated cap could conceal repeated scaling.
+
+`new FakeClock(t, { monotonic, wall })` supplies independent monotonic and wall
+milliseconds through `monotonic()` and `time()`, plus mocked Date and Node timers.
+`await clock.advance(ms, { wallMs })` advances timers and drains bounded Promise
+continuations; advance polling loops one interval at a time. Wall adjustments
+do not advance timers. Context mocks restore automatically. `runConcurrently`
+starts small cooperative async jobs behind a barrier, returns results in input
+order and accepts unique ordered checkpoint labels. Each job receives an async
+checkpoint function; its real-time deadline remains active under fake timers.
+Jobs must clean up their own effects; this helper does not terminate processes.
+
+Run `node test/run-tests.mjs load-time-kit.test.mjs load-time-regressions.test.mjs`
+for kit tests and the synthetic CLOSERINTENT-01, GEMTIMEOUT-01, LEASEFAIR-04 and
+timer-overflow regressions. The existing `lvr-12-review-kit` deployment assertion
+remains pending (exit 75) until the kit reaches the deployed checkout through the
+ordinary submodule float. Production budgets, lifecycle states and stores do not
+change.
+
 ALERTTIMEOUT-01: canonical alert delivery scales its nominal 35-second child
 budget once, capped at five minutes and the platform timer maximum. Transient
 failures use the existing bounded exponential retries; permanent request or

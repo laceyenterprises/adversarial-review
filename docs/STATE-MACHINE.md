@@ -885,6 +885,12 @@ existing lease ID/PR/head/acquisition-time fence plus local host/PID ownership.
 HQ terminality alone is not this lifecycle's quiescence. Existing closer-lease
 and review-row states, merge eligibility and smoke promises remain unchanged.
 See [controller registration data](data-model/hammer-controllers.md).
+LAC-2108 supplies the same census contract through bounded kernel-filtered
+libproc PID/PGID/exact-birth reads on Darwin and native current-PGID assertion.
+Initial capability denial still refuses readiness; lost/partial evidence never
+proves drain. Other hosts retain ps. Lifecycle states and transitions above are
+unchanged. Actual-provider offline fixtures and separate loaded-worker acceptance
+are recorded in [LAC-2108](validation/lac-2108.md).
 
 LAC-2086: successful API publication followed by failed scratch adoption stops
 at the existing `published-head-sync-failed` outcome after recording the exact

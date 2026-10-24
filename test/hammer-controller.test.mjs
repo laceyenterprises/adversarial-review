@@ -25,7 +25,7 @@ const launch = status => ({ ok: true, row: { launch_request_id: 'lrq_controller-
 const publishReady = value => `const fs=require("node:fs"),p=process.env.HAM_RUN_DIR+"/test-ready";
   fs.writeFileSync(p+".tmp",JSON.stringify(${value}));fs.renameSync(p+".tmp",p);`;
 
-function fixture(t, script) {
+function fixture(t, script, { realCensus = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   const env = { ...process.env, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
     HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_WORKER_LRQ_ID: 'lrq_controller-test' };
@@ -36,7 +36,7 @@ function fixture(t, script) {
     if(process.argv[2]!=='-o'||process.argv[3]!=='pgid=')process.exit(1);
     console.log(JSON.parse(readFileSync(process.env.HAM_CONTROLLER_RECORD,'utf8')).shellPid);`);
   writeFileSync(join(bin, 'ps'), '#!/bin/sh\nexec "$CONTROLLER_FIXTURE_NODE" "$CONTROLLER_FIXTURE_PS" "$@"\n', { mode: 0o755 });
-  Object.assign(env, { PATH: `${bin}:${env.PATH}`, CONTROLLER_FIXTURE_NODE: process.execPath, CONTROLLER_FIXTURE_PS: ps });
+  if (!realCensus) Object.assign(env, { PATH: `${bin}:${env.PATH}`, CONTROLLER_FIXTURE_NODE: process.execPath, CONTROLLER_FIXTURE_PS: ps });
   const launchPath = join(dir, 'launch.json');
   writeFileSync(launchPath, JSON.stringify(launch('running')));
   const leaseHelper = join(dir, 'acquire.mjs');
@@ -56,13 +56,13 @@ function fixture(t, script) {
   const driver = join(dir, 'driver.mjs');
   writeFileSync(driver, `
     import {readFileSync,writeFileSync,renameSync} from 'node:fs';
-    import {runHammerController} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
       pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000,
       readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
       // The test owns these exact births. Inject the OS census so this offline
       // regression also runs in workers whose sandbox forbids ps.
-      snapshotImpl:pgid=>{
+      ...(${realCensus} ? {} : {snapshotImpl:pgid=>{
         try {readFileSync(process.env.HAM_RUN_DIR+'/probe-denied');throw Object.assign(new Error('fixture census denied'),{code:'EPERM'})} catch(e) {if(e.code!=='ENOENT')throw e}
         let ready={}; try {ready=JSON.parse(readFileSync(process.env.HAM_RUN_DIR+'/test-ready','utf8'))} catch {}
         return [pgid,ready.pid,ready.ppid].filter(Boolean).filter(pid=>{
@@ -72,7 +72,7 @@ function fixture(t, script) {
             return true;
           } catch(e) {if(e.code==='ESRCH')return false;throw e}
         }).map(pid=>({pid,birth:'fixture-'+pid}));
-      }
+      }})
     });
     writeFileSync(${JSON.stringify(join(dir, 'result.tmp'))},String(status));
     renameSync(${JSON.stringify(join(dir, 'result.tmp'))},${JSON.stringify(join(dir, 'result'))});
@@ -418,3 +418,60 @@ test('a successful test leader cannot hide a background descendant from validati
   assert.equal(f.receipt().killSent, true);
   assert.equal(existsSync(join(f.dir, 'audit')), false);
 });
+
+// These fixtures exercise the actual provider inside the inherited worker
+// boundary. Only canonical launch reads are replaced with private local rows.
+for (const exitCode of [0, 7]) {
+  test(`real census admits assert-owner and preserves script exit ${exitCode}`, { timeout: 15000 }, async t => {
+    const f = fixture(t, `"${process.execPath}" "${root}/bin/hammer-controller.mjs" assert-owner
+      printf ready > "$HAM_RUN_DIR/ready"
+      exit ${exitCode}`, { realCensus: true });
+    const p = f.start();
+    assert.equal((await p.closed)[0], exitCode, `${p.output()} ${JSON.stringify(f.receipt())}`);
+    assert.equal(existsSync(join(f.dir, 'ready')), true);
+    assert.equal(f.receipt().state, 'quiescent');
+    assert.equal(f.receipt().drained, true);
+    assert.equal(f.receipt().leaseCleanup.released, true);
+    assert.deepEqual(controllerGroupSnapshot(f.receipt().shellPid), []);
+  });
+}
+
+test('real census drains all matching descendants after leader exit and preserves unrelated group', { timeout: 15000 }, async t => {
+  const f = fixture(t, `"${process.execPath}" -e '
+    const {spawn}=require("node:child_process");
+    const child=spawn(process.execPath,["-e", "process.on(\\"SIGTERM\\",()=>{});setInterval(()=>{},1000)"],{stdio:"ignore"});
+    child.unref();
+    process.on("SIGTERM",()=>{});
+    ${publishReady('{pid:process.pid,ppid:process.ppid,child:child.pid}')}
+    setInterval(()=>{},1000);' &
+    wait`, { realCensus: true });
+  const p = f.start();
+  await until(() => existsSync(join(f.dir, 'test-ready')));
+  const ready = JSON.parse(readFileSync(join(f.dir, 'test-ready'), 'utf8'));
+  await until(() => controllerGroupSnapshot(f.receipt().shellPid).some(m => m.pid === ready.child));
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' });
+  t.after(async () => { const done = once(unrelated, 'close'); unrelated.kill(); await done; });
+  // Let the controller witness births before the group leader exits on TERM.
+  await delay(100);
+  f.cancel();
+  assert.equal((await p.closed)[0], 143, `${p.output()} ${JSON.stringify(f.receipt())}`);
+  assert.equal(f.receipt().killSent, true);
+  assert.equal(f.receipt().drained, true);
+  assert.equal(f.receipt().leaseCleanup.released, true);
+  assert.deepEqual(controllerGroupSnapshot(f.receipt().shellPid), []);
+  assert.equal(unrelated.exitCode, null);
+  assert.equal(unrelated.signalCode, null);
+});
+
+
+test('missing native execution capability refuses readiness before any lease or script',
+  { skip: process.platform !== 'darwin', timeout: 10000 }, async t => {
+    const f = fixture(t, 'printf forbidden > "$HAM_RUN_DIR/audit"', { realCensus: true });
+    f.env.HQ_PYTHON3 = join(f.dir, 'missing-python');
+    const p = f.start();
+    assert.equal((await p.closed)[0], 125);
+    assert.equal(f.receipt().state, 'cleanup-unconfirmed');
+    assert.equal(f.receipt().drained, false);
+    assert.equal(existsSync(join(f.dir, 'merge-lease-acquire.json')), false);
+    assert.equal(existsSync(join(f.dir, 'audit')), false);
+  });

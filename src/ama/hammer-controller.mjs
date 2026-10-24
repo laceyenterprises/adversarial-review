@@ -10,6 +10,7 @@ import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
+import { nativeControllerIdentity } from '../controller-process-census.mjs';
 
 // Registration belongs to this invocation, never the shared PR or LRQ name.
 export function controllerLaunchId(env) {
@@ -61,7 +62,10 @@ export function confirmControllerValidation() {
 }
 
 // No environment/command census: retain only identities in our owned group.
-export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync } = {}) {
+export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform } = {}) {
+  if (platform === 'darwin' && execFileSyncImpl === execFileSync) {
+    return nativeControllerIdentity('group', pgid);
+  }
   const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
     encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024,
     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },

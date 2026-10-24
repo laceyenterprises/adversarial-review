@@ -5464,3 +5464,42 @@ observation. Missing organic evidence remains pending and is not a runtime
 refusal. No worker production action is part of this change. After deletion,
 rollback restores prior source revision `4d06237c`, including its matching
 owner declarations and tests; there is no second permanent policy switch.
+
+
+## Worker process census contract (LAC-2108)
+
+A mandatory controller needs read-only PID, PGID, zombie status and birth data
+for its isolated shell group before releasing the readiness pipe. On the
+reference macOS boundary `/bin/ps` is a setuid executable whose execution is
+refused even though native process identity reads are available. Operator-shell
+`ps` success does not establish worker capability. Keep the worker sandbox.
+
+`src/controller-process-census.mjs` invokes its adjacent stdlib-only Python
+helper with `-I -B`, using the existing `HQ_PYTHON3`, then `AGENT_OS_PY`, then
+`python3` interpreter contract. Provision that executable in the declared worker
+boundary. Darwin uses `proc_listpids(PROC_PGRP_ONLY)` and 136-byte
+`proc_pidinfo(PROC_PIDTBSDINFO)` identities; owner assertion uses `os.getpgid`.
+No argv/environment census, setuid helper, root daemon, new controller API or
+permission exception is required. Other platforms retain the existing `ps`
+provider. The two-second probe timeout, 1 MiB output ceiling, controller grace,
+ledger adapter, launch ownership and lease-generation fences remain in force.
+
+An unavailable interpreter/library, permission denial, malformed output, partial
+ABI read, inconsistent PID/PGID/birth or saturated bounded enumeration refuses
+proof. Only ESRCH during a member read proves that enumerated member exited.
+A successful empty group census requires the shell exit event before quiescence.
+After lost evidence, only the live direct child can be signaled; unknown drain
+retains the receipt and lease for canonical teardown. Do not use another harness,
+a copied `ps`, sandbox relaxation, or live queue/lease edits as recovery.
+
+Run the offline `controller-process-census` and `hammer-controller` fixtures in
+the inherited worker boundary. They create private launch rows and lease files;
+no production controller/lease is used. Record actual-provider readiness and
+assert-owner, exit 0/7, TERM-ignoring descendant cleanup after shell exit,
+unrelated-group preservation and initial provider-denial refusal. See
+[the RCA](validation/lac-2108.md). Source merge and normal submodule adoption do
+not prove a running worker has loaded these bytes. The runtime owner separately
+records a new organic worker's loaded revision, launch-bound registration,
+readiness, exact-head validation result and full-group drain/generation-fenced
+lease release. Existing `smv-handoff` smoke is unchanged. No restart, enrollment,
+live fault injection or production acceptance action is authorized by this fix.

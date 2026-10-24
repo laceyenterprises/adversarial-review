@@ -862,11 +862,25 @@ LAC-2093 bounds local validation under the shared lease with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
 independent of the load-scaled 360-second nominal absolute ceiling. Real pytest
 phase events expose collection/setup/call/teardown progress. TERM/INT/HUP
-cancellation initiates group TERM and five-second KILL escalation even after
+standalone cancellation initiates group TERM and five-second KILL escalation even after
 leader exit. Incomplete validation exits through the existing lease-release trap
 before any validated-head audit or merge; retry reacquires and rechecks unchanged
-head/base/file-overlap safety. No durable states or transitions are added.
+head/base/file-overlap safety. Existing review-row and closer-lease states are unchanged.
 See [source evidence and pending deployment acceptance](validation/lac-2093.md).
+
+The 2026-10-24 LAC-2093 recurrence adds a private controller registration lifecycle:
+`running` → `stopping` → `quiescent` after witnessed group drain, otherwise
+`cleanup-unconfirmed` (exit 125; preserve scratch and lease). Execution starts
+only after durable registration of the exact launch/shell generation. Dispatched
+HAM acquisition requires that registration. Validators stay in the shell group;
+timeout requests stop over a private inherited pipe. Signals or terminal,
+parked, unreadable or mismatched exact-launch evidence stop the round. The
+controller never adopts a live retry to justify an old process. Cancellation
+defers the shell release trap until group drain; fallback release retains the
+existing lease ID/PR/head/acquisition-time fence plus local host/PID ownership.
+HQ terminality alone is not this lifecycle's quiescence. Existing closer-lease
+and review-row states, merge eligibility and smoke promises remain unchanged.
+See [controller registration data](data-model/hammer-controllers.md).
 
 LAC-2086: successful API publication followed by failed scratch adoption stops
 at the existing `published-head-sync-failed` outcome after recording the exact

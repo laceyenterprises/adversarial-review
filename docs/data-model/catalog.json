@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "hammer-controllers",
+      "title": "Hammer Controller Registrations",
+      "path": "docs/data-model/hammer-controllers.md",
+      "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
+      "schemaSurface": "src/ama/hammer-controller.mjs",
+      "relatedSchemaSurfaces": ["bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
+      "owner": "versioned closer controller"
+    },
+    {
       "id": "next-action-shadow",
       "title": "Next Action Shadow Observations",
       "path": "docs/data-model/next-action-shadow.md",

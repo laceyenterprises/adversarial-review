@@ -122,7 +122,7 @@ esac
     baseHead: original, validatedHead: rebased, identity: { login: 'hammer-worker', databaseId: 77 },
     range: { verified: true, reviewedHead: original, currentHead: rebased, baseSha: original, commits: [rebased] },
     counts: { total: 2, blocking: 1, nonBlocking: 1 } });
-  const run = () => spawnSync('/bin/bash', ['-c', `
+  const run = (extraEnv = {}) => spawnSync('/bin/bash', ['-c', `
 ham_fixture_completion() { :; }
 if [ "$SCENARIO" = dirty ]; then echo dirty >> surface.txt; fi
 source "$FIXTURE_DIR/hammer-verify-head.sh"
@@ -152,9 +152,18 @@ source "$FIXTURE_DIR/hammer-merge.sh"
 status=$?
 echo "merge=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD"
 exit "$status"
-`], { cwd: scratch, env, encoding: 'utf8', timeout: subprocessTimeout });
+`], { cwd: scratch, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: subprocessTimeout });
   return { dir, scratch, original, rebased, nextBase, nextRebased, run, git };
 }
+
+test('LAC-2093: an unregistered dispatched controller cannot acquire or validate a head', t => {
+  const f = fixture(t, 'no-op');
+  const result = f.run({ HQ_LAUNCH_REQUEST_ID: 'lrq_unregistered', AGENT_OS_WORKER_LRQ_ID: 'lrq_unregistered' });
+  assert.equal(result.status, 125, result.stdout + result.stderr);
+  assert.match(result.stderr, /hammer-controller:/);
+  assert.equal(existsSync(join(f.dir, 'leases')), false);
+  assert.equal(existsSync(join(f.dir, 'validated-head')), false);
+});
 
 for (const scenario of ['snapshot-failed', 'ci-snapshot-failed', 'snapshot-permanent']) {
   test(`post-rebase snapshot failure releases the lease before returning: ${scenario}`, t => {

@@ -1809,7 +1809,7 @@ Do not nest a buffering runner that conceals real output from this supervisor.
 Timeout, cancellation or failed tests must exit via the existing lease-release
 trap without a successful validation audit or merge. Diagnose outside the shared
 lease, then reacquire and repeat head/base/file-overlap checks before retrying.
-TERM/INT/HUP cancellation initiates group TERM; KILL follows after five seconds even if
+Standalone TERM/INT/HUP cancellation initiates group TERM; KILL follows after five seconds even if
 the leader exits first. Once the output pipes close, the supervisor rechecks group
 presence at most every 100ms and completes early when all descendants have exited,
 preserving the original failure or cancellation status. This bounds cooperative runner cancellation, not SIGKILL
@@ -4169,6 +4169,40 @@ assume a per-head review ceiling bounds repeated new rebase heads: the combined
 lifetime accounting needs the offline cycle regression tracked in LAC-1849.
 Local-first trailer suppression still lacks authenticated linked identity;
 source-aware stale-head resume verification is tracked in LAC-1848.
+## LAC-2093: detached closer cancellation ownership
+
+For newly rendered closers, source `inputs.sh` in the calling shell, write the
+complete persistent closure script inside the private run directory, then run
+`node <deployed-root>/bin/hammer-controller.mjs run <run-dir>/close-controller.sh`
+in the foreground. Keep the inherited HQ launch/spawn markers and FD 4. Direct
+execution of a dispatched shell refuses lease acquisition. The legacy final-pass
+merge-agent prompt uses the same wrapper and named acquisition receipt.
+
+The controller registers before execution and watches its exact HQ launch through
+the existing read adapter and producer vocabulary. Validation runs in that shell's
+group. Terminal, parked, unreadable or mismatched ownership stops the round;
+retries cannot keep an old controller alive. TERM has two seconds before KILL,
+then one second to confirm drain. A current witnessed PID/birth identity is
+required for a group signal after leader exit. Unknown process inspection refuses
+startup or retains `cleanup-unconfirmed` with status 125; it cannot establish
+absence or release a matching lease. An empty/malformed census fails closed.
+
+During cancellation the shell defers its trap release. Only after confirmed
+group drain may fallback cleanup release the exact acquisition receipt's local
+host/PID/PR/head/lease-ID/acquisition-time match under the existing mutation lock.
+A successor holder is left intact. Normal release during CI waits is unchanged.
+Inspect the private `controller-<uuid>.json` registration for drain evidence;
+a canceled LRQ or absent worker lease alone is insufficient. Receipt states and
+fields are in [controller data](data-model/hammer-controllers.md).
+
+Old rendered scripts need normal retirement; this change does not reach into
+already-running controllers. Controller SIGKILL, host loss and intentional group
+escape remain canonical HQ teardown responsibilities. A separate scoped Agent OS
+follow-up is recorded in [the recurrence RCA](validation/lac-2093.md). Source
+fixtures, normal PR review and deployment precede read-only runtime-owner
+observation of organic cancellation and queue progress. Do not turn that
+observation into a forced production probe or manual lease/queue edit.
+
 ## CIUNKNOWN-01: cancelled checks and no-CI bootstrap
 
 When the current open head's only non-green external checks are cancelled, the

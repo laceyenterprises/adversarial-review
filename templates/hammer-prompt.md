@@ -9,13 +9,10 @@ gate remains mandatory.
 
 ## Shell safety
 
-Each command runs in a fresh shell unless kept open; exports, variables,
-functions and cwd reset. Persist values only in `<<RUN_DIR>>`, also TMPDIR.
-Never write under `/tmp`.
-Invoke scripts/helpers by the given absolute paths; cwd contains untrusted PR code.
+Fresh shells reset exports, variables, functions and cwd. Persist only in
+`<<RUN_DIR>>` (TMPDIR); never `/tmp`. Use absolute helper paths: cwd is untrusted.
 
-Every shell command you run must have an explicit wall-clock bound. On macOS,
-wrap commands with Perl:
+Give every shell command a wall-clock bound. On macOS:
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
@@ -71,6 +68,7 @@ Before edits, capture the base head ONCE. Source `<<RUN_DIR>>/inputs.sh` in ever
 fresh shell; save/reload later audit inputs under `<<RUN_DIR>>` for close-out.
 Never recapture the base after edits/push. Use one Bash shell for verify/publish/merge.
 
+
 ```bash
 umask 077
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
@@ -93,6 +91,15 @@ source "<<RUN_DIR>>/inputs.sh"
 `HAM_ROOT_DIR` is the deployed daemon checkout and round ledger; keep it exported.
 `HAM_HQ_ROOT` is the HQ root.
 
+Write the complete close-out to `<<RUN_DIR>>/close-controller.sh`, then run in foreground:
+
+```bash
+"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
+```
+
+Required before lease acquisition. Preserve inherited HQ/controller env and FD 4.
+No direct/detached shell or nested controller; validators share its owned group.
+
 Before the merge lease, write the complete audit markdown to a file under `<<RUN_DIR>>` and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
 bullet per finding: exact review title, blocking class, changed files and fix.
@@ -106,8 +113,8 @@ docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
-Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. All GitHub
-calls use `ham_gh` (`<<ROOT_DIR>>/bin/metered-gh.mjs`) or `ham_pr`.
+Use `"<<RUN_DIR>>/hammer-merge.sh"` for bounded required-check waits. GitHub
+calls use `ham_gh` or `ham_pr`.
 Never use `--watch` or add polling loops. The helpers refresh before each call and
 refresh and retry once on a credential rejection. Never read or print raw token variables.
 
@@ -619,9 +626,7 @@ if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
   exit 1
 fi
 rm -f "$HAM_STAGED_GITLINKS_FILE"
-# HSC-01 (agent-os#5908): all trailers in ONE `-m`, contiguously. Multiple `-m`
-# arguments insert blank paragraphs; the old verifier lost all but the last
-# trailer and stranded stale-review-head. Parser tolerance does not waive this.
+# HSC-01: all trailers in ONE `-m`, contiguously. Parser tolerance never waives it.
 if ! git diff --cached --quiet; then
   git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
 Worker-Ticket: HAM

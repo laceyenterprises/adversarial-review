@@ -1126,13 +1126,26 @@ LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
 absolute ceiling scales from 360 seconds, but 120 seconds without child output
 fails with status 124 regardless of load. Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
-test settings remain intact. TERM/INT/HUP cancellation initiates group TERM,
+test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,
 with KILL after five seconds even if its leader has exited. Unconfirmed cleanup
 returns 125 and retains private scratch for canonical teardown. Failure exits through
 the existing lease-release trap before any validated-head audit or merge. Head,
-base and file-overlap gates remain mandatory. This adds no durable states or
-smoke promises. Offline regressions: `test/run-bounded.test.mjs`; deployment
+base and file-overlap gates remain mandatory. Existing review-row and closer-lease
+states and smoke promises remain unchanged. Offline regressions: `test/run-bounded.test.mjs`; deployment
 acceptance and historical evidence: [LAC-2093](docs/validation/lac-2093.md).
+
+LAC-2093 recurrence: newly rendered closers run their persistent script through
+`bin/hammer-controller.mjs run`. A private registration binds the exact HQ launch
+to the shell group before execution; dispatched acquisition refuses an
+unregistered shell. Validators share that group. Terminal/parked/unreadable
+launch evidence and signals transition `running` → `stopping` → `quiescent`,
+or `cleanup-unconfirmed` on missing drain proof. Cancellation defers trap release
+until confirmed drain; the existing full lease-generation fence protects other
+holders. [Controller data](docs/data-model/hammer-controllers.md) describes the
+two-second TERM grace, one-second drain bound and retained scratch. Focused
+offline `hammer-controller` tests extend source acceptance; the existing
+`smv-handoff` smoke promise is unchanged. Deployed organic cancellation and
+next-contender progress remain separate runtime-owner acceptance.
 
 Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
 `statusVocabulary`. Explicit terminal/succeeded false values win independently;

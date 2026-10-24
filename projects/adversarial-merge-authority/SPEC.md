@@ -620,3 +620,21 @@ CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class 
 the second Codex OAuth account. It keeps the hammer route and merge-capability
 identity. The fallback default remains `[hammer-claude]`; account fallback
 selection and activation are governed by credential-capacity-expansion CCX-13.
+
+
+## LAC-2093 recurrence: controller cancellation ownership
+
+A dispatched closer's persistent shell must run through the versioned
+`hammer-controller.mjs` entrypoint before acquiring a merge lease. The controller
+registers the exact HQ LRQ, generation and shell group before execution, preserves
+HQ spawn attribution, and keeps validators in that group. Terminal/parked or
+unreadable launch ownership, signals and validator timeout stop the round. A
+terminal LRQ alone never proves process quiescence. Confirm group drain before
+cancellation fallback release; require local host/PID plus the complete existing
+lease ID/PR/head/acquisition-time fence. Unknown drain retains ownership evidence
+and fails closed; unrelated processes and successor leases must survive.
+
+No validation, base-overlap, exact-head CI, finding-remediation or merge-authority
+gate is waived. No HQ ledger mutation or new config section is introduced.
+Registration states and source/deployed acceptance are documented in
+`docs/data-model/hammer-controllers.md` and `docs/validation/lac-2093.md`.

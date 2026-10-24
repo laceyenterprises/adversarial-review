@@ -96,6 +96,12 @@ ham_mark_merge_lease_retryable_abort() {
 }
 
 ham_release_merge_lease() {
+  # During cancellation only the outer controller can establish group drain.
+  # Keep the acquisition receipt for its generation-fenced fallback release.
+  if [ -n "${HAM_CONTROLLER_RECORD:-}" ]; then
+    if [ "${HAM_CONTROLLER_CANCELLED:-0}" -eq 1 ]; then return 125; fi
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || return 125
+  fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
     local ham_release_retryable_args=()
     if [ "${HAM_POST_STATE:-}" = "MERGED" ] && [ "${HAM_POST_HEAD:-}" = "${POST_REMEDIATION_SHA:-}" ] && [ -n "${POST_REMEDIATION_SHA:-}" ]; then
@@ -169,6 +175,11 @@ ham_lease_pr_view() {
 }
 
 ham_acquire_merge_lease() {
+  # HQ cancellation only owns the recorded worker group. Dispatched closers
+  # must enter the versioned, launch-bound controller before taking a lease.
+  if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ]; then
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || return 125
+  fi
   local ham_lease_wait_retry=${1:-0}
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "AMG-04 hard-blocker: merge lease head is not a full SHA" >&2

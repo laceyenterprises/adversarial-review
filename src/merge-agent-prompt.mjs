@@ -30,6 +30,7 @@ function shellSingleQuote(value) {
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const mergeLeaseHelper = shellSingleQuote(fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url)));
   const validationHelper = shellSingleQuote(fileURLToPath(new URL('../bin/hammer-validate.mjs', import.meta.url)));
+  const controllerHelper = shellSingleQuote(fileURLToPath(new URL('../bin/hammer-controller.mjs', import.meta.url)));
   const stackedBaseChecker = shellSingleQuote(fileURLToPath(new URL('../bin/stacked-base-check.mjs', import.meta.url)));
   const stackedBaseRoot = shellSingleQuote(fileURLToPath(new URL('..', import.meta.url)));
   const ciCostChecker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-cost-check.mjs', import.meta.url)));
@@ -287,6 +288,12 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         + ' `blockers_observed` result must hard-refuse the merge.'
       );
       if (isZeroBlockerFinalPass) {
+        lines.push('First create a private run directory in the calling shell. Preserve the inherited HQ launch/spawn markers.');
+        lines.push('```bash');
+        lines.push(`export HAM_REPO=${mergeRepoLiteral} HAM_PR_NUMBER=${mergePrLiteral} HAM_ROOT_DIR=${stackedBaseRoot}`);
+        lines.push('export HAM_RUN_DIR=$(mktemp -d)');
+        lines.push('```');
+        lines.push('Write the following complete rebase/validation/merge script as "$HAM_RUN_DIR/close-controller.sh"; never execute a detached ad hoc shell.');
         lines.push(
           'Merge gate for the rebase-to-merge step only: after remediation is'
           + ' complete and you are ready to rebase for merge, acquire the'
@@ -304,20 +311,21 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('MERGE_HEAD_REF=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName --jq \'.headRefName\')');
         lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
         lines.push('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"');
-        lines.push('MERGE_LEASE_JSON=$(mktemp)');
+        lines.push('MERGE_LEASE_JSON="$HAM_RUN_DIR/merge-lease-acquire.json"');
         lines.push('MERGE_REVALIDATION_JSON=$(mktemp)');
         lines.push('MERGE_LEASE_ID=""');
         lines.push('cleanup_merge_lease() {');
         lines.push('  status=$?');
-        lines.push('  if [ -n "${MERGE_LEASE_ID:-}" ]; then');
+        lines.push(`  if [ -n "\${MERGE_LEASE_ID:-}" ] && [ "\${HAM_CONTROLLER_CANCELLED:-0}" -eq 0 ] && node ${controllerHelper} assert-owner; then`);
         lines.push(`    node ${mergeLeaseHelper} release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true`);
         lines.push('  fi');
-        lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON"');
+        lines.push('  rm -f "$MERGE_REVALIDATION_JSON"');
         lines.push('  exit "$status"');
         lines.push('}');
         lines.push('trap cleanup_merge_lease EXIT');
         lines.push('');
         lines.push('set +e');
+        lines.push(`node ${controllerHelper} assert-owner || exit 125`);
         lines.push(`node ${mergeLeaseHelper} acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
         lines.push('MERGE_LEASE_EXIT=$?');
         lines.push('set -e');
@@ -399,6 +407,10 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('fi');
         lines.push('');
         lines.push(`node ${ciCostChecker} "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA" && gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"`);
+        lines.push('```');
+        lines.push('Then start the script in the foreground through the launch-bound controller, from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease.');
+        lines.push('```bash');
+        lines.push(`node ${controllerHelper} run "$HAM_RUN_DIR/close-controller.sh"`);
         lines.push('```');
       }
     }

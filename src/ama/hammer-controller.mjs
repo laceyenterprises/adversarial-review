@@ -62,10 +62,11 @@ export function confirmControllerValidation() {
 }
 
 // No environment/command census: retain only identities in our owned group.
-export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform } = {}) {
-  if (platform === 'darwin' && execFileSyncImpl === execFileSync) {
-    return nativeControllerIdentity('group', pgid);
-  }
+// Darwin ps is setuid root, which a sandboxed closer cannot execute. The native
+// census reads the same kernel group records unprivileged and never falls back.
+export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform,
+  nativeImpl = nativeControllerIdentity } = {}) {
+  if (platform === 'darwin') return nativeImpl('group', pgid);
   const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
     encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024,
     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
@@ -208,7 +209,10 @@ export async function runHammerController(script, args = [], {
       if (exited) stop('shell-exited');
       let members;
       try { members = snapshotImpl(child.pid); }
-      catch (error) { record.probeError = error.code || 'unknown'; stop('process-probe-unreadable'); }
+      catch (error) {
+        if (!record.probeError) console.error(`hammer-controller: ${error.message}`);
+        record.probeError = error.code || 'unknown'; stop('process-probe-unreadable');
+      }
       if (members?.length === 0 && exited) { drained = true; break; }
       const owned = members && groupStillOwned(members, witnessed, !exited, child.pid);
       // A census can observe the shell's exit before Node delivers its exit
@@ -260,6 +264,7 @@ export async function runHammerController(script, args = [], {
     // A live direct-child handle is safe even when process inspection is denied.
     if (!exited) child.kill('SIGTERM');
     child.stdin.destroy();
+    console.error(`hammer-controller: refused before readiness: ${error.message}`);
     record.state = 'cleanup-unconfirmed';
     record.reason = 'controller-error';
     record.errorCode = error.code || 'unknown';

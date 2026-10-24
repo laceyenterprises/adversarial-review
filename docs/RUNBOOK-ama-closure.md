@@ -5477,16 +5477,22 @@ refused even though native process identity reads are available. Operator-shell
 `src/controller-process-census.mjs` invokes its adjacent stdlib-only Python
 helper with `-I -B`, using the existing `HQ_PYTHON3`, then `AGENT_OS_PY`, then
 `python3` interpreter contract. Provision that executable in the declared worker
-boundary. Darwin uses `proc_listpids(PROC_PGRP_ONLY)` and 136-byte
-`proc_pidinfo(PROC_PIDTBSDINFO)` identities; owner assertion uses `os.getpgid`.
+boundary. Darwin reads one kernel-filtered `kern.proc.pgrp.<pgid>` sysctl
+snapshot of 648-byte `kinfo_proc` records, the PID/PGID/status/start time `ps`
+itself reads, so `ps lstart` and the census agree to the second. Unlike per-PID
+`proc_pidinfo(PROC_PIDTBSDINFO)` reads it has no same-user check, so a member
+running a setuid tool (load-aware timeouts run `ps` inside the group outside a
+sandbox) stays readable. Owner assertion uses `os.getpgid`.
 No argv/environment census, setuid helper, root daemon, new controller API or
-permission exception is required. Other platforms retain the existing `ps`
+permission exception is required. A refusal names the helper, interpreter and
+errno on the controller's stderr and states that no operator
+process-introspection change is needed; the receipt keeps the errno code. Other platforms retain the existing `ps`
 provider. The two-second probe timeout, 1 MiB output ceiling, controller grace,
 ledger adapter, launch ownership and lease-generation fences remain in force.
 
 An unavailable interpreter/library, permission denial, malformed output, partial
 ABI read, inconsistent PID/PGID/birth or saturated bounded enumeration refuses
-proof. Only ESRCH during a member read proves that enumerated member exited.
+proof. Exited members are absent from the snapshot; zombies are excluded.
 A successful empty group census requires the shell exit event before quiescence.
 After lost evidence, only the live direct child can be signaled; unknown drain
 retains the receipt and lease for canonical teardown. Do not use another harness,

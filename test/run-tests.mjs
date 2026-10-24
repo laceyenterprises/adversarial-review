@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -105,9 +105,13 @@ function cleanupSandbox() {
 // Exit hooks must be synchronous: stop the test group before removing its files.
 process.once('exit', () => {
   try {
-    if (child?.exitCode === null && child?.signalCode === null) signalTestGroup('SIGKILL');
-  } finally {
-    cleanupSandbox();
+    try {
+      if (child?.exitCode === null && child?.signalCode === null) signalTestGroup('SIGKILL');
+    } finally {
+      cleanupSandbox();
+    }
+  } catch (error) {
+    console.error('Test sandbox cleanup failed:', error);
   }
 });
 
@@ -121,8 +125,8 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 }
 
 try {
-  const reclaimed = reclaimAbandonedSandboxes(tempBase);
-  console.error(`Test sandbox cleanup: reclaimed ${reclaimed} abandoned sandbox(es).`);
+  const { reclaimed, failed } = reclaimAbandonedSandboxes(tempBase);
+  console.error(`Test sandbox cleanup: reclaimed ${reclaimed} abandoned sandbox(es), failed ${failed}.`);
   sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
   writeFileSync(path.join(sandboxRoot, SANDBOX_OWNER_MARKER), JSON.stringify({ version: 1, pid: process.pid }), {
     flag: 'wx', mode: 0o600,
@@ -202,6 +206,13 @@ try {
     child.once('error', reject);
     child.once('close', (status, signal) => resolve({ status, signal }));
   });
+  if (child.pid) {
+    const marker = path.join(sandboxRoot, SANDBOX_OWNER_MARKER);
+    writeFileSync(`${marker}.next`, JSON.stringify({ version: 1, pid: process.pid, group: child.pid }), {
+      flag: 'wx', mode: 0o600,
+    });
+    renameSync(`${marker}.next`, marker);
+  }
 
   if (receivedSignal) terminateChild(receivedSignal);
   timeout = setTimeout(() => {

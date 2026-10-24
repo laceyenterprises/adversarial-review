@@ -2536,18 +2536,22 @@ production state from the checkout. Restricted workers can set
 the runner's short-path `/tmp` fallback. Socket-based tests still need a parent
 short enough for the platform's Unix socket path limit.
 
-Each runner sandbox records its owning PID in a private `.runner-owner.json`
-marker. Startup logs the number of reclaimed `art-*` directories under the same
-temporary parent. Reclamation requires same-user directory and marker ownership,
-at least 24 hours of age, and a confirmed absent PID. Live or uncertain PIDs,
-missing or invalid markers, and symlinks are preserved, including older sandboxes
-created before ownership markers existed. Normal completion and handled
+Each runner sandbox records its owning PID and, atomically after spawn, its
+detached test group ID in a private `.runner-owner.json` marker. Startup logs
+failed deletions and reclaimed `art-*` directories under the same temporary
+parent. Reclamation requires same-user directory and marker ownership, at least
+24 hours of age, and confirmed absence of both the runner PID and test group.
+Live or uncertain processes, PID-only markers from older runs, missing or invalid
+markers, and symlinks are preserved, including older sandboxes created before
+ownership markers existed. Normal completion and handled
 SIGTERM/SIGINT/SIGHUP remove the current sandbox after stopping the test group;
 a synchronous exit hook also stops the group and retries cleanup on an explicit
 `process.exit()` or an unhandled asynchronous error outside the runner's `try`
 block. Synchronous exceptions inside that block unwind through `finally`, which
 also stops a still-running test group before cleanup. SIGKILL cannot run cleanup,
-so a later run reclaims its marked sandbox once it is old enough.
+so a later run reclaims its marked sandbox once it is old enough and both owners
+are absent. Exit-hook cleanup errors are logged without replacing the original
+exit status.
 
 ### V2 repository/base queue foundation (MGQ-01)
 

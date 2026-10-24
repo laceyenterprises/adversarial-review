@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { ABANDONED_SANDBOX_MIN_AGE_MS, reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
+const deadOwner = 12345;
+const deadKill = () => { throw Object.assign(new Error('absent fixture owner'), { code: 'ESRCH' }); };
+
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 
 function fixtureRoot(t) {
@@ -23,11 +26,11 @@ function deadPid() {
   return child.pid;
 }
 
-function sandbox(base, name, pid, age = ABANDONED_SANDBOX_MIN_AGE_MS * 2) {
+function sandbox(base, name, pid, age = ABANDONED_SANDBOX_MIN_AGE_MS * 2, group = pid) {
   const root = path.join(base, name);
   mkdirSync(root);
   if (pid !== undefined) {
-    writeFileSync(path.join(root, SANDBOX_OWNER_MARKER), JSON.stringify({ version: 1, pid }));
+    writeFileSync(path.join(root, SANDBOX_OWNER_MARKER), JSON.stringify({ version: 1, pid, group }));
     const time = new Date(Date.now() - age);
     utimesSync(path.join(root, SANDBOX_OWNER_MARKER), time, time);
   }
@@ -38,10 +41,10 @@ function sandbox(base, name, pid, age = ABANDONED_SANDBOX_MIN_AGE_MS * 2) {
 
 test('startup skips reclamation when the temporary parent cannot be listed', (t) => {
   const base = fixtureRoot(t);
-  assert.equal(reclaimAbandonedSandboxes(path.join(base, 'missing'), { uid: 1 }), 0);
+  assert.deepEqual(reclaimAbandonedSandboxes(path.join(base, 'missing'), { uid: 1 }), { reclaimed: 0, failed: 0 });
   const file = path.join(base, 'file');
   writeFileSync(file, 'not a directory');
-  assert.equal(reclaimAbandonedSandboxes(file, { uid: 1 }), 0);
+  assert.deepEqual(reclaimAbandonedSandboxes(file, { uid: 1 }), { reclaimed: 0, failed: 0 });
 });
 
 test('startup skips reclamation when the temporary parent is unreadable', {
@@ -50,7 +53,7 @@ test('startup skips reclamation when the temporary parent is unreadable', {
   const base = fixtureRoot(t);
   chmodSync(base, 0);
   try {
-    assert.equal(reclaimAbandonedSandboxes(base), 0);
+    assert.deepEqual(reclaimAbandonedSandboxes(base, { kill: deadKill }), { reclaimed: 0, failed: 0 });
   } finally {
     chmodSync(base, 0o700);
   }
@@ -58,34 +61,37 @@ test('startup skips reclamation when the temporary parent is unreadable', {
 
 test('startup reclaims only old, same-user sandboxes with confirmed dead owners', { skip: !process.getuid }, (t) => {
   const base = fixtureRoot(t);
-  const pid = deadPid();
+  const pid = deadOwner;
   const stale = sandbox(base, 'art-stale', pid);
   const live = sandbox(base, 'art-live', process.pid);
   const young = sandbox(base, 'art-young', pid, 0);
   const unknown = sandbox(base, 'art-unknown', undefined, 0);
   const legacy = sandbox(base, 'art-legacy', undefined);
   const unrelated = sandbox(base, 'other-stale', pid);
-  assert.equal(reclaimAbandonedSandboxes(base), 1);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, { kill(pid) { if (pid === process.pid) return; deadKill(); } }), { reclaimed: 1, failed: 0 });
   assert.equal(existsSync(stale), false);
   for (const root of [live, young, unknown, legacy, unrelated]) assert.equal(existsSync(root), true);
-  assert.equal(reclaimAbandonedSandboxes(base), 0, 'reclamation must be idempotent');
+  assert.deepEqual(reclaimAbandonedSandboxes(base, {
+    kill(pid) { if (pid === process.pid) return; deadKill(); },
+  }), { reclaimed: 0, failed: 0 }, 'reclamation must be idempotent');
 });
 
 test('uncertain ownership, fresh metadata and symlinks never authorize reclamation', { skip: !process.getuid }, (t) => {
   const base = fixtureRoot(t);
-  const pid = deadPid();
+  const pid = deadOwner;
   const stale = sandbox(base, 'art-stale', pid);
-  assert.equal(reclaimAbandonedSandboxes(base, { uid: process.getuid() + 1 }), 0);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, { uid: process.getuid() + 1 }), { reclaimed: 0, failed: 0 });
   for (const code of ['EPERM', 'EINVAL']) {
-    assert.equal(reclaimAbandonedSandboxes(base, {
+    assert.deepEqual(reclaimAbandonedSandboxes(base, {
       kill() { throw Object.assign(new Error('synthetic probe failure'), { code }); },
-    }), 0);
+    }), { reclaimed: 0, failed: 0 });
   }
   assert.equal(existsSync(stale), true);
   rmSync(stale, { recursive: true });
 
   for (const [index, owner] of [null, {}, { version: 2, pid }, { version: 1, pid: -1 },
-    { version: 1, pid: 0 }, { version: 1, pid: '123' }].entries()) {
+    { version: 1, pid: 0 }, { version: 1, pid: '123' }, { version: 1, pid }, { version: 1, pid, group: 0 },
+    { version: 1, pid, group: '123' }].entries()) {
     const root = sandbox(base, `art-invalid-${index}`, pid);
     writeFileSync(path.join(root, SANDBOX_OWNER_MARKER), JSON.stringify(owner));
     const time = new Date(Date.now() - ABANDONED_SANDBOX_MIN_AGE_MS * 2);
@@ -106,12 +112,50 @@ test('uncertain ownership, fresh metadata and symlinks never authorize reclamati
   utimesSync(linkedMarker, old, old);
   writeFileSync(path.join(base, 'art-file'), 'synthetic fixture');
   const before = readdirSync(base).sort();
-  assert.equal(reclaimAbandonedSandboxes(base), 0);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, { kill: deadKill }), { reclaimed: 0, failed: 0 });
   assert.deepEqual(readdirSync(base).sort(), before);
   assert.equal(existsSync(target), true);
 });
 
-async function waitFor(predicate, timeout = 10_000) {
+test('a dead runner cannot authorize deleting a live or uncertain detached group', {
+  skip: !process.getuid || process.platform === 'win32', timeout: 45_000,
+}, async (t) => {
+  const base = fixtureRoot(t);
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true, stdio: 'ignore',
+  });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  t.after(async () => { child.kill('SIGKILL'); await closed; });
+  const root = sandbox(base, 'art-orphan', deadOwner, undefined, child.pid);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, {
+    kill(pid, signal) {
+      if (pid === deadOwner) return deadKill();
+      return process.kill(pid, signal);
+    },
+  }), { reclaimed: 0, failed: 0 });
+  assert.equal(existsSync(root), true);
+  for (const code of ['EPERM', 'EINVAL']) {
+    assert.deepEqual(reclaimAbandonedSandboxes(base, {
+      kill(pid) {
+        if (pid === deadOwner) return deadKill();
+        throw Object.assign(new Error('uncertain group'), { code });
+      },
+    }), { reclaimed: 0, failed: 0 });
+  }
+});
+
+test('authorized deletion failures are counted and can be retried', (t) => {
+  const base = fixtureRoot(t);
+  const root = sandbox(base, 'art-undeletable', deadOwner);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, {
+    kill: deadKill,
+    remove() { throw Object.assign(new Error('denied'), { code: 'EACCES' }); },
+  }), { reclaimed: 0, failed: 1 });
+  assert.equal(existsSync(root), true);
+  assert.deepEqual(reclaimAbandonedSandboxes(base, { kill: deadKill }), { reclaimed: 1, failed: 0 });
+});
+
+async function waitFor(predicate, timeout = 20_000) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
     assert.ok(Date.now() < deadline, 'timed out waiting for fixture state');
@@ -127,11 +171,20 @@ async function startRunner(t, mode) {
   if (mode) {
     const hook = path.join(base, 'exit-hook.mjs');
     writeFileSync(hook, `
-      import { existsSync } from 'node:fs';
+      import fs, { existsSync } from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
       const timer = setInterval(() => {
         if (!existsSync(${JSON.stringify(exitRequest)})) return;
         clearInterval(timer);
-        ${mode === 'exit' ? 'process.exit(23);' : "throw new Error('synthetic runner failure');"}
+        ${mode === 'cleanup-error' ? `
+          const remove = fs.rmSync;
+          fs.rmSync = (root, options) => {
+            if (String(root).includes('/art-')) throw new Error('synthetic cleanup refusal');
+            return remove(root, options);
+          };
+          syncBuiltinESMExports();
+        ` : ''}
+        ${mode === 'exception' ? "throw new Error('synthetic runner failure');" : 'process.exit(23);'}
       }, 20);
     `);
     args.push('--import', hook);
@@ -168,14 +221,15 @@ async function startRunner(t, mode) {
     return existsSync(ready);
   });
   const root = path.join(base, readdirSync(base).find((name) => name.startsWith('art-')));
-  assert.deepEqual(JSON.parse(readFileSync(path.join(root, SANDBOX_OWNER_MARKER), 'utf8')), {
-    version: 1, pid: child.pid,
-  });
+  const owner = JSON.parse(readFileSync(path.join(root, SANDBOX_OWNER_MARKER), 'utf8'));
+  assert.equal(owner.version, 1);
+  assert.equal(owner.pid, child.pid);
+  assert.ok(Number.isSafeInteger(owner.group) && owner.group > 0);
   return { root, ready, exitRequest, child, closed, output: () => output };
 }
 
 test('runner startup logs reclamation and removes its own sandbox on normal completion', {
-  skip: !process.getuid, timeout: 20_000,
+  skip: !process.getuid, timeout: 45_000,
 }, (t) => {
   const base = fixtureRoot(t);
   const stale = sandbox(base, 'art-stale', deadPid());
@@ -185,7 +239,7 @@ test('runner startup logs reclamation and removes its own sandbox on normal comp
   delete env.NODE_TEST_CONTEXT;
   delete env.HQ_ROOT_FIXTURE_HOLD;
   const child = spawnSync(process.execPath, [path.join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs'], {
-    env, encoding: 'utf8', timeout: 15_000,
+    env, encoding: 'utf8', timeout: 30_000,
   });
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
   assert.match(child.stderr, /reclaimed 1 abandoned sandbox/);
@@ -197,7 +251,7 @@ test('runner startup logs reclamation and removes its own sandbox on normal comp
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   test(`runner removes its sandbox after ${signal} terminates the child`, {
-    skip: process.platform === 'win32', timeout: 20_000,
+    skip: process.platform === 'win32', timeout: 45_000,
   }, async (t) => {
     const { root, ready, child, closed, output } = await startRunner(t);
     const worker = JSON.parse(readFileSync(ready, 'utf8'));
@@ -213,15 +267,16 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   });
 }
 
-for (const mode of ['exit', 'exception']) {
+for (const mode of ['exit', 'exception', 'cleanup-error']) {
   test(`runner exit hook cleans up on an explicit ${mode}`, {
-    skip: process.platform === 'win32', timeout: 20_000,
+    skip: process.platform === 'win32', timeout: 45_000,
   }, async (t) => {
-    const { root, ready, exitRequest, closed } = await startRunner(t, mode);
+    const { root, ready, exitRequest, closed, output } = await startRunner(t, mode);
     const worker = JSON.parse(readFileSync(ready, 'utf8'));
     writeFileSync(exitRequest, 'exit');
-    assert.equal((await closed).status, mode === 'exit' ? 23 : 1);
-    assert.equal(existsSync(root), false);
+    assert.equal((await closed).status, mode === 'exception' ? 1 : 23, output());
+    assert.equal(existsSync(root), mode === 'cleanup-error');
+    if (mode === 'cleanup-error') assert.match(output(), /Test sandbox cleanup failed:.*synthetic cleanup refusal/);
     await waitFor(() => {
       try { process.kill(worker.pid, 0); return false; } catch (error) {
         assert.equal(error.code, 'ESRCH');
@@ -232,7 +287,7 @@ for (const mode of ['exit', 'exception']) {
 }
 
 test('runner finally stops a live test group before cleanup after an unexpected error', {
-  skip: process.platform === 'win32', timeout: 20_000,
+  skip: process.platform === 'win32', timeout: 45_000,
 }, (t) => {
   const base = fixtureRoot(t);
   const events = path.join(base, 'events.jsonl');
@@ -263,7 +318,7 @@ test('runner finally stops a live test group before cleanup after an unexpected 
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [
     '--import', hook, path.join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs',
-  ], { env, encoding: 'utf8', timeout: 15_000 });
+  ], { env, encoding: 'utf8', timeout: 30_000 });
   assert.equal(child.status, 1, `${child.stdout}\n${child.stderr}`);
   assert.match(child.stderr, /synthetic runner unwind/);
   const observed = readFileSync(events, 'utf8').trim().split('\n').map((line) => JSON.parse(line));

@@ -91,9 +91,18 @@ async function execFileWithStdin(execFileImpl, command, args, options, input) {
     stdin.end(input);
   } catch (error) {
     inputError = error;
-    try { execution?.child?.kill?.(); } catch { /* Still drain the execution below. */ }
+    let killed = false;
+    try { killed = execution?.child?.kill?.() === true; } catch { /* Observe completion without waiting below. */ }
+    if (!killed) {
+      // A broken runner may hide the child handle or refuse termination. Do not
+      // wait for stdin completion in that case, but still observe a late reject.
+      void Promise.resolve(execution).catch(() => {}).finally(() => {
+        stdin?.removeListener?.('error', onInputError);
+      });
+      throw inputError;
+    }
   }
-  // Always observe child completion, even if stdin delivery failed. Prefer the
+  // Await completion after successful delivery or termination. Prefer the
   // child's failure (including stderr) over a secondary EPIPE/delivery error.
   try {
     const result = await execution;

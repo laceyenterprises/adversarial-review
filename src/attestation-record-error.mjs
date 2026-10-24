@@ -2,7 +2,7 @@ import { redactPathlikeText, redactSensitiveText } from './adapters/comms/github
 
 export function attestationRecordErrorDetails(error, env = process.env) {
   const redact = value => {
-    let text = String(value || '');
+    let text = String(value ?? '');
     for (const [key, secret] of Object.entries(env)) {
       if (/token|secret|password|credential|private.?key|hmac|dsn/i.test(key)
         && typeof secret === 'string' && secret.length >= 8) text = text.split(secret).join('[REDACTED]');
@@ -19,7 +19,11 @@ export function attestationRecordErrorDetails(error, env = process.env) {
   const code = redact(error?.code).slice(0, 80) || 'unknown';
   const signal = redact(error?.signal).slice(0, 80) || null;
   const stderrTail = tail(error?.stderr);
-  const message = tail(error?.message || error);
+  const suffix = `; exitCode=${code}${signal ? ` signal=${signal}` : ''}${stderrTail ? `; stderr=${stderrTail}` : ''}`;
+  const rawMessage = redact(error?.message || error);
+  // The record boundary already redacts errors for callers that persist only
+  // their message. Reformatting that error in the daemon must not duplicate it.
+  const message = tail(rawMessage.endsWith(suffix) ? rawMessage.slice(0, -suffix.length) : rawMessage);
   return { exitCode, signal, stderrTail,
-    error: `${message}; exitCode=${code}${signal ? ` signal=${signal}` : ''}${stderrTail ? `; stderr=${stderrTail}` : ''}` };
+    error: `${message}${suffix}` };
 }

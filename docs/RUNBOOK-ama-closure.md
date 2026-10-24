@@ -5344,9 +5344,13 @@ the merge transport attempt, with
 through the existing signer and canonical ledger before merging. Ledger delivery
 failure defers without a reviewer or closer; repeat delivery reuses and verifies
 the existing signed head record. The watcher executor preserves the child stdin
-needed to send the signed payload. Delivery errors still await child completion,
-so a child rejection cannot escape the pre-merge catch. Failure diagnostics retain
-the exit code, signal and a redacted stderr tail capped at 2,000 characters.
+needed to send the signed payload. Delivery errors await child completion when
+termination succeeds. A missing/invalid stdin or synchronous delivery failure
+without a terminable child fails immediately; later subprocess rejection is
+still observed so it cannot escape as an unhandled rejection. Failure diagnostics
+retain the exit code (including numeric zero), signal and a redacted stderr tail
+capped at 2,000 characters. Reformatting a record error at the daemon boundary
+retains one diagnostic suffix rather than duplicating the code and stderr.
 The per-head audit permits three failed record attempts, with 60-second then
 120-second backoff. Repeated polls and watcher restarts retain this budget.
 After the third failure the head parks as `attestation-record-retry-exhausted`

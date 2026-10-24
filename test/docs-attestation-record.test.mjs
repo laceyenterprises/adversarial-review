@@ -29,6 +29,9 @@ for (const fail of [false, true]) test(`watcher executor delivers record stdin a
   if (fail) await assert.rejects(record(), error => {
     assert.match(error.message, /exitCode=23/);
     assert.match(error.message, /synthetic persistence refused/);
+    const details = attestationRecordErrorDetails(error, {});
+    assert.equal(details.error, error.message);
+    assert.equal(details.exitCode, 23);
     return true;
   });
   else assert.equal((await record()).attestation_id, 'fixture-id');
@@ -36,7 +39,7 @@ for (const fail of [false, true]) test(`watcher executor delivers record stdin a
   assert.deepEqual(['unhandledRejection', 'uncaughtException'].map(event => process.listeners(event)), handlers);
 });
 
-for (const delivery of ['missing-stdin', 'throwing-end', 'stream-error']) {
+for (const delivery of ['throwing-end', 'stream-error']) {
   test(`failed ${delivery} delivery drains the rejecting record promise`, async () => {
     const handlers = process.listeners('unhandledRejection');
     let settled = false;
@@ -46,15 +49,13 @@ for (const delivery of ['missing-stdin', 'throwing-end', 'stream-error']) {
           settled = true;
           reject(Object.assign(new Error('record command failed'), { code: 24, stderr: 'synthetic child cause' }));
         }));
-        if (delivery !== 'missing-stdin') {
-          const stdin = new EventEmitter();
-          stdin.end = () => {
-            const error = Object.assign(new Error('payload pipe failed'), { code: 'EPIPE' });
-            if (delivery === 'throwing-end') throw error;
-            stdin.emit('error', error);
-          };
-          execution.child = { stdin, kill() {} };
-        }
+        const stdin = new EventEmitter();
+        stdin.end = () => {
+          const error = Object.assign(new Error('payload pipe failed'), { code: 'EPIPE' });
+          if (delivery === 'throwing-end') throw error;
+          stdin.emit('error', error);
+        };
+        execution.child = { stdin, kill() { return true; } };
         return execution;
       },
     }), /exitCode=24; stderr=synthetic child cause/);
@@ -63,6 +64,52 @@ for (const delivery of ['missing-stdin', 'throwing-end', 'stream-error']) {
     assert.deepEqual(process.listeners('unhandledRejection'), handlers);
   });
 }
+
+for (const delivery of ['missing-child', 'invalid-stdin', 'kill-refused', 'kill-throws']) {
+  test(`failed ${delivery} delivery rejects before subprocess settlement and observes late rejection`, async () => {
+    let rejectExecution;
+    let settled = false;
+    const execution = new Promise((_resolve, reject) => { rejectExecution = reject; });
+    const stdin = new EventEmitter();
+    stdin.end = () => { throw new Error('payload pipe failed'); };
+    if (delivery === 'invalid-stdin') execution.child = { stdin: {} };
+    if (delivery.startsWith('kill-')) execution.child = { stdin, kill() {
+      if (delivery === 'kill-throws') throw new Error('cannot terminate');
+      return false;
+    } };
+    const record = recordSignedReviewedAttestation({ signed, env: {}, maxAttempts: 1,
+      execFileImpl: () => execution }).finally(() => { settled = true; });
+    const rejection = assert.rejects(record, /child.stdin|payload pipe failed/);
+    // A pending execution has no timer: test prompt failure before allowing it
+    // to settle, without relying on subprocess timeout or elapsed-time margins.
+    await new Promise(resolve => setImmediate(resolve));
+    const rejectedPromptly = settled;
+    rejectExecution(new Error('late subprocess rejection'));
+    await rejection;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(rejectedPromptly, true);
+    assert.equal(stdin.listenerCount('error'), 0);
+  });
+}
+
+test('record diagnostics preserve a numeric zero exit code', () => {
+  const details = attestationRecordErrorDetails({ code: 0, message: 'record refused' }, {});
+  assert.equal(details.exitCode, 0);
+  assert.equal(details.error, 'record refused; exitCode=0');
+});
+
+test('record diagnostics stay bounded and stable across module boundaries', () => {
+  const error = { code: 23, signal: 'SIGTERM', message: 'x'.repeat(3000),
+    stderr: 'y'.repeat(3000) + ' constraint refused' };
+  const details = attestationRecordErrorDetails(error, {});
+  const wrapped = Object.assign(new Error(details.error), {
+    code: error.code, signal: error.signal, stderr: details.stderrTail,
+  });
+  assert.deepEqual(attestationRecordErrorDetails(wrapped, {}), details);
+  assert.equal(details.error.split('exitCode=23').length - 1, 1);
+  assert.equal(details.error.split('constraint refused').length - 1, 1);
+  assert.ok(details.error.length <= 4040);
+});
 
 test('record diagnostics redact before retaining bounded stderr tail', () => {
   const details = attestationRecordErrorDetails({ code: 7,

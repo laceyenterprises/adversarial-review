@@ -4376,3 +4376,26 @@ test('LEASEFAIR-04 disabled watcher authority drops its reservation without invo
   assert.equal(result.reason, 'ama-disabled');
   assert.deepEqual(readMergeLeaseWaiters(rootDir, identity), []);
 });
+
+test('FINDINGSBATCH-01 handed-off non-blocking review merges without a hammer only when strict mode is off', async t => {
+  const { acquireAmaCloserLease, updateAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
+  for (const strictMode of [false, true]) {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsArgs(rootDir);
+    const identity = { rootDir, repo: args.repoPath, prNumber: args.prNumber, headSha: 'head-live' };
+    acquireAmaCloserLease(identity);
+    updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'fixture-finished' });
+    updateAmaCloserLease({ ...identity, status: 'handed-to-review' });
+    let merges = 0, hammers = 0;
+    await maybeDispatchAmaClosureFor({ ...args,
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode,
+        autonomousMergeExecutionEnabled: true, lha: { consumeAttestations: false } }),
+      getOrchestrationMode: () => 'native' }),
+      runDaemonCleanMergeAttemptImpl: async () => { merges++; return { disposition: 'merged', merged: true }; },
+      maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+    });
+    assert.equal(merges, strictMode ? 0 : 1);
+    assert.equal(hammers, strictMode ? 1 : 0);
+  }
+});

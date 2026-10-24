@@ -2256,7 +2256,7 @@ async function dispatchAmaClosureFor({
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   const handoffReviewHasFindings = handoffLease?.status === 'handed-to-review'
     && reviewState.headSha === currentPrHeadSha
-    && reviewState.blockingFindingCount + reviewState.nonBlockingFindingCount > 0;
+    && (reviewState.blockingFindingCount > 0 || (strictMode && reviewState.nonBlockingFindingCount > 0));
   const daemonCleanMerge = handoffReviewHasFindings
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'review-handoff-findings',
       reasons: [reviewState.blockingFindingCount > 0 ? 'blocking-findings-present' : 'non-blocking-findings-present'] }

@@ -191,3 +191,57 @@ test('DOCSFASTPATH-01 request-review and operator requests select the full path,
     { enabled: true, eligibility: { fastMergeLabels: ['fast-merge:docs'] } });
   assert.equal(eligibility.reasons.includes('fast-merge-state-unsupported'), false);
 });
+
+test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explicit request to review', async () => {
+  const statuses = [];
+  let daemonCalls = 0;
+  const args = { subject: { headSha: head, labels: [] }, repoPath: 'example/withdraw', prNumber: 4,
+    cfg: { enabled: true }, logger: quiet, readDocsFastPathImpl: async () => evidence,
+    publishStatusImpl: async (_root, status) => { statuses.push(status); },
+    fetchProtectionImpl: async () => ({}), runDaemonImpl: async () => { daemonCalls++; } };
+  assert.equal(await maybeRunDocsFastPath(args), true);
+  assert.equal(statuses.at(-1).decision.state, 'success');
+  for (const override of [
+    { subject: { ...args.subject, labels: ['request-review'] } },
+    { subject: { ...args.subject, labels: ['retrigger-review'] } },
+    { subject: { ...args.subject, requested_reviewers: [{ login: 'reviewer' }] } },
+    { subject: { ...args.subject, requested_teams: [{ slug: 'reviewers' }] } },
+    { reviewRow: { rereview_reason: 'retrigger-review: operator requested review' } },
+    { readDocsFastPathImpl: async () => ({ ...evidence, reviewRequested: true }) },
+    { readReviewRow: () => ({ rereview_reason: 'retrigger-review: operator requested review' }) },
+  ]) {
+    const before = statuses.length;
+    assert.equal(await maybeRunDocsFastPath({ ...args, ...override }), false);
+    assert.equal(statuses.length, before + 1);
+    assert.equal(statuses.at(-1).headSha, head);
+    assert.equal(statuses.at(-1).decision.state, 'pending');
+    assert.equal(statuses.at(-1).decision.reason, 'docs-review-requested');
+    assert.equal(daemonCalls, 1, 'review-request admission cannot merge');
+  }
+  assert.equal(await maybeRunDocsFastPath({ ...args, subject: { ...args.subject, labels: ['request-review'] },
+    publishStatusImpl: async () => { throw new Error('status service unavailable'); } }), true,
+  'failed withdrawal owns the wait until the waiver can be withdrawn');
+  assert.equal(daemonCalls, 1);
+});
+
+test('DOCSFASTPATH-01 reader delegates live labels and retains row requests after discovery', async () => {
+  let row = {}, liveReads = 0;
+  const statuses = [];
+  assert.equal(await maybeRunDocsFastPath({ subject: { headSha: head, labels: [] },
+    repoPath: 'example/live-requests', prNumber: 5, cfg: { enabled: true }, logger: quiet,
+    readReviewRow: () => row,
+    readDocsFastPathImpl: async ({ live }) => {
+      if (live) { liveReads++; return { ...evidence, reviewRequested: true }; }
+      return evidence;
+    },
+    publishStatusImpl: async (_root, { decision }) => { statuses.push(decision.state); },
+    fetchProtectionImpl: async () => ({}),
+    runDaemonImpl: async ({ readDocsFastPathImpl }) => {
+      assert.equal((await readDocsFastPathImpl({ live: true })).reviewRequested, true);
+      row = { rereview_reason: 'retrigger-review: operator requested review' };
+      assert.equal((await readDocsFastPathImpl({ live: false })).reviewRequested, true);
+      return { liveGate: { docsFastPath: { reviewRequested: true } } };
+    } }), false);
+  assert.equal(liveReads, 1);
+  assert.deepEqual(statuses, ['success', 'pending']);
+});

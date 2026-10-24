@@ -826,7 +826,9 @@ eligible range. Recording failure releases the lease and retries on a later poll
 `--match-head-commit` fences the merge itself. Required contexts use the shared
 check classifier, including the pipeline gate, which records the docs waiver as
 success as a review waiver, independently of external CI. A late review request
-withdraws that waiver with a pending status and selects full review. Kill switch,
+withdraws that waiver with a pending status and selects full review. Requests
+already visible at poll admission or classification do the same; failed status
+withdrawal keeps the PR waiting for a later retry. Kill switch,
 primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
 finding count is invented. Pending/red checks wait without reviewer or closer.

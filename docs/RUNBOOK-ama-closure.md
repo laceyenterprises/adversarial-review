@@ -5384,7 +5384,9 @@ Required checks must be green on the exact head. The watcher publishes the
 existing gate context as a docs waiver, then uses the ordinary daemon lease and
 merge predicate. That context certifies the review waiver; external CI and
 mergeability remain separate gates. A live review request withdraws the waiver
-with a pending status before returning to full review.
+with a pending status before returning to full review, including requests already
+visible at poll admission or classification. A failed withdrawal retains the
+fast-path wait for a later retry; it does not hand off with a stale green waiver.
 Under the lease, each attempt revalidates live classification, review requests,
 exact head, required checks and merge eligibility before signing/recording.
 A base tip advance is accepted after classifying the new immutable base/head

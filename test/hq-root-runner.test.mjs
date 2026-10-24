@@ -40,6 +40,7 @@ test('runner replaces inherited HQ roots, clears host run-as users, ignores exha
         GITHUB_TOKEN_REFRESH_COMMAND: 'exit 91',
         HQ_ROOT_FIXTURE_REPORT: report,
         HQ_ROOT_FIXTURE_FAIL: fail === true ? '1' : fail || '0',
+        ADVERSARIAL_REVIEW_TEST_TEMP_BASE: fixture,
       };
       delete env.NODE_TEST_CONTEXT;
       const child = spawnSync(process.execPath, [join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs', 'hq-root-runner-peer.test.mjs'], {

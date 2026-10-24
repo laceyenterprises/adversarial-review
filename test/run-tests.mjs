@@ -4,6 +4,7 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testDir);
@@ -81,6 +82,9 @@ function signalTestGroup(signal) {
     if (process.platform === 'win32') child.kill(signal);
     else process.kill(-child.pid, signal);
   } catch (error) {
+    // Some platforms report EPERM rather than ESRCH for an exited group.
+    // A refusal while the child is still running must remain an error.
+    if (error.code === 'EPERM' && (child.exitCode !== null || child.signalCode !== null)) return;
     if (error.code !== 'ESRCH') throw error;
   }
 }
@@ -89,6 +93,22 @@ function terminateChild(signal) {
   signalTestGroup(signal);
   forceKillTimeout ??= setTimeout(() => signalTestGroup('SIGKILL'), 5_000);
 }
+
+function cleanupSandbox() {
+  if (!sandboxRoot) return;
+  rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  sandboxRoot = undefined;
+}
+
+// Explicit process.exit() and uncaught exceptions do not unwind finally.
+// Exit hooks must be synchronous: stop the test group before removing its files.
+process.once('exit', () => {
+  try {
+    if (child?.exitCode === null && child?.signalCode === null) signalTestGroup('SIGKILL');
+  } finally {
+    cleanupSandbox();
+  }
+});
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   const handler = () => {
@@ -100,7 +120,12 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 }
 
 try {
+  const reclaimed = reclaimAbandonedSandboxes(tempBase);
+  console.error(`Test sandbox cleanup: reclaimed ${reclaimed} abandoned sandbox(es).`);
   sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
+  writeFileSync(path.join(sandboxRoot, SANDBOX_OWNER_MARKER), JSON.stringify({ version: 1, pid: process.pid }), {
+    flag: 'wx', mode: 0o600,
+  });
   const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
   mkdirSync(sandboxTmpDir);
   const coordinatorHqRoot = path.join(sandboxTmpDir, 'coordinator-hq');
@@ -198,7 +223,10 @@ try {
 } finally {
   clearTimeout(timeout);
   clearTimeout(forceKillTimeout);
-  if (receivedSignal || timedOut) signalTestGroup('SIGKILL');
-  for (const [signal, handler] of signalHandlers) process.off(signal, handler);
-  if (sandboxRoot) rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  try {
+    if (receivedSignal || timedOut) signalTestGroup('SIGKILL');
+  } finally {
+    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+    cleanupSandbox();
+  }
 }

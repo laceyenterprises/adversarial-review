@@ -288,8 +288,12 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         + ' `blockers_observed` result must hard-refuse the merge.'
       );
       if (isZeroBlockerFinalPass) {
-        lines.push('Write the following complete rebase/validation/merge script as "$HAM_RUN_DIR/close-controller.sh". First create a private run directory and start it in the foreground through the launch-bound controller; never execute a detached ad hoc shell. Preserve the inherited HQ launch/spawn markers.');
-        lines.push(`Export HAM_REPO=${mergeRepoLiteral} HAM_PR_NUMBER=${mergePrLiteral} HAM_ROOT_DIR=${stackedBaseRoot}; export HAM_RUN_DIR=$(mktemp -d); node ${controllerHelper} run "$HAM_RUN_DIR/close-controller.sh". The controller records group drain independently of HQ terminal status and only releases a matching owned lease.`);
+        lines.push('First create a private run directory in the calling shell. Preserve the inherited HQ launch/spawn markers.');
+        lines.push('```bash');
+        lines.push(`export HAM_REPO=${mergeRepoLiteral} HAM_PR_NUMBER=${mergePrLiteral} HAM_ROOT_DIR=${stackedBaseRoot}`);
+        lines.push('export HAM_RUN_DIR=$(mktemp -d)');
+        lines.push('```');
+        lines.push('Write the following complete rebase/validation/merge script as "$HAM_RUN_DIR/close-controller.sh"; never execute a detached ad hoc shell.');
         lines.push(
           'Merge gate for the rebase-to-merge step only: after remediation is'
           + ' complete and you are ready to rebase for merge, acquire the'
@@ -403,6 +407,10 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('fi');
         lines.push('');
         lines.push(`node ${ciCostChecker} "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA" && gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"`);
+        lines.push('```');
+        lines.push('Then start the script in the foreground through the launch-bound controller, from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease.');
+        lines.push('```bash');
+        lines.push(`node ${controllerHelper} run "$HAM_RUN_DIR/close-controller.sh"`);
         lines.push('```');
       }
     }

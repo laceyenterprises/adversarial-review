@@ -94,7 +94,7 @@ source "<<RUN_DIR>>/inputs.sh"
 Write the complete close-out to `<<RUN_DIR>>/close-controller.sh`, then run in foreground:
 
 ```bash
-node "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
+"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
 ```
 
 Required before lease acquisition. Preserve inherited HQ/controller env and FD 4.

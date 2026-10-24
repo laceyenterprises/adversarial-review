@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
 
 import {
   BRANCH_NOT_PROTECTED_STDERR,
@@ -22,6 +23,58 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   /In (?:the persistent merge-lease shell,|the same shell with dispatch values exported,) `source "<<RUN_DIR>>\/(hammer-[a-z-]+)\.sh"`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
+
+test('merge-agent controller setup and launch blocks execute without prose or path punctuation', t => {
+  const root = mkdtempSync(join(tmpdir(), 'merge-controller-prompt-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const prompt = buildMergeAgentPrompt({ repo: 'fixture/repo', prNumber: 42, baseBranch: 'main' },
+    { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
+  const blocks = [...prompt.matchAll(/```bash\n([\s\S]*?)\n```/g)].map(match => match[1]);
+  const setup = blocks.find(block => block.startsWith('export HAM_REPO='));
+  const launch = blocks.find(block => /^node [^\n]*hammer-controller\.mjs[^\n]* run /.test(block));
+  assert.ok(setup, 'directory setup must be executable fenced Bash');
+  assert.ok(launch, 'controller launch must be executable fenced Bash');
+  assert.ok(prompt.indexOf(setup) < prompt.indexOf('set -euo pipefail'));
+  assert.ok(prompt.indexOf(launch) > prompt.indexOf('set -euo pipefail'));
+  const result = spawnSync('/bin/bash', ['-euc', `
+mktemp() { command mktemp "$@" "$TMPDIR/run.XXXXXX"; }
+node() { test -f "$3"; printf '%s\\n' "$@" "$HAM_REPO" "$HAM_PR_NUMBER" "$HAM_ROOT_DIR"; }
+${setup}
+printf '%s\\n' '#!/bin/bash' > "$HAM_RUN_DIR/close-controller.sh"
+${launch}
+`], { encoding: 'utf8', timeout: 5000, env: { ...process.env, TMPDIR: root } });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  const [helper, action, script, repo, pr, deployedRoot] = result.stdout.trim().split('\n');
+  assert.equal(helper, join(REPO_ROOT, 'bin/hammer-controller.mjs'));
+  assert.equal(action, 'run');
+  assert.ok(script.startsWith(`${root}/`));
+  assert.ok(script.endsWith('/close-controller.sh'));
+  assert.equal(repo, 'fixture/repo');
+  assert.equal(pr, '42');
+  assert.equal(deployedRoot, `${REPO_ROOT}/`);
+});
+
+test('hammer controller launch honors an isolated Node executable and the PATH fallback', t => {
+  const root = mkdtempSync(join(tmpdir(), 'hammer-node-prompt-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const customNode = join(root, 'isolated node');
+  const stub = '#!/bin/sh\nprintf "%s\\n" "$@"\n';
+  writeFileSync(customNode, stub, { mode: 0o755 });
+  writeFileSync(join(root, 'node'), stub, { mode: 0o755 });
+  const launch = HAMMER_TEMPLATE.match(/```bash\n([^\n]*hammer-controller\.mjs[^\n]*)\n```/)?.[1];
+  assert.ok(launch);
+  const script = launch.replaceAll('<<ROOT_DIR>>', '/deployed root').replaceAll('<<RUN_DIR>>', '/private run');
+  for (const nodeBin of [customNode, '']) {
+    const result = spawnSync('/bin/bash', ['-euc', script], { encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, HAM_NODE_BIN: nodeBin, PATH: nodeBin ? '' : root } });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), [
+      '/deployed root/bin/hammer-controller.mjs', 'run', '/private run/close-controller.sh',
+    ]);
+  }
+});
 
 test('HAMNOREREVIEW-01 prompt keeps hammer responsibility through publication and merge', () => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);

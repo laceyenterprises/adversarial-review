@@ -1,7 +1,7 @@
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -190,9 +190,9 @@ import {
   resetWorkspaceDir,
   runWorkspaceGitWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
+import { formatCiCheckList } from './ci-check-format.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
-import { formatCiCheckList } from './ci-check-format.mjs';
 import {
   cancelHqDispatch,
   classifyHqDispatchFailure,
@@ -267,53 +267,15 @@ const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURR
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
-const REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV = 'ADVERSARIAL_REMEDIATION_CI_SETTLE_TIMEOUT_MS';
-const DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS = 30 * 60 * 1000;
-const REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS = 60 * 1000;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
-function parseTimestampMs(value) {
-  const parsed = Date.parse(String(value || ''));
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function resolveRemediationCiSettleTimeoutMs(env = process.env) {
-  const raw = env?.[REMEDIATION_CI_SETTLE_TIMEOUT_MS_ENV];
-  if (raw === undefined || raw === null || raw === '') {
-    return loadAwareTimeoutMs(DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS, { maxMs: Infinity });
-  }
-  const parsed = Number.parseInt(String(raw), 10);
-  return loadAwareTimeoutMs(Number.isFinite(parsed) && parsed > 0
-    ? parsed
-    : DEFAULT_REMEDIATION_CI_SETTLE_TIMEOUT_MS, { maxMs: Infinity });
-}
+const REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS = 60 * 1000;
 
 function isoAfter(startIso, deltaMs) {
-  const startMs = parseTimestampMs(startIso) ?? Date.now();
+  const parsed = Date.parse(String(startIso || ''));
+  const startMs = Number.isFinite(parsed) ? parsed : Date.now();
   return new Date(startMs + deltaMs).toISOString();
-}
-
-function ciGuardRecord({ job, ciGate, observedAt, timeoutMs }) {
-  const firstObservedAt = job?.ciRegressionGuard?.firstObservedAt || observedAt;
-  return {
-    state: ciGate.state,
-    conclusion: ciGate.conclusion || null,
-    headSha: ciGate.headSha || null,
-    firstObservedAt,
-    lastObservedAt: observedAt,
-    timeoutAt: isoAfter(firstObservedAt, timeoutMs),
-    totalExternalChecks: ciGate.totalExternalChecks || 0,
-    failedChecks: ciGate.failedChecks || [],
-    pendingChecks: ciGate.pendingChecks || [],
-    error: ciGate.error || null,
-  };
-}
-
-function ciGuardTimedOut(record, observedAt) {
-  const timeoutAtMs = parseTimestampMs(record?.timeoutAt);
-  const observedAtMs = parseTimestampMs(observedAt) ?? Date.now();
-  return timeoutAtMs !== null && observedAtMs >= timeoutAtMs;
 }
 
 function buildCiRegressionRetryReason(job, ciGate) {
@@ -1878,6 +1840,8 @@ async function reconcileFollowUpJob({
       state: job?.remediationReply?.path ? 'awaiting-worker-write' : 'not-configured',
     };
     let rereview = buildRereviewResult({ requested: false });
+    let closeout = null;
+    let closeoutCiGate = null;
     // Hoisted so the terminal `stopped` / `completed` branches below
     // can pass the worker's parsed reply (summary, validation,
     // blockers) into the public PR comment. When the reply path
@@ -2228,16 +2192,32 @@ async function reconcileFollowUpJob({
           };
         }
 
-        const ciGate = await inspectRemediationCiRegressionImpl({
-          repo: job.repo,
-          prNumber: job.prNumber,
-          execFileImpl,
-          env: process.env,
-          log,
+        closeoutCiGate = await inspectRemediationCiRegressionImpl({
+          repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
         });
-        if (ciGate.state === 'failed') {
-          const published = (!ciGate.headSha || ciGate.headSha === workerPublishedHead?.headSha) && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+        // Reuse the completion lifecycle read before any rereview mutation.
+        // A moved head invalidates the earlier CI/publish generation.
+        completionLifecycle = await resolveJobPRLifecycleSafe({
+          rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+        });
+        if (closeoutCiGate.state === 'failed'
+          && (!closeoutCiGate.headSha || closeoutCiGate.headSha === workerPublishedHead?.headSha)
+          && (completionLifecycle?.source !== 'live' || completionLifecycle.headSha === workerPublishedHead?.headSha)) {
+          const published = completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath,
+            completedAt, ciGate: closeoutCiGate, lifecycle: completionLifecycle || lifecycle,
+            requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
           if (published) return published;
+        }
+        closeout = remediationCloseout({ rootDir, job, completedAt, lifecycle: completionLifecycle || lifecycle,
+          headSha: (completionLifecycle?.source === 'live' ? completionLifecycle.headSha : null)
+            || closeoutCiGate.headSha || lifecycle?.headSha || job.revisionRef,
+          workerPushedHeadSha: workerPublishedHead?.headSha, ciGate: closeoutCiGate });
+        rereview = closeoutRereview(closeout, reply.reReview.reason);
+        // Proven publications complete above and leave failed CI to watcher
+        // admission. Only an unproven current head can retry inside this job.
+        if (workerPublishedHead?.headSha !== closeout.decision.head
+          && closeout.decision.action === 'remediate' && closeoutCiGate.state === 'failed') {
+          const ciGate = closeoutCiGate;
           const maxRetries = resolveMaxTransientRemediationRetries();
           const priorRetries = Number(job?.remediationPlan?.transientRetries || 0);
           if (priorRetries < maxRetries) {
@@ -2252,6 +2232,7 @@ async function reconcileFollowUpJob({
               retryAfterOverride: retryAfter,
               retryMetadata: {
                 code: 'ci-regression',
+                nextAction: closeout.decision,
                 recoverable: true,
                 conclusion: ciGate.conclusion || null,
                 headSha: ciGate.headSha || null,
@@ -2273,7 +2254,7 @@ async function reconcileFollowUpJob({
             };
           }
 
-          rereview = buildRereviewResult({
+          rereview = { ...buildRereviewResult({
             requested: false,
             reason: null,
             outcome: {
@@ -2281,7 +2262,7 @@ async function reconcileFollowUpJob({
               reason: 'ci-regression',
               failedChecks: ciGate.failedChecks || [],
             },
-          });
+          }), nextAction: closeout.decision };
           const ciFailure = {
             code: 'ci-regression',
             message: [
@@ -2296,6 +2277,7 @@ async function reconcileFollowUpJob({
             action: 'failed',
             reply: parsedReply,
             failure: ciFailure,
+            reReview: rereview,
             now,
           });
           const failed = markFollowUpJobFailed({
@@ -2322,7 +2304,7 @@ async function reconcileFollowUpJob({
                 ciGate,
               },
               parsedReply,
-              rereview,
+              reReview: rereview,
             },
           });
 
@@ -2347,148 +2329,12 @@ async function reconcileFollowUpJob({
             jobPath: failed.jobPath,
           };
         }
-        if (ciGate.state !== 'green') {
-          const timeoutMs = resolveRemediationCiSettleTimeoutMs(process.env);
-          const guard = ciGuardRecord({ job, ciGate, observedAt: completedAt, timeoutMs });
-          if (!ciGuardTimedOut(guard, completedAt)) {
-            const waitingJob = {
-              ...job,
-              lastHeartbeatAt: completedAt,
-              ciRegressionGuard: guard,
-              remediationPlan: {
-                ...(job.remediationPlan || {}),
-                nextAction: {
-                  type: 'wait-ci-settlement',
-                  round: job?.remediationPlan?.currentRound || 1,
-                  operatorVisibility: 'explicit',
-                  requestedAt: completedAt,
-                  requestedBy: 'system',
-                  reason: ciGate.state === 'pending'
-                    ? `Waiting for external CI to settle before requesting re-review: ${formatCiCheckList(ciGate.pendingChecks)}.`
-                    : `Waiting for external CI evidence before requesting re-review: ${ciGate.error || 'status check rollup unavailable'}.`,
-                },
-              },
-            };
-            writeFollowUpJob(jobPath, waitingJob);
-            log.log?.(
-              `[follow-up-remediation] ci-settlement waiting ${job.repo}#${job.prNumber}: ` +
-              `state=${ciGate.state} conclusion=${ciGate.conclusion || 'unknown'} ` +
-              `pending=${formatCiCheckList(ciGate.pendingChecks)}`
-            );
-            return {
-              action: 'active',
-              reason: `ci-settlement-${ciGate.state}`,
-              job: waitingJob,
-              jobPath,
-            };
-          }
+        if (rereview.requested) {
+          const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+            requestedAt: completedAt, reason: reply.reReview.reason, targetRevisionRef: closeout.decision.head });
+          rereview = { ...buildRereviewResult({ requested: true, reason: reply.reReview.reason,
+            outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
         }
-        // CIBLOCKHAM-01: checks still PENDING at the bounded wait are not a failed
-        // remediation. Request the re-review; the watcher's CI admission holds the
-        // reviewer until CI settles, then green re-reviews and red requeues or
-        // routes to the hammer.
-        if (ciGate.state !== 'green' && ciGate.state !== 'pending') {
-          rereview = buildRereviewResult({
-            requested: false,
-            reason: null,
-            outcome: {
-              status: 'refused',
-              reason: 'ci-settlement-timeout',
-              ciGate,
-            },
-          });
-          const timeoutFailure = {
-            code: 'ci-settlement-timeout',
-            message: [
-              'Refused to request re-review because external CI did not settle for the remediated PR head before the daemon timeout.',
-              `Last observed state: ${ciGate.state}; pending checks: ${formatCiCheckList(ciGate.pendingChecks)}.`,
-            ].join('\n'),
-          };
-          const { commentDelivery: timeoutDelivery } = buildReconcileCommentDelivery({
-            job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: timeoutFailure,
-            now,
-          });
-          const failed = markFollowUpJobFailed({
-            rootDir,
-            jobPath,
-            failedAt: completedAt,
-            failureCode: 'ci-settlement-timeout',
-            error: new Error(timeoutFailure.message),
-            remediationWorker: {
-              ...workerState,
-              state: 'failed',
-            },
-            failure: {
-              remediationReplyPath: worker.replyPath || job?.remediationReply?.path || null,
-              ciGate,
-            },
-            commentDelivery: timeoutDelivery,
-            jobUpdates: {
-              completedAt,
-              remediationReply,
-              completionMetadata: {
-                source: 'reconcile:ci-settlement-timeout',
-                note: 'External CI did not settle before the remediation completion timeout; refused rereview.',
-                ciGate,
-              },
-              parsedReply,
-              rereview,
-            },
-          });
-
-          await postReconcileOutcomeCommentSafe({
-            rootDir,
-            jobPath: failed.jobPath,
-            job: failed.job,
-            worker,
-            action: 'failed',
-            reply: parsedReply,
-            failure: timeoutFailure,
-            postCommentImpl,
-            alreadyTerminal: failed.alreadyTerminal,
-            now,
-            log,
-          });
-
-          return {
-            action: 'failed',
-            reason: 'ci-settlement-timeout',
-            job: failed.job,
-            jobPath: failed.jobPath,
-          };
-        }
-
-        const requestedAt = completedAt;
-        const rereviewOutcome = requestReviewRereviewImpl({
-          rootDir,
-          repo: job.repo,
-          prNumber: job.prNumber,
-          requestedAt,
-          reason: reply.reReview.reason,
-          targetRevisionRef: ciGate.headSha || null,
-        });
-        rereview = buildRereviewResult({
-          requested: true,
-          reason: reply.reReview.reason,
-          outcome: {
-            ...rereviewOutcome,
-            requestedAt,
-          },
-        });
-        if (ciGate.state === 'pending') rereview = { ...rereview, ciSettlement: 'pending-at-timeout', ciGate };
-      } else if (job?.finalRound === 'comment-only') {
-        rereview = {
-          ...buildRereviewResult({
-            requested: false,
-            reason: null,
-            outcome: { status: 'suppressed', reason: 'comment-only-final-round' },
-          }),
-          suppressed: 'comment-only-final-round',
-        };
       } else {
         rereview = buildRereviewResult({
           requested: false,
@@ -2540,12 +2386,37 @@ async function reconcileFollowUpJob({
     if (job?.finalRound === 'comment-only') ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
       rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
       resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log }));
+    if (!closeout && (workerPublishedHead || (parsedReply && job.finalRound === 'comment-only') || pendingCiCompletion)) {
+      completionLifecycle ||= lifecycle;
+      closeoutCiGate = finalRound.ciGate || await inspectRemediationCiRegressionImpl({
+        repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
+      });
+      closeout = remediationCloseout({ rootDir, job, completedAt, lifecycle: completionLifecycle,
+        headSha: closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef,
+        workerPushedHeadSha: job.finalRound === 'comment-only'
+          ? finalRound.workerPushedHeadSha : workerPublishedHead?.headSha, ciGate: closeoutCiGate });
+      rereview = closeoutRereview(closeout, parsedReply?.reReview?.reason);
+      // A withheld final-round head retains the existing audited exact-head
+      // recovery path. Publish its evidence before that owner requests review.
+      if (finalRound.completionFields.withheldPushHeadSha && rereview.requested) {
+        rereview = { ...rereview, requested: false, status: 'suppressed', suppressed: 'shared-next-action' };
+      }
+      if (!rereview.requested && job.finalRound === 'comment-only') rereview.suppressed = 'comment-only-final-round';
+      if (rereview.requested) {
+        const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+          requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head });
+        rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,
+          outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
+      }
+    }
     const workerModel = worker?.model || 'codex', completionMetadata = {
       source: hasNonEmptyNarrative
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,
       workerModel,
       ...finalRound.completionFields,
+      ...(workerPublishedHead && job.finalRound !== 'comment-only' ? { workerPushedHeadSha: workerPublishedHead.headSha } : {}),
+      ...(closeout ? { finalRemediationPush: closeout.snapshot.observations.remediation.value.finalPush != null } : {}),
       ...(pendingCiCompletion ? { pendingCiOnly: true, workerPushedHeadSha: job.completion.workerPushedHeadSha } : {}),
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
@@ -2583,6 +2454,7 @@ async function reconcileFollowUpJob({
         repo: job.repo,
         prNumber: job.prNumber,
         headSha:
+          closeout?.decision.head ||
           rereview.reviewRow?.revisionRef ||
           rereview.reviewRow?.reviewerHeadSha ||
           job.headSha ||
@@ -2611,7 +2483,9 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested && !finalRound.completed && !pendingCiCompletion) {
+    if (!rereview.requested && !finalRound.completed && !pendingCiCompletion
+      && !(closeout && job.finalRound !== 'comment-only'
+        && (parsedReply?.reReview?.requested || workerPublishedHead))) {
       const published = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
       if (published) return published;
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
@@ -2691,6 +2565,11 @@ async function reconcileFollowUpJob({
     }
 
     if (rereviewBlocked) {
+      if (closeout) {
+        closeout = refusedCloseout(closeout, { reason: rereview.outcomeReason,
+          reviewRow: { review_status: rereview.reviewRow?.reviewStatus } });
+        rereview.nextAction = closeout.decision;
+      }
       const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
       const projectedStopJob = {
@@ -2756,7 +2635,7 @@ async function reconcileFollowUpJob({
       rootDir,
       jobPath,
       completedAt,
-      resultingHeadSha: completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null,
+      resultingHeadSha: closeout?.decision.head || (completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null),
       remediationWorker: {
         ...workerState,
         state: 'completed',
@@ -2768,11 +2647,12 @@ async function reconcileFollowUpJob({
       jobUpdates: operationalBlockerRecovery ? { operationalBlockerRecovery } : null,
     });
 
-    if (finalRound.completed && !completed.alreadyTerminal) {
+    if (closeout && !rereview.requested && !completed.alreadyTerminal) {
       try {
         requestWatcherWakeImpl({
           rootDir,
-          reason: 'comment-only-final-round-completed',
+          reason: job.finalRound === 'comment-only'
+            ? 'comment-only-final-round-completed' : REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
           repo: job.repo,
           prNumber: job.prNumber,
           requestedAt: completedAt,

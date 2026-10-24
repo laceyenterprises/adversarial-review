@@ -339,7 +339,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   });
 });
 
-test('reconcileFollowUpJob waits for external CI before requesting re-review', async () => {
+test('reconcileFollowUpJob registers re-review admission while external CI is pending', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);
   createFollowUpJob({ branch: 'fixture/remediation', ...makeJobInput(rootDir) });
@@ -386,9 +386,10 @@ test('reconcileFollowUpJob waits for external CI before requesting re-review', a
     jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:05:00.000Z',
     isProcessAliveImpl: () => false,
-    requestReviewRereviewImpl: () => {
+    requestReviewRereviewImpl: (args) => {
       rereviewCalls += 1;
-      throw new Error('rereview must wait for CI settlement');
+      assert.equal(args.targetRevisionRef, 'pending-head');
+      return { triggered: true, status: 'pending' };
     },
     resolvePRLifecycleImpl: async () => null,
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
@@ -402,16 +403,16 @@ test('reconcileFollowUpJob waits for external CI before requesting re-review', a
     }),
   });
 
-  const stored = JSON.parse(readFileSync(spawned.jobPath, 'utf8'));
-  assert.equal(reconciled.reconciled, false);
-  assert.equal(reconciled.reason, 'ci-settlement-pending');
-  assert.equal(rereviewCalls, 0);
+  const stored = JSON.parse(readFileSync(reconciled.jobPath, 'utf8'));
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(rereviewCalls, 1);
   assert.equal(readReviewRow(rootDir).review_status, 'posted');
-  assert.equal(stored.status, 'in_progress');
-  assert.equal(stored.lastHeartbeatAt, '2026-04-21T10:05:00.000Z');
-  assert.equal(stored.ciRegressionGuard.state, 'pending');
-  assert.equal(stored.ciRegressionGuard.pendingChecks[0].name, 'repo-guards');
-  assert.equal(stored.remediationPlan.nextAction.type, 'wait-ci-settlement');
+  assert.equal(stored.status, 'completed');
+  assert.equal(stored.reReview.requested, true);
+  assert.equal(stored.reReview.nextAction.action, 'wait-for-CI');
+  assert.equal(stored.reReview.nextAction.actor, 'ci');
+  assert.equal(stored.reReview.nextAction.deadline.anchoredAt, stored.completedAt);
 });
 
 // CIBLOCKHAM-01 (c): agent-os PR 8007's remediation round 2 of 2 ended `failed`
@@ -474,15 +475,11 @@ async function completeRoundWithCiPendingAtTimeout(rootDir, { priorCompletedRoun
     inspectRemediationCiRegressionImpl: pendingGate,
     postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
   });
-  // Inside the bounded wait the round keeps waiting (unchanged).
-  const waiting = await reconcile('2026-04-21T10:05:00.000Z');
-  assert.equal(waiting.reason, 'ci-settlement-pending');
-  // The 30-minute default wait expires with the checks still PENDING.
-  const reconciled = await reconcile('2026-04-21T10:40:00.000Z');
+  const reconciled = await reconcile('2026-04-21T10:05:00.000Z');
   return { claimed, reconciled, comments };
 }
 
-test('CIBLOCKHAM-01: a remediation CI wait that expires while checks are PENDING completes and requests the re-review', async () => {
+test('NXA-04: pending non-final CI completes with durable watcher admission intent', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { reconciled, comments } = await completeRoundWithCiPendingAtTimeout(rootDir);
 
@@ -491,11 +488,12 @@ test('CIBLOCKHAM-01: a remediation CI wait that expires while checks are PENDING
   assert.equal(reconciled.job.status, 'completed');
   assert.equal(reconciled.job.failure, undefined);
   assert.equal(reconciled.job.reReview.requested, true);
-  assert.equal(reconciled.job.reReview.ciSettlement, 'pending-at-timeout');
-  assert.equal(reconciled.job.reReview.ciGate.pendingChecks[0].name, 'repo-guards');
+  assert.equal(reconciled.job.reReview.nextAction.action, 'wait-for-CI');
+  assert.equal(reconciled.job.reReview.nextAction.actor, 'ci');
   const reviewRow = readReviewRow(rootDir);
   assert.equal(reviewRow.review_status, 'pending');
   assert.equal(reviewRow.revision_ref, 'pending-head');
+  assert.equal(reconciled.job.reReview.nextAction.head, 'pending-head');
   for (const comment of comments) {
     assert.doesNotMatch(JSON.stringify(comment), /Human intervention required/);
   }
@@ -523,9 +521,16 @@ test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI 
     inspectCiImpl: settled(state),
   });
 
+  const pendingRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  await completeRoundWithCiPendingAtTimeout(pendingRoot);
+  assert.equal(readReviewRow(pendingRoot).review_status, 'pending');
+  assert.equal((await rereviewGuard(pendingRoot, 'pending')).proceed, false);
+  assert.equal(readReviewRow(pendingRoot).review_status, 'pending');
+
   // Green: the re-review the round requested proceeds.
   const greenRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   await completeRoundWithCiPendingAtTimeout(greenRoot);
+  assert.equal(readReviewRow(greenRoot).review_status, 'pending');
   const green = await rereviewGuard(greenRoot, 'green');
   assert.equal(green.proceed, true);
   assert.equal(green.reason, 'ci-green');
@@ -533,6 +538,7 @@ test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI 
   // Red with a round left: the completed job is requeued (unchanged).
   const redRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed: redClaim } = await completeRoundWithCiPendingAtTimeout(redRoot);
+  assert.equal(readReviewRow(redRoot).review_status, 'pending');
   assert.ok(redClaim.job.remediationPlan.currentRound < redClaim.job.remediationPlan.maxRounds);
   const red = await rereviewGuard(redRoot, 'failed');
   assert.equal(red.reason, 'ci-regression-requeued');
@@ -898,7 +904,7 @@ test('reconcileFollowUpJob wakes watcher when re-review was already pending', as
     reason: 'remediation-to-rereview',
     repo: 'laceyenterprises/clio',
     prNumber: 7,
-    headSha: 'current-pending-head',
+    headSha: 'ci-green-head',
     requestedAt: '2026-04-21T10:05:00.000Z',
   });
   assert.deepEqual(reconciled.job.reReview.wake, {

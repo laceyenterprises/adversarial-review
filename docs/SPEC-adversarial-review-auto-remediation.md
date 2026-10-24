@@ -1801,15 +1801,15 @@ re-review as `ci-regression-no-job` with nobody owning the red head.
   operator, as SEV1 `ama.ci_blocked.hammer_final`, once per `repo#pr@head`. No
   new blocking gate is added.
 
-A remediation round whose bounded CI wait
-(`ADVERSARIAL_REMEDIATION_CI_SETTLE_TIMEOUT_MS`, default 30 minutes) expires
-while the external checks are still PENDING is not a failed remediation. The
-round completes and requests the re-review, recording
-`reReview.ciSettlement='pending-at-timeout'`. The watcher's re-review CI
-admission holds the reviewer until the checks settle. Green proceeds to the
-re-review. Red requeues remediation while a round is left, and otherwise takes
-the hammer-owner route above. An unknown CI state at the timeout (no readable
-rollup) still fails the round as `ci-settlement-timeout`.
+NXA-04 replaces the private completion-time CI wait with the shared successor
+contract. A worker round with pending/unreadable CI completes with an observer
+in `reReview.nextAction`, including its reason, head and anchored UTC deadline.
+It requests no extra rereview and consumes no extra round while CI is pending.
+A proven final published head belongs to hammer after green settlement or as
+CI repair after failure; unrelated/unproven heads follow exact-head review.
+Remaining-round CI repair retains its existing bounded requeue accounting.
+Deadline expiry reports through existing closure-wait delivery without refusing
+work. Every launch and merge retains its independent execution safety gates.
 
 ## GitHub API Rollup
 

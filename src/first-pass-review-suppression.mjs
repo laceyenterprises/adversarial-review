@@ -9,6 +9,7 @@ import {
   hasCompletedReviewerRereviewAfter,
 } from './review-ceiling-metrics.mjs';
 import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from './review-cycle-cap.mjs';
+import { findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { isAutomaticReviewCycleCapPause, normalizeLabelNames } from './review-cycle-cap-actions.mjs';
 import { isExplicitOperatorRetriggerReason, isExactHeadReviewRecoveryReason } from './retrigger-review-reason.mjs';
 import {
@@ -238,6 +239,12 @@ export function resolveFirstPassReviewBudgetSuppression({
     !currentHeadAlreadyReviewed &&
     remediationBudgetConsumed &&
     (!postBudgetFinalReviewCompletedForPR || currentHeadDiffersFromReviewedHead);
+  const finalPush = findFinalRemediationPushJob(rootDir, { repo: repoPath, prNumber, headSha: suppliedCurrentHeadSha }, logger);
+  if (finalPush && !isExactHeadReviewRecoveryRequested(reviewRow)) {
+    return { suppressed: true, reason: 'remediation-round-budget-exhausted',
+      completedRoundsForPR, roundBudget, riskClass: resolution.riskClass,
+      nextAction: finalPush.reReview.nextAction };
+  }
   if (currentHeadOwesPostBudgetFinalReview) {
     return {
       suppressed: false,

@@ -610,6 +610,37 @@ if (scenario === 'clean') {
   assert.equal(wakes, 2);
   const shadow = await shadowNextAction({ shared: wakeShared, env: {}, sink() {} });
   assert.equal(shadow.decision, wakeShared.decision);
+  const { remediationCloseout, closeoutRereview } = await import('../../src/remediation-closeout.mjs');
+  const closeoutAt = '2026-01-01T00:00:00.000Z';
+  const closeoutJob = { repo: 'subject-closeout', prNumber: 1, revisionRef: 'a'.repeat(40),
+    completedAt: closeoutAt, remediationPlan: { currentRound: 2, maxRounds: 2 } };
+  const closeoutSnapshot = deriveNextActionSnapshot({ head: headSha, observedAt: closeoutAt, observations: {
+    policy: { autonomousMergeExecutionEnabled: true }, leases: { closer: null }, launches: { closer: null } } });
+  for (const state of ['pending', 'green', 'failed']) {
+    const shared = remediationCloseout({ rootDir, job: closeoutJob, snapshot: closeoutSnapshot,
+      headSha, workerPushedHeadSha: headSha, completedAt: closeoutAt, ciGate: { headSha, state } });
+    assert.equal(shared.decision.action, state === 'pending' ? 'wait-for-CI' : 'hammer');
+    assert.equal(closeoutRereview(shared).requested, false);
+    assert.equal(shared.decision.deadline.anchoredAt, closeoutAt);
+    assert.equal(closeoutJob.remediationPlan.currentRound, 2);
+  }
+  const nonFinalCloseout = remediationCloseout({ rootDir,
+    job: { ...closeoutJob, remediationPlan: { currentRound: 1, maxRounds: 2 } },
+    snapshot: closeoutSnapshot, headSha, workerPushedHeadSha: headSha,
+    completedAt: closeoutAt, ciGate: { headSha, state: 'pending' } });
+  assert.equal(nonFinalCloseout.decision.action, 'wait-for-CI');
+  assert.equal(closeoutRereview(nonFinalCloseout).requested, true);
+  const closeoutDb = openReviewStateDb(rootDir);
+  closeoutDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref)
+    VALUES (?,?,'2026-01-01','gemini','posted',?)`).run(closeoutJob.repo, closeoutJob.prNumber, closeoutJob.revisionRef);
+  assert.equal(requestReviewRereview({ db: closeoutDb, rootDir, repo: closeoutJob.repo,
+    prNumber: closeoutJob.prNumber, targetRevisionRef: headSha, requestedAt: closeoutAt,
+    reason: 'Synthetic non-final closeout.', logger: quiet }).triggered, true);
+  const admissionRow = closeoutDb.prepare('SELECT review_status,revision_ref FROM reviewed_prs WHERE repo=? AND pr_number=?')
+    .get(closeoutJob.repo, closeoutJob.prNumber);
+  assert.equal(admissionRow.review_status, 'pending');
+  assert.equal(admissionRow.revision_ref, headSha);
+  closeoutDb.close();
   const unreadableSubject = { ...retrySubject, prNumber: prNumber + 11 };
   updateAmaCloserDispatchRecord(rootDir, unreadableSubject, () => ({ ...unreadableSubject,
     state: 'dispatched', launchRequestId: 'synthetic-unreadable', lastObservedStatus: 'starting',
@@ -687,7 +718,7 @@ if (scenario === 'clean') {
   evidence = { hammers, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
-    wakeRearmed: true, merged: true, remoteHeadMatches: true };
+    wakeRearmed: true, remediationCloseoutOwned: true, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   for (const reviewCycleExhausted of [false, true]) {
     for (const findings of [[], ['verdict-not-settled-success'], ['non-blocking-findings-present']]) {

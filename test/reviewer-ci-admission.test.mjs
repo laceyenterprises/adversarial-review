@@ -107,7 +107,7 @@ for (const finalRound of [true, false]) {
     assert.equal(result.hammerOwner, true);
     assert.equal(result.parkReview, true);
     assert.equal(result.parkReviewStatus, REREVIEW_CI_BLOCKED_STATUS);
-    assert.match(result.failureMessage, /completed comment-only final round/);
+    assert.match(result.failureMessage, /completed final remediation round/);
     assert.equal(result.jobPath, jobPath);
     assert.equal(result.job.status, 'completed');
     assert.deepEqual(result.job.remediationPlan.rounds, [round]);

@@ -8800,7 +8800,7 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
       reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
     }),
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
-    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
+    inspectRemediationCiRegressionImpl: async () => ({ ...greenCiGate(), headSha: resultingHead }),
   }));
 
   assert.equal(lifecycleReads, 2);
@@ -11986,6 +11986,7 @@ test('reconcileFollowUpJob does not stop stale-review-head after this worker pus
   });
 
   let rereviewCalls = 0;
+  const workerHead = 'b'.repeat(40);
   const result = await withHqRootEnv(hqRoot, async () => reconcileFollowUpJob({
     rootDir,
     job: spawned.job,
@@ -11998,7 +11999,7 @@ test('reconcileFollowUpJob does not stop stale-review-head after this worker pus
       mergedAt: null,
       closedAt: null,
       labels: [],
-      headSha: 'worker-pushed-head-sha',
+      headSha: workerHead,
     }),
     requestReviewRereviewImpl: () => {
       rereviewCalls += 1;
@@ -12015,7 +12016,7 @@ test('reconcileFollowUpJob does not stop stale-review-head after this worker pus
       };
     },
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
-    inspectRemediationCiRegressionImpl: async () => greenCiGate(),
+    inspectRemediationCiRegressionImpl: async () => ({ ...greenCiGate(), headSha: workerHead }),
     postCommentImpl: async () => ({ posted: true }),
   }));
 
@@ -12862,8 +12863,11 @@ for (const variant of ['ci-only', 'ci-still-pending', 'genuine', 'mixed', 'unpus
       assert.equal(result.job.reReview.normalizedFrom, 'ci-pending-only');
       assert.match(commentCalls[0].body, /re-review queued/);
     } else if (variant === 'ci-still-pending') {
-      assert.equal(result.action, 'active');
-      assert.equal(result.reason, 'ci-settlement-pending');
+      assert.equal(result.action, 'completed');
+      assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
+      assert.equal(result.job.reReview.requested, true);
+      assert.equal(result.job.reReview.triggered, true);
+      assert.deepEqual(readFollowUpJob(result.jobPath).reReview, JSON.parse(JSON.stringify(result.job.reReview)));
       assert.equal(result.job.reReview.normalizedFrom, 'ci-pending-only');
     } else {
       assert.equal(result.action, 'stopped', JSON.stringify(result.job.failure));
@@ -13017,7 +13021,7 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
         : async () => ({ stdout: '[]', stderr: '' }),
       auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: endHead }),
-      inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
+      inspectRemediationCiRegressionImpl: async () => ({ state: refusedReset || scenario === 'already-pending' ? 'green' : 'pending', headSha: endHead }),
       requestReviewRereviewImpl: (args) => {
         rereviewCalls.push(args);
         if (refusedReset) return { triggered: false, status: 'blocked', reason: scenario };
@@ -13029,14 +13033,19 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       log: { log() {}, warn() {}, error() {} },
     }));
     const expectedCompleted = ['pushed', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round', 'already-pending'].includes(scenario);
-    const expectedRereview = normalizedRereview;
+    const pendingAdmission = ['pushed', 'normalized-rereview', 'blocking-rereview'].includes(scenario);
+    const expectedRereview = refusedReset || scenario === 'already-pending' || pendingAdmission;
     assert.equal(rereviewCalls.length, expectedRereview ? 1 : 0);
     if (expectedRereview) {
       assert.equal(rereviewCalls[0].targetRevisionRef, endHead);
       assert.equal(result.job.reReview.requested, true);
       assert.equal(result.job.reReview.triggered, !refusedReset && scenario !== 'already-pending');
-      assert.equal(result.job.reReview.ciSettlement, 'pending-at-timeout');
+      assert.equal(result.job.reReview.nextAction.action, refusedReset ? 'hammer' : pendingAdmission ? 'wait-for-CI' : 'review');
+      if (refusedReset) assert.equal(result.job.reReview.nextAction.actor, 'closure-recovery');
       assert.equal(result.job.remediationPlan.rounds.at(-1).reReview.requested, true);
+      assert.deepEqual(readFollowUpJob(result.jobPath).reReview, JSON.parse(JSON.stringify(result.job.reReview)));
+    } else if (['round-two', 'final-round'].includes(scenario)) {
+      assert.equal(result.job.reReview.requested, false, 'final rounds retain hammer ownership');
     }
     assert.equal(result.job.status, expectedCompleted ? 'completed' : 'stopped', JSON.stringify(result.job.failure));
     assert.equal(result.job.remediationPlan.rounds.at(-1).state, expectedCompleted ? 'completed' : 'stopped');
@@ -13055,7 +13064,10 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       assert.doesNotMatch(body, /The pipeline continues when CI finishes|Nothing is needed from a person/);
       return;
     }
-    if (expectedCompleted) {
+    if (expectedCompleted && scenario === 'already-pending') {
+      assert.match(body, /already pending/);
+    } else if (expectedCompleted) {
+      assert.equal(result.job.reReview.nextAction.action, 'wait-for-CI');
       assert.ok(body.includes('**Outcome:** round finished; CI still running.\n\nAll findings from this review were addressed and pushed as bbbbbbb. Required checks had not finished when the round ended.\n\nNothing is needed from a person. The pipeline continues when CI finishes.'));
       assert.doesNotMatch(body, /Human intervention required/);
     } else {

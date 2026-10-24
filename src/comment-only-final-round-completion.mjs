@@ -306,6 +306,7 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   return {
     completed,
     workerPushedHeadSha,
+    ciGate,
     completionFields: {
       ...(projection.audit ? { operationalBlockerResolution: projection.audit } : {}),
       ...(workerPushedHeadSha ? { workerPushedHeadSha, workerPushProof: push.proof } : {}),

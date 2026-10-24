@@ -299,6 +299,8 @@
         "src/remediation-claimed-requeue.mjs",
         "src/remediation-worker-class-fallback.mjs",
         "src/remediation-published-head.mjs",
+        "src/remediation-closeout.mjs",
+        "src/reviewer-ci-admission.mjs",
         "src/adapters/comms/github-pr-comments/comment-delivery.mjs",
         "src/remediation-round-accounting.mjs",
         "src/remediation-infrastructure-refund.mjs",
@@ -325,6 +327,8 @@
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
       "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],
+      "closeoutSuccessorFields": ["reReview.nextAction", "remediationPlan.rounds[].reReview.nextAction", "completion.workerPushedHeadSha", "completion.finalRemediationPush"],
+      "closeoutSuccessorMeaning": "one shared action, actor, reason, head and anchored UTC deadline; pending CI completes under an observer with durable watcher re-review admission intent when rounds remain; recovered red CI registers intent to requeue remaining remediation; final push evidence preserves terminal hammer handoff without merge authority",
       "pendingCiCompletionEvidenceFields": ["completion.pendingCiOnly", "completion.workerPushedHeadSha"],
       "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
     },

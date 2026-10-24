@@ -54,6 +54,7 @@ function fixture(t, { reply = true } = {}) {
   writeFileSync(jobPath, JSON.stringify(job));
   return {
     rootDir, jobPath, job, payload,
+    ciGate: { headSha, state: 'green', conclusion: 'SUCCESS' },
     execFileSyncImpl: () => `${headSha}\nSynthetic remediation\n\nWorker-Job-Id: ${job.jobId}\n`,
     requestReviewRereviewImpl: () => ({ triggered: true, status: 'pending' }),
     requestRereviewWakeImpl: () => ({ requested: true }),

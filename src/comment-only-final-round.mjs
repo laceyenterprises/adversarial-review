@@ -247,6 +247,19 @@ function terminalFollowUpJobs(rootDir, repo, prNumber, log) {
   ].map((entry) => ({ ...entry, job: withCommentOnlyRecovery(rootDir, entry.job) }));
 }
 
+// NXA-04: the closeout writer binds final handoff intent to its independently
+// observed worker push. A later/unrelated head cannot inherit this handoff.
+export function findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha }, log = console) {
+  if (!SHA.test(String(headSha || ''))) return null;
+  return terminalFollowUpJobs(rootDir, repo, prNumber, log)
+    .map(({ job }) => job)
+    .filter(job => job.completion?.finalRemediationPush === true
+      && job.completion.workerPushedHeadSha === headSha
+      && job.reReview?.nextAction?.head === headSha
+      && job.reReview.requested === false)
+    .sort((a, b) => String(b.completedAt || '').localeCompare(String(a.completedAt || '')))[0] || null;
+}
+
 function isTerminalFinalRound(status, job) {
   return job?.status === status && job.finalRound === 'comment-only' &&
     job.reReview?.suppressed === 'comment-only-final-round';
@@ -254,6 +267,13 @@ function isTerminalFinalRound(status, job) {
 
 export function isCompletedCommentOnlyFinalRoundJob(job) {
   return isTerminalFinalRound('completed', job);
+}
+
+export function isCompletedFinalRemediationJob(job) {
+  return isCompletedCommentOnlyFinalRoundJob(job) || (job?.status === 'completed'
+    && job.completion?.finalRemediationPush === true && job.reReview?.requested === false
+    && SHA.test(String(job.completion.workerPushedHeadSha || ''))
+    && job.reReview.nextAction?.head === job.completion.workerPushedHeadSha);
 }
 
 export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }, log = console) {

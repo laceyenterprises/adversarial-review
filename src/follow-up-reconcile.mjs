@@ -55,9 +55,11 @@ async function reconcileFollowUpJob({
   postCommentImpl,
   requestReviewRereviewImpl,
   requestWatcherWakeImpl,
+  requestRereviewWakeImpl,
   resolvePRLifecycleImpl,
   auditWorkspaceForContaminationImpl,
   inspectRemediationCiRegressionImpl,
+  deliverAlertImpl,
   execFileImpl,
 }) {
   const entry = listFollowUpJobsInDir(rootDir, 'inProgress').find((item) => item.jobPath === jobPath);
@@ -74,9 +76,11 @@ async function reconcileFollowUpJob({
     postCommentImpl,
     requestReviewRereviewImpl,
     requestWatcherWakeImpl,
+    requestRereviewWakeImpl,
     resolvePRLifecycleImpl,
     auditWorkspaceForContaminationImpl,
     inspectRemediationCiRegressionImpl,
+    deliverAlertImpl,
     execFileImpl,
   });
 
@@ -90,8 +94,10 @@ async function reconcileInProgressFollowUpJobs({
   postCommentImpl,
   requestReviewRereviewImpl,
   requestWatcherWakeImpl,
+  requestRereviewWakeImpl,
   resolvePRLifecycleImpl,
   inspectRemediationCiRegressionImpl,
+  deliverAlertImpl,
   execFileImpl,
 } = {}) {
   const result = await reconcileInProgressFollowUpJobsImpl({
@@ -101,8 +107,10 @@ async function reconcileInProgressFollowUpJobs({
     postCommentImpl,
     requestReviewRereviewImpl,
     requestWatcherWakeImpl,
+    requestRereviewWakeImpl,
     resolvePRLifecycleImpl,
     inspectRemediationCiRegressionImpl,
+    deliverAlertImpl,
     execFileImpl,
   });
 

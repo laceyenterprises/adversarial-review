@@ -200,7 +200,7 @@ async function signReviewedAttestation({
   }
   if (docs) {
     if (!String(signed.producer_identity || '').trim()) throw new Error('docs attestation signer missing');
-    payload = { ...payload, producer_identity: signed.producer_identity };
+    payload = { ...payload, producer_identity: payload.producer_identity || signed.producer_identity };
   }
   validateSignedReviewedAttestation(signed, payload);
   return signed;
@@ -232,7 +232,8 @@ function validateSignedReviewedAttestation(signed, payload) {
   if (signature.algorithm !== REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM) {
     throw new Error(`signed attestation signature algorithm mismatch: ${signature.algorithm}`);
   }
-  const reviewerIdentity = payload.payload?.reviewer_identity || payload.producer_identity;
+  const reviewerIdentity = payload.kind === 'docs-fast-path'
+    ? payload.producer_identity : payload.payload?.reviewer_identity;
   const signedSubject = String(signature.subject || '').trim();
   if (!signedSubject || signedSubject !== reviewerIdentity) {
     throw new Error(`signed attestation HCP subject mismatch: ${signedSubject}`);
@@ -334,16 +335,11 @@ export async function emitDocsFastPathAttestation({ repo, prNumber, headSha, hqR
   const rows = await readChainImpl({ repo, prNumber, hqRoot, execFileImpl, env });
   const existing = rows.find(row => row.kind === 'docs-fast-path' && row.repo === repo
     && row.pr_number === prNumber && row.head_sha === headSha && row.payload?.policy === 'DOCSFASTPATH-01');
-  if (existing) {
-    // Record re-verifies the MAC; a database row alone is never authority.
-    const recorded = await recordSignedReviewedAttestation({ signed: existing, hqPath, execFileImpl, env });
-    if (!recorded?.attestation_id) throw new Error('docs attestation reuse was not acknowledged');
-    return { signed: existing, recorded };
-  }
   const payload = { schema_version: 1, repo, pr_number: prNumber, head_sha: headSha,
     parent_head_sha: null, kind: 'docs-fast-path', producer_identity: null,
     verdict: null, findings_count: null, payload: { policy: 'DOCSFASTPATH-01' }, ts: new Date().toISOString() };
-  const signed = await signReviewedAttestation({ payload, hqPath, execFileImpl, env });
+  // Record re-verifies the MAC even when reusing a stored row.
+  const signed = existing || await signReviewedAttestation({ payload, hqPath, execFileImpl, env });
   const recorded = await recordSignedReviewedAttestation({ signed, hqPath, execFileImpl, env });
   if (!recorded?.attestation_id || recorded.kind !== payload.kind || recorded.head_sha !== headSha
     || recorded.repo !== repo || recorded.pr_number !== prNumber) {

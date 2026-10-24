@@ -73,7 +73,7 @@ function intentSnapshotMatches(path, bytes, rootDir, identity, lease) {
 // Match the exact closer ticket; a generic HAM or conflict worker is not this PR's closer.
 export function closerLaunchMatches(record, row) {
   return row?.identity_ambiguous !== true && row?.ticket_ref === `AMA-PR-${record.prNumber}`
-    && (row.target_repo == null || [record.repo, record.repo.split('/').at(-1)].includes(row.target_repo))
+    && (row.target_repo == null || (typeof row.target_repo === 'string' && [record.repo, record.repo.split('/').at(-1)].map(value => value.toLowerCase()).includes(row.target_repo.toLowerCase())))
     && (!row.head_sha || row.head_sha === (record.targetRemediationSha || record.headSha));
 }
 

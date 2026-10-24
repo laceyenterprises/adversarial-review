@@ -621,3 +621,5 @@ unknown status string is persisted as `succeeded` or `failed`, rather than an
 active closer status. Merge-agent phantom-handoff reconciliation and pending
 comment retries project `status: succeeded` with explicit `succeeded: false`
 as `failed` before crossing the status-string boundary.
+
+LAC-2096 canonical payload/job identity and unidentified-row absence guarantees are PostgreSQL-scoped. Producer-shaped SQLite ticket recovery without projected ticket/head columns remains fenced/unsupported. Ambiguous identity must be handled before any foreign-receipt disposition, preserving the pending lease and charged attempt. Repository names compare case-insensitively. Deployment restores existing automatic daemon reconciliation; the operator dry-run does not freeze it.

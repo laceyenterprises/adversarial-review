@@ -902,7 +902,8 @@ const postgresIdentityColumns = `
     CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
       AND attname = 'lineage_json' AND NOT attisdropped)
       THEN 'request.lineage_json::jsonb' ELSE '''{}''::jsonb' END AS identity_lineage,
-    CASE WHEN to_regclass('launch_request_logical_job_claims') IS NOT NULL
+    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('launch_request_logical_job_claims')
+      AND attname = 'ticket_ref' AND NOT attisdropped)
       THEN 'ARRAY(SELECT ticket_ref FROM launch_request_logical_job_claims WHERE launch_request_id = request.launch_request_id)'
       ELSE 'ARRAY[]::text[]' END AS identity_claims,
     CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('worker_runs')
@@ -925,10 +926,10 @@ function postgresIdentityValues(kind) {
     : kind === 'head' ? [['launchProvenance', 'prHeadSha']] : [['launchProvenance', 'repoFullName'], ['launchProvenance', 'repo']];
   const direct = kind === 'ticket' ? ':launch_ticket' : kind === 'head' ? ':launch_head' : ':launch_repo';
   const values = [direct];
-  for (const doc of [':identity_payload', ':identity_lineage']) {
+  for (const doc of ['identity_payload_fields', 'identity_lineage_fields']) {
     for (const path of paths) {
-      const selector = `(${doc}) #> '{${path.join(',')}}'`;
-      values.push(`CASE WHEN jsonb_typeof(${selector}) = 'string' THEN (${doc}) #>> '{${path.join(',')}}' END`);
+      const selector = path.length === 1 ? `${doc}."${path[0]}"` : `${doc}."${path[0]}" #> '{${path.slice(1).join(',')}}'`;
+      values.push(`CASE WHEN jsonb_typeof(${selector}) = 'string' THEN (${selector}) #>> '{}' END`);
     }
   }
   const jobs = kind === 'ticket' ? ' || :identity_claims || :identity_tasks'
@@ -937,14 +938,18 @@ function postgresIdentityValues(kind) {
     WHERE value IS NOT NULL AND value != '' ORDER BY value)`;
 }
 
-const postgresIdentityJoin = `CROSS JOIN LATERAL (SELECT
+const postgresIdentityJoin = `CROSS JOIN LATERAL jsonb_to_record(CASE WHEN jsonb_typeof(:identity_payload) = 'object' THEN :identity_payload ELSE '{}'::jsonb END)
+  AS identity_payload_fields("ticketRef" jsonb, "taskKey" jsonb, "launchProvenance" jsonb)
+  CROSS JOIN LATERAL jsonb_to_record(CASE WHEN jsonb_typeof(:identity_lineage) = 'object' THEN :identity_lineage ELSE '{}'::jsonb END)
+  AS identity_lineage_fields("ticketRef" jsonb, "taskKey" jsonb, "launchProvenance" jsonb)
+  CROSS JOIN LATERAL (SELECT
   ${postgresIdentityValues('ticket')} AS tickets,
   ${postgresIdentityValues('head')} AS heads,
   ${postgresIdentityValues('repo')} AS repos
 ) identity`;
 const postgresIdentityAmbiguous = `(cardinality(identity.tickets) > 1 OR cardinality(identity.heads) > 1
   OR EXISTS (SELECT FROM unnest(identity.repos) a, unnest(identity.repos) b
-    WHERE a != b AND a != regexp_replace(b, '^.*/', '') AND b != regexp_replace(a, '^.*/', '')))`;
+    WHERE lower(a) != lower(b) AND lower(a) != lower(regexp_replace(b, '^.*/', '')) AND lower(b) != lower(regexp_replace(a, '^.*/', ''))))`;
 // A basename projection must not hide an owner-qualified canonical repository.
 const postgresCanonicalRepo = `COALESCE((SELECT value FROM unnest(identity.repos) value
   WHERE strpos(value, '/') > 0 ORDER BY value LIMIT 1), :launch_repo, identity.repos[1])`;

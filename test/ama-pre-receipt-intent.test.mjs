@@ -8,7 +8,7 @@ import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
 import { reapStaleCloserLeases } from '../src/recovery-reaper.mjs';
 import { reconcileRecoveryLaunches } from '../src/ama/recovery-launch-reconciliation.mjs';
-import { reconcilePreReceiptIntent, tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
+import { closerLaunchMatches, reconcilePreReceiptIntent, tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease, amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord,
   findActiveAmaCloserLaunches, reconcileAmaCloserDispatches, isActiveAmaCloserDispatchRecord, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
@@ -1079,4 +1079,10 @@ for (const replacement of ['intent', 'lease']) test(`CLOSERPENDINGDEAD-01: proce
   assert.equal(result.reason, 'intent-or-lease-changed');
   assert.equal(f.read().state, 'dispatching');
   assert.equal(f.read().retryCount, 2);
+});
+
+
+test('closer receipt repository identity follows GitHub case insensitivity', () => {
+  assert.equal(closerLaunchMatches({ repo: 'laceyenterprises/agent-os', prNumber: 8, headSha: 'a'.repeat(40) },
+    { ticket_ref: 'AMA-PR-8', target_repo: 'LaceyEnterprises/Agent-OS', head_sha: 'a'.repeat(40) }), true);
 });

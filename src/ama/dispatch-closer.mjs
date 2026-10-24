@@ -7904,6 +7904,12 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const row = probe?.ok ? probe.row : null;
+    if (row?.identity_ambiguous === true) {
+      retainScratchDir = true;
+      logger?.warn?.(JSON.stringify({ event: 'ama_closer.launch_receipt_unverified', repo, prNumber,
+        headSha: targetRemediationSha, launchRequestId: payload.launchRequestId, reason: 'receipt-identity-ambiguous' }));
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-receipt-unverified' });
+    }
     const ticket = row?.ticket_ref || payload.ticketRef;
     const targetRepo = row?.target_repo || payload.targetRepo;
     const launchHead = row?.head_sha || payload.headSha;
@@ -7912,7 +7918,7 @@ async function maybeDispatchAmaCloserAttempt({
     // and unreceipted until exact-key reconciliation can prove ownership.
     const expected = { repo, prNumber, headSha: targetRemediationSha };
     const mismatch = (ticket && ticket !== `AMA-PR-${prNumber}`)
-      || (targetRepo && ![repo, repo.split('/').at(-1)].includes(targetRepo))
+      || (targetRepo && (typeof targetRepo !== 'string' || ![repo, repo.split('/').at(-1)].map(value => value.toLowerCase()).includes(targetRepo.toLowerCase())))
       || (launchHead && launchHead !== targetRemediationSha);
     if (!mismatch && ticket && closerLaunchMatches(expected, {
       ticket_ref: ticket, target_repo: targetRepo || repo, head_sha: launchHead || targetRemediationSha,

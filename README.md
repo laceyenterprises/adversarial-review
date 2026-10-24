@@ -2619,3 +2619,5 @@ supervisor. Require `.capabilities.admission.available == true` and
 Empty organic evidence and live-reader/routing composition remain pending.
 See the [store contract](docs/data-model/finalization-ledger.md#fifo-admission-and-clean-reviews-mgq-03)
 and [operator observation procedure](docs/finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).
+
+LAC-2096 deployment restores automatic daemon intent reconciliation; pre-deploy reader grants and affected intents must be checked. Canonical identity/absence guarantees are PostgreSQL-scoped; producer-shaped SQLite ticket recovery remains fenced. See the recovery deployment boundaries in the closure runbook.

@@ -2657,13 +2657,13 @@ test('CLOSERINTENT-01: new submitting intent cannot inherit the previous attempt
   assert.equal(result.dispatched, true, JSON.stringify(result));
 });
 
-for (const ambiguous of [false, true]) for (const failedCall of [false, true]) test(`CLOSERINTENT-01: unverified receipt stays fenced (failed call=${failedCall}, ambiguous=${ambiguous})`, async t => {
+for (const ambiguous of [false, true]) for (const failedCall of [false, true]) for (const foreignRepo of [false, true]) test(`CLOSERINTENT-01: unverified receipt stays fenced (failed call=${failedCall}, ambiguous=${ambiguous}, foreignRepo=${foreignRepo})`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-unverified-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const messages = [];
   const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
     readLaunchRequestStatusImpl: () => ambiguous ? ({ ok: true,
-      row: { status: 'running', ticket_ref: 'AMA-PR-404', target_repo: 'acme/repo', head_sha: HEAD, identity_ambiguous: true },
+      row: { status: 'running', ticket_ref: 'AMA-PR-404', target_repo: foreignRepo ? 'aaa-foreign/repo' : 'acme/repo', head_sha: HEAD, identity_ambiguous: true },
     }) : ({ ok: false, reason: 'missing-launch-request-row' }),
     logger: { warn: text => messages.push(text) },
     execFileImpl: async () => {

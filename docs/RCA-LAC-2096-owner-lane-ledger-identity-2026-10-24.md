@@ -97,3 +97,11 @@ managed publication evidence are reported separately.
 The final focused pass of pre-receipt recovery, dispatch priority, ledger readers
 and the watcher claim-loop passed all 569 tests, with zero failures,
 cancellations or skips. The native 21-test SQL run above is additional evidence.
+
+### Recovery deployment boundaries
+
+Deployment restores the daemon's automatic reconciliation, including legacy absence settlement with its existing retry refund and lease deferral, and exact-key receipt recovery. The prior missing-column failure prevented those paths. Inspect affected intents before activation; an operator dry-run does not pin or freeze subsequent daemon reconciliation. This source change itself performs no live settlement.
+
+Canonical identity and unidentified-row absence guarantees in LAC-2096 apply to PostgreSQL. The legacy SQLite ticket reader requires projected ticket/head columns: a producer-shaped SQLite ledger without them remains fenced/unsupported for ticket-wide recovery; do not interpret its unreadable result as absence. SQLite ledgers with projected columns do not supply the PostgreSQL unidentified-row guarantee.
+
+Before deploying, verify the configured reader can SELECT launch_requests, launch_request_logical_job_claims and worker_runs, with ticket_ref and launch_request_id on claims and task_key and launch_request_id on worker_runs. Missing privileges fail closed; do not omit existing linked evidence to turn a failed grant into an apparent absence. Required CI discovers native PostgreSQL tools through pg_config --bindir or PATH and fails if unavailable. Each payload and lineage document is expanded once per candidate row into small typed identity fields; the legacy whole-table pre-16 text fallback still scales with row count and remains an explicit operational limit.

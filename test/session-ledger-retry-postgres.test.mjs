@@ -73,9 +73,15 @@ for (const scenario of ['recovers', 'exhausts', 'unrelated failure']) {
 // network, credentials or existing ledger is used.
 // Actual psql scripts, variable substitution and exit statuses are preserved.
 function isolatedPostgres(t) {
+  const config = spawnSync('pg_config', ['--bindir'], { encoding: 'utf8', timeout: 5000 });
+  const bindir = config.status === 0 ? config.stdout.trim() : null;
+  if (bindir && ['initdb', 'pg_ctl', 'psql'].every(command => existsSync(join(bindir, command)))) {
+    process.env.PATH = `${bindir}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH || ''}`;
+  }
   for (const command of ['initdb', 'pg_ctl', 'psql']) {
     const probe = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
     if (probe.error?.code === 'ENOENT') {
+      assert.ok(!process.env.CI, 'required CI coverage needs native PostgreSQL tools (pg_config --bindir or PATH)');
       t.skip('native PostgreSQL tools are not installed');
       return null;
     }

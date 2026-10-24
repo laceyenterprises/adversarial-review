@@ -73,4 +73,8 @@ test('runner quota probe cannot see an inherited exhausted Gemini status', async
   writeFileSync(join(resolveHqRoot(), 'fixture-state.json'), '{}');
   if (process.env.HQ_ROOT_FIXTURE_FAIL === '1') assert.fail('synthetic fixture failure');
   if (process.env.HQ_ROOT_FIXTURE_FAIL === 'kill') process.kill(process.pid, 'SIGKILL');
+  if (process.env.HQ_ROOT_FIXTURE_HOLD) {
+    writeFileSync(process.env.HQ_ROOT_FIXTURE_HOLD, JSON.stringify({ pid: process.pid }));
+    await new Promise((resolve) => setTimeout(resolve, 60_000));
+  }
 });

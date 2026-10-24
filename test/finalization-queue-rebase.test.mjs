@@ -354,3 +354,123 @@ for (const applied of [false, true]) test(`unknown push response requires candid
     assert.equal(f.store.operations(a.h.lane).length, 1);
   }
 });
+
+for (const failure of ['hold', 'permission-in-lock', 'unavailable']) test(`second derivation readmits retained candidate: ${failure}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const first = await run(service(f, a), a);
+  f.g(['checkout', 'main']); f.file('upstream', 'second base\n'); f.base = f.commit('next base');
+  f.g(['push', f.remote, 'main']); a.live.subject.baseSha = f.base;
+  a.live.subject.head = first.candidate; a.live.eligibility.primaryChange.headSha = first.candidate;
+  let reads = 0, pushes = 0;
+  const parked = await run(service(f, a, { read: async () => {
+    reads++;
+    if (failure === 'hold' && reads === 2) a.live.subject.labels = ['no-merge-hold'];
+    if (failure === 'permission-in-lock' && reads === 3) a.live.permission.canForcePush = false;
+    if (failure === 'unavailable' && reads === 2) return null;
+    return structuredClone(a.live);
+  } }), a);
+  assert.match(parked.phase, /^parked-/); assert.notEqual(parked.candidate, first.candidate);
+  assert.equal(parked.expectedOldHead, first.candidate);
+  a.live.subject.labels = []; a.live.permission.canForcePush = true;
+  const ready = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle, gitAdapter: f.adapter,
+    liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+  assert.equal(ready.phase, 'ready', ready.reason); assert.ok(ready.readinessSeq > parked.readinessSeq);
+  const result = await run(service(f, a, { git: { ...f.adapter,
+    prepare: async () => { throw new Error('must retain C2'); },
+    push: async request => { pushes++; return f.adapter.push(request); } } }), a);
+  assert.equal(result.phase, 'waiting-checks'); assert.equal(result.candidate, parked.candidate);
+  assert.equal(pushes, 1); assert.deepEqual(result.patience, first.patience);
+});
+
+for (const failure of ['hold', 'permission']) for (const late of [false, true]) test(`published candidate checks fresh ${failure}: late=${late}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const first = late ? null : await run(service(f, a), a);
+  let reads = 0;
+  const result = await run(service(f, a, { read: async () => {
+    reads++;
+    if (late && reads === 2) {
+      const entry = f.store.readEntry(a.ack.entryId);
+      a.live.subject.head = entry.candidate; a.live.eligibility.primaryChange.headSha = entry.candidate;
+    }
+    if (!late || reads === 2) {
+      if (failure === 'hold') a.live.subject.labels = ['no-merge-hold'];
+      else a.live.permission.canForcePush = false;
+    }
+    return structuredClone(a.live);
+  }, git: { ...f.adapter, push: async () => { throw new Error('must not push'); } } }), a);
+  assert.equal(result.phase, failure === 'hold' ? 'parked-hold' : 'parked-permission');
+  if (first) assert.equal(result.candidate, first.candidate);
+});
+
+for (const corrupt of ['proof', 'chain']) test(`admission refuses corrupted earlier derivation: ${corrupt}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  await run(service(f, a), a);
+  f.g(['checkout', 'main']); f.file('upstream', 'next base\n'); f.base = f.commit('next base');
+  f.g(['push', f.remote, 'main']); a.live.subject.baseSha = f.base;
+  const second = await run(service(f, a), a);
+  a.live.subject.labels = ['no-merge-hold']; await run(service(f, a), a); a.live.subject.labels = [];
+  if (corrupt === 'chain') {
+    const entry = f.store.readEntry(a.ack.entryId);
+    entry.rebase.priorDerivations[0].expectedOldHead = 'f'.repeat(40);
+    f.store.db.prepare('UPDATE finalization_queue_entry SET payload_json=? WHERE entry_id=?').run(JSON.stringify(entry), entry.entryId);
+  }
+  let earlier = 0;
+  const ready = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+    gitAdapter: { ...f.adapter, verify: request => {
+      if (request.entry.candidate !== second.candidate) { earlier++; if (corrupt === 'proof') return null; }
+      return f.adapter.verify(request);
+    } }, liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+  assert.equal(ready.phase, 'returned-to-closer');
+  if (corrupt === 'proof') assert.equal(earlier, 1);
+});
+
+for (const stage of ['prepare', 'verify', 'publication-verify', 'admission', 'deadline']) test(`transient proof failure parks: ${stage}`, async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const fail = () => { throw Object.assign(new Error('transient'), { reason: 'git-deadline-or-output-limit' }); };
+  let result;
+  if (['verify', 'admission', 'deadline'].includes(stage)) await run(service(f, a), a);
+  if (stage === 'admission') {
+    a.live.subject.labels = ['no-merge-hold']; await run(service(f, a), a); a.live.subject.labels = [];
+    result = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+      gitAdapter: { ...f.adapter, verify: fail }, liveAdapter: { read: async () => structuredClone(a.live) } })
+      .reconcile({ fence: a.fence, entryId: a.ack.entryId });
+  } else {
+    if (stage === 'deadline') f.clock(1800);
+    result = await run(service(f, a, { git: { ...f.adapter,
+      ...(stage === 'prepare' ? { prepare: fail } : { verify: fail }) } }), a);
+  }
+  assert.equal(result.phase, 'parked-infrastructure');
+  assert.equal(result.reason, stage === 'deadline' ? 'rebase-deadline-expired' : 'rebase-git-unavailable');
+  assert.equal(f.store.operations(a.h.lane).length, 0);
+});
+
+test('unpublished first candidate does not waive the original head current-review check', async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  let reads = 0;
+  const parked = await run(service(f, a, { read: async () => {
+    if (++reads === 2) a.live.subject.labels = ['no-merge-hold'];
+    return structuredClone(a.live);
+  } }), a);
+  assert.equal(parked.phase, 'parked-hold');
+  a.live.subject.labels = []; a.live.currentReview.verdict = 'changes-requested';
+  const result = await createQueueAdmissionService({ store: f.store, now: f.now, load: idle,
+    liveAdapter: { read: async () => structuredClone(a.live) } }).reconcile({ fence: a.fence, entryId: a.ack.entryId });
+  assert.equal(result.phase, 'returned-to-closer');
+  assert.equal(result.reason, 'current-head-review-not-clean');
+});
+
+test('rebase probe orders old entries by recent publication, before limiting sample', async t => {
+  const f = gitFixture(t), a = await admitted(f);
+  const first = await run(service(f, a), a);
+  const insert = f.store.db.prepare('INSERT INTO finalization_queue_entry SELECT ?,repository,base,?,admission_head,admission_generation,?,?,?,phase,? FROM finalization_queue_entry WHERE entry_id=?');
+  for (let i = 0; i < 101; i++) {
+    const copy = { ...first, entryId: `later-${i}`, rebase: { ...first.rebase,
+      publication: { ...first.rebase.publication, observedAt: handoffTime(0) } } };
+    insert.run(copy.entryId, 1000 + i, `handoff-${i}`, `ack-${i}`, 1000 + i, JSON.stringify(copy), first.entryId);
+  }
+  const latest = { ...first, rebase: { ...first.rebase, publication: { ...first.rebase.publication, observedAt: handoffTime(10) } } };
+  f.store.db.prepare('UPDATE finalization_queue_entry SET payload_json=? WHERE entry_id=?').run(JSON.stringify(latest), first.entryId);
+  const result = probeQueueOwner({ rootDir: f.root, now: f.now(), load: idle });
+  assert.equal(result.observations.rebase.observations.length, 100);
+  assert.equal(result.observations.rebase.observations[0].entry_id, first.entryId);
+});

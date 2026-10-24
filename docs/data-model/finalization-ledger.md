@@ -430,3 +430,17 @@ slice remains unwired. Digest-addressed proof storage and narrower event patches
 are deferred: they require a durable evidence lookup and replay compatibility
 contract, rather than dropping proof bytes from an existing audit history.
 Resolve that retention/compaction work before production queue routing.
+
+
+Recovery verifies every contiguous derivation from the admission head, including
+prior workspaces, before accepting either the current candidate or its proven
+expected old head. This includes a park after a second candidate was prepared
+but before publication. A computed proof mismatch returns to the closer;
+unavailable Git execution parks as infrastructure, and expired patience parks
+before proof execution. Both already-published paths recheck live holds and
+permissions before advancing to checks. Deterministic workspace, remote, runner
+or deadline refusals before transport invocation settle `not-applied` with
+`git:push-not-spawned`; failures after invocation still require authoritative
+results or drain reconciliation. Ambient author/committer environment variables
+and `EMAIL` are removed from local Git execution so replay retains the source
+author and uses the synthetic committer.

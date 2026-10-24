@@ -3,6 +3,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { classifyQueueAdmission, resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
+import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { queueTime } from './queue-store.mjs';
@@ -38,8 +39,7 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
   };
   async function verify(entry) {
     if (!entry.candidate || !entry.rebase) return false;
-    const proof = await git.verify({ entry: structuredClone(entry), deadline: entry.patience.deadline });
-    return proof && isDeepStrictEqual(proof, entry.proof);
+    return verifyQueueDerivation({ entry: structuredClone(entry), git, deadline: entry.patience.deadline });
   }
   function preflight(entry, receipt, live, head, derived) {
     // Same finalization policy input as the existing executor, never a route
@@ -87,10 +87,13 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
       let receipt;
       try { receipt = receipts.receipt(entry); } catch { /* unreadable evidence parks */ }
       if (!receipt) return progress(entry, fence, 'parked-infrastructure', 'admission-receipt-unavailable');
+      if (Date.parse(now()) >= Date.parse(entry.patience.deadline)) return progress(entry, fence, 'parked-infrastructure', 'rebase-deadline-expired');
       // Persisted candidates are always re-proved, including after a restart.
       let verified = false;
       if (entry.candidate) {
-        try { verified = await verify(entry); } catch { /* Missing objects cannot authorize a new push. */ }
+        try { verified = await verify(entry); } catch {
+          return progress(entry, fence, 'parked-infrastructure', 'rebase-git-unavailable');
+        }
         current(entry, fence);
         if (!verified || entry.rebase.sourceReceiptDigest !== handoffDigest(receipt.input ?? receipt.handoff)) {
           return progress(entry, fence, 'returned-to-closer', 'persisted-rebase-proof-unavailable');
@@ -110,6 +113,8 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
       }
       if (entry.candidate && s?.head === entry.candidate && s.baseSha === entry.exactBase && s.state === 'open'
         && isDeepStrictEqual(s.lane, entry.lane) && s.prNumber === entry.prNumber && nonempty(s.sourceRef)) {
+        const decision = preflight(entry, receipt, live, entry.candidate, verified && entry.candidate !== entry.head);
+        if (decision.phase !== 'ready') return parkOrReturn(entry, fence, decision, live);
         // Observation is persisted even after a lost push response. No repush,
         // commit creation or stale CI reuse; checks are owned by the next slice.
         return progress(entry, fence, 'waiting-checks', entry.proof.noop ? 'no-op-rebase' : 'candidate-already-published',
@@ -160,6 +165,8 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
       if (Date.parse(now()) >= Date.parse(entry.patience.deadline)) return progress(entry, fence, 'parked-infrastructure', 'rebase-deadline-expired');
       if (live?.subject?.head === entry.candidate && live.subject.baseSha === entry.exactBase && live.subject.state === 'open'
         && live.subject.sourceRef && isDeepStrictEqual(live.subject.lane, entry.lane) && live.subject.prNumber === entry.prNumber) {
+        const decision = preflight(entry, receipt, live, entry.candidate, entry.candidate !== entry.head);
+        if (decision.phase !== 'ready') return parkOrReturn(entry, fence, decision, live);
         return progress(entry, fence, 'waiting-checks', entry.proof.noop ? 'no-op-rebase' : 'candidate-already-published',
           { rebase: { ...entry.rebase, lastObservation: live, publication: { head: live.subject.head, base: live.subject.baseSha,
             sourceRef: live.subject.sourceRef, observedAt: now() } } });
@@ -173,7 +180,9 @@ export function createQueueRebaseService({ store, owner, liveAdapter, gitAdapter
       // Durable preflight + immutable candidate/proof precede the owner intent.
       entry = progress(entry, fence, 'publishing', 'publication-preflight-validated', { rebase: { ...entry.rebase, lastObservation: live } });
       let proof;
-      try { proof = await verify(entry); } catch { /* fail closed */ }
+      try { proof = await verify(entry); } catch {
+        return progress(entry, fence, 'parked-infrastructure', 'rebase-git-unavailable');
+      }
       current(entry, fence);
       if (!proof) return progress(entry, fence, 'returned-to-closer', 'persisted-rebase-proof-unavailable');
       // Owner deduplicates and journals each attempt. An unresolved intent must

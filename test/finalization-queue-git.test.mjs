@@ -3,7 +3,7 @@ import test from 'node:test';
 import { resolveQueueGitAdapter, runQueueGit } from '../src/finalization/queue-git.mjs';
 import { gitFixture, localGit, idle } from './helpers/queue-rebase-fixture.mjs';
 import { handoffTime } from './helpers/queue-handoff-fixture.mjs';
-import { readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readdirSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 // An unsafe control uses only disposable local refs, to demonstrate the race
@@ -95,3 +95,56 @@ for (const status of ['[rejected] (stale info)', '[remote rejected] (protected b
     });
   });
 }
+
+for (const failure of ['workspace', 'remote', 'runner', 'deadline']) test(`pre-invocation refusal is not ambiguous: ${failure}`, async t => {
+  const f = gitFixture(t), p = await f.prepare();
+  const entry = { ...f.entry, ...p, rebase: { workspace: p.workspace, headRepository: 'example/review', headRef: 'topic' } };
+  if (failure === 'workspace') rmSync(join(f.root, 'data/finalization-git', p.workspace), { recursive: true });
+  if (failure === 'deadline') f.clock(1800);
+  let invoked = 0;
+  const adapter = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle,
+    run: async () => { invoked++; throw new Error('must not invoke'); },
+    resolveRemote: () => {
+      if (failure === 'remote') throw new Error('resolver unavailable');
+      return failure === 'runner' ? 'git@github.com:example/review.git' : f.remote;
+    } });
+  assert.deepEqual(await adapter.push({ entry, intent: { expectedOldHead: f.oldHead, candidate: p.candidate,
+    deadline: handoffTime(1800), timeoutMs: 30000 } }), { outcome: 'not-applied', sourceRef: 'git:push-not-spawned' });
+  assert.equal(invoked, 0);
+  assert.equal(f.g(['--git-dir', f.remote, 'rev-parse', 'topic']), f.oldHead);
+});
+
+test('replay ignores ambient author and committer identity and dates', async t => {
+  const f = gitFixture(t);
+  const adapter = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle, resolveRemote: () => f.remote,
+    run: (args, options) => runQueueGit(args, { ...options, env: { ...process.env,
+      GIT_AUTHOR_NAME: 'Ambient', GIT_AUTHOR_EMAIL: 'ambient@example.invalid', GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z',
+      GIT_COMMITTER_NAME: 'Ambient', GIT_COMMITTER_EMAIL: 'ambient@example.invalid', GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z',
+      EMAIL: 'ambient@example.invalid' } }) });
+  const p = await adapter.prepare({ entry: f.entry, oldHead: f.oldHead, exactBase: f.base,
+    headRepository: 'example/review', headRef: 'topic', deadline: handoffTime(1800) });
+  const raw = localGit(join(f.root, 'data/finalization-git', p.workspace), ['cat-file', 'commit', p.candidate]);
+  assert.match(raw, /^committer Queue Rebase <queue@example.invalid> /m);
+  assert.match(raw, /^author Example Author <author@example.invalid> 1767225600 /m);
+  assert.equal(raw.includes('Ambient'), false);
+  assert.doesNotMatch(raw, /^committer .* 978307200 /m);
+});
+
+for (const stage of ['initial-proof', 'replay', 'final-proof', 'shared-proof']) test(`prepare propagates transient Git failure: ${stage}`, async t => {
+  const f = gitFixture(t); let mergeBases = 0, diffs = 0;
+  const adapter = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle, resolveRemote: () => f.remote,
+    run: (args, options) => {
+      if (args[0] === 'merge-base') mergeBases++;
+      if (args[0] === 'diff') diffs++;
+      if ((stage === 'initial-proof' && args[0] === 'diff' && mergeBases === 2)
+        || (stage === 'replay' && args.includes('rebase'))
+        || (stage === 'final-proof' && args[0] === 'diff' && mergeBases === 3)
+        || (stage === 'shared-proof' && args[0] === 'diff' && diffs === 4)) {
+        throw Object.assign(new Error('transient'), { reason: 'git-deadline-or-output-limit' });
+      }
+      return runQueueGit(args, options);
+    } });
+  await assert.rejects(adapter.prepare({ entry: f.entry, oldHead: f.oldHead, exactBase: f.base,
+    headRepository: 'example/review', headRef: 'topic', deadline: handoffTime(1800) }), e => e.reason === 'git-deadline-or-output-limit');
+  assert.deepEqual(readdirSync(join(f.root, 'data/finalization-git')), []);
+});

@@ -109,7 +109,8 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
         json_extract(payload_json,'$.exactBase') AS exactBase,
         json_extract(payload_json,'$.rebase.publication') AS publication
         FROM finalization_queue_entry WHERE json_extract(payload_json,'$.rebase.workspace') IS NOT NULL
-        ORDER BY rowid DESC LIMIT 100`).all().map(row => ({ ...row, publication: row.publication ? JSON.parse(row.publication) : null }));
+        ORDER BY COALESCE(json_extract(payload_json,'$.rebase.publication.observedAt'),
+          json_extract(payload_json,'$.updatedAt')) DESC, rowid DESC LIMIT 100`).all().map(row => ({ ...row, publication: row.publication ? JSON.parse(row.publication) : null }));
       result.observations.rebase = { ...counts, observations, sampleLimit: 100, organicPublicationObserved: counts.published > 0 };
       result.capabilities.rebase = { available: true, ...resolved, schema: '20261023_finalization_queue',
         liveAdapter: 'composition-required', credentialRunner: 'composition-required', routing: 'not-installed-by-this-capability' };

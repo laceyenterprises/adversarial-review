@@ -20,7 +20,7 @@ export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
   return new Promise((resolveResult, reject) => {
     const clean = { ...env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_ATTR_NOSYSTEM: '1' };
     for (const key of Object.keys(clean)) if (/^GIT_(DIR|COMMON_DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|SHALLOW_FILE|NAMESPACE|TEMPLATE_DIR|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_PARAMETERS)$/.test(key)
-      || key.startsWith('GIT_TRACE')) delete clean[key];
+      || /^(GIT_AUTHOR_|GIT_COMMITTER_|GIT_TRACE)/.test(key) || key === 'EMAIL') delete clean[key];
     const child = spawn('git', [...config, ...args], { cwd, env: clean, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = [], bytes = 0, failed = false;
     const kill = () => { failed = true; try { process.kill(-child.pid, 'SIGKILL'); } catch { /* close/error settles */ } };
@@ -50,14 +50,16 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
   const parent = join(root, 'data', 'finalization-git');
   const wait = deadline => queueWaitMs(30_000, { ceilingMs: 60_000, deadline, now: now(), load });
   const git = (cwd, deadline, budget = Infinity) => args => run(args, { cwd, timeoutMs: Math.min(budget, wait(deadline)) });
-  const transport = (repository, args, cwd, deadline, budget = Infinity) => {
+  const transport = (repository, args, cwd, deadline, budget = Infinity, onInvoke = () => {}) => {
     const target = resolveRemote(repository);
     const local = typeof target === 'string' && target.startsWith('/');
     // Composition must supply the existing per-operation entitled credential
     // runner for network Git. Never fall back to the runtime user's SSH agent.
     if (!local && typeof networkRunner !== 'function') throw error('entitled-git-runner-unavailable');
-    return (local ? run : networkRunner)(args(target), { cwd,
-      timeoutMs: Math.min(budget, wait(deadline)), deadline, repository });
+    const command = args(target), timeoutMs = Math.min(budget, wait(deadline));
+    if (!(timeoutMs > 0)) throw error('git-deadline-expired');
+    onInvoke();
+    return (local ? run : networkRunner)(command, { cwd, timeoutMs, deadline, repository });
   };
   const key = entry => createHash('sha256').update(JSON.stringify([entry.lane.repository, entry.prNumber, entry.head])).digest('hex');
   const workspace = (entry, id) => {
@@ -95,7 +97,8 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
             await g(['-c', 'user.name=Queue Rebase', '-c', 'user.email=queue@example.invalid', 'rebase',
               '--no-autostash', '--no-autosquash', '--no-rebase-merges', '--reapply-cherry-picks', '--keep-empty', '--empty=keep',
               '--onto', exactBase, fork, oldHead]);
-          } catch {
+          } catch (failure) {
+            if (failure.reason !== 'git-command-refused') throw failure;
             // Never resolve a conflict or continue from a partially replayed tree.
             throw error('rebase-conflict-or-unsupported');
           }
@@ -118,16 +121,18 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
       return proveQueueRebase({ oldHead: entry.expectedOldHead, candidate: entry.candidate, exactBase: entry.exactBase, git: g });
     },
     async push({ entry, intent }) {
-      const cwd = workspace(entry, entry.rebase.workspace);
+      let invoked = false;
       // The pushed object is the verified SHA, never a mutable local branch.
       try {
+        const cwd = workspace(entry, entry.rebase.workspace);
         await transport(entry.rebase.headRepository, target => ['push', '--porcelain',
           `--force-with-lease=refs/heads/${entry.rebase.headRef}:${intent.expectedOldHead}`,
-          '--', target, `${intent.candidate}:refs/heads/${entry.rebase.headRef}`], cwd, intent.deadline, intent.timeoutMs);
+          '--', target, `${intent.candidate}:refs/heads/${entry.rebase.headRef}`], cwd, intent.deadline, intent.timeoutMs, () => { invoked = true; });
         return { outcome: 'succeeded', sourceRef: `git:push:${intent.candidate}:refs/heads/${entry.rebase.headRef}` };
       } catch (failure) {
         // Explicit single-ref porcelain refusals prove non-application.
         // Transport/timeout failures remain ambiguous; do not expose diagnostics.
+        if (!invoked) return { outcome: 'not-applied', sourceRef: 'git:push-not-spawned' };
         if (failure.reason === 'git-command-refused' && failure.publicationRefused) {
           return { outcome: 'not-applied', sourceRef: 'git:publication-refused' };
         }

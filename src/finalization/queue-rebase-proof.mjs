@@ -1,11 +1,21 @@
 // Strict queue derivation. patch-id normalizes whitespace and treats order as a
 // multiset in rebase-authority; neither is publication evidence for this port.
 import { proveReviewedRebase } from '../ama/reviewed-rebase.mjs';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 
 export const QUEUE_REBASE_PROOF = 'queue-ordered-binary-v1';
 export const isQueueSha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 export async function proveQueueRebase({ oldHead, candidate, exactBase, git }) {
+  let unavailable;
+  const execute = git;
+  git = async args => {
+    try { return await execute(args); }
+    catch (failure) {
+      if (failure?.reason !== 'git-command-refused') unavailable = failure;
+      throw failure;
+    }
+  };
   try {
     if (![oldHead, candidate, exactBase].every(isQueueSha)) return null;
     const bases = (await git(['merge-base', '--all', oldHead, exactBase])).trim().split('\n');
@@ -47,9 +57,25 @@ export async function proveQueueRebase({ oldHead, candidate, exactBase, git }) {
     // Reuse the existing complete ordered proof, with no generated exceptions.
     const proof = await proveReviewedRebase({ reviewedHead: oldHead, head: candidate, base: exactBase,
       git: args => args[0] === 'diff' ? strictGit(['diff', ...args.slice(1).filter(a => a !== '--' && a !== ':(top)')]) : git(args) });
+    if (unavailable) throw unavailable;
     if (!proof || proof.rebaseBase !== exactBase || proof.fork !== fork) return null;
     return { kind: QUEUE_REBASE_PROOF, noop: false, oldHead, candidate, exactBase, fork,
       sourceCommits: original, replayedCommits: replay.map(c => c.sha), digest: digest(proof) };
-  } catch { return null; }
+  } catch { if (unavailable) throw unavailable; return null; }
 }
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+// Recompute every persisted hop; a later proof alone does not link the receipt.
+export async function verifyQueueDerivation({ entry, git, deadline }) {
+  const prior = entry.rebase?.priorDerivations ?? [];
+  if (!Array.isArray(prior) || prior.length > 256) return false;
+  let head = entry.head;
+  for (const hop of [...prior, entry]) {
+    if (hop.expectedOldHead !== head || hop.proof?.oldHead !== head
+      || hop.proof?.candidate !== hop.candidate || hop.proof?.exactBase !== hop.exactBase) return false;
+    const proof = await git.verify({ entry: { ...entry, ...hop }, deadline });
+    if (!proof || !isDeepStrictEqual(proof, hop.proof)) return false;
+    head = hop.candidate;
+  }
+  return true;
+}

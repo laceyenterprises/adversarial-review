@@ -9,6 +9,7 @@ import { resolveCleanReviewStore } from './queue-clean-review.mjs';
 import { queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
+import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
 import { handoffDigest } from './queue-handoff.mjs';
 
@@ -116,20 +117,21 @@ export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, no
           live = await readQueueEvidence(liveAdapter, { entry, kind: receipt?.kind ?? null }, wait);
         } catch { /* Unknown evidence parks, never dispatches. */ }
       }
-      let derivation = null;
-      if (live?.subject?.state === 'open' && entry.candidate && !sameSha(entry.candidate, entry.head)
-        && sameSha(live.subject.head, entry.candidate) && entry.proof && receipt
+      let derivation = null, proofUnavailable = false;
+      if (Date.parse(now()) < Date.parse(deadline) && live?.subject?.state === 'open' && entry.candidate && !sameSha(entry.candidate, entry.head)
+        && !sameSha(live.subject.head, entry.head)
+        && [entry.candidate, entry.expectedOldHead].some(head => sameSha(live.subject.head, head)) && entry.proof && receipt
         && entry.rebase?.sourceReceiptDigest === handoffDigest(receipt.input ?? receipt.handoff)) {
         // A saved proof is not authority by itself. Recompute it from the
         // isolated objects before treating our own rewrite as the admission head.
         try {
           const git = gitAdapter ?? resolveQueueGitAdapter({ rootDir: store.rootDir, now, load });
-          const proof = await git.verify({ entry: structuredClone(entry), deadline });
-          if (proof && isDeepStrictEqual(proof, entry.proof)) derivation = { head: entry.candidate };
-        } catch { /* Unknown derivations cannot authorize readmission. */ }
+          if (await verifyQueueDerivation({ entry: structuredClone(entry), git, deadline })) derivation = { head: live.subject.head };
+        } catch { proofUnavailable = true; }
       }
       const at = queueTime(now());
       if (Date.parse(at) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
+      else if (proofUnavailable) decision = disposition('parked-infrastructure', 'rebase-git-unavailable');
       else decision = classifyQueueAdmission(entry, receipt, live, derivation);
       // Snapshot CAS spans the await: a late recovery cannot overwrite a newer
       // hold, terminal observation, or recovery, even after an ABA phase cycle.

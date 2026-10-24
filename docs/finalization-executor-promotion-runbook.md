@@ -340,6 +340,9 @@ wait capped at 5 seconds. It hashes the shipped runtime modules, including the
 Git/proof code. This digest identifies the probe process bytes; record the actual
 watcher build/route independently before promotion.
 
+The bounded sample is ordered by publication observedAt, falling back to entry
+updatedAt, with acknowledgement order used only to break ties.
+
 Record prepared/published counts, the bounded recent observation sample, old
 head, candidate, exact base and publication source references. The sample is at
 most 100 entries and does not attest every historical proof. Empty publication
@@ -391,3 +394,17 @@ used. Sibling owner/admission/handoff and original rebase-proof regressions stay
 green. Touched-file ESLint, contract typecheck, catalog and whitespace checks
 passed. Deployed runtime-owner probe, actual watcher build, composed transports,
 notice delivery and organic publication evidence remain pending operator work.
+
+
+Recovery verifies every contiguous derivation from the admission head, including
+prior workspaces, before accepting either the current candidate or its proven
+expected old head. This includes a park after a second candidate was prepared
+but before publication. A computed proof mismatch returns to the closer;
+unavailable Git execution parks as infrastructure, and expired patience parks
+before proof execution. Both already-published paths recheck live holds and
+permissions before advancing to checks. Deterministic workspace, remote, runner
+or deadline refusals before transport invocation settle `not-applied` with
+`git:push-not-spawned`; failures after invocation still require authoritative
+results or drain reconciliation. Ambient author/committer environment variables
+and `EMAIL` are removed from local Git execution so replay retains the source
+author and uses the synthetic committer.

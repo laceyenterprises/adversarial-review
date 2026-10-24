@@ -1006,7 +1006,7 @@
       "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged", "heads.rereview"],
       "attemptOutcomeFields": ["action", "reason", "holdReason", "at", "dispatched", "launchRequestId", "triggered"],
       "attemptHoldReasonNormalization": "Explicit result holdReason takes precedence; otherwise extract the harness-hold: suffix from reason for outcomes and evidence summaries.",
-      "sharedRereviewDecision": "rereview-exact-head queues once per head immediately when ownership is certainly absent; heads.evidence records action, reason and reasons; local queue failure refunds heads.rereview; a head-bound review/exact-head-review closure owner also executes when a recorded bridge cannot carry an unsettled verdict, before bounded-wait return",
+      "sharedRereviewDecision": "rereview-exact-head queues once per head immediately when ownership is certainly absent; heads.evidence records action, reason and reasons; local queue failure refunds heads.rereview; both explicit decisions and selectedClosureOwner review/exact-head-review intents require matching distinct current/reviewed heads; selected intents execute before bounded-wait return while closureOwner stays wait/page until certain owner absence and successful queueing; selection is in-memory and the durable shape is unchanged",
       "recoveryAttemptLimit": 2,
       "pagedTerminalReceiptStatuses": ["delivered", "dead-letter"]
     },

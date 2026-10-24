@@ -916,8 +916,9 @@ async function maybeDispatchAmaClosureForInner({
     } catch (error) { options.logger?.warn?.(`[watcher] final-round wait observation failed: ${error.message}`); }
   }
   // The wake already chose this review from the immutable pass snapshot. Do
-  // not discard it at an old review-round ceiling or in the wait projection.
-  // Execution still requires the watchdog's independent live-ownership probe.
+  // not discard it at an old review-round ceiling. Preserve the selection
+  // separately: a bounded wait remains the reported owner until the watchdog
+  // confirms ownership absence and successfully queues review.
   const sharedReview = closureOwnerSink.shared;
   const reviewHead = options.candidate?.headSha || options.currentRevisionRef;
   if (sharedReview?.decision?.action === 'review' && sharedReview.decision.actor === 'reviewer'
@@ -928,12 +929,9 @@ async function maybeDispatchAmaClosureForInner({
     closureOwnerSink.value = { owner: 'review', reason: 'exact-head-review' };
   }
   if (result && closureOwnerSink.value) result = { ...result,
+    ...(closureOwnerSink.value.owner === 'review' ? { selectedClosureOwner: closureOwnerSink.value } : {}),
     closureOwner: result.dispatched ? { owner: 'hammer', reason: result.reason || 'dispatched' }
       : result.reason === 'daemon-merged' ? { owner: 'daemon-merge', reason: 'daemon-merged' }
-      : closureOwnerSink.value.owner === 'review' && closerAuthoredStaleSink.value?.currentHead
-        && closerAuthoredStaleSink.value.reviewedHead
-        && closerAuthoredStaleSink.value.currentHead !== closerAuthoredStaleSink.value.reviewedHead
-        ? closureOwnerSink.value
       : result.boundedWait ? { owner: result.boundedWait.exhausted ? 'page' : 'wait',
         reason: result.boundedWait.reason, boundedMs: result.boundedWait.boundedMs,
         retryAfterMs: result.boundedWait.retryAfterMs }
@@ -3079,11 +3077,8 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     }
     return orphan;
   };
-  const reviewDecision = amaClosureResult?.closerAuthoredStale;
   if (!mergeAgentRequestedScoped && amaClosureResult?.boundedWait
     && hasExactHeadReviewDecision(amaClosureResult, candidate?.headSha || currentRevisionRef, reviewStateRow)
-    && reviewDecision.currentHead === (candidate?.headSha || currentRevisionRef)
-    && reviewDecision.reviewedHead === reviewStateRow?.reviewer_head_sha
     && !isSafetyRecoveryHold(amaClosureResult)) {
     const orphan = await recoverOwnerless();
     if (orphan) return orphan;

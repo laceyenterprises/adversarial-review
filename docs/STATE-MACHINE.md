@@ -1066,8 +1066,12 @@ The watchdog checks live/uncertain ownership before requesting review. Successfu
 queueing reports `exact-head-review-queued` with review as the next owner; the
 durable per-head reservation and original wait reason remain available. A live
 hammer still suppresses re-review. No verdict or required-check predicate changes.
-The review owner also survives when a complete publication bridge cannot carry
-an unsettled live verdict; the original refusal reasons remain diagnostic evidence.
+A complete publication bridge that cannot carry an unsettled live verdict retains
+its review intent in `selectedClosureOwner`, with original refusal reasons intact.
+Both the explicit decision and selected intent require matching current and
+reviewed heads. During the bounded wait, `closureOwner` remains wait/page until
+the watchdog confirms ownership absence and successfully queues review; live or
+uncertain owners and queue refusals cannot report review ownership.
 
 Historical `exact-head-review-required` and bare `stale-review-head` stops release
 with `hammer-responsibility` without a new review. Mixed safety refusals retain

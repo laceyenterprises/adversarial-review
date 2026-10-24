@@ -132,7 +132,7 @@ if (scenario === 'clean') {
   // HAMATTEST-03: production coexistence executes review before its wait return.
   const { resolveMergeAgentCoexistenceForWatcher } = await import('../../src/ama-closure-orchestration.mjs');
   for (const decision of ['rereview-exact-head', 'not-eligible']) {
-    let hammerLive = true, reviewRequests = 0;
+    let hammerLive = true, ownershipUncertain = false, reviewRequests = 0;
     const terminalReviewTick = () => resolveMergeAgentCoexistenceForWatcher({
       rootDir: join(rootDir, 'terminal-review', decision), repoPath: repo, prNumber, currentRevisionRef: headSha,
       candidate: { headSha, prState: 'open' }, labelNames: [], logger: quiet,
@@ -140,14 +140,19 @@ if (scenario === 'clean') {
       maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
         reason: 'not-eligible', closerAuthoredStale: { ...closerAuthoredStale, decision,
           reasons: ['verdict-not-settled-success', 'blocking-findings-unknown'] },
-        closureOwner: { owner: 'review', reason: 'exact-head-review' },
+        selectedClosureOwner: { owner: 'review', reason: 'exact-head-review' },
+        closureOwner: { owner: 'wait', reason: 'required-checks-pending' },
         boundedWait: { exhausted: false, reason: 'required-checks-pending' } }),
-      orphanOptions: { hasOwnerImpl: async () => ({ owned: hammerLive }), pageImpl: refuse,
+      orphanOptions: { hasOwnerImpl: async () => ({ owned: hammerLive, uncertain: ownershipUncertain }), pageImpl: refuse,
         requestRereviewImpl: async () => { reviewRequests++; return { triggered: true }; } },
     });
-    await terminalReviewTick();
+    assert.equal((await terminalReviewTick()).amaClosureResult.closureOwner.owner, 'wait');
     assert.equal(reviewRequests, 0);
     hammerLive = false;
+    ownershipUncertain = true;
+    assert.equal((await terminalReviewTick()).amaClosureResult.closureOwner.owner, 'wait');
+    assert.equal(reviewRequests, 0);
+    ownershipUncertain = false;
     assert.equal((await terminalReviewTick()).amaClosureResult.closureOwner.owner, 'review');
     await terminalReviewTick();
     assert.equal(reviewRequests, 1);

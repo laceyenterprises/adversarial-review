@@ -4960,9 +4960,14 @@ still fences review; successful queueing reports `exact-head-review-queued`
 and `closureOwner.owner=review`, preserving the wait reason and durable request
 marker. A publication edge starting after an unreviewed intermediate head cannot
 carry an older verdict; the exact-head review is the safe recovery in that case.
-A complete bridge with unsettled live review evidence also retains its selected
-exact-head review owner through the wait wrapper. Its rejected verdict remains
-visible; only a new authoritative review or valid carried verdict can settle it.
+A complete bridge with unsettled live review evidence retains its review intent
+as `selectedClosureOwner` through the wait wrapper. Both that intent and an
+explicit `rereview-exact-head` decision must bind the current and reviewed heads
+to the live candidate and review row. While bounded wait is active, `closureOwner`
+remains wait/page, including with live or uncertain ownership or a refused queue
+request; only successful watchdog queueing changes it to review. The rejected
+verdict remains visible; only a new authoritative review or valid carried verdict
+can settle it.
 Pending exact-head CI already records `required-checks-pending`, `resumeOwed`
 and `resumeHead` in the hammer terminal audit. Neither that receipt nor pushed
 provenance certifies CI or authorizes merge.

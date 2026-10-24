@@ -586,6 +586,22 @@ for (const factHead of ['current', 'prior']) {
 }
 
 
+for (const mismatch of ['current-head', 'reviewed-head', 'missing-heads', 'same-head']) {
+  test(`exact-head watchdog rejects ${mismatch} before bypassing a proof wait`, async t => {
+    const { tick, calls } = setup(t);
+    const stale = { decision: 'rereview-exact-head', currentHead: 'current', reviewedHead: 'reviewed' };
+    if (mismatch === 'current-head') stale.currentHead = 'foreign';
+    if (mismatch === 'reviewed-head') stale.reviewedHead = 'foreign';
+    if (mismatch === 'missing-heads') { delete stale.currentHead; delete stale.reviewedHead; }
+    if (mismatch === 'same-head') stale.reviewedHead = 'current';
+    await tick(0, { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
+      result: { amaEnabled: true, recoveryWait: true, closerAuthoredStale: stale },
+      hasOwnerImpl: () => assert.fail('a foreign decision cannot bypass the proof wait') });
+    assert.equal(calls.reviews.length, 0);
+    assert.equal(calls.launches.length, 0);
+  });
+}
+
 test('HAMATTEST-02: watcher executes an unproven-head decision once, before its idle bound', async t => {
   const { args, tick, calls } = setup(t);
   const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: 'reviewed', currentHead: 'current',
@@ -621,8 +637,9 @@ for (const failure of ['failed-review', 'queue-refused']) {
   test(`HAMATTEST-02: exact-head ${failure} accumulates idle time and exhausts recovery`, async t => {
     const { args, tick, calls } = setup(t);
     const overrides = { reviewStateRow: { review_status: failure === 'failed-review' ? 'failed' : 'posted',
-      reviewer_head_sha: 'current' },
-    result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head' },
+      reviewer_head_sha: 'reviewed' },
+    result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head',
+      currentHead: 'current', reviewedHead: 'reviewed' },
       ownerProofFacts: { headSha: 'current', liveHeadCloserAuthored: true, reviewCycleExhausted: true } },
     requestRereviewImpl: async options => { calls.reviews.push(options); return { triggered: false, reason: 'queue-refused' }; } };
     await tick(0, overrides);
@@ -644,7 +661,9 @@ for (const ownership of [{ owned: true }, { owned: false, uncertain: true }]) {
   test(`HAMATTEST-02: shared re-review decision respects ownership ${JSON.stringify(ownership)}`, async t => {
     const { tick, calls } = setup(t);
     await tick(0, { hasOwnerImpl: async () => ownership,
-      result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head' } } });
+      reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
+      result: { amaEnabled: true, closerAuthoredStale: { decision: 'rereview-exact-head',
+        currentHead: 'current', reviewedHead: 'reviewed' } } });
     assert.equal(calls.reviews.length, 0);
     assert.equal(calls.launches.length, 0);
   });
@@ -653,7 +672,8 @@ for (const ownership of [{ owned: true }, { owned: false, uncertain: true }]) {
 test('HAMATTEST-02: local request failure remains retryable, while later heads get their own request', async t => {
   const { tick, calls } = setup(t);
   let attempts = 0;
-  const overrides = { result: { amaEnabled: true, closerAuthoredStale: {
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'reviewed' },
+    result: { amaEnabled: true, closerAuthoredStale: { currentHead: 'current', reviewedHead: 'reviewed',
     decision: 'rereview-exact-head', reasons: ['hammer-app-attestation-missing'] } },
   requestRereviewImpl: async options => {
     if (++attempts === 1) throw new Error('synthetic local database busy');
@@ -664,7 +684,8 @@ test('HAMATTEST-02: local request failure remains retryable, while later heads g
   await tick(1, overrides);
   await tick(2, overrides);
   assert.equal(attempts, 2);
-  await tick(3, { ...overrides, headSha: 'next', candidate: { prState: 'open', headSha: 'next' } });
+  await tick(3, { ...overrides, headSha: 'next', candidate: { prState: 'open', headSha: 'next' },
+    result: { ...overrides.result, closerAuthoredStale: { ...overrides.result.closerAuthoredStale, currentHead: 'next' } } });
   assert.deepEqual(calls.reviews.map(request => request.targetRevisionRef), ['current', 'next']);
 });
 

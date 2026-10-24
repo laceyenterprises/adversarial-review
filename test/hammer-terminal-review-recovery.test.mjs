@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { publishPushedHammerAttestation } from '../src/ama/hammer-pushed-attestation.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
-import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
+import { hasExactHeadReviewDecision, probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
@@ -106,7 +106,9 @@ test('HAMATTEST-03 settles: a recorded pushed edge without a reviewed-head bridg
 test('HAMATTEST-03 no early re-review: running launch suppresses review until its terminal poll', async t => {
   const f = await fixture(t);
   f.setStatus('running');
-  await f.tick();
+  const waiting = await f.tick();
+  assert.equal(waiting.amaClosureResult.closureOwner.owner, 'wait');
+  assert.equal(waiting.amaClosureResult.closureOwner.reason, 'required-checks-pending');
   assert.equal(f.counts().requests, 0);
   assert.equal(f.row().review_status, 'posted');
   f.setStatus('succeeded');
@@ -176,3 +178,50 @@ for (const exhausted of [false, true]) test(`HAMATTEST-03 a recorded bridge with
   assert.ok(result.amaClosureResult.closerAuthoredStale.reasons.includes('verdict-not-settled-success'));
   assert.equal(f.counts().requests, 1);
 });
+
+for (const route of ['explicit', 'selected', 'legacy-owner']) {
+  test(`exact-head decision binds both heads for ${route}`, () => {
+    const result = { closerAuthoredStale: { currentHead: published, reviewedHead: reviewed,
+      decision: route === 'explicit' ? 'rereview-exact-head' : 'not-eligible' },
+      ...(route === 'explicit' ? {} : { [route === 'selected' ? 'selectedClosureOwner' : 'closureOwner']:
+        { owner: 'review', reason: 'exact-head-review' } }) };
+    const row = { reviewer_head_sha: reviewed };
+    assert.equal(hasExactHeadReviewDecision(result, published, row), true);
+    assert.equal(hasExactHeadReviewDecision(result, intermediate, row), false);
+    assert.equal(hasExactHeadReviewDecision(result, '', row), false);
+    assert.equal(hasExactHeadReviewDecision(result, published, {}), false);
+    assert.equal(hasExactHeadReviewDecision(result, published, { reviewer_head_sha: intermediate }), false);
+    for (const stale of [{ decision: result.closerAuthoredStale.decision },
+      { ...result.closerAuthoredStale, reviewedHead: published },
+      { ...result.closerAuthoredStale, reviewedHead: '' }]) {
+      assert.equal(hasExactHeadReviewDecision({ ...result, closerAuthoredStale: stale }, published, row), false);
+    }
+  });
+}
+
+for (const bridge of [false, true]) {
+  for (const ownership of ['live', 'uncertain', 'queue-refused']) {
+    for (const exhausted of [false, true]) {
+      test(`bounded owner remains truthful: bridge=${bridge}, ownership=${ownership}, exhausted=${exhausted}`, async t => {
+        const f = await fixture(t, { bridge });
+        const result = await f.tick({ orphanOptions: {
+          hasOwnerImpl: async () => ({ owned: ownership === 'live', uncertain: ownership === 'uncertain' }),
+          requestRereviewImpl: async () => {
+            assert.equal(ownership, 'queue-refused');
+            return { triggered: false, reason: 'queue-refused' };
+          },
+          pageImpl: () => assert.fail('fixture must not page'),
+        } }, {
+          fetchLatestHeadReviewBodiesImpl: async () => [],
+          observeClosureWaitImpl: async () => ({ exhausted, reason: 'required-checks-pending',
+            boundedMs: 60000, retryAfterMs: 30000 }),
+        });
+        assert.deepEqual(result.amaClosureResult.closureOwner, {
+          owner: exhausted ? 'page' : 'wait', reason: 'required-checks-pending',
+          boundedMs: 60000, retryAfterMs: 30000,
+        });
+        assert.equal(f.row().review_status, 'posted');
+      });
+    }
+  }
+}

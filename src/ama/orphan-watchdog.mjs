@@ -30,11 +30,12 @@ const text = value => String(value || '').slice(0, 300);
 // that rejection while executing the separately selected, head-bound owner.
 export function hasExactHeadReviewDecision(result, headSha, reviewStateRow) {
   const stale = result?.closerAuthoredStale;
-  return stale?.decision === 'rereview-exact-head'
-    || (result?.closureOwner?.owner === 'review' && result.closureOwner.reason === 'exact-head-review'
-      && Boolean(headSha && stale?.reviewedHead)
-      && stale.currentHead === headSha && stale.reviewedHead === reviewStateRow?.reviewer_head_sha
-      && stale.reviewedHead !== headSha);
+  const isHeadBound = Boolean(headSha && stale?.reviewedHead)
+    && stale.currentHead === headSha && stale.reviewedHead === reviewStateRow?.reviewer_head_sha
+    && stale.reviewedHead !== headSha;
+  const selectedOwner = result?.selectedClosureOwner || result?.closureOwner;
+  return Boolean(isHeadBound && (stale.decision === 'rereview-exact-head'
+    || (selectedOwner?.owner === 'review' && selectedOwner.reason === 'exact-head-review')));
 }
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.

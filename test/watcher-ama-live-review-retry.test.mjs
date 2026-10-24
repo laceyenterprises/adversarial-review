@@ -51,7 +51,7 @@ function baseArgs(rootDir) {
     currentRevisionRef: 'head-live',
     loadConfigImpl: loadAmaEnabledConfig,
     liveReviewRetryDelaysMs: [0, 0],
-    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'fixture-declined' }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'deferred', reason: 'lease-contended' }),
     logger: { warn() {} },
   };
 }
@@ -111,8 +111,8 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
       'gemini-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.equal(result.dispatched, true);
-    assert.equal(result.reason, 'comment-only');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'daemon-deferred');
     assert.equal(result.nextAction.action, 'daemon-merge');
     assert.equal(result.closureOwner.owner, 'daemon-merge');
   } finally {
@@ -186,8 +186,8 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
       'codex-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.equal(result.dispatched, true);
-    assert.equal(result.reason, 'comment-only');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'daemon-deferred');
     assert.equal(result.nextAction.action, 'daemon-merge');
     assert.equal(result.closureOwner.owner, 'daemon-merge');
   } finally {

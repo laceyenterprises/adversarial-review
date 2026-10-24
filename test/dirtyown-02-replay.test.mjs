@@ -198,7 +198,7 @@ test('replay #7332: a conflicting, red-CI final-round head reaches one hammer in
   assert.equal(run.merges.length, 0, 'the proof never merges on its own');
 });
 
-test('replay #7332: a hard-stop label still blocks, and both background log lines name the reasons', async (t) => {
+test('replay #7332: a hard-stop label selects a shared hold before background admission', async (t) => {
   for (const label of ['do-not-merge', 'merge-agent-skip']) {
     const rootDir = tempRoot(t, `7332-${label}`);
     const input = setup7332(rootDir);
@@ -208,15 +208,15 @@ test('replay #7332: a hard-stop label still blocks, and both background log line
     await queue.drain();
     const second = await replay(rootDir, { ...input, labelNames: [label], queue, logs });
 
-    const expected = `reasons=[${[...INCIDENT_7332_REASONS, `label-${label}`].join(',')}]`;
-    assert.deepEqual(first.closerResults[0].reasons, [...INCIDENT_7332_REASONS, `label-${label}`]);
-    assert.equal(first.closerResults[0].reason, 'not-eligible');
+    for (const run of [first, second]) {
+      assert.equal(run.closerResults.length, 0, 'explicit holds return before closer eligibility');
+      assert.equal(run.outcome.amaClosureResult.nextAction.action, 'operator-hold');
+      assert.equal(run.outcome.amaClosureResult.nextAction.reason, 'hold-label');
+      assert.equal(run.outcome.amaClosureResult.nextAction.queue.intent, 'none');
+    }
     assert.equal(first.hammerDispatches.length + second.hammerDispatches.length, 0, `${label} dispatches nothing`);
     assert.notEqual(second.outcome.outcome, 'ama-dispatched');
-    const settled = logs.find((line) => /AMA hammer background dispatch settled for .*#7332@/.test(line));
-    const applied = logs.find((line) => /AMA hammer background outcome applied for .*#7332:/.test(line));
-    assert.ok(settled?.includes(`dispatched=false reason=not-eligible ${expected}`), settled);
-    assert.ok(applied?.includes(`dispatched=false reason=not-eligible ${expected}`), applied);
+    assert.equal(logs.some((line) => /AMA hammer background (?:dispatch settled|outcome applied)/.test(line)), false);
   }
 });
 
@@ -243,22 +243,20 @@ test('replay #7332 with pending CI: a conflicting final-round head reaches one h
   assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), false);
 });
 
-test('replay #7332 with pending CI and another miss: a conflicting head is not exempted as waiting on CI', async (t) => {
-  // `pr-is-draft` is neither a hard stop nor covered by the resume, so the
-  // closer returns not-eligible. Only a mergeable head earns the CI-wait
-  // exemption from the retain-loop cap; a conflicting one is not waiting on CI.
-  for (const [label, overrides, expectHold] of [
-    ['conflict', {}, false],
-    ['no-conflict', { mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED' }, true],
+test('replay #7332 with pending CI: draft holds precede conflict and CI observation', async (t) => {
+  for (const [label, overrides] of [
+    ['conflict', {}],
+    ['no-conflict', { mergeable: 'MERGEABLE', mergeStateStatus: 'BLOCKED' }],
   ]) {
     const rootDir = tempRoot(t, `7332-pending-draft-${label}`);
     const input = setup7332(rootDir, { statusCheckRollup: PENDING_7332_ROLLUP, isDraft: true, ...overrides });
     const logs = [];
     const run = await replay(rootDir, { ...input, stubs: { ...input.stubs, now: WITHIN_CI_WAIT }, logs });
-    assert.equal(run.closerResults[0]?.reason, 'not-eligible', label);
-    assert.ok(run.closerResults[0].reasons.includes('pr-is-draft'), label);
+    assert.equal(run.closerResults.length, 0, label);
+    assert.equal(run.outcome.amaClosureResult.nextAction.action, 'operator-hold', label);
+    assert.equal(run.outcome.amaClosureResult.nextAction.reason, 'draft', label);
     assert.equal(run.hammerDispatches.length, 0, label);
-    assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), expectHold, `${label}: ${logs.join('\n')}`);
+    assert.equal(logs.some((line) => HOLDING_FOR_CI.test(line)), false, label);
   }
 });
 

@@ -9,13 +9,12 @@ import {
   isDaemonNotTakenHammerRemediable,
   isDaemonNotTakenTransientRead,
   maybeDispatchAmaClosureFor,
-  resolveMergeAgentCoexistenceForWatcher,
 } from '../src/ama-closure-orchestration.mjs';
 import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
+import { observeDaemonResult } from '../src/ama/closure-next-action.mjs';
 import { parkRecordPath } from '../src/daemon-merge-park-log.mjs';
 import {
   DAEMON_ROUTE_DISAGREEMENT_BOUND,
-  DAEMON_ROUTE_DISAGREEMENT_REASON,
   MERGEABILITY_UNKNOWN_STUCK_MS,
   clearDaemonRouteDisagreement,
   daemonRouteDisagreementFilePath,
@@ -24,17 +23,13 @@ import {
   readDaemonRouteDisagreement,
   recordDaemonRouteDisagreement,
 } from '../src/daemon-route-disagreement.mjs';
-import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 
-// CIDEDUPE-01 — no silent refusal. When the AMA closer answers
-// `daemon-clean-route` and the daemon declined the same tick, the disagreement is
-// logged with the daemon's reason and counted per head. Past the bound the PR
-// goes to the capped hammer (hammer-remediable gates) or parks with an
-// operator-visible alert (everything else). SEV3 2026-09-28, agent-os#7314.
+// Retained CIDEDUPE-01 helper/ledger behavior is covered for source rollback.
+// Runtime daemon selection and handoff consume the common next action.
 
-const HEAD = 'head-7314';
-const REPO = 'acme/repo';
-const PR = 7314;
+const HEAD = 'a'.repeat(40);
+const REPO = 'subject-route';
+const PR = 6;
 
 const CLEAN_REVIEW_BODY = [
   '## Blocking Issues', '', '- None.', '',
@@ -72,9 +67,9 @@ const DUPLICATE_FAMILY = Object.freeze({
 // `maybeDispatchAmaCloser` for an eligible clean PR, and dispatches the hammer
 // only when told the daemon failed.
 function routingCloser(calls) {
-  return async ({ dispatchContext }) => {
-    calls.push({ force: dispatchContext.forceHammerAfterDaemonFailure === true, reasons: dispatchContext.daemonFailureReasons });
-    if (dispatchContext.forceHammerAfterDaemonFailure === true) {
+  return async ({ dispatchContext, sharedNextAction }) => {
+    calls.push({ decision: sharedNextAction.decision, reasons: dispatchContext.daemonFailureReasons });
+    if (sharedNextAction.decision.action === 'hammer' && sharedNextAction.decision.queue.intent === 'dispatch') {
       return { dispatched: true, reason: 'dispatched', launchRequestId: 'lrq_hammer' };
     }
     return { dispatched: false, skipMergeAgent: true, reason: 'daemon-clean-route' };
@@ -125,7 +120,10 @@ function closureArgs(rootDir, { daemonResult, closerCalls, logs, warns, head = H
     liveReviewRetryDelaysMs: [0, 0],
     fetchMergedProtectiveDependentsImpl: async () => [],
     logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
-    runDaemonCleanMergeAttemptImpl: async () => daemonResult,
+    runDaemonCleanMergeAttemptImpl: async ({ sharedNextAction, passSnapshot }) => daemonResult ? ({
+      ...daemonResult,
+      nextActionShared: observeDaemonResult(sharedNextAction, daemonResult, passSnapshot),
+    }) : daemonResult,
     maybeDispatchAmaCloserImpl: routingCloser(closerCalls),
     ...overrides,
   };
@@ -190,38 +188,6 @@ test('DIRTYOWN-01: only all-transient pre-lease declines are transient reads', (
   assert.equal(isDaemonNotTakenTransientRead({ ...unknown, reason: 'prior-daemon-terminal-failure' }), false);
 });
 
-test('DIRTYOWN-01: a pre-lease UNKNOWN decline is logged but never counted, parked, or paged', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const args = closureArgs(rootDir, {
-      daemonResult: { ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] },
-      closerCalls,
-      logs,
-      warns,
-    });
-
-    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND + 3; tick += 1) {
-      const result = await maybeDispatchAmaClosureFor(args);
-      assert.equal(result.reason, 'daemon-clean-route', `tick ${tick} still waits on the daemon`);
-      assert.equal(result.needsOperator, undefined);
-    }
-    assert.ok(closerCalls.every((c) => c.force === false), 'a transient read never forces the hammer');
-    const events = jsonEvents(logs, 'ama.daemon_route_disagreement');
-    assert.equal(events.length, DAEMON_ROUTE_DISAGREEMENT_BOUND + 3, 'every tick is still logged');
-    assert.ok(events.every((e) => e.transientRead === true && e.disagreements === 0 && e.escalation === null));
-    assert.deepEqual(events[0].daemonReasons, ['pr-mergeability-unknown']);
-    assert.match(warns.join('\n'), /declined on a transient GitHub read.*not counted/);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
-    assert.equal(existsSync(daemonRouteDisagreementFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
 test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoking the closer', async () => {
   const rootDir = tempRoot();
   try {
@@ -249,177 +215,6 @@ test('DIRTYOWN-01 / NXA-05: UNKNOWN+CLEAN selects the CI observer without invoki
   }
 });
 
-test('a closer→daemon disagreement is logged every tick, then falls back to the capped hammer past the bound', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const args = closureArgs(rootDir, { daemonResult: CI_NOT_GREEN, closerCalls, logs, warns });
-
-    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND; tick += 1) {
-      const result = await maybeDispatchAmaClosureFor(args);
-      assert.equal(result.reason, 'daemon-clean-route', `tick ${tick} still routes to the daemon`);
-      assert.equal(result.needsOperator, undefined);
-      const events = jsonEvents(logs, 'ama.daemon_route_disagreement');
-      assert.equal(events.length, tick, `tick ${tick} logs the disagreement`);
-      const last = events.at(-1);
-      assert.equal(last.repo, REPO);
-      assert.equal(last.pr, PR);
-      assert.equal(last.headSha, HEAD);
-      assert.equal(last.disagreements, tick);
-      assert.equal(last.bound, DAEMON_ROUTE_DISAGREEMENT_BOUND);
-      assert.equal(last.daemonDisposition, 'not-taken');
-      assert.equal(last.daemonReason, 'not-eligible');
-      assert.deepEqual(last.daemonReasons, ['ci-not-green']);
-      assert.equal(last.hammerRemediable, true);
-      assert.equal(last.escalation, null);
-    }
-    assert.match(warns.join('\n'), /daemon-clean-route\) but the daemon declined: not-taken not-eligible; gates=ci-not-green/);
-    assert.ok(closerCalls.every((c) => c.force === false), 'within the bound the closer is not forced');
-
-    // Past the bound the closer is told the daemon failed, so it dispatches the hammer.
-    const escalated = await maybeDispatchAmaClosureFor(args);
-    assert.equal(closerCalls.at(-1).force, true);
-    assert.deepEqual(closerCalls.at(-1).reasons, ['ci-not-green'], 'the hammer alert carries the daemon gates');
-    assert.equal(escalated.dispatched, true);
-    assert.equal(escalated.launchRequestId, 'lrq_hammer');
-    const fallback = jsonEvents(logs, 'ama.daemon_route_disagreement.hammer_fallback');
-    assert.equal(fallback.length, 1);
-    assert.equal(fallback[0].disagreements, DAEMON_ROUTE_DISAGREEMENT_BOUND);
-    assert.deepEqual(fallback[0].daemonReasons, ['ci-not-green']);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('a non-remediable disagreement parks with an operator-visible alert past the bound', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const args = closureArgs(rootDir, { daemonResult: DUPLICATE_FAMILY, closerCalls, logs, warns });
-
-    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND; tick += 1) {
-      const result = await maybeDispatchAmaClosureFor(args);
-      assert.equal(result.reason, 'daemon-clean-route');
-    }
-    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false, 'no park inside the bound');
-
-    const parked = await maybeDispatchAmaClosureFor(args);
-    assert.ok(closerCalls.every((c) => c.force === false), 'a non-remediable decline never forces the hammer');
-    assert.equal(parked.dispatched, false);
-    assert.equal(parked.skipMergeAgent, true);
-    assert.equal(parked.needsOperator, undefined);
-    assert.equal(parked.reason, DAEMON_ROUTE_DISAGREEMENT_REASON);
-    assert.equal(parked.operatorReason, 'daemon-route-disagreement:duplicate-family-unresolved');
-    assert.equal(parked.routeDisagreement.count, DAEMON_ROUTE_DISAGREEMENT_BOUND + 1);
-
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1).escalation, 'park');
-    assert.match(warns.join('\n'), /not hammer-remediable; retrying through automated recovery/);
-
-    const park = JSON.parse(readFileSync(parkRecordPath(rootDir, REPO, PR), 'utf8'));
-    assert.equal(park.reason, DAEMON_ROUTE_DISAGREEMENT_REASON);
-    assert.match(park.remedy, /daemon merges on its next tick/);
-
-    // It stays parked on later ticks, but pages once per head.
-    const stillParked = await maybeDispatchAmaClosureFor(args);
-    assert.equal(stillParked.needsOperator, undefined);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1).escalation, 'park');
-    assert.equal(
-      JSON.parse(readFileSync(parkRecordPath(rootDir, REPO, PR), 'utf8')).observationCount,
-      2,
-      'the park record keeps counting for review-pipeline-health',
-    );
-
-    // Ownerless admission starts the elapsed clock before ordinary recovery.
-    const coexistence = await resolveMergeAgentCoexistenceForWatcher({
-      rootDir,
-      reviewStateRow: args.reviewStateRow,
-      dispatchJob: args.dispatchJob,
-      candidate: args.candidate,
-      labelNames: [],
-      repoPath: REPO,
-      prNumber: PR,
-      currentRevisionRef: HEAD,
-      logger: args.logger,
-      maybeDispatchAmaClosureForImpl: (callArgs) => maybeDispatchAmaClosureFor({ ...args, ...callArgs, rootDir }),
-    });
-    assert.equal(coexistence.outcome, 'ama-pending');
-    assert.equal(coexistence.recovery, undefined);
-    assert.equal(coexistence.amaClosureResult.skipMergeAgent, true);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('a new head restarts the count, and a daemon merge clears it', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const oldHead = closureArgs(rootDir, { daemonResult: CI_NOT_GREEN, closerCalls, logs, warns });
-    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND; tick += 1) {
-      await maybeDispatchAmaClosureFor(oldHead);
-    }
-    const newHead = closureArgs(rootDir, { daemonResult: CI_NOT_GREEN, closerCalls, logs, warns, head: 'head-pushed' });
-    const afterPush = await maybeDispatchAmaClosureFor(newHead);
-    assert.equal(afterPush.reason, 'daemon-clean-route', 'a new head is not escalated on its first disagreement');
-    assert.equal(closerCalls.at(-1).force, false);
-    assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1).disagreements, 1);
-
-    const merged = await maybeDispatchAmaClosureFor({
-      ...newHead,
-      runDaemonCleanMergeAttemptImpl: async () => ({
-        disposition: DAEMON_MERGE_DISPOSITION.MERGED,
-        reason: 'merged',
-        merged: true,
-        attempts: 1,
-      }),
-    });
-    assert.equal(merged.reason, `daemon-${DAEMON_MERGE_DISPOSITION.MERGED}`);
-    assert.equal(existsSync(daemonRouteDisagreementFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test('background dispatch mode counts the settled daemon-clean-route outcome too', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
-    const args = closureArgs(rootDir, {
-      daemonResult: CI_NOT_GREEN,
-      closerCalls,
-      logs,
-      warns,
-      resolveAmaHammerDispatchModeImpl: () => 'background',
-      amaHammerBackgroundQueueImpl: () => queue,
-      fetchCurrentPrStateImpl: async () => ({ state: 'OPEN', headSha: HEAD, isDraft: false, mergeable: 'MERGEABLE' }),
-    });
-
-    // The live #7314 shape: submit, settle to daemon-clean-route, apply next tick.
-    const submitted = await maybeDispatchAmaClosureFor(args);
-    assert.equal(submitted.backgroundDispatch.state, 'started');
-    await queue.drain();
-    const applied = await maybeDispatchAmaClosureFor(args);
-    assert.equal(applied.reason, 'daemon-clean-route');
-    const events = jsonEvents(logs, 'ama.daemon_route_disagreement');
-    assert.equal(events.length, 1, 'the applied background outcome is a logged disagreement');
-    assert.deepEqual(events[0].daemonReasons, ['ci-not-green']);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
 test('DIRTYOWN-01: a post-lease gate-not-eligible with UNKNOWN beside a remediable gate is hammer-remediable', () => {
   const failed = (reasons) => ({
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
@@ -431,40 +226,6 @@ test('DIRTYOWN-01: a post-lease gate-not-eligible with UNKNOWN beside a remediab
   assert.equal(isDaemonFailClosedHammerRemediable(failed(['stale-head', 'pr-mergeability-unknown'])), true);
   assert.equal(isDaemonFailClosedHammerRemediable(failed(['pr-mergeability-unknown'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(failed(['lease-not-held', 'pr-mergeability-unknown'])), false);
-});
-
-test('DIRTYOWN-01: a pre-lease remediable miss with UNKNOWN alongside reaches the capped hammer, not a park', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [];
-    const logs = [];
-    const warns = [];
-    const reasons = ['stale-head', 'pr-mergeability-unknown'];
-    const args = closureArgs(rootDir, {
-      daemonResult: { ...CI_NOT_GREEN, reasons },
-      closerCalls,
-      logs,
-      warns,
-    });
-
-    for (let tick = 1; tick <= DAEMON_ROUTE_DISAGREEMENT_BOUND; tick += 1) {
-      const result = await maybeDispatchAmaClosureFor(args);
-      assert.equal(result.reason, 'daemon-clean-route', `tick ${tick} still routes to the daemon`);
-      assert.equal(result.needsOperator, undefined);
-    }
-    const events = jsonEvents(logs, 'ama.daemon_route_disagreement');
-    assert.ok(events.every((e) => e.hammerRemediable === true && e.transientRead !== true));
-    assert.equal(events.at(-1).disagreements, DAEMON_ROUTE_DISAGREEMENT_BOUND);
-
-    const escalated = await maybeDispatchAmaClosureFor(args);
-    assert.equal(closerCalls.at(-1).force, true, 'past the bound the hammer is forced');
-    assert.equal(escalated.dispatched, true);
-    assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement.hammer_fallback').length, 1);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
 });
 
 test('DIRTYOWN-01: a head stuck on transient reads past the bound logs one stuck event and never parks', () => {
@@ -554,23 +315,6 @@ test('DIRTYOWN-01: a transient read reports the caller head and ignores a ledger
 });
 
 
-test('primary-change transport failure beside red CI dispatches hammer without manual park', async () => {
-  const rootDir = tempRoot();
-  try {
-    const closerCalls = [], logs = [], warns = [];
-    const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
-      daemonResult: { disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-        reason: 'gate-not-eligible', permanent: false,
-        reasons: ['primary-change-read-failed', 'ci-not-green'] },
-      closerCalls, logs, warns,
-    }));
-    assert.equal(result.dispatched, true);
-    assert.equal(closerCalls.at(-1).force, true);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
-    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
-  } finally { rmSync(rootDir, { recursive: true, force: true }); }
-});
-
 test('REVIEWNOTICE-01: closer final operator outcome is available to the next notice evaluation', async () => {
   const rootDir = tempRoot();
   try {
@@ -588,4 +332,52 @@ test('REVIEWNOTICE-01: closer final operator outcome is available to the next no
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+// NXA-06: runtime ownership uses the shared generation. The legacy counter
+// helpers above remain covered for a caller-local source rollback.
+for (const [name, liveGate, action, actor] of [
+  ['UNKNOWN', { mergeable: 'UNKNOWN' }, 'wait-for-CI', 'ci'],
+  ['red CI', { requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }, 'hammer', 'hammer'],
+  ['conflict', { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }, 'hammer', 'hammer'],
+  ['stale head', { candidateHead: 'c'.repeat(40) }, 'review', 'reviewer'],
+]) test(`common daemon decline owns ${name} on the first eligible pass without disagreement counting`, async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [], logs = [], warns = [];
+    const args = closureArgs(rootDir, { closerCalls, logs, warns,
+      dispatchJob: { remediationStopCode: 'max-rounds-reached' },
+      daemonResult: { ...CI_NOT_GREEN, liveGate: { candidateHead: HEAD, prState: 'OPEN',
+        mergeable: 'MERGEABLE', requiredChecks: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }], ...liveGate } },
+    });
+    // A historical disagreement count cannot select or block a next owner.
+    for (let i = 0; i < 4; i++) recordDaemonRouteDisagreement(rootDir, { repo: REPO, prNumber: PR },
+      { headSha: HEAD, daemonCleanMerge: CI_NOT_GREEN, logger: args.logger });
+    for (let i = 0; i < 2; i++) {
+      const result = await maybeDispatchAmaClosureFor(args);
+      assert.equal(result.nextAction.action, action);
+      assert.equal(result.nextAction.actor, actor);
+      assert.equal(result.dispatched, action === 'hammer');
+      if (action === 'hammer') assert.equal(closerCalls.at(-1).decision, result.nextAction);
+    }
+    assert.equal(readDaemonRouteDisagreement(rootDir, { repo: REPO, prNumber: PR }, { headSha: HEAD }).count, 4);
+    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
+    assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement.hammer_fallback').length, 0);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('unreadable decline details retain a snapshot refresh owner without speculative hammer admission', async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [], logs = [], warns = [];
+    const args = closureArgs(rootDir, { closerCalls, logs, warns, daemonResult: { ...CI_NOT_GREEN, reasons: ['labels-unavailable'] } });
+    for (let i = 0; i < 5; i++) {
+      const result = await maybeDispatchAmaClosureFor(args);
+      assert.equal(result.nextAction.actor, 'watcher');
+      assert.equal(result.nextAction.reason, 'snapshot-refresh');
+      assert.equal(result.dispatched, false);
+    }
+    assert.equal(closerCalls.length, 0);
+    assert.equal(existsSync(daemonRouteDisagreementFilePath(rootDir, { repo: REPO, prNumber: PR })), false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

@@ -1317,6 +1317,25 @@ safety-stop observations. Live operator/SRE acceptance remains pending; no live
 operation or rollout is performed by this change. See the
 [caller adoption procedure](docs/RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
 
+NXA-06: daemon selection and decline handoff consume that same generation.
+Live head/check/source-proof changes re-decide before mutation. Live facts
+returned in `liveGate` survive adoption of `nextActionShared`. Same-head
+daemon retry exhaustion selects capped hammer repair before operator approval;
+existing ownership, holds and safety refusals retain priority. Confirmed terminal
+and explicit hold decisions return before alternate admission. Unknown reads
+retain recovery ownership, and command success retains receipt reconciliation
+until remote termination is confirmed. The shared lease, strict/domain policy,
+HCP/identity and exact-head merge safety remain authoritative. Legacy decline
+classifiers/counters remain source-rollback helpers. Focused offline evidence:
+`node test/run-tests.mjs test/daemon-next-action.test.mjs
+ test/closer-next-action.test.mjs test/ama-daemon-merge.test.mjs
+ test/watcher-daemon-clean-merge.test.mjs test/daemon-route-disagreement.test.mjs`.
+The handoff smoke checks changed daemon CI evidence, operator-approved retry
+exhaustion, live hammer ownership and unconfirmed merge receipts. Operator/SRE
+observation of the first natural daemon candidate and first decline-routed hammer remains pending; an unneeded hammer
+observation stays explicitly pending. See the
+[daemon adoption procedure](docs/RUNBOOK-ama-closure.md#daemon-decisions-and-decline-recovery-nxa-06--cidedupe-01).
+
 NXA-04: normal and recovered remediation closeout use one shared successor.
 `reReview.nextAction` supplies suppression and comments with one owner, reason,
 head and anchored UTC deadline. Pending CI completes the worker round under an
@@ -1650,7 +1669,7 @@ poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
-<a id="smv-handoff"></a>**smv-handoff:** NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and deterministic automatic stops retain
 closure-recovery ownership. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission

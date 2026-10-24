@@ -2,6 +2,8 @@ import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 import { closureOwnerShadowEvidence } from '../pr-next-action-consumer.mjs';
 import { registerSharedNextAction, resolveSharedNextAction } from '../pr-next-action-shadow.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
+import { checkPrimaryChange } from './primary-change.mjs';
+import { classifyCheckRollup } from '../checks-summary.mjs';
 
 const decisionsByResult = new WeakMap();
 export function bindClosureNextAction(result, shared) {
@@ -74,12 +76,13 @@ export function reviseClosureNextAction(shared, observations, passSnapshot = nul
 export function revalidateClosurePr(shared, live, { checksConclusion } = {}) {
   live = live && typeof live === 'object' ? live : {};
   const prior = shared.snapshot.observations.pr.value;
-  const pr = { ...prior, state: live.state, headSha: live.headSha };
+  const pr = { ...prior, state: live.state, headSha: live.headSha,
+    ...(Object.hasOwn(prior, 'headRefOid') ? { headRefOid: live.headSha } : {}) };
   for (const name of ['isDraft', 'mergeable', 'mergeStateStatus', 'labels']) {
     if (Object.hasOwn(live, name)) pr[name] = live[name];
   }
-  const changed = ['state', 'headSha', 'isDraft', 'mergeable', 'mergeStateStatus', 'labels'].some(name => {
-    const normalize = value => typeof value === 'string' && name !== 'headSha' ? value.toUpperCase() : value;
+  const changed = ['state', 'headSha', 'headRefOid', 'isDraft', 'mergeable', 'mergeStateStatus', 'labels'].some(name => {
+    const normalize = value => typeof value === 'string' && !['headSha', 'headRefOid'].includes(name) ? value.toUpperCase() : value;
     return JSON.stringify(normalize(pr[name])) !== JSON.stringify(normalize(prior[name]));
   });
   const checks = Array.isArray(live.statusCheckRollup) ? {
@@ -87,6 +90,64 @@ export function revalidateClosurePr(shared, live, { checksConclusion } = {}) {
     rollup: live.statusCheckRollup,
   } : null;
   return changed || checks ? reviseClosureNextAction(shared, { pr, ...(checks ? { checks } : {}) }) : shared;
+}
+
+// NXA-06: executor observations replace facts, never select a second owner.
+// Partial/read-error observations retain their provenance instead of borrowing
+// green checks or a head from the preceding generation.
+export function observeDaemonGate(shared, live, passSnapshot = null) {
+  if (!shared) return shared;
+  if (live.readError) return reviseClosureNextAction(shared, {
+    pr: { state: 'error', value: null, provenance: { sourceRef: 'daemon-live-gate' } },
+  }, passSnapshot);
+  const pr = { ...shared.snapshot.observations.pr?.value,
+    headSha: live.candidateHead, headRefOid: live.candidateHead, state: live.prState,
+    mergeable: live.mergeable, mergeStateStatus: live.mergeStateStatus,
+    ...(Array.isArray(live.labels) ? { labels: live.labels } : {}) };
+  const requiredContexts = [...new Set([
+    ...(shared.snapshot.observations.checks?.value?.requiredContexts || []),
+    ...(live.requiredCheckContexts || []),
+  ])];
+  const checks = { requiredContexts,
+    conclusion: live.requiredChecks === true ? 'SUCCESS'
+      : live.ciRecoveryPending === true ? 'PENDING'
+      : Array.isArray(live.requiredChecks)
+        ? classifyCheckRollup(live.requiredChecks, { requiredContexts }) || 'PENDING' : null,
+    ...(Array.isArray(live.requiredChecks) ? { rollup: live.requiredChecks } : {}) };
+  const primary = live.primaryChange ? checkPrimaryChange(live.primaryChange, live.candidateHead,
+    { strictNonBlockingRemediation: (live.strictNonBlockingRemediation
+      ?? shared.snapshot.observations.policy?.value?.strictNonBlockingRemediation) !== false }) : null;
+  const progress = { ...shared.snapshot.observations.progress?.value,
+    ...(primary ? { primaryChange: { ok: primary.ok, reason: primary.reason } } : {}),
+    ...(Object.hasOwn(live, 'terminalReviewValidated') ? { terminalReview: { validated: live.terminalReviewValidated === true,
+      headSha: live.candidateHead, reviewedHeadSha: shared.snapshot.observations.reviews?.value?.headSha } } : {}) };
+  return reviseClosureNextAction(shared, {
+    pr: live.candidateHead ? pr : { state: 'unknown', value: null,
+      provenance: { sourceRef: 'daemon-live-gate' } }, checks, progress,
+  }, passSnapshot);
+}
+
+export function observeDaemonResult(shared, result, passSnapshot = null) {
+  if (!shared || !result) return shared;
+  if (result.remoteMergedConfirmed === true) return reviseClosureNextAction(shared, {
+    pr: { ...shared.snapshot.observations.pr.value, state: 'MERGED' },
+  }, passSnapshot);
+  return reviseClosureNextAction(shared, {
+    ...(result.ciMergePathPending === true && !result.merged ? { checks: {
+      ...shared.snapshot.observations.checks?.value, conclusion: 'PENDING',
+    } } : {}),
+    progress: {
+      ...shared.snapshot.observations.progress?.value,
+      ...(result.exactHeadReview === true ? { terminalReview: null, closerAuthoredStale: {
+        decision: 'rereview-exact-head', currentHead: shared.decision.head,
+        reviewedHead: shared.snapshot.observations.reviews?.value?.headSha,
+      } } : {}),
+      ...(result.merged ? { mergeReceipt: { merged: true, headSha: shared.decision.head, path: 'daemon-merge' } }
+        : { daemonExecution: { headSha: shared.decision.head, reason: result.reason,
+          reasons: result.reasons || [], disposition: result.disposition,
+          permanent: result.permanent, attempts: result.attempts || 0 } }),
+    },
+  }, passSnapshot);
 }
 
 // The existing watchdog's absence proof can discover an owner at an older head.
@@ -148,8 +209,6 @@ export function observeClosureResult(shared, result, passSnapshot = null) {
         deterministic: true, reason: result.hammerStop.predicate,
       } } : {}) },
   }, passSnapshot);
-  if (result.reason === 'daemon-merged') return reviseClosureNextAction(shared, {
-    pr: { ...shared.snapshot.observations.pr.value, state: 'MERGED' },
-  }, passSnapshot);
+  if (result.reason === 'daemon-merged') return observeDaemonResult(shared, result.daemonCleanMerge || { merged: true }, passSnapshot);
   return shared;
 }

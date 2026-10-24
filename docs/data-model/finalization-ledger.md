@@ -150,3 +150,89 @@ merged lifecycle observations park for the later authoritative merge receipt
 reconciler. These primitives do not replace final eligibility, holds, expected
 head push/merge protection, credentials or the emergency execution brake; later
 executor slices compose those adapters before any live route exists.
+
+## Durable closer handoff (MGQ-02)
+
+`migrations/20261024_finalization_queue_handoff.sql` adds
+`finalization_queue_handoff` in the same store. `openFinalizationQueueStore`
+converges both additive queue migrations. No runtime route is installed.
+
+| Column | Contract |
+|---|---|
+| `handoff_id` | Globally unique submitter id; conflicting reuse is refused. |
+| `entry_id` | Unique reference to the acknowledged lane entry. |
+| `repository`, `base`, `pr_number`, `admission_head`, `admission_generation` | Unique admission tuple. Repairs require a fresh generation. |
+| `payload_digest` | SHA-256 of canonical handoff JSON, also retained in entry/event `handoffDigest`. Object-key order is irrelevant; arrays and signed fields are retained. |
+| `handoff_json` | Immutable submitted identity, provenance and complete finding dispositions. |
+| `evidence_json` | Immutable trusted observations, including original signed records and verification references. |
+| `ack_json` | Immutable admission tuple, entry/handoff/ack ids, digest, original readiness sequence and acknowledgement time. |
+
+`createQueueHandoffService({store, evidenceAdapter})` is a composition-only v2
+port. `submit(handoff, {deadline})` returns the persisted ack;
+`readAcknowledgement(admission)` and `readReceipt(admission)` read it back.
+`resolveQueueHandoffStore` supplies the shared durable reader/writer. Read-back
+checks the receipt digest and entry linkage, failing closed on inconsistencies.
+An MGQ-01 storage-only acknowledgement has no validated handoff receipt and
+cannot establish closer completion.
+
+Handoff schema version 1 contains `lane`, `prNumber`, `head` (pushed head),
+`admissionGeneration`, `handoffId`, `worker` and `closer` (each has worker id,
+worker class and launch-request id), `sourceReview` (`id`, `commitId`), produced
+and reviewed attestation references, primary-change intent/reference,
+exact-head validation/publication references, and `dispositions`. Each
+disposition retains review id/commit, finding id/severity, evidence head,
+source reference and concrete fenced evidence. `fixed` also requires changed
+paths; `withdrawn` requires an explanation and source path/line locations.
+Acknowledgement and budget exhaustion are never finding dispositions.
+
+The trusted adapter's `read({handoff, timeoutMs, signal})` is supplied by runtime
+composition independently of the submitting closer. It must resolve sanctioned
+live PR/review, identity, signature-verification, publication, primary-change
+and validation reads; paginate the **complete applicable finding inventory**;
+and honor the already-sized timeout and abort signal. Its observation fields are:
+
+- `subject`: exact lane/PR, open state, pushed head and source reference.
+- `review`: source id/commit/reviewer identity, `complete: true`, source reference and every
+  applicable blocking/non-blocking finding, including other applicable reviews.
+  Findings retain id, review id/commit, severity, source reference and currency.
+- `currency`: independently proven review-to-pushed-head currency, using the
+  existing review-currency vocabulary with a source reference.
+- `identities`: successful independent worker/closer launch verification,
+  matched identities and source reference.
+- `attestations`: references, original signed records, verifier results and
+  source references. Produced binds the closer launch/class to the pushed head;
+  reviewed remains pinned to the original signed review commit. `valid` means
+  cryptographic verification by the trusted surface, never a submitter flag or
+  a signature-shape check.
+- `primaryChange`, `localValidation`, `publication`: successful exact-head
+  observations matching submitted intent/provenance references.
+
+The validator compares inventory, complete coverage, currencies, identities,
+signed subjects and provenance mechanically. It never calls a model or requests
+another review of terminal adjudication. Missing/unreadable evidence refuses
+acknowledgement. There is no default permissive identity fallback or production
+evidence adapter in this slice; later composition must supply it before routing.
+
+One immediate transaction stores entry, readiness/deadline, event, full handoff,
+evidence and ack. Failure rolls everything back. Concurrent identical submissions
+return the same entry/ack; conflicting reuse fails. After commit, lost-ack retries
+need no remote read and retain the original infrastructure patience. Evidence-read
+and DB-lock waits each scale a nominal 5-second budget once, cap at 30 seconds
+and clip to the remaining submission deadline (default 30 seconds). The actual
+read timer aborts and refuses late evidence. DB wait settings are restored.
+Owner expiry remains independent of submission and entry patience.
+
+`createCloserQueueHandoffBoundary` in `src/ama/closer-queue-handoff.mjs` submits
+and confirms the same durable ack before invoking an idempotent resource-release
+callback. Failed publication, unconfirmed replies or store errors cannot claim
+completion or release resources. A retry can confirm/release after a lost reply.
+Its `dispatch()` suppresses duplicate closer launch only for a validated receipt
+at that exact admission tuple; unknown reads fail closed. Later lane routing must
+compose both methods. Legacy dispatch and `bin/hammer-review-handoff.mjs` remain
+unchanged; the compatibility helper still marks retry and is not a queue ack.
+
+Bot derivations attach to the entry candidate/proof and original `handoffDigest`.
+They never rewrite dispositions, signed heads, subjects or signatures. The focused
+fixture advances a candidate and replays events while asserting the complete
+original receipt is unchanged. Rebase preservation and final eligibility belong
+to their later slices; handoff storage alone grants no merge permission.

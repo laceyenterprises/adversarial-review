@@ -6,7 +6,10 @@ import { queuePatience, queueWaitMs } from './queue-wait.mjs';
 import { reconcileQueuePublication } from './ledger-fold.mjs';
 
 const migration = new URL('../../migrations/20261023_finalization_queue.sql', import.meta.url);
-export function ensureFinalizationQueueSchema(db) { db.exec(readFileSync(migration, 'utf8')); }
+export function ensureFinalizationQueueSchema(db) {
+  db.exec(readFileSync(migration, 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
+}
 
 export function assertQueueStoreOwner(rootDir) {
   const data = join(rootDir, 'data');
@@ -73,7 +76,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
       return database.prepare('SELECT seq,payload_json FROM finalization_queue_event WHERE repository=? AND base=? ORDER BY seq')
         .all(...laneArgs(lane)).map(row => ({ ...parse(row), seq: row.seq }));
     },
-    acknowledge({ lane, entryId, prNumber, head, admissionGeneration, handoffId, ackId, at, load }) {
+    acknowledge({ lane, entryId, prNumber, head, admissionGeneration, handoffId, ackId, at, load, handoffDigest = null }) {
       lane = resolveLaneKey(lane); at = queueTime(at);
       [entryId, handoffId, ackId].forEach(queueId);
       if (!Number.isSafeInteger(prNumber) || prNumber <= 0 || typeof head !== 'string' || !head
@@ -86,12 +89,12 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
         if (existing.length) {
           if (existing.length !== 1 || existing[0].prNumber !== prNumber || existing[0].head !== head
             || existing[0].admissionGeneration !== admissionGeneration || existing[0].handoffId !== handoffId
-            || existing[0].ackId !== ackId) throw new Error('conflicting queue acknowledgement');
+            || existing[0].ackId !== ackId || (existing[0].handoffDigest ?? null) !== handoffDigest) throw new Error('conflicting queue acknowledgement');
           return existing[0];
         }
         const readinessSeq = database.prepare('UPDATE finalization_queue_lane SET readiness_seq=readiness_seq+1 WHERE repository=? AND base=? RETURNING readiness_seq')
           .get(...laneArgs(lane)).readiness_seq;
-        const entry = { lane, entryId, prNumber, head, admissionGeneration, handoffId, ackId,
+        const entry = { lane, entryId, prNumber, head, admissionGeneration, handoffId, ackId, handoffDigest,
           readinessSeq, phase: 'acknowledged', acknowledgedAt: at, updatedAt: at,
           candidate: null, expectedOldHead: head, exactBase: null, reason: null,
           patience: queuePatience(at, load), proof: null, checks: null, decision: null, delivery: null };

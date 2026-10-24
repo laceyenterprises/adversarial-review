@@ -139,3 +139,5 @@ export {
 export { foldQueue, reconcileQueuePublication } from './ledger-fold.mjs';
 export { ensureFinalizationQueueSchema, openFinalizationQueueStore } from './ledger-store.mjs';
 export { createQueueOwner, resolveQueueOwnerAdapter } from './executor-lease-store.mjs';
+export { normalizeQueueHandoff, validateQueueHandoff } from './queue-handoff.mjs';
+export { createQueueHandoffService, resolveQueueHandoffStore } from './queue-handoff-store.mjs';

@@ -161,6 +161,23 @@ test('FIFO acknowledgements, duplicates and parking/readmission retain atomic se
   assert.deepEqual(f.store.entries(lane).map(e => e.entryId), [b.entryId, a.entryId]);
 });
 
+test('progress audit records prior phases before mutation and survives reopen/replay', async t => {
+  const f = fixture(t); ack(f.store); const fence = await claim(f);
+  advance(f.store, fence, 'ready');
+  advance(f.store, fence, 'parked-hold');
+  f.store.progress({ fence, entryId: 'q-101', phase: 'ready', at: time(2), readmit: true });
+  const reopened = openFinalizationQueueStore({ rootDir: f.root });
+  try {
+    const events = reopened.readEvents(lane);
+    assert.deepEqual(events.filter(e => e.type === 'progress').map(e => [e.priorPhase, e.patch.phase]), [
+      ['acknowledged', 'ready'], ['ready', 'parked-hold'], ['parked-hold', 'ready'],
+    ]);
+    assert.deepEqual(foldQueue(events).entries['q-101'], reopened.readEntry('q-101'));
+    const legacy = events.map(({ priorPhase, ...event }) => event);
+    assert.deepEqual(foldQueue(legacy), foldQueue(events), 'legacy events still replay without priorPhase');
+  } finally { reopened.close(); }
+});
+
 test('crash/reopen at each phase and operation boundary replays candidate, order and original deadline', async t => {
   const f = fixture(t); const a = ack(f.store); ack(f.store, 'q-102'); const fence = await claim(f);
   for (const phase of QUEUE_ACTIONABLE_PHASES.slice(1)) {

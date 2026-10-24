@@ -145,9 +145,28 @@ artifact live in `data/finding-batches/<batch-id>/`; retain them until collected
 Workers re-check current main, drop stale/no-evidence findings with reasons and
 open one normal-review PR per area for valid fixes. An all-dropped batch needs
 no PR. Outcome JSON must cover every manifest ID exactly once. Applied outcomes
-require a merged PR in the same repository, the exact published head and the
-`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
+require a merged PR in the same repository with the
+`Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved. Normal review may rebase the batch PR;
+completion records the worker outcome and PR merge, without granting merge authority.
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
 `result_pr`. Batch failures retain `error`, never discard findings or launch a
 second worker blindly. Diagnose a missing artifact or failed worker before
 repairing its existing batch; no automatic timeout releases its fence.
+
+`pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is
+`node bin/review-findings.mjs backlog --db <existing-review-db>`. Each unresolved
+repository/area reports `size`, `oldestAt`, `oldestAgeMs`, `waitingForMerge`,
+`inBatch` and `error`. Missing schema/store reports `available: false`, never a
+healthy empty backlog. No new alert transport or per-item provider read is added.
+Ready captures superseded by the final merged review are retained as dropped
+with reason `superseded-final-review`; they cannot inflate a later batch.
+Late posting receipts also enroll findings for already-observed merges.
+Ready captures closed without merge are dropped with `pr-closed-without-merge`;
+if reopened and merged with that same final finding, merge enrollment restores
+its pending outcome. This event-driven cleanup prevents abandoned merge attempts
+from becoming a permanent waiting-for-merge backlog.
+
+The existing `show` CLI/read API also returns `backlog_outcome`, `backlog_reason`,
+`backlog_batch_id` and `backlog_result_pr` on the enrolled source finding. This
+left join adds no per-finding query and leaves historical reply/commit status
+semantics unchanged; use the backlog fields to audit batch application.

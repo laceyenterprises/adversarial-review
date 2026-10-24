@@ -9,7 +9,8 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
   try {
     return db.transaction(() => {
       const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo=? AND pr_number=?
-        AND pass_kind IN ('first-pass','rereview') AND gh_comment_id IS NOT NULL AND body_captured_at IS NOT NULL
+        AND pass_kind IN ('first-pass','rereview') AND gh_comment_id IS NOT NULL AND trim(cast(gh_comment_id AS TEXT))<>''
+        AND body_captured_at IS NOT NULL AND trim(body_captured_at)<>'' AND trim(body_md)<>''
         ORDER BY body_captured_at DESC, ended_at DESC, started_at DESC, pass_id DESC LIMIT 1`).get(repo, prNumber);
       if (!pass || pass.head_sha !== headSha || !version
         || createHash('sha256').update(pass.body_md || '').digest('hex') !== version) {
@@ -24,4 +25,19 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
         SELECT * FROM finding_backlog_candidates WHERE repo=? AND pr_number=? AND head_sha=?`).run(repo, prNumber, headSha).changes;
     }).immediate();
   } finally { db.close(); }
+}
+
+// Missing schema is unavailable evidence, never an empty/healthy backlog.
+export function summarizeFindingBacklog(db, now = Date.now()) {
+  if (!db) return { available: false, error: 'review-store-unavailable', areas: null };
+  try {
+    const areas = db.prepare(`SELECT b.repo,b.area,count(*) AS size,min(b.captured_at) AS oldestAt,
+      sum(b.batch_id IS NOT NULL) AS inBatch,sum(r.pr_state<>'merged') AS waitingForMerge,
+      max(a.error) AS error FROM finding_backlog b
+      JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
+      LEFT JOIN finding_batches a USING(batch_id) WHERE b.outcome IS NULL
+      GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all()
+      .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
+    return { available: true, areas };
+  } catch (error) { return { available: false, error: error.message, areas: null }; }
 }

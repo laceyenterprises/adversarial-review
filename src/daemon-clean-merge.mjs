@@ -855,7 +855,7 @@ async function runDaemonCleanMergeAttemptInner({
   let ciMergePathPending = false;
   const bootstrapFor = async (rollup) => {
     if ((!(settledVerdict === 'settled-success'
-      && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) && !hamTerminalRemediationHead)
+      && isDaemonMergeReviewAllowed(reviewState, { strictMode })) && !hamTerminalRemediationHead)
       || cfg?.autonomousMergeExecutionEnabled === false
       || String(rollup?.state || '').toUpperCase() !== 'OPEN') return { mode: null };
     try {
@@ -873,7 +873,7 @@ async function runDaemonCleanMergeAttemptInner({
   const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
   let recoveringCancelled = false;
   if (cfg?.autonomousMergeExecutionEnabled !== false
-    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode: true }))
+    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode }))
       || hamTerminalRemediationHead)
     && String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
     try {

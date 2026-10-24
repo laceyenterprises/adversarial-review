@@ -2330,7 +2330,7 @@ async function dispatchAmaClosureFor({
   const cleanReviewMergePath = () => {
     const reasons = daemonCleanMerge?.reasons || [];
     if (settledVerdict !== 'settled-success'
-      || !isDaemonMergeReviewAllowed(reviewState, { strictMode: true })
+      || !isDaemonMergeReviewAllowed(reviewState, { strictMode })
       || daemonCleanMerge?.reason === 'stale-head'
       || reasons.some(reason => reason !== 'ci-not-green')) return false;
     // Only fresh daemon evidence can distinguish recovery from an empty

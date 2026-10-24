@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
@@ -42,7 +42,7 @@ Drop stale findings and noise with no cited line or behaviour (REVIEWEVIDENCE-01
 Apply valid findings together in one PR for this area, through normal review using hq pr open.
 Do not merge the PR yourself. Include the exact marker Finding-Batch: ${batch.batch_id} in its body.
 If all findings are dropped, open no PR. Do not change host state or configuration.
-Write the complete outcome JSON atomically to ${JSON.stringify(outputPath)} before ending.
+Write the complete outcome JSON atomically with group-readable permissions (0664) to ${JSON.stringify(outputPath)} before ending.
 Schema: {"batchId":"${batch.batch_id}","prNumber":null,"headSha":null,
 "findings":[{"findingId":"<manifest id>","outcome":"applied or dropped","reason":"specific evidence and action"}]}.
 Include every manifest ID exactly once. When any finding is applied, prNumber and headSha must name
@@ -52,7 +52,8 @@ Manifest:\n${JSON.stringify(findings)}\n`;
 }
 
 // Validate the entire manifest before writing any outcome. A worker report alone
-// never proves application: the PR marker, merged state and exact head must agree.
+// never proves application: the batch PR marker and merged state must agree.
+// Normal review can rebase its commits; this record grants no merge authority.
 export function settleFindingBatch(db, batch, result, pr = null) {
   return db.transaction(() => {
     if (db.prepare('SELECT completed_at FROM finding_batches WHERE batch_id=?').get(batch.batch_id)?.completed_at) return true;
@@ -66,8 +67,8 @@ export function settleFindingBatch(db, batch, result, pr = null) {
         || typeof f.reason !== 'string' || !f.reason.trim()) throw Error('invalid-finding-outcome');
     }
     if (result.findings.some(f => f.outcome === 'applied')) {
-      if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !result.headSha
-        || (pr?.headRefOid ?? pr?.headSha) !== result.headSha || !String(pr?.body || '').split(/\r?\n/).includes(`Finding-Batch: ${batch.batch_id}`)) {
+      if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')
+        || !String(pr?.body || '').split(/\r?\n/).includes(`Finding-Batch: ${batch.batch_id}`)) {
         throw Error('batch-pr-evidence-mismatch');
       }
       if (String(pr.state).toUpperCase() !== 'MERGED' && !pr.mergedAt) return false;
@@ -106,9 +107,12 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
           ? await fetchPr(batch.repo, result.prNumber, { execFileImpl }) : null;
         settleFindingBatch(db, batch, result, pr);
       } else if (!batch.launch_id) {
-        const findings = db.prepare(`SELECT b.*,f.file,f.lines,f.finding_json FROM finding_backlog b
-          JOIN review_findings f USING(finding_id) WHERE b.batch_id=? ORDER BY b.finding_id`).all(batch.batch_id);
-        mkdirSync(dir, { recursive: true });
+        const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
+          b.head_sha AS headSha,b.reviewer_family AS reviewerFamily,f.finding_json FROM finding_backlog b
+          JOIN review_findings f USING(finding_id) WHERE b.batch_id=? ORDER BY b.finding_id`).all(batch.batch_id)
+          .map(({ finding_json, ...row }) => ({ ...row, finding: JSON.parse(finding_json) }));
+        mkdirSync(dir, { recursive: true, mode: 0o2775 });
+        chmodSync(dir, 0o2775);
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath));
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({}, { env }), env });

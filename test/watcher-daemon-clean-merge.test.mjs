@@ -4397,5 +4397,17 @@ test('FINDINGSBATCH-01 handed-off non-blocking review merges without a hammer on
     });
     assert.equal(merges, strictMode ? 0 : 1);
     assert.equal(hammers, strictMode ? 1 : 0);
+    if (!strictMode) {
+      const waiting = await maybeDispatchAmaClosureFor({ ...args,
+        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode,
+          autonomousMergeExecutionEnabled: true, lha: { consumeAttestations: false } }),
+        getOrchestrationMode: () => 'native' }),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible',
+          reasons: ['ci-not-green'], ciMergePathPending: true }),
+        maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+      });
+      assert.equal(waiting.reason, 'clean-review-merge-path');
+      assert.equal(hammers, 0);
+    }
   }
 });

@@ -19,7 +19,6 @@ const body = `## Blocking Issues
 ## Verdict
 Comment only
 `;
-const version = createHash('sha256').update(body).digest('hex');
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'findings-batch-'));
   const db = openReviewStateDb(rootDir);
@@ -41,24 +40,38 @@ function fixture(t) {
 test('FINDINGSBATCH-01 capture enrolls only the final review, deduplicates and survives reopen', async t => {
   const { db, rootDir, pass } = fixture(t);
   const { captureReadyFindings } = await import('../src/findings-backlog.mjs');
-  pass(1, body.replace('result.mjs', 'old.mjs'));
+  const oldBody = body.replace('result.mjs', 'old.mjs');
+  pass(1, oldBody);
+  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head,
+    version: createHash('sha256').update(oldBody).digest('hex'), count: 1 });
   pass(2, body + body.slice(body.indexOf('- **Explain'), body.indexOf('## Verdict')));
-  pass(3);
-  assert.throws(() => captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: 'b'.repeat(40), version, count: 1 }));
-  assert.throws(() => captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version: 'edited', count: 1 }));
-  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version, count: 1 });
-  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version, count: 1 });
+  const duplicated = body.replace('## Verdict', body.slice(body.indexOf('- **Explain'), body.indexOf('## Verdict')) + '## Verdict');
+  const version = createHash('sha256').update(duplicated).digest('hex');
+  const final = pass(3, duplicated);
+  db.prepare("UPDATE reviewer_passes SET metadata_json='invalid' WHERE pass_id=?").run(final.pass_id);
+  assert.throws(() => captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: 'b'.repeat(40), version, count: 2 }));
+  assert.throws(() => captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version: 'edited', count: 2 }));
+  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version, count: 2 });
+  captureReadyFindings({ rootDir, repo, prNumber: 7, headSha: head, version, count: 2 });
   db.prepare("UPDATE reviewed_prs SET pr_state='merged' WHERE repo=?").run(repo);
   const reopened = openReviewStateDb(rootDir);
   try {
-    const rows = reopened.prepare('SELECT b.*, f.file, f.lines FROM finding_backlog b JOIN review_findings f USING(finding_id)').all();
+    const rows = reopened.prepare('SELECT b.*, f.file, f.lines FROM finding_backlog b JOIN review_findings f USING(finding_id) WHERE b.outcome IS NULL').all();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].area, 'src');
     assert.equal(rows[0].head_sha, head);
     assert.equal(rows[0].reviewer_family, 'codex');
     assert.equal(rows[0].file, '`src/result.mjs`');
     assert.equal(rows[0].lines, '2');
+    assert.equal(reopened.prepare("SELECT reason FROM finding_backlog WHERE outcome='dropped'").get().reason,
+      'superseded-final-review');
   } finally { reopened.close(); }
+  db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
+  db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
+  assert.equal(db.prepare("SELECT count(*) n FROM finding_backlog WHERE reason='pr-closed-without-merge'").get().n, 1);
+  db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE outcome IS NULL').get().n, 1);
   // The ordinary merged write also captures without any ready-to-merge call.
   db.prepare('DELETE FROM finding_backlog').run();
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
@@ -94,20 +107,24 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
   await ticker.tick(Date.parse('2026-01-02T02:00:00Z'));
   assert.equal(launches, 2);
   const rows = db.prepare('SELECT * FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
+  assert.throws(() => db.prepare("UPDATE finding_backlog SET outcome='dropped'").run());
   const prompt = findingBatchPrompt(batch, rows, 'outcomes.json');
   assert.match(prompt, /current origin\/main/);
   assert.match(prompt, /no cited line or behaviour/);
   assert.match(prompt, /one PR/);
   const result = { batchId: batch.batch_id, prNumber: 8, headSha: head,
     findings: rows.map(r => ({ findingId: r.finding_id, outcome: 'applied', reason: 'Documented return value' })) };
-  const pr = { state: 'MERGED', headSha: head, body: `Finding-Batch: ${batch.batch_id}` };
+  const pr = { state: 'MERGED', headRefOid: head, body: `Finding-Batch: ${batch.batch_id}` };
   assert.throws(() => settleFindingBatch(db, batch, { ...result, findings: [] }, pr));
   assert.throws(() => settleFindingBatch(db, batch, { ...result, batchId: 'foreign' }, pr));
-  assert.throws(() => settleFindingBatch(db, batch, result, { ...pr, headSha: 'b'.repeat(40) }));
+  assert.throws(() => settleFindingBatch(db, batch, result, { ...pr, body: 'unrelated batch' }));
   assert.equal(settleFindingBatch(db, batch, result, { ...pr, state: 'OPEN' }), false);
   assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
-  assert.equal(settleFindingBatch(db, batch, result, pr), true);
+  assert.equal(settleFindingBatch(db, batch, result, { ...pr, headRefOid: 'b'.repeat(40) }), true);
   assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, 'applied');
+  const { readReviewFindings } = await import('../src/review-finding-records.mjs');
+  assert.equal(readReviewFindings(db)[0].backlog_outcome, 'applied');
+  assert.equal(readReviewFindings(db)[0].backlog_result_pr, 8);
   // New findings cannot launch another worker for the area on the same day.
   pass(2, body.replace('Explain the result', 'Explain another result'));
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
@@ -121,4 +138,23 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
     findings: [{ findingId, outcome: 'dropped', reason: 'Already described on current main' }] });
   assert.equal(db.prepare('SELECT reason FROM finding_backlog WHERE batch_id=?').get(next.batch_id).reason,
     'Already described on current main');
+});
+
+test('FINDINGSBATCH-01 report exposes size and oldest age per area and reports unavailable schema', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { main } = await import('../bin/review-findings.mjs');
+  db.prepare("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'").run();
+  const report = main(['backlog', '--db', join(rootDir, 'data', 'reviews.db')]);
+  assert.equal(report.available, true);
+  assert.equal(report.areas[0].area, 'src');
+  assert.equal(report.areas[0].size, 1);
+  assert.equal(report.areas[0].oldestAt, '2026-01-01T00:00:00Z');
+  const { summarizeFindingBacklog } = await import('../src/findings-backlog.mjs');
+  assert.equal(summarizeFindingBacklog(db, Date.parse('2026-01-03T00:00:00Z')).areas[0].oldestAgeMs, 172800000);
+  db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='No longer applies'").run();
+  assert.deepEqual(main(['backlog', '--db', join(rootDir, 'data', 'reviews.db')]).areas, []);
+  db.exec('DROP TRIGGER finding_backlog_on_merge; DROP TRIGGER finding_backlog_late_capture; DROP TRIGGER finding_backlog_late_receipt; DROP TRIGGER finding_backlog_on_close; DROP TABLE finding_backlog');
+  assert.equal(summarizeFindingBacklog(db).available, false);
 });

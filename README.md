@@ -1017,10 +1017,12 @@ PRM-06 centralizes quota, broker, launch-status, dispatch and publication envelo
 interpretation against pinned producer types and captured examples. Account
 holds and reviewer-route logs identify the producer and exact unavailable field;
 AMA audits retain the same diagnostics in `harnessResolution.diagnostics`.
-Account order, thresholds and retry authority stay unchanged. Weekly evidence
-uses the SDK through an explicit weekly-only admission policy. It
-falls back to legacy `measurement` only when `weeklyMeasurementReason` is
-absent; a present reason key, including null, retains an unknown-evidence hold. The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admission-policy) records the SDK-versus-admission truth table and public export fixture refresh.
+Account order, thresholds and retry authority stay unchanged. Both routers use
+SDK normalization through an explicit weekly-only admission policy. Unusable
+weekly evidence holds current floors even when the SDK can measure a short
+window. Floors without `weeklyMeasurementReason` retain their legacy fallback.
+The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admission-policy)
+records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 

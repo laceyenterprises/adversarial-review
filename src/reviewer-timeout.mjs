@@ -18,8 +18,8 @@ const DEFAULT_FIRST_OUTPUT_TIMEOUT_MS = 0;
 const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19 * 60 * 1000;
 const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;
 const AGY_CHUNK_TIMEOUT_SLACK_MS = 2 * 60 * 1000;
-// A multi-megabyte diff can require more than nine 20-minute calls. Permit
-// up to seventeen at the default call budget, while keeping a hard bound.
+// Fixed aggregate envelope, including chunk and process slack. Load can grow
+// requested call budgets, but never this ceiling.
 const AGY_CHUNK_TIMEOUT_CAP_MS = 6 * 60 * 60 * 1000;
 // Covers snapshot/context preparation and posting outside the chunk loop.
 const REVIEWER_PROCESS_SLACK_MS = 5 * 60 * 1000;
@@ -30,16 +30,24 @@ function resolveAgyChunkTimeoutCapMs(env = process.env) {
 
 function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = process.env } = {}) {
   if (!Number.isSafeInteger(chunkCount) || chunkCount < 1) throw new TypeError('chunkCount must be a positive integer');
-  const perChunkTimeoutMs = resolveAgyReviewerSubprocessTimeoutMs(env);
+  const requestedPerChunkTimeoutMs = resolveAgyReviewerSubprocessTimeoutMs(env);
   const capMs = resolveAgyChunkTimeoutCapMs(env);
-  const requiredMs = perChunkTimeoutMs * chunkCount + AGY_CHUNK_TIMEOUT_SLACK_MS;
-  const plan = { chunkCount, perChunkTimeoutMs, capMs, requiredMs, timeoutMs: requiredMs, promptBytes };
-  if (requiredMs > capMs) throw new ReviewerChunkBudgetExceededError(plan);
+  // These inputs have already been load-scaled. Retain the unconstrained
+  // sizing diagnostic, then divide the available envelope across all calls.
+  // Reserve both slacks so the parent does not clip a saturated chunk plan.
+  const requiredMs = requestedPerChunkTimeoutMs * chunkCount + AGY_CHUNK_TIMEOUT_SLACK_MS;
+  const availableMs = capMs - REVIEWER_PROCESS_SLACK_MS - AGY_CHUNK_TIMEOUT_SLACK_MS;
+  const perChunkTimeoutMs = Math.max(0, Math.min(requestedPerChunkTimeoutMs, Math.floor(availableMs / chunkCount)));
+  const timeoutMs = perChunkTimeoutMs * chunkCount + AGY_CHUNK_TIMEOUT_SLACK_MS;
+  const minimumCapMs = chunkCount + AGY_CHUNK_TIMEOUT_SLACK_MS + REVIEWER_PROCESS_SLACK_MS;
+  const plan = { chunkCount, requestedPerChunkTimeoutMs, perChunkTimeoutMs, capMs, requiredMs, timeoutMs, minimumCapMs, promptBytes };
+  // Never let timerDelayMs turn an impossible allocation into a 1ms timer.
+  if (perChunkTimeoutMs < 1) throw new ReviewerChunkBudgetExceededError(plan);
   return plan;
 }
 
 function resolveGeminiReviewerProcessTimeoutMs(env = process.env, { plan = null } = {}) {
-  // Per-call budgets are already load-scaled. Compose them once; the refusal
+  // Per-call budgets are already load-scaled. Compose them once; the aggregate
   // cap is never load-scaled or used as the nominal process deadline.
   const workMs = plan?.timeoutMs ?? resolveAgyReviewerSubprocessTimeoutMs(env);
   return timerDelayMs(Math.min(workMs + REVIEWER_PROCESS_SLACK_MS, resolveAgyChunkTimeoutCapMs(env)));

@@ -3639,7 +3639,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   // plan-derived deadline, shared by all calls and in-call retries.
   const timeoutPlan = reviewerModel === 'gemini'
     ? resolveAgyChunkTimeoutPlan({ chunkCount: split.chunks.length, promptBytes, env }) : null;
-  if (timeoutPlan) console.error(`[reviewer] agy-chunk-plan chunks=${timeoutPlan.chunkCount} perChunkTimeoutMs=${timeoutPlan.perChunkTimeoutMs} timeoutMs=${timeoutPlan.timeoutMs} capMs=${timeoutPlan.capMs} diffBytes=${agyPromptBytes(diff)} contextBytes=${agyPromptBytes(extraContext)} promptBytes=${promptBytes ?? 'unknown'}`);
+  if (timeoutPlan) console.error(`[reviewer] agy-chunk-plan chunks=${timeoutPlan.chunkCount} perChunkTimeoutMs=${timeoutPlan.perChunkTimeoutMs} timeoutMs=${timeoutPlan.timeoutMs} capMs=${timeoutPlan.capMs} diffBytes=${agyPromptBytes(diff)} contextBytes=${agyPromptBytes(extraContext)} promptBytes=${promptBytes ?? 'unknown'} requestedPerChunkTimeoutMs=${timeoutPlan.requestedPerChunkTimeoutMs} requiredMs=${timeoutPlan.requiredMs}`);
   onChunkPlan?.(timeoutPlan);
   const controller = new AbortController();
   const chunkSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;

@@ -959,8 +959,15 @@ GEMTIMEOUT-01: a Gemini claim starts with one load-scaled call budget plus
 five minutes for preparation and posting (25 minutes at idle defaults). Once
 its chunk plan exists, local IPC extends the parent's process timer and the
 matching session's persisted timeout and lease to that plan plus process slack.
-The load multiplier applies only to each call budget; neither composed deadlines
-nor the refusal cap are scaled again. Both process deadlines are bounded by the
+The load multiplier applies only to each requested call budget; neither composed deadlines
+nor the aggregate cap are scaled again. LAC-2100 bounds each chunk to the smaller
+of that requested budget and `floor((cap - 120000 - 300000) / chunks)` ms,
+reserving two minutes of chunk slack and five minutes of process slack. Plans
+retain `requestedPerChunkTimeoutMs`, unconstrained `requiredMs`, prompt bytes
+and the allocated deadline in diagnostics. An envelope unable to fit even one
+millisecond per chunk plus both slacks still refuses with exit 77 and a sized
+`minimumCapMs`; source/prompt sizing must be corrected within existing limits.
+Both process deadlines are bounded by the
 unscaled chunk cap (six hours by default) and Node's timer limit. Deadlines stay
 anchored to process start, and stale or terminal claims cannot be extended.
 Offline regressions cover single/multiple chunks, maximum load, timer expiry,
@@ -1025,6 +1032,13 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+LAC-2100 changes Gemini timeout allocation within the existing aggregate ceiling.
+Current-head review, cross-model selection, verdict validation and merge gates
+remain required. Lifecycle states and disposable smoke promises are unchanged;
+focused offline fixtures cover observed sizing, saturation, parent/lease budgets
+and ownership fencing. Read-only organic acceptance after normal deployment is
+declared in `post-merge-verify.json`; see the [RCA](docs/RCA-LAC-2100-chunk-budget-2026-10-24.md).
 
 FINDINGSBATCH-01 retains non-blocking findings in the existing SQLite review
 store. Findings move from pending to applied or dropped with a reason; daily

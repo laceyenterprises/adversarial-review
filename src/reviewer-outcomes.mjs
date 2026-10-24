@@ -8,7 +8,7 @@ export const REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE = 77;
 
 export class ReviewerChunkBudgetExceededError extends Error {
   constructor(plan) {
-    super(`[reviewer-chunk-budget-exceeded] chunks=${plan.chunkCount} perChunkTimeoutMs=${plan.perChunkTimeoutMs} requiredMs=${plan.requiredMs} capMs=${plan.capMs} promptBytes=${plan.promptBytes ?? 'unknown'}`);
+    super(`[reviewer-chunk-budget-exceeded] chunks=${plan.chunkCount} perChunkTimeoutMs=${plan.perChunkTimeoutMs} requiredMs=${plan.requiredMs} capMs=${plan.capMs} promptBytes=${plan.promptBytes ?? 'unknown'} requestedPerChunkTimeoutMs=${plan.requestedPerChunkTimeoutMs ?? 'unknown'} minimumCapMs=${plan.minimumCapMs ?? 'unknown'}`);
     this.name = 'ReviewerChunkBudgetExceededError';
     this.plan = plan;
   }

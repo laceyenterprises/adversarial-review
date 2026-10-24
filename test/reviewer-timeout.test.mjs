@@ -22,7 +22,7 @@ import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { usesStreamedReviewerCeiling } from '../src/reviewer-timeout-model.mjs';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
-test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe and over-cap chunks refuse', () => {
+test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe at saturation', () => {
   const env = {
     ADVERSARIAL_REVIEWER_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
@@ -33,9 +33,10 @@ test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe and ov
     reviewerTimeoutMs: MAX_TIMER_DELAY_MS, printTimeoutMs: MAX_TIMER_DELAY_MS,
   }), MAX_TIMER_DELAY_MS);
   assert.equal(resolveGeminiReviewerProcessTimeoutMs(env), MAX_TIMER_DELAY_MS);
-  assert.throws(() => resolveAgyChunkTimeoutPlan({ chunkCount: 1, env }),
-    error => error.name === 'ReviewerChunkBudgetExceededError'
-      && error.plan.capMs === MAX_TIMER_DELAY_MS && error.plan.requiredMs > error.plan.capMs);
+  const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 1, env });
+  assert.equal(plan.capMs, MAX_TIMER_DELAY_MS);
+  assert.ok(plan.requiredMs > plan.capMs);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env, { plan }), MAX_TIMER_DELAY_MS);
 });
 
 test('streamed reviewer model predicate is shared across lease and subprocess budgets', () => {
@@ -1093,5 +1094,7 @@ test('GEMTIMEOUT-01: maximum load scales each call once, never the refusal cap',
   assert.equal(leaseMs, plan.timeoutMs + REVIEWER_PROCESS_SLACK_MS);
   assert.ok(leaseMs <= AGY_CHUNK_TIMEOUT_CAP_MS && leaseMs <= MAX_TIMER_DELAY_MS);
   assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: { timeoutMs: AGY_CHUNK_TIMEOUT_CAP_MS } }), AGY_CHUNK_TIMEOUT_CAP_MS);
-  assert.throws(() => resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} }), /chunk-budget-exceeded/);
+  const saturated = resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
+  assert.ok(saturated.perChunkTimeoutMs < saturated.requestedPerChunkTimeoutMs);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }), AGY_CHUNK_TIMEOUT_CAP_MS);
 });

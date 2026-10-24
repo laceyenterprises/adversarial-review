@@ -9,8 +9,112 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
+import { underMaxLoad, MAX_TIMER_DELAY_MS } from './helpers/load-time-kit.mjs';
+import os from 'node:os';
 
 const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n' + '+synthetic content\n'.repeat(9000);
+
+function underObservedLoad(t) {
+  underMaxLoad(t);
+  // Full CPU corroboration at this synthetic load yields the observed call
+  // budget after rounding, without reading host load or provider state.
+  const multiplier = 5228726.5 / timeouts.DEFAULT_REVIEWER_TIMEOUT_MS;
+  t.mock.method(os, 'loadavg', () => [os.cpus().length * (1 + (multiplier - 1) / 2.5), 0, 0]);
+}
+
+test('LAC-2100: observed six-chunk allocation fits without inflating the aggregate cap', t => {
+  underObservedLoad(t);
+  assert.equal(timeouts.resolveAgyReviewerSubprocessTimeoutMs({}), 5228727);
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 6, promptBytes: 694487, env: {} });
+  assert.equal(plan.requestedPerChunkTimeoutMs, 5228727);
+  assert.equal(plan.requiredMs, 31492362, 'retain the original unbounded sizing diagnostic');
+  assert.equal(plan.promptBytes, 694487);
+  assert.equal(plan.capMs, 21600000);
+  assert.equal(plan.perChunkTimeoutMs, 3530000);
+  assert.equal(plan.timeoutMs, 21300000);
+  assert.equal(timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan }), plan.capMs);
+});
+
+test('LAC-2100: observed prompt size and delivery budget run all six bounded Gemini chunks', async t => {
+  underObservedLoad(t);
+  const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,31000 @@\n'
+    + '+synthetic content\n'.repeat(31000);
+  // Route sizing reserves 1024 bytes below the argv setting.
+  const env = { ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES: '234464' };
+  const routeFor = extraContext => resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini', geminiRuntime: 'antigravity', diff, extraContext, env,
+  });
+  // Match the incident's size, not its source content. Repeated context is why
+  // ceil(promptBytes / deliveryBytes) does not predict the actual chunk count.
+  const context = 'x'.repeat(694487 - routeFor('').promptBytes);
+  const route = routeFor(context);
+  assert.equal(route.promptBytes, 694487);
+  assert.equal(route.maxBytes, 233440);
+  let plan;
+  let calls = 0;
+  const result = await reviewAgyOversizedInChunks(diff, context, {
+    env, maxBytes: route.maxBytes, promptBytes: route.promptBytes,
+    onChunkPlan: value => { plan = value; },
+    reviewWithGeminiImpl: async (_diff, _context, options) => {
+      assert.equal(options.timeoutMs, 3530000);
+      assert.equal(options.signal.aborted, false);
+      calls += 1;
+      return { reviewText: '## Verdict\nComment only' };
+    },
+  });
+  assert.equal(plan.chunkCount, 6);
+  assert.equal(calls, 6);
+  assert.equal(result.chunks.length, 6);
+  for (const chunk of result.chunks) assert.ok(chunk.promptBytes <= route.maxBytes);
+});
+
+for (const maxMultiplier of [1, 6, 20]) {
+  test(`LAC-2100: bounded chunk allocations at load x${maxMultiplier}`, t => {
+    underMaxLoad(t, { maxMultiplier });
+    const requested = timeouts.resolveAgyReviewerSubprocessTimeoutMs({});
+    for (const chunkCount of [1, 2, 3, 6, 17, 18]) {
+      const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount, env: {} });
+      assert.equal(plan.perChunkTimeoutMs, Math.min(requested, Math.floor((plan.capMs
+        - timeouts.AGY_CHUNK_TIMEOUT_SLACK_MS - timeouts.REVIEWER_PROCESS_SLACK_MS) / chunkCount)));
+      assert.equal(plan.requiredMs, requested * chunkCount + timeouts.AGY_CHUNK_TIMEOUT_SLACK_MS);
+      assert.equal(plan.timeoutMs, plan.perChunkTimeoutMs * chunkCount + timeouts.AGY_CHUNK_TIMEOUT_SLACK_MS);
+      assert.equal(timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan }),
+        plan.timeoutMs + timeouts.REVIEWER_PROCESS_SLACK_MS);
+      assert.ok(plan.timeoutMs + timeouts.REVIEWER_PROCESS_SLACK_MS <= plan.capMs);
+    }
+  });
+}
+
+test('LAC-2100: finite integer budgets at timer saturation and the minimum feasible cap', () => {
+  const huge = {
+    ADVERSARIAL_REVIEWER_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
+    ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(Number.MAX_SAFE_INTEGER),
+  };
+  for (const chunkCount of [1, 6, 18]) {
+    const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount, env: huge });
+    assert.equal(plan.capMs, MAX_TIMER_DELAY_MS);
+    assert.equal(plan.requestedPerChunkTimeoutMs, MAX_TIMER_DELAY_MS);
+    for (const key of ['perChunkTimeoutMs', 'timeoutMs', 'capMs', 'requiredMs']) {
+      assert.ok(Number.isSafeInteger(plan[key]) && plan[key] > 0, key);
+    }
+    assert.ok(plan.timeoutMs + timeouts.REVIEWER_PROCESS_SLACK_MS <= MAX_TIMER_DELAY_MS);
+  }
+  const slack = timeouts.AGY_CHUNK_TIMEOUT_SLACK_MS + timeouts.REVIEWER_PROCESS_SLACK_MS;
+  const env = { ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(slack + 6) };
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 6, env });
+  assert.equal(plan.perChunkTimeoutMs, 1);
+  assert.equal(plan.timeoutMs + timeouts.REVIEWER_PROCESS_SLACK_MS, plan.capMs);
+  for (const chunkCount of [7, Number.MAX_SAFE_INTEGER]) {
+    assert.throws(() => timeouts.resolveAgyChunkTimeoutPlan({ chunkCount, env }),
+      error => error.name === 'ReviewerChunkBudgetExceededError'
+        && error.plan.promptBytes === null && Number.isFinite(error.plan.requiredMs)
+        && error.plan.minimumCapMs > error.plan.capMs && /minimumCapMs=\d+/.test(error.message));
+  }
+  for (const chunkCount of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => timeouts.resolveAgyChunkTimeoutPlan({ chunkCount, env: {} }), TypeError);
+  }
+});
 
 test('CHUNKTIME-01: N chunks receive N per-call budgets plus slack within the cap', () => {
   const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 4, env: {} });
@@ -193,10 +297,11 @@ test('CHUNKTIME-01: the outer Gemini runtime defaults to one call and honors an 
 });
 
 
-test('GEMTIMEOUT-01: parent timer and persisted lease receive the actual plan without rescaling', async () => {
+test('GEMTIMEOUT-01: parent timer and persisted lease receive a saturated plan without rescaling', async t => {
+  underObservedLoad(t);
   const { createCliDirectReviewerRuntimeAdapter } = await import('../src/adapters/reviewer-runtime/cli-direct/index.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'plan-runtime-'));
-  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 6, env: {} });
   const updates = [];
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir,
@@ -221,14 +326,15 @@ test('GEMTIMEOUT-01: parent timer and persisted lease receive the actual plan wi
 });
 
 
-test('GEMTIMEOUT-01: plan extension updates orphan expiry and fences replacement or terminal rows', async () => {
+test('GEMTIMEOUT-01: saturated plan updates orphan expiry and fences replacement or terminal rows', async t => {
+  underObservedLoad(t);
   const { default: Database } = await import('better-sqlite3');
   const { extendReviewerLeaseForPlan, computeReviewerLeaseExpiryAt } = await import('../src/reviewer-lease.mjs');
   const { shouldReconcileStaleReviewerSession } = await import('../src/reviewer-orphan-reconcile.mjs');
   const db = new Database(':memory:');
   const startedAt = '2026-01-01T00:00:00.000Z';
   const initialMs = timeouts.resolveGeminiReviewerProcessTimeoutMs({});
-  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
+  const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount: 6, env: {} });
   const timeoutMs = timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan });
   try {
     db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, reviewer_session_uuid TEXT,

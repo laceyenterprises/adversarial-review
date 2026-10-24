@@ -1,0 +1,198 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { replayRouteAllowed, parseReplayReview } from '../src/osg-reviewer-replay.mjs';
+
+test('OSG-11 replay refuses same-family and unknown builders using canonical routing', () => {
+  assert.equal(replayRouteAllowed('codex', { harness: 'codex', model: 'gpt-6.1-sol' }), false);
+  assert.equal(replayRouteAllowed('clio-agent', { harness: 'codex', model: 'gpt-6-luna' }), false);
+  assert.equal(replayRouteAllowed('gemini', { harness: 'gemini', model: 'gemini-test' }), false);
+  assert.equal(replayRouteAllowed('unknown', { harness: 'codex', model: 'gpt-6.1-sol' }), false);
+  assert.equal(replayRouteAllowed('claude-code', { harness: 'codex', model: 'gpt-6.1-sol' }), true);
+  assert.equal(replayRouteAllowed('codex', { harness: 'pi', model: 'deepseek/model' }, { diagnostic: true }), true);
+  assert.equal(replayRouteAllowed('codex', { harness: 'pi', model: 'deepseek/model' }), false);
+  assert.equal(replayRouteAllowed('codex', { harness: 'pi', model: 'openai/gpt-6.1-sol' }, { diagnostic: true }), false);
+});
+
+test('OSG-11 parses shadow findings with canonical headings and line ranges', () => {
+  const result = parseReplayReview('## Blocking Issues\n- **Bound**\n  - **File:** x.py\n  - **Lines:** 2-3\n  - **Problem:** Missing bound.\n\n## Non-blocking Issues\n- None.\n');
+  assert.equal(result.length, 1);
+  assert.equal(result[0].blocking, true);
+  assert.deepEqual(result[0].line_ranges, [{ start: 2, end: 3 }]);
+  assert.throws(() => parseReplayReview('malformed'));
+});
+
+test('OSG-11 replay accepts eligible native Gemini arms without relaxing family guards', () => {
+  const arm = { harness: 'gemini', model: 'gemini-1.5-pro', worker_class: 'gemini-reviewer' };
+  for (const builder of ['claude-code', 'codex', 'clio-agent', 'codex-corp']) {
+    assert.equal(replayRouteAllowed(builder, arm), true, builder);
+  }
+  for (const builder of ['gemini', 'unknown', 'pi', 'opencode', 'hermes']) {
+    assert.equal(replayRouteAllowed(builder, arm), false, builder);
+  }
+  assert.equal(replayRouteAllowed('codex', { ...arm, harness: 'pi', worker_class: 'pi' }), false);
+  assert.equal(replayRouteAllowed('codex', { ...arm, worker_class: 'codex-reviewer' }), false);
+  assert.equal(replayRouteAllowed('codex', arm, { builderModel: 'gemini-test' }), false);
+  const result = runBridge({ operation: 'route', builder_class: 'claude-code', arm });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'true\n');
+});
+
+test('OSG-11 requires both review sections to be known, including placeholder validation', () => {
+  const clean = '- None.\n';
+  const placeholder = '- **<Title>**\n  - **File:** <path>\n  - **Problem:** <one paragraph>\n';
+  assert.deepEqual(parseReplayReview(`## Blocking Issues\n${clean}\n## Non-blocking Issues\n${clean}`), []);
+  for (const [section, other] of [['Blocking Issues', 'Non-blocking Issues'], ['Non-blocking Issues', 'Blocking Issues']]) {
+    assert.throws(() => parseReplayReview(`## ${other}\n${clean}`), /missing review section/);
+    assert.throws(() => parseReplayReview(`## ${other}\n${clean}\n## ${section}\n${placeholder}`), /missing review section/);
+  }
+  assert.throws(() => parseReplayReview(`## Blocking Issues\n${clean}\n## Non-blocking Notes\n${clean}`), /missing review section/);
+  const findings = parseReplayReview(`## Blocking Issues\n${clean}\n## Non-blocking Issues\n- **Note**\n  - **File:** x.py\n  - **Lines:** 4\n  - **Problem:** Missing comment.\n`);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].blocking, false);
+  assert.equal(findings[0].title, 'Note');
+  assert.deepEqual(findings[0].line_ranges, [{ start: 4, end: 4 }]);
+});
+
+test('OSG-11 null routing options use the ordinary non-diagnostic defaults', () => {
+  assert.equal(replayRouteAllowed('claude-code', { harness: 'codex', model: 'gpt-6.1-sol' }, null), true);
+  assert.equal(replayRouteAllowed('codex', { harness: 'codex', model: 'gpt-6.1-sol' }, null), false);
+  assert.equal(replayRouteAllowed('codex', { harness: 'pi', model: 'deepseek/model' }, null), false);
+});
+
+const bridge = new URL('../bin/osg-reviewer-replay.mjs', import.meta.url);
+test('OSG-11 bridge can be invoked directly as an executable', () => {
+  const result = spawnSync(bridge.pathname, [], {
+    input: JSON.stringify({ operation: 'ranges', lines: '2-3', file: 'x.py' }),
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.equal(result.stdout, '[{"start":2,"end":3}]\n');
+});
+
+test('OSG-11 corporate reviewer identities retain harness and family restrictions', () => {
+  for (const [builder, harness, model] of [
+    ['claude-code', 'codex', 'gpt-6.1-sol'], ['codex', 'claude', 'claude-sonnet-4'],
+  ]) {
+    const arm = { harness, model, worker_class: `${harness}-reviewer-corp` };
+    assert.equal(replayRouteAllowed(builder, arm), true);
+    assert.equal(replayRouteAllowed(harness === 'codex' ? 'codex' : 'claude-code', arm), false);
+    for (const worker_class of ['other-reviewer-corp', `${harness}-reviewer-corp-extra`, 'pi']) {
+      assert.equal(replayRouteAllowed(builder, { ...arm, worker_class }), false);
+    }
+  }
+  assert.equal(replayRouteAllowed('codex', {
+    harness: 'pi', model: 'deepseek/model', worker_class: 'pi-reviewer-corp',
+  }, { diagnostic: true }), false);
+});
+
+test('OSG-11 reasoning and Bedrock model identifiers preserve cross-family refusal', () => {
+  for (const model of ['o1', 'o1-mini', 'o3', 'o3-mini', 'o4-mini', 'openai/o3-mini']) {
+    const arm = { harness: 'codex', model };
+    assert.equal(replayRouteAllowed('claude-code', arm), true, model);
+    assert.equal(replayRouteAllowed('codex', arm), false, model);
+    assert.equal(replayRouteAllowed('pi', arm, { builderModel: model }), false, model);
+    assert.equal(replayRouteAllowed('pi', { harness: 'pi', model: 'deepseek/model' }, {
+      diagnostic: true, builderModel: model,
+    }), true, model);
+  }
+  for (const model of ['anthropic.claude-sonnet-4', 'us.anthropic.claude-sonnet-4',
+    'eu.anthropic.claude-sonnet-4', 'bedrock/anthropic.claude-sonnet-4']) {
+    const arm = { harness: 'claude', model };
+    assert.equal(replayRouteAllowed('codex', arm), true, model);
+    assert.equal(replayRouteAllowed('claude-code', arm), false, model);
+    assert.equal(replayRouteAllowed('pi', arm, { builderModel: model }), false, model);
+  }
+  for (const model of ['o10', 'o3unknown', 'o2', 'untrusted.claude-sonnet-4']) {
+    assert.equal(replayRouteAllowed('claude-code', { harness: 'codex', model }), false, model);
+  }
+});
+
+function runBridge(value) {
+  return spawnSync(process.execPath, [bridge.pathname], { input: JSON.stringify(value), encoding: 'utf8', timeout: 5000 });
+}
+
+test('OSG-11 stdin bridge accepts null options and emits newline-delimited JSON', () => {
+  const result = runBridge({ operation: 'route', builder_class: 'claude-code', arm: { harness: 'codex', model: 'gpt-6.1-sol' }, options: null });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout, 'true\n');
+});
+
+test('OSG-11 stdin bridge distinguishes unresolved ranges from unknown operations', () => {
+  for (const lines of ['unknown', 'unparseable citation', null]) {
+    const result = runBridge({ operation: 'ranges', lines, file: 'x.py' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, '[]\n');
+  }
+  const valid = runBridge({ operation: 'ranges', lines: '2-3', file: 'x.py' });
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, '[{"start":2,"end":3}]\n');
+  for (const operation of ['unknown', null]) {
+    const result = runBridge({ operation });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'Replay input unavailable or invalid.\n');
+  }
+});
+
+test('OSG-11 stdin bridge preserves UTF-8 sequences split between chunks', () => {
+  const body = '## Blocking Issues\n- **Café 🌍**\n  - **File:** café.py\n  - **Lines:** 2\n  - **Problem:** Missing bound.\n\n## Non-blocking Issues\n- None.\n';
+  const input = Buffer.from(JSON.stringify({ operation: 'parse', body_md: body }));
+  const script = `
+    import { Readable } from 'node:stream';
+    const bytes = ${JSON.stringify([...input])};
+    Object.defineProperty(process, 'stdin', { value: Readable.from(bytes.map(byte => Buffer.from([byte]))) });
+    await import(${JSON.stringify(bridge.href)});
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  assert.equal(result.stdout, `${JSON.stringify(parseReplayReview(body))}\n`);
+});
+
+test('OSG-11 stdin bridge rejects malformed reviews and oversized UTF-8 input without stdout', () => {
+  for (const value of [
+    { operation: 'parse', body_md: '## Blocking Issues\n- None.\n' },
+    { operation: 'ranges', lines: '2', file: 'é'.repeat(65536) },
+  ]) {
+    const result = runBridge(value);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, 'Replay input unavailable or invalid.\n');
+  }
+});
+
+test('OSG-11 shadow fixture runs with publication and process effects forbidden', async () => {
+  const target = new URL('../src/osg-reviewer-replay.mjs', import.meta.url).href;
+  const loader = `
+    export function resolve(specifier, context, next) {
+      if (/attest|github-writer|reviewer\\.mjs$/.test(specifier)) throw Error('publication effect reached');
+      return next(specifier, context);
+    }
+  `;
+  const script = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import http from 'node:http';
+    import https from 'node:https';
+    import cp from 'node:child_process';
+    import { syncBuiltinESMExports, register } from 'node:module';
+    register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(loader)}`)}, import.meta.url);
+    const forbid = () => { throw Error('publication effect reached'); };
+    for (const key of ['writeFileSync','appendFileSync','renameSync','mkdirSync']) fs[key] = forbid;
+    for (const mod of [http, https]) { mod.request = forbid; mod.get = forbid; }
+    for (const key of ['spawn','spawnSync','execFile','execFileSync','exec','execSync']) cp[key] = forbid;
+    globalThis.fetch = forbid;
+    syncBuiltinESMExports();
+    for (const specifier of ['./attest.mjs', './github-writer.mjs', './reviewer.mjs']) {
+      await assert.rejects(import(specifier), /publication effect reached/);
+    }
+    const replay = await import(${JSON.stringify(target)});
+    if (!replay.replayRouteAllowed('claude-code', {harness:'codex',model:'gpt-6.1-sol'})) throw Error('route');
+    replay.parseReplayReview('## Blocking Issues\\n- None.\\n\\n## Non-blocking Issues\\n- None.');
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 5000, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});

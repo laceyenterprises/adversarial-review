@@ -2403,3 +2403,32 @@ The probe resolves the durable adapter against real schema and reports ack
 counts. Zero means organic evidence is pending. Availability does not assert
 live evidence-reader composition, lane routing or a running watcher's build.
 See the [handoff contract](docs/data-model/finalization-ledger.md#durable-closer-handoff-mgq-02).
+
+### Shadow replay policy and parsing (OSG-11)
+
+`src/osg-reviewer-replay.mjs` exposes read-only `replayRouteAllowed` and
+`parseReplayReview`; `bin/osg-reviewer-replay.mjs` accepts bounded private JSON
+stdin operations `route`, `parse`, and `ranges`. It imports the existing routing
+and finding parsers, with no production reviewer, store, GitHub writer or
+attestation path. Parsing requires both canonical findings sections (`Blocking
+Issues` and `Non-blocking Issues`) to be known; a missing section or unedited
+template placeholders in either section reject the review. Omitted or null
+route options use the ordinary non-diagnostic defaults. The bridge decodes
+streamed UTF-8 across chunk boundaries, caps input at 128 KiB and review bodies
+at 64 KiB, and emits one newline-terminated JSON result. Invalid input exits
+nonzero with a generic stderr diagnostic and no stdout result.
+The `ranges` operation serializes the shared parser's result directly (an empty
+array for unknown or unparseable citations); unsupported operations are rejected
+before dispatch. Native recommendations follow the canonical base builder route
+or permit Gemini for the canonical Gemini-eligible classes (`claude-code`,
+`codex`, `clio-agent`).
+Codex and Claude arms accept their matching `-reviewer-corp` worker identities.
+Model-family detection includes OpenAI `o1`, `o3`, and `o4` reasoning IDs and
+Bedrock `anthropic.claude-*` IDs, including regional inference-profile prefixes.
+Unknown/same-family models are refused, including models concealed behind a
+third-party harness. DeepSeek through Pi can run diagnostically when the known
+builder family differs; that diagnostic permission cannot recommend a route.
+The caller owns pinned diff extraction, authorized read-only execution, budget
+reservations, quota measurement and score evidence. This bridge does not launch
+reviewers or change any live routing configuration. Synthetic tests exercise
+parsing/routing with network, process execution and publication writes forbidden.

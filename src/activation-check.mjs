@@ -30,4 +30,10 @@ export function main({ argv = process.argv.slice(2), env = process.env,
   }
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) process.exitCode = main();
+let directInvocation = false;
+try {
+  directInvocation = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+} catch {
+  // Imported helpers also run in hosts with synthetic or missing argv paths.
+}
+if (directInvocation) process.exitCode = main();

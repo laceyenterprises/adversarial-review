@@ -2525,6 +2525,8 @@ its evidence is `{reservationSeconds, pollSeconds}`. Activation YAML lives in
 the consuming superproject and remains observe-only. Normal deployment must
 make both repository revisions available before that consumer declares success.
 Both commands also execute when the script is invoked through a symbolic link.
+Importing the module's helpers does not require a real filesystem path in
+the host's `process.argv[1]` and does not execute either command.
 
 Evidence-read failures use exit 126 (the consuming activation contract's
 `check_error`), making missing entitlement and transport/read failures

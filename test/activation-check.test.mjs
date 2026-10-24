@@ -12,6 +12,13 @@ import { hammerTokenSession } from '../src/hammer-token.mjs';
 import { main, reservationEvidence } from '../src/activation-check.mjs';
 
 const secret = 'ghs_' + 'synthetic'.repeat(6);
+// CLI children need the same idle host as the parent timeout fixture.
+const idleHostImport = 'data:text/javascript,' + encodeURIComponent(`
+  import os from 'node:os';
+  import { syncBuiltinESMExports } from 'node:module';
+  os.loadavg = () => [0, 0, 0];
+  syncBuiltinESMExports();
+`);
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 function fixture(t, output, fail = false) {
   const root = mkdtempSync(join(tmpdir(), 'activation-check-'));
@@ -61,7 +68,7 @@ test('symlinked CLI executes checks and reports unsupported commands instead of 
   symlinkSync(fileURLToPath(new URL('../src/activation-check.mjs', import.meta.url)), link);
   // The sandbox preserves symlinks globally; exercise Node's ordinary CLI
   // resolution so sibling imports resolve beside the actual script target.
-  const nodeArgs = ['--no-preserve-symlinks', '--no-preserve-symlinks-main', link];
+  const nodeArgs = ['--import', idleHostImport, '--no-preserve-symlinks', '--no-preserve-symlinks-main', link];
   const command = spawnSync(process.execPath, [...nodeArgs, 'daemon-reservation'],
     { env: process.env, encoding: 'utf8', timeout: 30_000 });
   assert.equal(command.status, 0, command.stderr);
@@ -75,6 +82,20 @@ test('symlinked CLI executes checks and reports unsupported commands instead of 
   assert.equal(invalid.status, 126);
   assert.equal(invalid.stdout, '');
   assert.equal(invalid.stderr, 'activation check unavailable\n');
+});
+
+test('helpers import with a nonexistent synthetic argv path without executing the CLI', t => {
+  const root = mkdtempSync(join(tmpdir(), 'activation-import-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const moduleUrl = new URL('../src/activation-check.mjs', import.meta.url).href;
+  const command = spawnSync(process.execPath, ['--import', idleHostImport, '--input-type=module', '-e',
+    `const { main, reservationEvidence } = await import(${JSON.stringify(moduleUrl)});
+     if (typeof main !== 'function') throw new Error('missing helper');
+     console.log(JSON.stringify(reservationEvidence()));`, join(root, 'nonexistent.mjs')],
+    { env: process.env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(command.status, 0, command.stderr);
+  assert.equal(command.stderr, '');
+  assert.deepEqual(JSON.parse(command.stdout), reservationEvidence());
 });
 
 test('HAMTOKEN-05 whitespace-rejecting parser fails on exactly the same export fixture', async t => {
@@ -111,7 +132,7 @@ test('reservation uses the effective poll reader and real sizing; incident 120 v
   assert.equal(incident.reservationSeconds > incident.pollSeconds, false);
   assert.deepEqual(reservationEvidence({ pollIntervalMs: 900_000, reservation: ms => ms / 500 }),
     { reservationSeconds: 1800, pollSeconds: 900 });
-  const command = spawnSync(process.execPath, ['src/activation-check.mjs', 'daemon-reservation'],
+  const command = spawnSync(process.execPath, ['--import', idleHostImport, 'src/activation-check.mjs', 'daemon-reservation'],
     { env: process.env, encoding: 'utf8', timeout: 30_000 });
   assert.equal(command.status, 0);
   const observed = JSON.parse(command.stdout);

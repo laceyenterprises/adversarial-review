@@ -144,6 +144,10 @@ test('DOCSFASTPATH-01 request-review and operator requests select the full path,
     cfg: { enabled: true }, readDocsFastPathImpl: async () => evidence,
     publishStatusImpl: async () => {}, fetchProtectionImpl: async () => ({}), logger: quiet,
     runDaemonImpl: async () => { calls++; return { disposition: 'deferred' }; } };
+  let configReads = 0;
+  assert.equal(await maybeRunDocsFastPath({ ...args, readDocsFastPathImpl: async () => null,
+    loadCfg: () => { configReads++; return args.cfg; } }), false);
+  assert.equal(configReads, 0, 'ordinary heads add no configuration read');
   assert.equal(await maybeRunDocsFastPath(args), true);
   for (const overrides of [
     { subject: { ...args.subject, labels: ['request-review'] } },

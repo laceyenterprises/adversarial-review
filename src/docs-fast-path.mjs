@@ -5,7 +5,7 @@ import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
 
 const readProtection = createBranchProtectionChecker();
 
-export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, rootDir, repoPath, prNumber,
+export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = () => cfg, rootDir, repoPath, prNumber,
   execFileImpl, logger = console,
   readReviewRow = () => reviewRow, readDocsFastPathImpl = readDocsFastPath,
   publishStatusImpl = publishAdversarialGateStatus,
@@ -23,8 +23,9 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, rootDir, r
   if (!evidence || evidence.reviewRequested) return false;
   // An eligible docs head owns its wait, including disabled authority and red CI.
   // Neither a reviewer nor a closer is useful while these deterministic gates wait.
-  if (!cfg?.enabled || cfg.autonomousMergeExecutionEnabled === false) return true;
   try {
+    cfg = loadCfg();
+    if (!cfg?.enabled || cfg.autonomousMergeExecutionEnabled === false) return true;
     const branchProtection = await fetchProtectionImpl({
       repoPath, baseBranch: evidence.baseBranch, execFileImpl });
     await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha: evidence.headSha,

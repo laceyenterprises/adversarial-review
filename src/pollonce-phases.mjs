@@ -803,12 +803,13 @@ export async function processReviewSubject(entry, ctx) {
       ).run(Number(draft), repoPath, prNumber);
       if (draft === true) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
-        const loaded = loadConfigCached();
-        const cfg = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
-          loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
-        if (await maybeRunDocsFastPath({ subject, reviewRow: existing, cfg, rootDir: ROOT,
-          repoPath, prNumber,
-          execFileImpl: execFileAsync, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) })) return;
+        if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
+          repoPath, prNumber, execFileImpl: execFileAsync,
+          loadCfg: () => {
+            const loaded = loadConfigCached();
+            return resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
+              loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
+          }, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) })) return;
       }
       // Run before admission refusals so unavailable capacity, credentials,
       // CI, routing, or a retained claim cannot strand the transfer silently.

@@ -2267,3 +2267,19 @@ test('GEMTIMEOUT-01: watcher fallback normalizes supported Gemini aliases for mi
     }
   } finally { db.close(); }
 });
+
+test('LVR-02 incident reviews precede ordinary reviews within existing timeout/wait/wake protections', async () => {
+  const make = (prNumber, body = '') => ({ repoPath: 'owner/repo', prNumber,
+    subject: { body, createdAt: `2026-01-${String(prNumber).padStart(2, '0')}T00:00:00Z` },
+    run: async () => {} });
+  const ordinary = make(1);
+  const incident = make(2, '<!-- deploy-incident:v1 id=incident-1 -->');
+  assert.deepEqual(sortReviewerDispatchCandidates([ordinary, incident]).map(c => c.prNumber), [2, 1]);
+  assert.deepEqual(sortReviewerDispatchCandidates([make(2), ordinary]).map(c => c.prNumber), [1, 2]);
+  assert.deepEqual(sortReviewerDispatchCandidates([ordinary, { ...incident, sameHeadTimeoutRetry: true }]).map(c => c.prNumber), [1, 2]);
+  assert.deepEqual(sortReviewerDispatchCandidates([{ ...ordinary, wakePriority: true }, incident]).map(c => c.prNumber), [1, 2]);
+  const started = [];
+  await runBoundedReviewerDispatchQueue([ordinary, incident].map(c => ({ ...c, run: async () => started.push(c.prNumber) })),
+    { maxConcurrent: 1, logger: { log() {}, warn() {} } });
+  assert.deepEqual(started, [2, 1]);
+});

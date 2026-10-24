@@ -42,8 +42,8 @@ rules run under the existing mutation lock during selection and release-wake
 pruning; they neither release a holder nor change its identity fence.
 
 LEASEFAIR-01 adds optional `priority: "daemon"`. Missing priority means an
-ordinary closer. Daemon reservations precede closer requests; each class uses
-arrival order, preserving insertion order for identical timestamps. Refreshing
+ordinary closer. Daemon reservations precede closer requests; within each class,
+incident requests precede ordinary requests, then arrival order and stable ties apply. Refreshing
 a request retains its arrival and insertion order. Queue selection, atomic
 holder creation, and served-waiter removal share the existing per-base mutation
 lock, so a closer cannot read an empty queue then acquire ahead of a newly
@@ -117,3 +117,14 @@ live head/check snapshot and record a deferred audit before each of up to two
 in-run acquisition retries. They re-enter admission on every retry. Final green
 exhaustion records `leaseWaitExhausted: true`, which requests the next closer
 pass without charging failure counters. This does not waive any live merge gate.
+
+## Incident scheduling (LVR-02)
+
+Optional boolean `deployIncident` is derived from a PR body comment
+`<!-- deploy-incident:v1 id=incident-1 -->`. Missing means false. Daemon
+reservations still precede every closer. Within each class, incident requests
+precede ordinary requests; FIFO and stable ties remain within each group. No
+holder is preempted. Renewal without a body snapshot retains the stored hint.
+The daemon passes its existing PR snapshot; the hammer passes
+`merge-lease acquire --pr-state-file <snapshot.json>`. No extra GitHub read or
+merge permission is introduced.

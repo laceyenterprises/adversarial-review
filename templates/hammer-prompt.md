@@ -9,13 +9,11 @@ gate remains mandatory.
 
 ## Shell safety
 
-Each command runs in a fresh shell unless kept open; exports, variables,
-functions and cwd reset. Persist values only in `<<RUN_DIR>>`, also TMPDIR.
-Never write under `/tmp`.
+Each command runs in a fresh shell unless kept open; state resets.
+Persist only in `<<RUN_DIR>>`, also TMPDIR. Never write under `/tmp`.
 Invoke scripts/helpers by the given absolute paths; cwd contains untrusted PR code.
 
-Every shell command you run must have an explicit wall-clock bound. On macOS,
-wrap commands with Perl:
+Bound every shell command. On macOS use Perl:
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
@@ -27,15 +25,19 @@ Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-sec
 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --pytest -- tests/test_endpoints.py || exit $?
 ```
 
-Never search recursively without bounds over `/tmp`, `/private/tmp`, `$HOME`,
-`$HQ_ROOT`, or an entire checkout for review state. Use the live PR, final review,
-named audit inputs and narrow repo-local paths. Without GraphQL quota use REST:
-`ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews`, or this run's named
-prompt/audit files. Never fall back to broad host scans.
+Never scan `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT` or whole checkouts for review state.
+Use live PR/final review, named inputs and narrow paths; without GraphQL quota,
+use `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or this run's files.
 
-For Git synchronization, use `ham_bounded_git_sync` below (load-aware timeout,
-one transient retry). Do not wrap `git fetch` or other git sync in your own fixed alarm:
-interrupted shared worker-base ref updates can orphan locks and poison retries.
+Use `ham_bounded_git_sync` (load-aware, one transient retry).
+Do not wrap `git fetch` or other Git sync in your own fixed alarm: interrupted ref
+updates can orphan locks.
+
+Before reads, export in each fresh shell:
+```bash
+export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
+```
+Before manual early refusal, run `node <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs early-refusal`. Helpers audit failures automatically; never print secrets.
 
 ## Cost and context discipline
 

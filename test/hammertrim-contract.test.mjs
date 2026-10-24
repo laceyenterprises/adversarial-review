@@ -65,7 +65,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   for (const [phase, outcome, diagnostic, status] of [
     ['hammer-verify-head', 'parked:max-gate-attempts', 'AMG-04 parked', 20],
     ['hammer-publish', 'hammer-publish-error', 'terminal-remediation audit must be written', 1],
-    ['hammer-merge', 'merge-error', 'no hammer merge without holding', 1],
+    ['hammer-merge', 'merge-lease-not-held', 'no hammer merge without holding', 1],
   ]) {
     const env = {
       HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: `https://github.com/acme/repo/pull/${prNumber}`, HAM_REPO: 'acme/repo',
@@ -868,7 +868,8 @@ printf '{"head":{"sha":"%s"},"base":{"ref":"main"}}\\n' "$head"
     const rendered = renderPhase('hammer-verify-head', env);
     assert.equal(rendered.status, 0, rendered.stderr);
     // Execute the actual visibility gate and intercept the following phase boundary.
-    const prefix = rendered.stdout.slice(0, rendered.stdout.indexOf('BASE_BRANCH='));
+    const prefix = rendered.stdout.slice(0, rendered.stdout.indexOf('BASE_BRANCH='))
+      .replace('ham_run_rendered_phase() {\n', '');
     let checksContinuation = '';
     if (scenario === 'two lag polls') {
       const verdict = join(dir, 'verdict.json');

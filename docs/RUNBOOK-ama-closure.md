@@ -4237,7 +4237,7 @@ dispatch.
 Daemon acquisitions use a durable priority reservation per repo/base/PR/head.
 The existing 250/500 ms retries still bound work on a watcher tick; deferral now
 retains a place ahead of closer acquisitions instead of racing them again.
-Daemon requests are FIFO within their class, including equal timestamp arrivals;
+Daemon requests use incident-first FIFO within their class, including stable timestamp ties;
 a refresh preserves the arrival order across watcher process changes. Closers
 cannot barge between queue selection and holder creation, which share one lock.
 The served waiter is removed before that lock releases, so subsequent lock
@@ -5231,3 +5231,34 @@ The `expectedHeadSha` diagnostic field names the active comparison head: the
 reviewed head before advancement and the target remediation head afterwards.
 Authoritative live merged state and terminal audit evidence retain their
 existing behavior.
+
+## Truthful launch outcomes and incident scheduling (LVR-02)
+
+Hammer and closer launches pass `hq dispatch --required-outcome terminal-audit`;
+remediators pass `--required-outcome push`. Normal terminal audit writes bind
+`HQ_LAUNCH_REQUEST_ID`. Before any read, the hammer exports the trusted dispatch
+identity from its prompt. Context/base-head failures, fatal credential refresh
+failures and rendered phase refusals write the existing local AMA audit with
+`failed-without-merge` and a fixed reason. For a manual refusal before the first
+GitHub call, run the deployed `bin/hammer-terminal-audit.mjs early-refusal` with
+that identity exported before exiting. Audit writes need no network or lease.
+Do not put credential values or raw command errors into a reason.
+
+An open PR without a terminal close audit is observed as failed with
+`failure: no_work_done`; the compatibility outcome remains
+`hammer-exited-without-close`. The existing bounded retry refund is unchanged.
+A confirmed no-merge audit records failure too. Unknown PR or audit evidence
+retains ownership for the existing bounded observation path. This changes no
+merge authority and never requests another review of a hammer head.
+
+A PR body carrying `<!-- deploy-incident:v1 id=incident-1 -->` supplies a
+scheduling hint. Review admission honors its existing timeout, aged-wait and
+wake protections, then serves incident PRs before ordinary lane work. Merge
+waiters retain daemon reservation precedence and holder exclusivity, then use
+incident-first FIFO within each class. Old unmarked records keep FIFO order.
+The hint grants no authorization.
+
+After normal deployment, the operator observes plan assertion
+`lvr-02-review-required-outcome` once; it remains pending (75) until the deployed
+closer includes the required-outcome contract. No config flip, host restart or
+manual live dispatch is part of this change.

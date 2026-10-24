@@ -8,6 +8,21 @@ export function renderHammerProcedure(phase, values) {
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
   let source = readFileSync(path, 'utf8');
+  // Install failure recording before lease checks, temporary files or GitHub calls.
+  // All phases are sourced; a phase-local return must settle its audit first.
+  source = source.replace(/^(#![^\n]*\n)?/, `$1export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
+export HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
+ham_run_rendered_phase() {
+`) + `
+}
+if ham_run_rendered_phase "$@"; then
+  return 0
+else
+  ham_phase_exit=$?
+  "\${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs "\${HAM_PHASE_OUTCOME:-${phase}-failed}" "\${POST_REMEDIATION_SHA:-<<TARGET_REMEDIATION_SHA>>}" || echo 'HAM terminal failure audit unavailable' >&2
+  return "$ham_phase_exit"
+fi
+`;
   // These defaults belong to the versioned procedure, never the renderer's
   // caller environment. Embed each floor at the assignment's original site.
   source = source.replace(
@@ -40,6 +55,7 @@ ham_procedure_floor() {
   source = shebang
     ? `${shebang}${procedureFloor}${source.slice(shebang.length)}`
     : `${procedureFloor}${source}`;
+  values = { ...values, TARGET_REMEDIATION_SHA: values.TARGET_REMEDIATION_SHA || values.REVIEWED_SHA };
   const missing = new Set();
   source = source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
     const value = values[key];

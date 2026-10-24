@@ -1971,3 +1971,14 @@ LEGACYINTENT-01 adds legacy no-key settlement only when a successful canonical
 ledger ticket/time query returns no rows at or after the attempt timestamp.
 The audited single-PR command defaults to dry-run; any row or unreadable ticket query
 retains ownership for that recovery path. Source changes authorize no production action.
+
+## Truthful no-op launch observation (LVR-02)
+
+A confirmed open PR with no terminal close audit transitions through existing
+terminal-failure/retry handling: `lastObservedStatus` is `failed` with
+`failure: no_work_done` and a reason, while the compatibility outcome remains
+`hammer-exited-without-close`. Launch success remains unverified until PR or
+audit evidence resolves it. Existing refund bounds and final-hammer charging
+are unchanged. Early helper failures append launch-bound failed-without-merge
+AMA attempts. Incident body markers affect scheduling only; daemon reservation
+precedence and holder exclusivity remain intact.

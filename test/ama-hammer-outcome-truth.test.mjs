@@ -108,7 +108,8 @@ test('classifySucceededHammerOutcome: merged, no-merge audit, exited, unconfirme
   );
   assert.deepEqual(
     classifySucceededHammerOutcome({ livePrState: 'OPEN' }),
-    { closed: false, outcome: HAMMER_EXITED_WITHOUT_CLOSE },
+    { closed: false, outcome: HAMMER_EXITED_WITHOUT_CLOSE, failure: 'no_work_done',
+      reason: 'hammer exited with an open PR and no terminal audit for the current head' },
   );
   assert.deepEqual(
     classifySucceededHammerOutcome({ livePrState: 'OPEN', concurrentWriter: true }),
@@ -424,7 +425,9 @@ test('FINALCLOSE-01 a final hammer that exited without closing retries at once a
   assert.deepEqual(deps.statusProbes, [LRQ_FIRST]);
 
   const firstRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
-  assert.equal(firstRecord.lastObservedStatus, 'succeeded');
+  assert.equal(firstRecord.lastObservedStatus, 'failed');
+  assert.equal(firstRecord.failure, 'no_work_done');
+  assert.match(firstRecord.failureReason, /open PR and no terminal audit/);
   assert.equal(firstRecord.outcome, HAMMER_EXITED_WITHOUT_CLOSE);
   assert.equal(firstRecord.lastError, HAMMER_EXITED_WITHOUT_CLOSE);
 
@@ -533,6 +536,8 @@ test('#7334: a truthful no-merge audit comment is a closed run, charged, not ref
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(record.outcome, 'failed-without-merge');
+  assert.equal(record.lastObservedStatus, 'failed');
+  assert.equal(record.failure, 'failed-without-merge');
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.retryable, undefined);
   assert.equal(ledger.attemptCount, 2, 'a run that reported its no-merge spends a real attempt');
@@ -561,6 +566,8 @@ test('the local failed-without-merge audit for the current head is a closed run'
 
   const record = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(record.outcome, 'failed-without-merge');
+  assert.equal(record.lastObservedStatus, 'failed');
+  assert.equal(record.failure, 'failed-without-merge');
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).retryable, undefined);
 });
 

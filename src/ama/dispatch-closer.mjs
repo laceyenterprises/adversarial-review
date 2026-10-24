@@ -5926,7 +5926,9 @@ async function maybeDispatchAmaCloserAttempt({
       });
       updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
-        lastObservedStatus: observedStatus,
+        lastObservedStatus: 'failed',
+        failure: 'failed-without-merge',
+        failureReason: 'failed-without-merge',
         lastObservedAt: dispatchContext.dispatchedAt,
         lastError: 'failed-without-merge',
         outcome: 'failed-without-merge',
@@ -6018,6 +6020,8 @@ async function maybeDispatchAmaCloserAttempt({
         }, { level: 'warn' });
       }
     }
+    const reportedNoWork = status === 'failed'
+      && prefetchedLaunchRequestProbe?.row?.failure_class === 'no_work_done';
     const capFinalDecision = await reconcileCapFinalDecision(status);
     if (capFinalDecision) return capFinalDecision;
     if (certifiedContentionPark && !deferredPark &&
@@ -6025,9 +6029,9 @@ async function maybeDispatchAmaCloserAttempt({
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
     }
-    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed')) {
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed') || reportedNoWork) {
       if (
-        AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || reportedNoWork)
         && auditTerminalOutcome !== 'succeeded'
         // HAMBG-02: the validated-HAM exemption holds only while the same-head
         // daemon merge below can act on it. With a readable merged signal it
@@ -6036,7 +6040,7 @@ async function maybeDispatchAmaCloserAttempt({
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
         // Preserve the terminal-success hold below before HAMBG-02 can infer
         // an exit without close from an OPEN PR whose merge may be queued.
-        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
+        && !(mergedSignalUnknown && !reportedNoWork && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
           && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
           && !(await isReclaimableDispatchedAmaCloserLeaseAsync(terminalSuccessHoldLease, {
             rootDir, hqRoot, readLaunchRequestStatusImpl, signal,
@@ -6126,7 +6130,9 @@ async function maybeDispatchAmaCloserAttempt({
           });
           updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
-            lastObservedStatus: 'succeeded',
+            lastObservedStatus: 'failed',
+            failure: hammerOutcome.failure || 'failed-without-merge',
+            failureReason: hammerOutcome.reason || noMergeOutcome,
             lastObservedAt: dispatchContext.dispatchedAt,
             lastError: noMergeOutcome,
             outcome: noMergeOutcome,
@@ -6156,7 +6162,7 @@ async function maybeDispatchAmaCloserAttempt({
             currentHeadSha: terminalLivePr.headRefOid || null,
             launchRequestId: existingRecord.launchRequestId,
             dispatchId: existingRecord.dispatchId || null,
-            observedWorkerStatus: 'succeeded',
+            observedWorkerStatus: reportedNoWork ? 'failed' : 'succeeded',
             classification: exitedWithoutClose ? HAMMER_EXITED_WITHOUT_CLOSE : 'hammer-ended-without-merge',
             ...(retryRefund ? { retryRefund } : {}),
           }, { level: 'warn' });
@@ -6315,6 +6321,7 @@ async function maybeDispatchAmaCloserAttempt({
                 base: baseBranch,
                 holderPr: prNumber,
                 holderHead: mergeHead,
+                prBody: String(prMetadata?.body ?? dispatchContext?.prBody ?? ''),
                 holderPid: process.pid,
                 holderHost: hostname(),
                 now: new Date().toISOString(),
@@ -7727,6 +7734,7 @@ async function maybeDispatchAmaCloserAttempt({
     '--worker-class', dispatchWorkerClass,
     '--task-kind', 'merge',
     '--completion-shape', 'decision-only',
+    '--required-outcome', 'terminal-audit',
     '--project', hqProject,
     '--repo', repoBasename,
     '--pr', String(prNumber),

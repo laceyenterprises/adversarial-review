@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 // One bounded GitHub snapshot; no Agent OS installation or local daemon required.
 import { meteredExecFileSync } from '../src/metered-gh.mjs';
 import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
@@ -34,6 +35,7 @@ function compact(value, max = 1200) {
 }
 try {
   const pr = get(['api', `repos/${repo}/pulls/${number}`]);
+  if (!pr?.state || typeof pr?.head?.sha !== 'string' || !pr.head.sha.trim()) throw new Error('missing PR state');
   const reviews = [];
   for (let page = 1; page <= 10; page += 1) {
     const batch = get(['api', `repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`]);
@@ -129,6 +131,7 @@ try {
   if (Buffer.byteLength(serialized) >= 8192) throw new Error('snapshot exceeds 8192 bytes');
   process.stdout.write(`${serialized}\n`);
 } catch (error) {
+  reportHammerEarlyFailure('pr-context-unavailable');
   process.stderr.write(`${compact(error.message, 800)}\n`);
   process.exitCode = 1;
 }

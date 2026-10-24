@@ -1104,6 +1104,7 @@ async function runDaemonCleanMergeAttemptInner({
         base,
         holderPr: prNumber,
         holderHead: daemonValidatedHead,
+        prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
         holderPid: process.pid,
         holderHost: hostname(),
         now: new Date().toISOString(),

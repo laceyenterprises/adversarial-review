@@ -1,3 +1,4 @@
+import { reportHammerEarlyFailure } from './ama/hammer-terminal-audit.mjs';
 import { execFileSync } from 'node:child_process';
 
 const ENTITLED_VARS = ['HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN'];
@@ -183,10 +184,16 @@ export function hammerTokenSession(options = {}) {
       if (!managed) return childOptions;
       if (forced) {
         forced = false;
-        refresh();
+        try { refresh(); } catch (error) {
+          reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+          throw error;
+        }
       } else if (!held || !expiresLater(expiresAt)) {
         try { refresh(); } catch (error) {
-          if (!held) throw error;
+          if (!held) {
+            reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+            throw error;
+          }
           warnProactiveFailure(error.refreshOutcome);
         }
       }
@@ -195,8 +202,10 @@ export function hammerTokenSession(options = {}) {
     retry(error) {
       if (!managed) throw error;
       if (!credentialRejected(error)) throw redact(error);
-      if (retried) throw failure('succeeded, but GitHub rejected the retried call');
-      if (!command) throw failure('unavailable (no launch refresh command)');
+      if (retried || !command) {
+        reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+        throw failure(retried ? 'succeeded, but GitHub rejected the retried call' : 'unavailable (no launch refresh command)');
+      }
       retried = true;
       forced = true;
       // prepare() performs the one forced refresh immediately before retry.

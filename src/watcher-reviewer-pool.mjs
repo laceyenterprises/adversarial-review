@@ -1,3 +1,4 @@
+import { hasDeployIncidentMarker } from './deploy-incident.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import {
   checkReviewerMemoryAdmission,
@@ -353,7 +354,9 @@ function compareReviewerDispatchPriority(a, b, options) {
   if (waitDelta !== 0) return waitDelta;
   const retainedDelta = Number(b?.retainedWakePriority === true) - Number(a?.retainedWakePriority === true);
   if (retainedDelta !== 0) return retainedDelta;
-  return Number(b?.wakePriority === true) - Number(a?.wakePriority === true);
+  const wakeDelta = Number(b?.wakePriority === true) - Number(a?.wakePriority === true);
+  if (wakeDelta !== 0) return wakeDelta;
+  return Number(hasDeployIncidentMarker(b?.subject?.body)) - Number(hasDeployIncidentMarker(a?.subject?.body));
 }
 
 function reviewerDispatchEnqueuedAt(current) {

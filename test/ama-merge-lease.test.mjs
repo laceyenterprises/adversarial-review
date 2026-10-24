@@ -1376,3 +1376,29 @@ test('holder identity validation rejects null empty and non-positive numeric val
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('LVR-02 incident waiters lead FIFO within their class, preserving daemon reservations and holders', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const held = acquire(rootDir);
+  const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  const queue = (id, seconds, extra = {}) => acquire(rootDir, {
+    holderPr: 100 + seconds, holderHead: 'b'.repeat(40), registerWaiter: true,
+    waiterId: id, now: at(seconds), pidAliveFn: () => true, ...extra,
+  });
+  queue('ordinary-first', 1);
+  queue('ordinary-second', 2);
+  queue('incident-first', 3, { prBody: '<!-- deploy-incident:v1 id=incident-1 -->' });
+  queue('incident-second', 4, { prBody: '<!-- deploy-incident:v1 id=incident-2 -->' });
+  queue('daemon-first', 5, { waiterPriority: 'daemon' });
+  queue('daemon-incident', 6, { waiterPriority: 'daemon', prBody: '<!-- deploy-incident:v1 id=incident-3 -->' });
+  assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).lease.leaseId, held.lease.leaseId);
+  const ids = () => readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId);
+  assert.deepEqual(ids(), ['daemon-incident', 'daemon-first', 'incident-first', 'incident-second', 'ordinary-first', 'ordinary-second']);
+  // Renewal retains arrival and marker when no new body snapshot is supplied.
+  queue('incident-first', 7);
+  assert.deepEqual(ids(), ['daemon-incident', 'daemon-first', 'incident-first', 'incident-second', 'ordinary-first', 'ordinary-second']);
+  releaseMergeLease({ rootDir, ...held.lease, now: at(8) });
+  assert.equal(queue('incident-first', 9).acquired, false);
+  assert.equal(queue('daemon-incident', 10, { waiterPriority: 'daemon' }).acquired, true);
+});

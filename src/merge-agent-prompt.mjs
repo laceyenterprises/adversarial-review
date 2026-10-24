@@ -36,8 +36,13 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const mergeRepoLiteral = shellSingleQuote(job.repo);
   const mergeBaseLiteral = shellSingleQuote(job.baseBranch);
   const mergePrLiteral = shellSingleQuote(job.prNumber);
+  const terminalAuditHelper = shellSingleQuote(fileURLToPath(new URL('../bin/ama-audit.mjs', import.meta.url)));
   const lines = [
     '# Merge-Agent Dispatch',
+    '',
+    'This launch requires a terminal AMA audit tied to HQ_LAUNCH_REQUEST_ID. Before exit, record the actual result (succeeded only after confirmed merge, otherwise failed-without-merge or deferred) using the deployed helper:',
+    `node ${terminalAuditHelper} append --hq-root "$HQ_ROOT" --repo ${mergeRepoLiteral} --pr ${mergePrLiteral} --head ${shellSingleQuote(job.headSha)} --outcome OUTCOME`,
+    'Include a fixed reason code in --attempt-json for a no-merge result; never include credentials or raw transport output.',
     '',
     '## Preamble: abort if PR is no longer open',
     '',
@@ -301,7 +306,9 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push(`MERGE_REPO=${mergeRepoLiteral}`);
         lines.push(`MERGE_BASE=${mergeBaseLiteral}`);
         lines.push(`MERGE_PR=${mergePrLiteral}`);
-        lines.push('MERGE_HEAD_REF=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName --jq \'.headRefName\')');
+        lines.push('MERGE_PR_STATE_JSON=$(mktemp)');
+        lines.push('gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"');
+        lines.push('MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")');
         lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
         lines.push('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"');
         lines.push('MERGE_LEASE_JSON=$(mktemp)');
@@ -312,13 +319,13 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('  if [ -n "${MERGE_LEASE_ID:-}" ]; then');
         lines.push(`    node ${mergeLeaseHelper} release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true`);
         lines.push('  fi');
-        lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON"');
+        lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON" "$MERGE_PR_STATE_JSON"');
         lines.push('  exit "$status"');
         lines.push('}');
         lines.push('trap cleanup_merge_lease EXIT');
         lines.push('');
         lines.push('set +e');
-        lines.push(`node ${mergeLeaseHelper} acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
+        lines.push(`node ${mergeLeaseHelper} acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --pr-state-file "$MERGE_PR_STATE_JSON" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
         lines.push('MERGE_LEASE_EXIT=$?');
         lines.push('set -e');
         lines.push('if [ "$MERGE_LEASE_EXIT" -eq 70 ] && jq -e \'.parked == true\' "$MERGE_LEASE_JSON" >/dev/null; then');

@@ -1000,6 +1000,15 @@ absent; a present reason key, including null, retains an unknown-evidence hold. 
 
 ## State machines and smoke verification (SMV v1)
 
+REVIEWSIMPLE-01 adds an optional simplicity/cost note to review records and an
+observational applied flag to existing remediation completions/audit text.
+The note has no lifecycle, verdict, strict-mode or round-budget authority.
+Offline fixtures `simplicity-note.test.mjs` and `simplicity-note-prompts.test.mjs`
+cover those boundaries. After normal deployment, the SRE session separately
+samples the next 20 reviews, counts notes, and confirms none changed verdicts
+or added rounds; this read-only observation is declared in
+`post-merge-verify.json`, outside the smoke harness.
+
 LAC-2093 bounds lease-held validation through `bin/hammer-validate.mjs`: the
 absolute ceiling scales from 360 seconds, but 120 seconds without child output
 fails with status 124 regardless of load. Pytest reports real collection and test

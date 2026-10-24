@@ -594,6 +594,7 @@ function buildRemediationReply({
     pushback,
     blockers,
     operationalBlockers,
+    ...((job.simplicityNote ?? extractSimplicityNote(job.reviewBody)) ? { simplicityNoteApplied: false } : {}),
     reReview: {
       requested: Boolean(reReviewRequested),
       reason: reReviewRequested

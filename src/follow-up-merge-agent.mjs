@@ -2864,6 +2864,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     ...(finalPush ? { reviewCycleCapReached: true } : {}),
     lastVerdict,
     mergeAgentRescueDecision: classifierResult.decision,
+    simplicityNote: latestJob?.simplicityNote ?? null,
     mergeAgentRescueReason: classifierResult.reason,
     // Count of standing blocking findings in the latest review (`- None.` → 0;
     // malformed non-None section → >=1; legacy Request changes body with no

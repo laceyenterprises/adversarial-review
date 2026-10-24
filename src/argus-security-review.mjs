@@ -29,6 +29,8 @@ import { argusReviewerFailure, argusFailureDefers, argusReviewerDeferral } from 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SIMPLICITY_REVIEW_GUIDANCE } from './kernel/prompt-stage.mjs';
+import { extractSimplicityNote } from './kernel/verdict.mjs';
 
 import { defangUntrustedMarkdown } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
@@ -80,7 +82,7 @@ const MAX_COMMENT_CHARS = 60_000;
 let promptTemplateCache = null;
 export function loadArgusReviewPromptTemplate(rootDir = ROOT) {
   if (rootDir === ROOT && promptTemplateCache) return promptTemplateCache;
-  const text = readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8');
+  const text = `${readFileSync(join(rootDir, 'prompts', 'argus-security', 'reviewer.md'), 'utf8').trim()}\n\n${SIMPLICITY_REVIEW_GUIDANCE}`;
   if (rootDir === ROOT) promptTemplateCache = text;
   return text;
 }
@@ -157,6 +159,7 @@ export function parseArgusReviewOutput(text) {
   return {
     verdict,
     summary: boundedText(doc.summary, 600),
+    simplicityNote: extractSimplicityNote(raw),
     riskDirection: ['reduced', 'unchanged', 'increased'].includes(doc.riskDirection) ? doc.riskDirection : null,
     findings: doc.findings.map((finding) => normalizeArgusFinding(finding, { source: 'model' })),
     axes: Array.isArray(doc.axes) ? doc.axes.slice(0, 16).map((axis) => ({
@@ -318,6 +321,10 @@ export function buildArgusFindingsComment({ job, result }) {
       '',
     );
   }
+  if (result.simplicityNote) {
+    lines.push('## Simplicity and cost (advisory)', '',
+      defangUntrustedMarkdown(redactSensitiveText(result.simplicityNote)), '');
+  }
   lines.push(
     `<sub>Reviewed by ${result.reviewer?.model || 'unknown'} under the ASR-05 rubric. `
       + 'Only `high` findings in a reserved category block; `medium` and `low` are advisory. '
@@ -340,6 +347,7 @@ function isArgusOwnedJob(job) {
  */
 export function shouldPostArgusComment({ job, result }) {
   if (result.verdict === ARGUS_SUPERSEDED_VERDICT) return false;
+  if (result.simplicityNote) return true;
   if (result.findings.length > 0) return true;
   if (result.verdict !== ARGUS_VERDICTS.APPROVE) return true;
   return isArgusOwnedJob(job);
@@ -500,6 +508,7 @@ export async function reviewArgusJob({
     source: ARGUS_REVIEW_RESULT_SOURCE,
     verdict: composed.verdict,
     summary: composed.summary,
+    simplicityNote: cached.modelReview.simplicityNote ?? null,
     findings: composed.findings,
     riskDirection: cached.modelReview.riskDirection,
     axes: cached.modelReview.axes,

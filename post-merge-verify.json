@@ -32,6 +32,7 @@
     "host": {
       "prerequisites": [
         "SRE approval: SMV_HOST_CANARY_APPROVED=1; no worker identity",
+        "REVIEWSIMPLE-01 separate read-only observation after normal deployment: SRE samples the next 20 reviews, counts those with simplicityNote, and confirms no note changed a verdict or added a round. Applied observations use existing completion.simplicityNoteApplied or Hammer audit text; no live smoke action or blocking gate is added.",
         "Run from deployed registered checkout; disposable offline safe canary only",
         "LAC-2087 runtime recovery remains separate from source validation: after normal deployment, observe a natural hold/head-change pass removing its exact obsolete daemon waiter and the next eligible closer acquiring under the shared fence. Record waiter identities/order and holder evidence read-only; no restart, rescue-PR mutation, queue edit or bypass. See docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service.",
         "LAC-2082 recovery proof is separate read-only observation after normal source deployment: record a naturally scheduled review session, successful required PR-context capture, selected bot login, reviewed head and GitHub review ID/commit_id. No manual retrigger, budget reset, service restart or credential substitution; see docs/RUNBOOK-gemini-reviewer-app.md#required-pr-context-reads-lac-2082.",

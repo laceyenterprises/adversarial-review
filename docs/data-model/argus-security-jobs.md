@@ -24,6 +24,12 @@ Each job is bound to one exact `(repo, prNumber, headSha)` identity. A re-poll
 of the same PR head is idempotent, while a new head SHA creates a new job
 because the prior security review only speaks for the tree it inspected.
 
+REVIEWSIMPLE-01: model reviews and completed results retain `simplicityNote`
+(optional final advisory text, or `null`). The existing findings comment displays
+it separately; a note can make a clean review visible but does not enter
+`findings`, severity or verdict composition, nor request remediation or re-review.
+Cached reviews created before this field existed yield `null` in the result.
+
 Jobs are produced by the watcher (ASR-04). Every open, non-terminal PR is
 classified once per head by the ASR-02 security-surface classifier, and any
 trigger enqueues here. Two dispositions follow from that:

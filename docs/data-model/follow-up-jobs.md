@@ -20,6 +20,20 @@ The note is outside both finding lists and the verdict; it changes no strict
 gate, dispatch decision, remediation round budget or retry cap. A settled clean
 review with only a note still owes no remediation round.
 
+Within an already-running round, the reply may report the boolean
+`simplicityNoteApplied`, with its reason and estimated savings in `summary`.
+It is copied to `completion.simplicityNoteApplied` and the current round's
+`completion.simplicityNoteApplied`; missing or non-boolean reports become `null`
+(unknown), never a validation failure or a new retry. Count only explicit
+`true` as applied; keep `false` and unknown separate. Existing reply artifacts
+also retain this field. Historical completed records may omit it.
+
+The Hammer receives the same advice from its existing bounded context snapshot
+(`review.simplicityNote`, capped at 1,200 bytes; fetch the full review when the
+snapshot reports truncation). It records `simplicityNoteApplied: true|false`
+and a reason in its existing closing audit text, outside all finding counts.
+No new store, config key, label or merge authority is introduced.
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

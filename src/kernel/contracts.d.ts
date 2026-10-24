@@ -101,6 +101,8 @@ export interface RemediationReply {
   outcome: 'completed' | 'blocked' | 'partial';
   summary: string;
   validation: readonly string[];
+  /** Optional observation only; never validated as a completion requirement. */
+  simplicityNoteApplied?: boolean;
   addressed?: readonly RemediationReplyAddressed[];
   pushback?: readonly RemediationReplyPushback[];
   // Non-blocking review findings that the worker chose to fix in this

@@ -20,6 +20,9 @@ import { join } from 'node:path';
 
 const STAGES = new Set(['first', 'middle', 'last']);
 const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
+const SIMPLICITY_REVIEW_GUIDANCE = readFileSync(
+  new URL('../../prompts/shared/simplicity-and-cost.md', import.meta.url), 'utf8',
+).trim();
 
 /**
  * Classified failure raised when a domain's `promptSet` cannot be resolved.
@@ -167,7 +170,7 @@ function loadStagePrompt({
   if (!actor) throw new Error('actor is required');
 
   const selectedStage = assertStage(stage);
-  return readFileSync(
+  const prompt = readFileSync(
     join(
       rootDir,
       'prompts',
@@ -176,10 +179,12 @@ function loadStagePrompt({
     ),
     'utf8',
   ).trim();
+  return actor === 'reviewer' ? `${prompt}\n\n${SIMPLICITY_REVIEW_GUIDANCE}` : prompt;
 }
 
 export {
   PromptSetResolutionError,
+  SIMPLICITY_REVIEW_GUIDANCE,
   loadStagePrompt,
   pickReviewerStage,
   pickRemediatorStage,

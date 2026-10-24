@@ -51,6 +51,7 @@ const reply: RemediationReply = {
   outcome: 'completed',
   summary: 'Added validation.',
   validation: ['npm test'],
+  simplicityNoteApplied: false,
   addressed: [
     {
       title: 'Missing validation',

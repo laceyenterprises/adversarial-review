@@ -14,7 +14,9 @@ import { buildReviewerPromptPrefix } from '../src/reviewer.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function readPrompt(...parts) {
-  return readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  const prompt = readFileSync(join(ROOT, 'prompts', ...parts), 'utf8').trim();
+  return parts.at(-1).startsWith('reviewer.')
+    ? `${prompt}\n\n${readFileSync(join(ROOT, 'prompts/shared/simplicity-and-cost.md'), 'utf8').trim()}` : prompt;
 }
 
 function renderReviewerViaStage(args) {

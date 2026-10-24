@@ -24,6 +24,20 @@ dispatcher debugging), see
 
 ---
 
+## Optional simplicity advice (REVIEWSIMPLE-01)
+
+Reviewer prompts share an optional final simplicity/cost section. It is advice
+outside finding counts and all merge/round/retry decisions. Existing remediation
+or Hammer work may apply it only when behavior stays the same and net lines or
+runtime cost decrease. Remediation replies and round completions record
+`simplicityNoteApplied`; Hammer's existing audit text records the same boolean
+with a reason. No configuration or deployment migration is needed.
+
+After deploy, the SRE session samples the next 20 reviews, counts those with a
+note, and confirms none changed the verdict or added a round. See the existing
+[job records](data-model/follow-up-jobs.md#simplicity-advisory-reviewsimple-01)
+for measurement fields and unknown historical values.
+
 ## Interrupted dispatch intents (LAC-2081)
 
 CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output

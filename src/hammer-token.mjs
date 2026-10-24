@@ -188,8 +188,9 @@ export function hammerTokenSession(options = {}) {
       try {
         const parsed = refresh(loadAwareTimeoutMs(10_000));
         const expiry = Date.parse(parsed.expiresAt || '');
+        const currentMs = typeof now === 'function' ? now() : Number(now);
         return { parsed: true, source: parsed.source,
-          expiresInSeconds: Number.isFinite(expiry) ? Math.floor((expiry - now()) / 1000) : null };
+          expiresInSeconds: Number.isFinite(expiry) ? Math.floor((expiry - currentMs) / 1000) : null };
       } catch (error) {
         if (error.refreshOutcome === 'failed (empty or invalid output)') {
           return { parsed: false, source: 'invalid', expiresInSeconds: null };

@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { hammerTokenSession } from './hammer-token.mjs';
 import { daemonMergeReservationSeconds } from './ama/merge-lease.mjs';
@@ -29,4 +30,4 @@ export function main({ argv = process.argv.slice(2), env = process.env,
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exitCode = main();
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) process.exitCode = main();

@@ -1,9 +1,10 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import childProcess, { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
@@ -42,6 +43,38 @@ test('real refresh export lines pass, force refresh despite healthy held token, 
   assert.ok(evidence.expiresInSeconds > 0);
   // The old prepare()-only check skips this failing refresh on the held expiry.
   assert.equal(run(fixture(t, exportsOutput(), true)).code, 126);
+});
+
+test('refresh check accepts numeric timestamps and callable clocks with identical expiry evidence', t => {
+  const env = fixture(t, exportsOutput());
+  const session = hammerTokenSession({ credentialEnv: env, hammerToken: true });
+  const now = Date.parse('2098-12-31T23:58:59.500Z');
+  const expected = { parsed: true, source: 'exports', expiresInSeconds: 60 };
+  assert.deepEqual(session.checkRefresh(now), expected);
+  assert.deepEqual(session.checkRefresh(() => now), expected);
+});
+
+test('symlinked CLI executes checks and reports unsupported commands instead of silently succeeding', t => {
+  const root = mkdtempSync(join(tmpdir(), 'activation-cli-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const link = join(root, 'activation check #link.mjs');
+  symlinkSync(fileURLToPath(new URL('../src/activation-check.mjs', import.meta.url)), link);
+  // The sandbox preserves symlinks globally; exercise Node's ordinary CLI
+  // resolution so sibling imports resolve beside the actual script target.
+  const nodeArgs = ['--no-preserve-symlinks', '--no-preserve-symlinks-main', link];
+  const command = spawnSync(process.execPath, [...nodeArgs, 'daemon-reservation'],
+    { env: process.env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(command.status, 0, command.stderr);
+  const evidence = JSON.parse(command.stdout);
+  assert.equal(evidence.pollSeconds, reservationEvidence().pollSeconds);
+  assert.ok(evidence.reservationSeconds > evidence.pollSeconds);
+  assert.equal(command.stderr, '');
+
+  const invalid = spawnSync(process.execPath, [...nodeArgs, 'unsupported'],
+    { env: process.env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(invalid.status, 126);
+  assert.equal(invalid.stdout, '');
+  assert.equal(invalid.stderr, 'activation check unavailable\n');
 });
 
 test('HAMTOKEN-05 whitespace-rejecting parser fails on exactly the same export fixture', async t => {
@@ -89,16 +122,15 @@ test('reservation uses the effective poll reader and real sizing; incident 120 v
 
 test('refresh check scales its timeout once at maximum load and stays below the timer ceiling', t => {
   let calls = 0;
+  let refreshOptions;
   const originalExec = childProcess.execFileSync;
   t.mock.method(os, 'loadavg', () => [Number.MAX_SAFE_INTEGER, 0, 0]);
-  t.mock.method(os, 'cpus', () => []);
   t.mock.method(childProcess, 'execFileSync', (_file, _args, options) => {
+    // Corroborate maximum load without reading the host's current CPU usage.
+    if (_file === '/bin/ps') return '1000000\n';
     if (_file !== '/bin/sh') return originalExec(_file, _args, options);
     calls++;
-    assert.equal(options.timeout, 60_000);
-    assert.ok(options.timeout <= 2 ** 31 - 1);
-    assert.equal(options.maxBuffer, 16 * 1024);
-    assert.equal(options.stdio, 'pipe');
+    refreshOptions = options;
     return exportsOutput();
   });
   syncBuiltinESMExports();
@@ -106,4 +138,8 @@ test('refresh check scales its timeout once at maximum load and stays below the 
   const env = { HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'synthetic-refresh' };
   assert.equal(hammerTokenSession({ credentialEnv: env, hammerToken: true }).checkRefresh().parsed, true);
   assert.equal(calls, 1);
+  assert.equal(refreshOptions.timeout, 60_000);
+  assert.ok(refreshOptions.timeout <= 2 ** 31 - 1);
+  assert.equal(refreshOptions.maxBuffer, 16 * 1024);
+  assert.equal(refreshOptions.stdio, 'pipe');
 });

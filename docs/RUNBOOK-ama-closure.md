@@ -5466,8 +5466,12 @@ changes and offline tests do not alter host configuration or services.
 ## Docs-only daemon merge (DOCSFASTPATH-01)
 
 The watcher classifies docs-only PRs before review admission. All changed paths,
-including rename sources, must be Markdown or images under `docs/`; instructions,
-prompts, personas, identities, config and any path outside `docs/` keep full review.
+including rename sources, must be Markdown or images under `docs/`, or inert
+evidence files under `docs/postmortems/evidence/` at any depth with extensions
+`.json`, `.txt`, `.yaml`, `.yml`, `.diff`, `.patch`, `.log` or `.csv`.
+These evidence extensions elsewhere, executable files, instructions, prompts,
+personas, identities, config outside the evidence directory and any path outside
+`docs/` keep full review. Paths containing `.` or `..` segments are excluded.
 Instruction filenames and excluded directory names are matched case-insensitively.
 Uncertain/empty/capped inventories retain full review. No label is needed.
 `request-review` or the existing operator `retrigger-review` request opts out;

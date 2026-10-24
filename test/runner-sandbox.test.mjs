@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -35,6 +35,26 @@ function sandbox(base, name, pid, age = ABANDONED_SANDBOX_MIN_AGE_MS * 2) {
   utimesSync(root, time, time);
   return root;
 }
+
+test('startup skips reclamation when the temporary parent cannot be listed', (t) => {
+  const base = fixtureRoot(t);
+  assert.equal(reclaimAbandonedSandboxes(path.join(base, 'missing'), { uid: 1 }), 0);
+  const file = path.join(base, 'file');
+  writeFileSync(file, 'not a directory');
+  assert.equal(reclaimAbandonedSandboxes(file, { uid: 1 }), 0);
+});
+
+test('startup skips reclamation when the temporary parent is unreadable', {
+  skip: !process.getuid || process.getuid() === 0,
+}, (t) => {
+  const base = fixtureRoot(t);
+  chmodSync(base, 0);
+  try {
+    assert.equal(reclaimAbandonedSandboxes(base), 0);
+  } finally {
+    chmodSync(base, 0o700);
+  }
+});
 
 test('startup reclaims only old, same-user sandboxes with confirmed dead owners', { skip: !process.getuid }, (t) => {
   const base = fixtureRoot(t);
@@ -210,3 +230,43 @@ for (const mode of ['exit', 'exception']) {
     });
   });
 }
+
+test('runner finally stops a live test group before cleanup after an unexpected error', {
+  skip: process.platform === 'win32', timeout: 20_000,
+}, (t) => {
+  const base = fixtureRoot(t);
+  const events = path.join(base, 'events.jsonl');
+  const hook = path.join(base, 'unwind-hook.mjs');
+  writeFileSync(hook, `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import path from 'node:path';
+    const record = (event) => fs.appendFileSync(${JSON.stringify(events)}, JSON.stringify(event) + '\\n');
+    const remove = fs.rmSync;
+    fs.rmSync = (root, options) => {
+      if (path.basename(root).startsWith('art-')) record('cleanup');
+      return remove(root, options);
+    };
+    syncBuiltinESMExports();
+    const kill = process.kill;
+    process.kill = (pid, signal) => {
+      if (pid < 0 && signal === 'SIGKILL') record('kill');
+      return kill(pid, signal);
+    };
+    const schedule = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      if (ms === 900_000) throw new Error('synthetic runner unwind');
+      return schedule(callback, ms, ...args);
+    };
+  `);
+  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: base };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, [
+    '--import', hook, path.join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs',
+  ], { env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(child.status, 1, `${child.stdout}\n${child.stderr}`);
+  assert.match(child.stderr, /synthetic runner unwind/);
+  const observed = readFileSync(events, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(observed.slice(0, 2), ['kill', 'cleanup'], 'stop the group before removing its files');
+  assert.equal(readdirSync(base).some((name) => name.startsWith('art-')), false);
+});

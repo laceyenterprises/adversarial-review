@@ -2543,9 +2543,11 @@ at least 24 hours of age, and a confirmed absent PID. Live or uncertain PIDs,
 missing or invalid markers, and symlinks are preserved, including older sandboxes
 created before ownership markers existed. Normal completion and handled
 SIGTERM/SIGINT/SIGHUP remove the current sandbox after stopping the test group;
-a synchronous exit hook also stops the group and retries cleanup when an explicit
-exit or uncaught exception skips `finally`. SIGKILL cannot run cleanup, so a later
-run reclaims its marked sandbox once it is old enough.
+a synchronous exit hook also stops the group and retries cleanup on an explicit
+`process.exit()` or an unhandled asynchronous error outside the runner's `try`
+block. Synchronous exceptions inside that block unwind through `finally`, which
+also stops a still-running test group before cleanup. SIGKILL cannot run cleanup,
+so a later run reclaims its marked sandbox once it is old enough.
 
 ### V2 repository/base queue foundation (MGQ-01)
 

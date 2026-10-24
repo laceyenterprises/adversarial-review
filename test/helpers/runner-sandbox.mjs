@@ -10,8 +10,15 @@ export function reclaimAbandonedSandboxes(tempBase, {
   now = Date.now(), uid = process.getuid?.(), kill = process.kill,
 } = {}) {
   if (uid === undefined) return 0;
+  let entries;
+  try {
+    entries = readdirSync(tempBase, { withFileTypes: true });
+  } catch {
+    // Reclamation is best-effort, including when the parent cannot be listed.
+    return 0;
+  }
   let reclaimed = 0;
-  for (const entry of readdirSync(tempBase, { withFileTypes: true })) {
+  for (const entry of entries) {
     if (!entry.name.startsWith('art-') || !entry.isDirectory()) continue;
     const root = path.join(tempBase, entry.name);
     try {
@@ -22,7 +29,7 @@ export function reclaimAbandonedSandboxes(tempBase, {
       if (!marker.isFile() || marker.uid !== uid) continue;
       if (now - Math.max(directory.mtimeMs, marker.mtimeMs) < ABANDONED_SANDBOX_MIN_AGE_MS) continue;
       const owner = JSON.parse(readFileSync(markerPath, 'utf8'));
-      if (owner.version !== 1 || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) continue;
+      if (owner?.version !== 1 || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) continue;
       try {
         kill(owner.pid, 0);
         continue;

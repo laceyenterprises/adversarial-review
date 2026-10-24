@@ -100,7 +100,8 @@ function cleanupSandbox() {
   sandboxRoot = undefined;
 }
 
-// Explicit process.exit() and uncaught exceptions do not unwind finally.
+// Explicit process.exit() and unhandled asynchronous errors outside the runner's
+// try block can terminate the process without executing its finally block.
 // Exit hooks must be synchronous: stop the test group before removing its files.
 process.once('exit', () => {
   try {
@@ -224,7 +225,9 @@ try {
   clearTimeout(timeout);
   clearTimeout(forceKillTimeout);
   try {
-    if (receivedSignal || timedOut) signalTestGroup('SIGKILL');
+    if (receivedSignal || timedOut || (child?.exitCode === null && child?.signalCode === null)) {
+      signalTestGroup('SIGKILL');
+    }
   } finally {
     for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     cleanupSandbox();

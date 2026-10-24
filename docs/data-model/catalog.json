@@ -218,6 +218,7 @@
     },
     {
       "id": "ama-audit",
+      "docsFastPathFields": ["closureAuthority=docs-fast-path", "mergeAccountability=docs-fast-path", "docsFastPath.headSha", "docsFastPath.baseSha", "docsFastPath.baseBranch", "attempts[].reason=attestation-record-failed"],
       "osgResolutionFields": ["harnessResolution.modelResolution", "harnessResolution.osgRemediator", "attempts[].harnessResolution.modelResolution", "attempts[].harnessResolution.osgRemediator"],
       "harnessResolutionDiagnostics": "optional array of producer/field evidence strings; no admission or retry authority",
       "title": "AMA Closure Audit",

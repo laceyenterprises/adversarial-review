@@ -198,3 +198,14 @@ numeric identity must match before posting under the next hammer's lease.
 The pending object alone is never provenance: the unchanged App-comment parser
 must accept the recovered comment before the normal range proof can succeed.
 These immutable historical attempts need no new lifecycle state or config key.
+
+## Docs fast path authority (DOCSFASTPATH-01)
+
+The existing daemon audit may carry `closureAuthority=docs-fast-path`,
+`mergeAccountability=docs-fast-path`, and `docsFastPath={headSha,baseSha,baseBranch}`.
+No reviewer or finding count is invented. A failed attestation delivery appends
+`outcome=failed-without-merge`, `reason=attestation-record-failed`, `permanent=false`
+and diagnostic `error`, then releases the lease for a later retry. The signed
+`docs-fast-path` attestation lives in the canonical head-attestation ledger,
+through the existing sign/record interface. The audit binds the classified range;
+live classification and merge eligibility are rechecked after recording.

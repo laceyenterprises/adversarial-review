@@ -804,6 +804,30 @@ required-check, identity, arming and shared-lease checks. The compatibility owne
 projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
+DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
+inline daemon merge lane, before reviewer admission or closer dispatch. Every
+old and new changed path must be under `docs/` and end in `.md` or an image
+extension (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `ico`, `bmp`, `tif`,
+`tiff`). Agent instruction filenames and prompt/persona/identity directories stay
+on the full path. Empty, unreadable or potentially capped inventories also take
+the full path. Classification is cached by PR revision; immutable base/head
+comparison prevents a moving PR from lending its classification to another head.
+
+`request-review`, `retrigger-review`, `fast-merge-veto`, a native requested
+reviewer/team, or a retained operator retrigger selects full review. Merge holds
+remain holds. The daemon records a signed `docs-fast-path` attestation through
+`hq attest sign`/`record` while holding the existing merge lease. Recording failure
+releases the lease and retries on a later poll. After recording, a live read
+revalidates classification, review requests, base, exact head and merge gates;
+`--match-head-commit` fences the merge itself. Required contexts use the shared
+check classifier, including the pipeline gate, which records the docs waiver as
+success. Kill switch, primary-change policy, protection, capability, protective
+predecessors, stop holds and audit remain authoritative. No reviewer result or
+finding count is invented. Pending/red checks wait without reviewer or closer.
+
+The former `fast-merge:docs` label shortcut is retired; it cannot waive review
+for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.
+
 
 LAC-2093 bounds local validation under the shared lease with
 `bin/hammer-validate.mjs`: 120 seconds without child output returns 124,
@@ -1520,7 +1544,6 @@ The label alone is never the authority. The watcher may set
   authorized head SHA by pairing the most recent allowlisted-operator label
   event with the live PR head from `pulls.get`.
 - The changed-file list matches the allowlisted category shape. For example,
-  `fast-merge:docs` is limited to documentation file extensions,
   `fast-merge:submodule-bump` is limited to known gitlink paths, and
   `fast-merge:spec-hash-rebind` only allows a tiny spec-lock/spec-hash rebind.
 - Any commit, force-push, or head-restore event at or after the label

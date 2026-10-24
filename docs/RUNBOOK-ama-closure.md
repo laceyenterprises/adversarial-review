@@ -5368,3 +5368,36 @@ lands” decision, it backs up host config, sets
 The next day's batch PRs must exist, and every captured finding must eventually
 be applied or dropped with a reason. These are deployment activities; source
 changes and offline tests do not alter host configuration or services.
+
+## Docs-only daemon merge (DOCSFASTPATH-01)
+
+The watcher classifies docs-only PRs before review admission. All changed paths,
+including rename sources, must be Markdown or images under `docs/`; instructions,
+prompts, personas, identities, config and any path outside `docs/` keep full review.
+Uncertain/empty/capped inventories retain full review. No label is needed.
+`request-review` or the existing operator `retrigger-review` request opts out;
+native requested reviewers/teams and `fast-merge-veto` also select full review.
+The former broad `fast-merge:docs` authorization is retired.
+
+Required checks must be green on the exact head. The watcher publishes the
+existing gate context as a docs waiver, then uses the ordinary daemon lease and
+merge predicate. It records kind `docs-fast-path` with `policy=DOCSFASTPATH-01`
+through the existing signer and canonical ledger before merging. Ledger delivery
+failure defers without a reviewer or closer; repeat delivery reuses and verifies
+the existing signed head record. The AMA audit records closure authority
+`docs-fast-path` and the classified base/head. The merge kill switch and the
+remaining merge authority gates still apply.
+
+Deploy the companion signer/ledger migration before this daemon change. No new
+configuration or CI gate is needed. SRE then observes the next three docs-only
+PRs: each should merge within about ten minutes of green checks, with no reviewer
+pass or closer and a recorded docs-fast-path attestation. Observe one PR with a
+non-`docs/` change taking the ordinary review path. These are post-deploy checks;
+source tests do not claim live acceptance.
+
+Runtime cost: one compact immutable compare per newly observed base/head pair; unchanged classifications are bounded in-memory cache hits.
+Eligible merges reuse daemon check/lease/audit reads and refresh PR metadata
+under the lease. Discovery reuses its existing REST supplement for base identity
+and review requests; incomplete identity retains full review. Branch protection uses the existing six-hour cache. Signing and
+recording occur only after checks are green and a lease is held. No process, timer,
+CI job, per-tick scan or configuration key is added.

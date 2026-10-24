@@ -1,0 +1,55 @@
+{
+  "valid": {
+    "rollout": "shadow",
+    "override": "auto",
+    "sample_interval_seconds": 60,
+    "max_sample_age_seconds": 180,
+    "enter_samples": 3,
+    "clear_samples": 5,
+    "minimum_dwell_seconds": 600,
+    "load_enter_per_core": 3.0,
+    "load_clear_per_core": 2.0,
+    "deploy_enter_seconds": 1200,
+    "deploy_clear_seconds": 600,
+    "ready_pr_enter_seconds": 1800,
+    "ready_pr_clear_seconds": 900,
+    "throughput_enter_ratio": 0.8,
+    "throughput_clear_ratio": 1.0,
+    "throughput_window_seconds": 3600,
+    "throughput_min_arrivals": 5,
+    "admission_enter_seconds": 600,
+    "admission_clear_seconds": 300,
+    "boot_enter_ratio": 0.5,
+    "boot_clear_ratio": 0.2,
+    "boot_min_samples": 5,
+    "heavy_refresh_multiplier": 4,
+    "heavy_refresh_ceiling_seconds": 3600,
+    "ordinary_concurrency_fraction": 0.5,
+    "ordinary_min_running": 1,
+    "recovery_turns_before_ordinary": 3,
+    "ttr_objective_seconds": 1800,
+    "ttr_stall_seconds": 1800,
+    "baseline_window_seconds": 3600,
+    "baseline_stable_samples": 2
+  },
+  "invalid": [
+    {
+      "rollout": "enabled"
+    },
+    {
+      "override": "paused"
+    },
+    {
+      "enter_samples": 0
+    },
+    {
+      "load_enter_per_core": -1
+    },
+    {
+      "ordinary_concurrency_fraction": 1.1
+    },
+    {
+      "unknown": 1
+    }
+  ]
+}

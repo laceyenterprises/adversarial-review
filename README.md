@@ -2264,3 +2264,11 @@ Empty lanes mean organic execution evidence is pending. No route/config flag,
 service bounce or synthetic traffic is part of this slice. See the
 [owner observation and recovery procedure](docs/finalization-executor-promotion-runbook.md#queue-owner-storage-observation-mgq-01-no-activation)
 and [store contract](docs/data-model/finalization-ledger.md#repositorybase-queue-mgq-01).
+
+RCV-01 shared configuration: the strict Node loader recognizes the full
+`worker_pool.recovery` subtree, matching Python and the shell export reader.
+`test/fixtures/recovery-parity.json` is the shared synthetic acceptance/rejection
+fixture. This reader-support change publishes no recovery config values and
+changes no review, queue, merge or hammer authority. Merge/deploy compatible
+readers before an operator publishes recovery host settings. Normal Agent OS
+submodule float carries the merged companion; no feature-head pointer bump.

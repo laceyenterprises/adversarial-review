@@ -140,3 +140,5 @@ maximum gap is 25 seconds plus the once-scaled polling ceiling (before integer
 second rounding), excluding time spent in synchronous I/O. The final output
 obeys the same gap bound. Signal cancellation
 and fixed bounded cleanup retries retain their existing behavior.
+
+Acquire contention `queuePosition` describes ready service order, excluding earlier delayed arrivals. A delayed candidate retains its arrival position; the status/list `position` field continues to enumerate arrival order alongside `notBefore`. Holder, waiter and release-wake mutations use the same per-base lease mutation lock; release does not reacquire that non-reentrant lock.

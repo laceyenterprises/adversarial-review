@@ -1520,18 +1520,62 @@ test('reset clears no-merge delay without restoring a former arrival position', 
   assert.deepEqual(readMergeLeaseAttempts(rootDir, IDENTITY), []);
 });
 
-test('a different pre-merge reason resets the consecutive parking count', t => {
+test('alternating chargeable failures cannot evade the same-head parking cap', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const args = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'retry-head',
     holderPid: process.pid, holderHost: hostname() };
   let now = '2026-06-20T18:00:00Z';
-  for (let count = 1; count <= 6; count++) {
+  for (let count = 1; count <= 5; count++) {
     const held = acquireDaemonMergeLease({ ...args, now });
     assert.equal(held.acquired, true);
     const released = releaseMergeLease({ rootDir, ...held.lease, now, reason: `step-${count % 2}` });
-    assert.equal(released.retry.consecutiveNoMergeReleases, 1);
-    assert.equal(released.retry.parkedReason, null);
+    assert.equal(released.retry.consecutiveNoMergeReleases, count);
+    assert.equal(released.retry.parkedReason, count === 5 ? 'repeated-no-merge-release' : null);
     now = released.retry.nextEligibleAt;
   }
+  const refused = acquireDaemonMergeLease({ ...args, now });
+  assert.equal(refused.parked, true);
+});
+
+for (const occupied of [false, true]) test(`ready contention position excludes delayed arrivals (occupied=${occupied})`, t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = '2026-06-20T18:00:00Z';
+  const held = acquireDaemonMergeLease({ rootDir, ...IDENTITY, holderPr: 102, holderHead: 'delayed',
+    holderPid: process.pid, holderHost: hostname(), now });
+  releaseMergeLease({ rootDir, ...held.lease, now, yielded: true });
+  if (occupied) acquire(rootDir, { holderPr: 200, now, pidAliveFn: () => true });
+  const options = { registerWaiter: true, holderPid: process.pid, holderHost: hostname(),
+    now, pidAliveFn: () => true };
+  if (occupied) acquire(rootDir, { ...options, holderPr: 103, waiterId: 'first-ready' });
+  else upsertMergeLeaseWaiter({ rootDir, ...IDENTITY, pr: 103, head: 'first',
+    waiterId: 'first-ready', holderPid: process.pid, holderHost: hostname(), arrivedAt: now });
+  const result = acquire(rootDir, { ...options, holderPr: 104, waiterId: 'second-ready' });
+  assert.equal(result.acquired, false);
+  assert.equal(result.queuePosition, 2);
+});
+
+test('an explicitly parked head refuses behind a live holder without charging or queuing', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { rootDir, ...IDENTITY, holderPr: 102, holderHead: 'parked-head',
+    holderPid: process.pid, holderHost: hostname() };
+  let now = '2026-06-20T18:00:00Z';
+  for (let i = 0; i < 5; i++) {
+    const held = acquireDaemonMergeLease({ ...args, now });
+    const released = releaseMergeLease({ rootDir, ...held.lease, now, reason: 'permanent-failure' });
+    now = released.retry.nextEligibleAt;
+  }
+  const before = readMergeLeaseAttempts(rootDir, IDENTITY).find(r => r.pr === 102);
+  assert.equal(before.attempts, 0);
+  const other = acquire(rootDir, { holderPr: 200, now, pidAliveFn: () => true });
+  assert.equal(other.acquired, true);
+  const gate = recordMergeLeaseGateAttempt({ rootDir, ...IDENTITY, pr: 102, head: args.holderHead, now });
+  assert.equal(gate.parked, true);
+  assert.deepEqual(gate.attempt, before, 'parked acquisition must not charge or rewrite history');
+  const refused = acquireDaemonMergeLease({ ...args, now });
+  assert.equal(refused.parked, true);
+  assert.equal(refused.reason, 'repeated-no-merge-release');
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
 });

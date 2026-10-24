@@ -50,7 +50,7 @@ mutation locks; writes replace the JSON file atomically.
 
 Optional no-merge retry fields share this existing PR/head record:
 `noMergeReleases` counts non-terminal releases; `noMergeReason` and
-`consecutiveNoMergeReleases` count the current consecutive failure reason;
+`consecutiveNoMergeReleases` count the current consecutive chargeable failure sequence;
 `noMergeLeaseId` makes recording the same release idempotent.
 `reenteredAt` records the latest re-entry, and `nextEligibleAt` is its earliest
 next grant. Backoff starts at one second, doubles per no-merge release, and caps
@@ -58,7 +58,7 @@ at the existing watcher poll interval before being load-scaled once.
 Planned `--yield` releases and retryable aborts reset the consecutive failure
 count to zero while retaining backoff and any existing park. Successful grants
 do not reset failure evidence: acquisition alone is not a successful merge gate.
-After `AMG_MAX_GATE_ATTEMPTS` consecutive chargeable releases with the same reason
+After `AMG_MAX_GATE_ATTEMPTS` consecutive chargeable releases, even when reasons alternate
 (default five), `parkedReason: "repeated-no-merge-release"` refuses admission
 for that head and removes its reservation. There is no new config key or merge
 gate: this bounds rescheduling of failed holders. Changing the head or using
@@ -78,3 +78,5 @@ that charge. The daemon marks non-permanent failed outcomes as `yielded: true`,
 so transient reads and retry exhaustion cannot cause failure parking. Unknown
 exceptions remain chargeable. Repeated-failure parks carry a closing status and
 use the hammer's existing audit, comment and page path for gate-cap parks.
+
+Known `parkedReason` refuses a provisional gate acquisition without charging or rewriting the attempt. Core admission checks it before waiter registration and foreign-holder contention, then rechecks under the common holder/waiter mutation lock. Non-permanent daemon yields and retryable aborts remain non-chargeable; their total `noMergeReleases` and backoff stay visible without a hard park. Alternating chargeable reasons cannot reset the consecutive-failure cap.

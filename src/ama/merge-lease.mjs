@@ -94,6 +94,17 @@ export async function withDaemonMergeReservation({ rootDir, repo, base, pr, head
   }
 }
 
+function waiterReady(waiter, at) {
+  return !waiter.notBefore || Date.parse(waiter.notBefore) <= Date.parse(at);
+}
+
+function waiterQueuePosition(waiters, waiter, at) {
+  const queued = waiter && waiters.find(w => w.waiterId === waiter.waiterId);
+  const order = queued && waiterReady(queued, at) ? waiters.filter(w => waiterReady(w, at)) : waiters;
+  const index = waiter ? order.findIndex(w => w.waiterId === waiter.waiterId) : -1;
+  return index >= 0 ? index + 1 : null;
+}
+
 function wakeDaemonWaiter({ rootDir, repo, base, now, requestWatcherWakeImpl }) {
   // Both release callers hold the same per-base mutation lock as waiter writes.
   // Wake delivery is best-effort. A failed write cannot undo a fenced release;
@@ -101,7 +112,7 @@ function wakeDaemonWaiter({ rootDir, repo, base, now, requestWatcherWakeImpl }) 
   try {
     const { waiters } = pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base,
       now, pidAliveFn: pidIsLive });
-    const first = waiters.find(w => !w.notBefore || Date.parse(w.notBefore) <= Date.parse(now));
+    const first = waiters.find(w => waiterReady(w, now));
     if (first?.priority === 'daemon') requestWatcherWakeImpl({ rootDir, repo,
       prNumber: first.pr, headSha: first.head, reason: 'daemon-merge-lease-released' });
   } catch { /* Ordinary polling remains the recovery path. */ }
@@ -825,6 +836,10 @@ export function recordMergeLeaseGateAttempt({
     const existing = activeAttempts.find((record) => (
       record.pr === normalizedPr && record.head === normalizedHead
     ));
+    if (existing?.parkedReason) {
+      return { attemptsPath, attempt: existing, attempts: sortedAttempts(activeAttempts),
+        maxAttempts: parseMaxGateAttempts(maxAttempts), parked: true };
+    }
     const next = normalizeAttemptRecord({
       ...existing,
       pr: normalizedPr,
@@ -992,6 +1007,13 @@ export function acquireMergeLease({
   const acquiredAt = now || isoNow();
   let waiter = null;
   let reclaim = null;
+  // Refuse a known parked generation before creating a waiter or waiting on a
+  // foreign holder. The locked admission below still rechecks after contention.
+  const prior = readMergeLeaseAttempts(rootDir, { repo, base })
+    .find(r => Number(r.pr) === Number(holderPr) && r.head === holderHead && !attemptExpired(r, acquiredAt));
+  if (prior?.parkedReason) {
+    return { acquired: false, leasePath, waiter, parked: true, reason: prior.parkedReason, retry: prior };
+  }
 
   if (registerWaiter) {
     const registered = upsertMergeLeaseWaiter({
@@ -1028,9 +1050,8 @@ export function acquireMergeLease({
     if (!reclaim.reclaimed) {
       const { waiters } = withWaiterMutationLock({ rootDir, repo, base }, () =>
         pruneMergeLeaseWaitersUnlocked({ rootDir, repo, base, now: acquiredAt, host: holderHost, pidAliveFn }));
-      const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
       return { acquired: false, leasePath, lease: existingLease, existingLease, waiter, reclaim,
-        queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
+        queuePosition: waiterQueuePosition(waiters, waiter, acquiredAt) };
     }
   }
 
@@ -1052,15 +1073,14 @@ export function acquireMergeLease({
         reason: retry.parkedReason || 'no-merge-backoff', retry };
     }
     const waiters = waiterState.waiters;
-    const readyWaiters = waiters.filter(w => Date.parse(w.notBefore) <= Date.parse(acquiredAt) || !w.notBefore);
+    const readyWaiters = waiters.filter(w => waiterReady(w, acquiredAt));
     if (readyWaiters.length > 0) {
       if (!waiter?.waiterId) {
         return { acquired: false, leasePath, lease: null, existingLease: null, waiters, prunedWaiters: waiterState.pruned };
       }
       if (readyWaiters[0]?.waiterId !== waiter.waiterId) {
-        const queueIndex = waiters.findIndex((w) => w.waiterId === waiter.waiterId);
         return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters,
-          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null, prunedWaiters: waiterState.pruned };
+          queuePosition: waiterQueuePosition(waiters, waiter, acquiredAt), prunedWaiters: waiterState.pruned };
       }
     }
 
@@ -1089,9 +1109,8 @@ export function acquireMergeLease({
     } catch (err) {
       if (err?.code === 'EEXIST') {
         const beat = readJsonFile(leasePath, null);
-        const queueIndex = waiter ? waiters.findIndex((w) => w.waiterId === waiter.waiterId) : -1;
         return { acquired: false, leasePath, lease: beat, existingLease: beat, waiter,
-          queuePosition: queueIndex >= 0 ? queueIndex + 1 : null };
+          queuePosition: waiterQueuePosition(waiters, waiter, acquiredAt) };
       }
       throw err;
     }
@@ -1132,8 +1151,7 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
       && r.head === lease.holderHead && !attemptExpired(r, at));
     if (previous?.noMergeLeaseId === lease.leaseId) return previous;
     const noMergeReleases = (previous?.noMergeReleases || 0) + 1;
-    const consecutiveNoMergeReleases = !chargeable ? 0 : previous?.noMergeReason === reason
-      ? (previous.consecutiveNoMergeReleases || 0) + 1 : 1;
+    const consecutiveNoMergeReleases = chargeable ? (previous?.consecutiveNoMergeReleases || 0) + 1 : 0;
     const parkedReason = previous?.parkedReason || (consecutiveNoMergeReleases >= parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS)
       ? 'repeated-no-merge-release' : null);
     const backoffMs = loadAwareTimeoutMs(Math.min(WATCHER_POLL_INTERVAL_MS,

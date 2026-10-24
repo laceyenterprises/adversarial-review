@@ -595,7 +595,7 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 ## Hammer merge logic
 
 Daemon and closer merge requests share FIFO arrival order. A failed holder
-re-enters at the tail with exponential backoff; repeated same-step failures
+re-enters at the tail with exponential backoff; consecutive chargeable failures
 park the head with `repeated-no-merge-release` after the existing attempt cap.
 Planned CI-wait yields and retryable aborts retain backoff but reset consecutive
 failure counting; non-permanent daemon failures yield too. Yields retain the
@@ -1815,6 +1815,15 @@ approved disposable offline safe canary of deployed code; it does not inspect
 live queues, credentials or running daemon freshness. This worker does not run
 host mode. Node dependencies and local Git must already be installed.
 
+LAC-2096: closer recovery reads canonical Postgres request/lineage work-item and
+logical-job identity without assuming launch ticket/head columns. Conflicting
+or unidentified evidence preserves ownership; operator settlement requires its
+ticket-wide absence proof. SQLite compatibility, lifecycle states and smoke
+steps remain unchanged. After normal deployment, the runtime owner can record an
+owner-qualified dry-run with the explicit canonical target as described in the
+[closure runbook](docs/RUNBOOK-ama-closure.md) and `post-merge-verify.json`.
+Source validation does not authorize apply or incident recovery.
+
 REVIEWEVIDENCE-01: new PR blockers need a resolvable head file/line and a concrete
 input/state plus wrong outcome. Unsupported findings remain visible as
 non-blocking with a reason. Evidence-backed fixer disputes close on an unchanged
@@ -2676,3 +2685,5 @@ supervisor. Require `.capabilities.admission.available == true` and
 Empty organic evidence and live-reader/routing composition remain pending.
 See the [store contract](docs/data-model/finalization-ledger.md#fifo-admission-and-clean-reviews-mgq-03)
 and [operator observation procedure](docs/finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).
+
+LAC-2096 deployment restores automatic daemon intent reconciliation; pre-deploy reader grants and affected intents must be checked. Canonical identity/absence guarantees are PostgreSQL-scoped; producer-shaped SQLite ticket recovery remains fenced. See the recovery deployment boundaries in the closure runbook.

@@ -340,7 +340,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    or a terminal no-merge comment.
    For other terminal stops, the comment must contain the line `HAM closing status — no merge.`.
    Never post it after merge or claim remediation/rebase completion as merge.
-   At the gate-attempt cap, copy the acquire result's `closingStatus` verbatim
+   At either lease admission cap (gate attempts or repeated no-merge releases),
+   copy the acquire result's `closingStatus` verbatim
    into that comment and terminal audit.
 0c. **Run every step in the foreground (HAMBG-02).** If a step can exceed your tool's timeout, split it into repeated
    foreground polls. Never end your final message while a command you started is still running. Each exit needs a merge or

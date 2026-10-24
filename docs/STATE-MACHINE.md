@@ -1061,8 +1061,7 @@ guards still apply, and an already captured prompt path must remain unchanged.
 
 Merge lease scheduling uses FIFO arrival across daemon and closer roles.
 A non-terminal no-merge release rejoins at the tail with persistent PR/head
-exponential backoff; delayed requests yield to ready waiters. Repeating the same
-reason through the existing attempt cap parks that head with
+exponential backoff; delayed requests yield to ready waiters. Repeating chargeable failures through the existing attempt cap parks that head with
 `repeated-no-merge-release`; a new head or explicit reset recovers it. Planned
 CI-wait yields and retryable aborts reset the consecutive failure count, retain
 backoff and never create a park. Yields keep the gate charge; aborts refund it
@@ -1960,7 +1959,17 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Exact-key reads project missing identity columns as null on SQLite and Postgres.
+Postgres reads resolve ticket identity from optional launch columns,
+`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
+`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
+and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
+from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
+identity includes the existing target projection, linked logical jobs and
+provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
+over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
+adoption; null projections never override positive canonical evidence. Status,
+retry-chain and bounded snapshot readers use the same identity projection.
+SQLite keyed/status reads retain their optional-column compatibility.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -2018,7 +2027,14 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. Dry-run remains the default;
+that window refuses this ticket-based recovery. A Postgres launch with no
+readable ticket identity also blocks absence proof; the reader never substitutes
+`NULL = ticket` for a canonical lookup. The query includes the exact attempt
+boundary and null request timestamps and never filters repository, head or
+terminal status. An operator key read returning zero cannot bypass an unreadable
+supplemental ticket query. A returned unidentified, conflicting or same-ticket
+wrong-head receipt remains ambiguous even when terminal; an empty ticket query
+cannot settle it. Dry-run remains the default;
 apply requires the directory owner's UID, an operator reason, and a durable
 `settlement-authorized` audit before lease/intent mutation, followed by the
 completion audit. Audit evidence includes the recorded ID and both queries.

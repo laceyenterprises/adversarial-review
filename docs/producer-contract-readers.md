@@ -42,9 +42,15 @@ admission. `readFleetQuota(payload)` preserves the original floor and its
 `weeklyMeasurementReason` in `result.payload.reserveFloors[credential]`. The
 corresponding `result.reserveFloors[credential].source` names the selected field.
 Retain both together: a measured `measurement` is never a seven-day reading.
-`readReserveFloorWeeklyEvidence` returns the same source but callers using that
-standalone reader must retain the input floor's reason themselves. No new SDK
-method or package replacement is required.
+The repository's `readReserveFloorWeeklyEvidence` export from
+`src/fleet-quota-status.mjs` aliases `readWeeklyOnlyReserveFloorEvidence`. For
+current floors (those with a `weeklyMeasurementReason` key), this wrapper clears
+the short-window `measurement` candidate before calling the SDK reader and
+forwards `weeklyMeasurementReason` in its result. If no weekly candidate remains,
+it returns `measurement: null` and `source: null`, even when the raw SDK reader
+would select `source: 'measurement'`. Floors without the reason key retain the
+legacy fallback. The table below distinguishes raw SDK evidence from this
+repository's weekly-only admission policy. No SDK replacement is required.
 
 | Weekly input | Reason key | Other measurement | SDK evidence/source | Review weekly-only policy |
 |---|---|---|---|---|

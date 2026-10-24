@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { parseProducerContracts } from '@agent-os/app-sdk';
 
 const [input, producerRevision, ...extra] = process.argv.slice(2);
-if (!input || !/^[a-f0-9]{40}$/.test(producerRevision || '') || extra.length) {
+if (!input || !/^[a-f0-9]{40}$/i.test(producerRevision || '') || extra.length) {
   throw new Error('usage: node scripts/contracts/refresh-reserve-floors.mjs <public-export.json> <producer-revision>');
 }
 const bytes = readFileSync(input);

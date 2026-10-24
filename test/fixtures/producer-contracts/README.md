@@ -1,6 +1,13 @@
 # Vendored producer artifacts
 
-Copied owner records and captures are verbatim. `provenance.json` is authoritative:
+LVR-09 recorded examples are extracted from the immutable SDK 0.4.0 public
+snapshot. `provenance.json` pins per-producer versions and hashes under `recorded`
+and exposes `producerHashes` for the report-only stale command. JSON recordings
+retain compact producer canonical bytes; the token text retains export lines
+verbatim. Refresh with `scripts/contracts/refresh-recorded.py`, never by hand.
+Consumer drift failures name the producer and capture contract version.
+
+Historical copied owner records and captures are verbatim. `provenance.json` is authoritative:
 relative links resolve under each artifact's `source` path in agent-os at its
 pinned `revision`, rather than relative to this checkout. Revision mentions in
 copied READMEs describe their original capture history. Only captures listed in

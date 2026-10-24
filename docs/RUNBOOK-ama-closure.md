@@ -484,6 +484,12 @@ watchdog, including after the old review-round ceiling. NXA-07 removes the repla
 HCP, required-check, protection, identity and lease checks described in this
 runbook still decide every mutation.
 
+The closer supplies verified terminal-HAM evidence from the eligibility
+predicate to the shared decision, with both current and reviewed heads. This
+prevents a certified completion from selecting another no-merge retry while
+preserving CI waits and repair, live ownership, stop controls and retry limits.
+A handed-to-review lease cannot reuse that terminal proof.
+
 The shadow (`src/pr-next-action-shadow.mjs`, reached through the import-free
 consumer seam `src/pr-next-action-consumer.mjs`) runs at closure orchestration
 (selected shared workflow), the posted-review handler, the no-progress lane, the

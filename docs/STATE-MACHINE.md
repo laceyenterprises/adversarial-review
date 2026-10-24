@@ -2099,5 +2099,11 @@ No-progress scheduling retains the selected actor through stops, caps and drain.
 Background preflight replaces changed facts and re-decides, preserving CI repair
 admission alongside UNKNOWN. Existing lifecycle states, terminal settlement,
 claim CAS, execution proof, retry limits and shared lease transitions remain.
+The closer carries the eligibility predicate's verified terminal-HAM evidence
+into the shared snapshot, bound to the current and reviewed heads. That proof
+allows certified completion to proceed through the CI and review gates rather
+than selecting another retry solely because the worker exited without merging.
+Live ownership, stop controls and retry limits retain priority; a handoff to
+review invalidates the terminal proof for successor selection.
 Offline handoff smoke verifies the adapter matrix; organic rollout is separate
 operator/SRE acceptance. Source rollback is revision `4d06237c`.

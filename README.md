@@ -1737,7 +1737,7 @@ poll and promotes the owner to review, once per head. SRE verifies the next
 deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
-<a id="smv-handoff"></a>**smv-handoff:** NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and deterministic automatic stops retain
 closure-recovery ownership. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission

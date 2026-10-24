@@ -345,6 +345,18 @@ if (scenario === 'clean') {
     durableCleanupAndDrainFence: true, releaseReceiptRetained: true, terminalWithoutPgidReadmitted: true,
     immediateFailedReviewRecovery: true };
 } else if (scenario === 'handoff') {
+  const terminalHead = 'a'.repeat(40), reviewedHead = 'b'.repeat(40);
+  const terminalOptions = {
+    reviews: { headSha: reviewedHead, verdict: 'request changes', blockingFindingState: 'known',
+      blockingFindingCount: 1, nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    launches: { closer: { headSha: terminalHead, row: { status: 'succeeded' }, outcome: 'no-merge', retryable: true } },
+    progress: { terminalReview: { validated: true, headSha: terminalHead, reviewedHeadSha: reviewedHead } },
+  };
+  for (const [conclusion, action] of [['PENDING', 'wait-for-CI'], ['FAILURE', 'hammer'], ['SUCCESS', 'daemon-merge']]) {
+    assert.equal(matrixPair({ ...terminalOptions, checks: { conclusion } }).decision.action, action);
+  }
+  assert.equal(matrixPair({ ...terminalOptions, progress: { terminalReview: {
+    validated: true, headSha: 'c'.repeat(40), reviewedHeadSha: reviewedHead } } }).decision.reason, 'retry-no-merge');
   for (const [name, observations, action, actor] of actionCases) {
     const shared = matrixPair(observations);
     assert.deepEqual([shared.decision.action, shared.decision.actor], [action, actor], name);

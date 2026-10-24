@@ -1337,7 +1337,7 @@ test('GHSCOPE-01: an unrelated parent-poll rate limit does not suppress healthy 
 });
 
 
-test('explicit holds override an automated snapshot in the persisted no-progress lane', async () => {
+test('shared operator holds retain ownership despite stale automated diagnostics', async () => {
   const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
   const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
   for (const deferredBy of [null, 'drain']) {
@@ -1348,7 +1348,8 @@ test('explicit holds override an automated snapshot in the persisted no-progress
     const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => ({ review_status: 'posted' }),
       logger: { warn() {}, log() {} } });
     const value = { operatorHoldReason: 'operator-label-required:fixture-approved', hammerRouteActive: true,
-      nextAction: { head: headSha, action: 'hammer', actor: 'hammer', queue: { intent: 'dispatch', deferredBy } } };
+      nextAction: { head: headSha, action: 'operator-hold', actor: 'operator',
+        reason: 'operator-label-required:fixture-approved', queue: { intent: 'hold', deferredBy } } };
     for (let i = 0; i < 2; i++) await gate.record(handler, { value });
     const ledger = readNoProgressLane(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber });
     assert.equal(ledger.progressClass, 'operator-decision-required');

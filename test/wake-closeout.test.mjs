@@ -90,7 +90,8 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(f.wakes.length, 1);
   assert.equal(dispatches.length, 1);
-  assert.equal(dispatches[0].dispatchContext.commentOnlyFinalRoundResume, true);
+  assert.equal(dispatches[0].sharedNextAction.decision.action, 'hammer');
+  assert.equal(dispatches[0].sharedNextAction.decision.reason, 'suppressed-final-push');
   assert.equal(dispatches[0].dispatchContext.targetRemediationSha, pushedHead);
   assert.equal(dispatches[0].reviewState.headSha, reviewedHead, 'wake never changes reviewed merge evidence');
   assert.equal(requestReviewRereview({ rootDir: f.rootDir, repo, prNumber,
@@ -100,33 +101,41 @@ test('suppressed final-round push waits for CI, then wakes and reaches the hamme
   'one wake per recorded head');
 });
 
-test('a suppressed round with no push keeps the current-head wake and unrelated-head refusal', t => {
-  const f = fixture(t, { completion: {} });
-  assert.equal(f.wake({ headSha: reviewedHead, eligibility: { eligible: true, reasons: [] } }).outcome, 'requested');
-  assert.equal(f.wake().reason, 'stale-head');
+test('legacy eligibility and final-round records cannot select a wake without a shared decision', t => {
+  const f = fixture(t);
+  for (const eligibility of [{ eligible: true, reasons: [] },
+    { eligible: false, reasons: ['stale-head'] }]) {
+    assert.equal(f.wake({ eligibility }).reason, 'not-eligible');
+  }
+  assert.equal(f.wakes.length, 0);
 });
 
-for (const [label, overrides, wakeArgs, status] of [
-  ['unrelated push', {}, { headSha: unrelatedHead }],
-  ['different reviewed head', {}, { reviewedHeadSha: unrelatedHead }],
-  ['unsuppressed round', { reReview: { requested: true } }, {}],
-  ['blocking round', { finalRound: undefined, reviewBody: '## Verdict\nRequest changes' }, {}],
-  ['in-progress round', {}, {}, 'in-progress'],
+for (const [label, patch, snapshotHead] of [
+  ['foreign decision head', { head: unrelatedHead }, pushedHead],
+  ['foreign snapshot head', {}, unrelatedHead],
+  ['recovery owner', { actor: 'closure-recovery', queue: { intent: 'reconcile' } }, pushedHead],
+  ['pending checks', { action: 'wait-ci', actor: 'ci', queue: { intent: 'observe' } }, pushedHead],
+  ['drain deferral', { queue: { intent: 'dispatch', deferredBy: 'drain' } }, pushedHead],
 ]) {
-  test(`${label} cannot inherit the recorded final-round wake`, t => {
-    const f = fixture(t, overrides, status);
-    assert.equal(f.wake(wakeArgs).reason, 'stale-head');
+  test(`${label} cannot wake the selected hammer`, t => {
+    const f = fixture(t);
+    const shared = { snapshot: { head: snapshotHead }, decision: { head: pushedHead,
+      action: 'hammer', actor: 'hammer', reason: label, queue: { intent: 'dispatch' }, ...patch } };
+    assert.equal(f.wake({ shared }).reason, label);
     assert.equal(f.wakes.length, 0);
   });
 }
 
-test('a recorded push preserves other wake eligibility misses', t => {
-  const f = fixture(t);
-  for (const reason of ['ci-not-green', 'verdict-not-eligible', 'branch-protection-missing-gate', 'labels-unavailable']) {
-    assert.equal(f.wake({ eligibility: { eligible: false, reasons: ['stale-head', reason] } }).reason, reason);
-  }
-  assert.equal(f.wakes.length, 0);
-});
+for (const [action, actor, intent] of [['hammer', 'hammer', 'dispatch'], ['daemon-merge', 'daemon', 'daemon']]) {
+  test(`shared ${action} selection wakes once on its exact head`, t => {
+    const f = fixture(t);
+    const shared = { snapshot: { head: pushedHead }, decision: { head: pushedHead, action, actor,
+      reason: 'selected', queue: { intent } } };
+    assert.equal(f.wake({ shared }).outcome, 'requested');
+    assert.equal(f.wake({ shared }).outcome, 'duplicate');
+    assert.equal(f.wakes.length, 1);
+  });
+}
 
 for (const pendingCiOnly of [true, false]) {
   test(`suppressed completion names hammer ownership with pending CI ${pendingCiOnly}`, t => {

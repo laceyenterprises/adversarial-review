@@ -165,7 +165,6 @@ import {
   HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
   evaluateHammerDeferralQueue,
-  grantTransientHammerRetry,
   normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
@@ -4754,8 +4753,6 @@ async function maybeDispatchAmaCloserAttempt({
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
   const reviewHandoffLease = prMetadata.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, decisionIdentity) : null;
-  const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
-    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
   // Standalone entry points build the same evidence contract. Adopted callers
   // pass their pair; no dispatch reason or worker class selects a successor.
   if (!closureDecisionMatches(sharedNextAction, decisionIdentity)) {
@@ -4806,7 +4803,11 @@ async function maybeDispatchAmaCloserAttempt({
       job: { status: 'in_progress', headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
-      primaryChange: verdict.trace.primaryChange },
+      primaryChange: verdict.trace.primaryChange,
+      ...(verdict.trace.hamTerminalRemediation?.ok === true ? { terminalReview: {
+        validated: true, headSha: prMetadata.headSha, reviewedHeadSha: reviewState.headSha,
+      } } : {}),
+    },
   });
   if (!verdict.trace.primaryChange.ok) {
     observeSharedDecision(sharedNextAction);
@@ -4820,6 +4821,8 @@ async function maybeDispatchAmaCloserAttempt({
   observeSharedDecision(sharedNextAction);
   if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
+  const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
+    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
   const orphanAdmit = ownerProofRecovery;
   let queuedParkAudit = null;
   if (prMetadata?.headSha && verdict.trace?.hamTerminalRemediation?.ok === true) {
@@ -6673,36 +6676,11 @@ async function maybeDispatchAmaCloserAttempt({
     // pre-exec like the per-head record), so an interrupted-in-flight dispatch
     // never bumped it — there is no phantom increment to reclaim here. A deploy
     // bounce mid-launch simply never counted, which is the correct fail-safe.
-    let hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
+    const hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
       jobKey: reviewedSha,
       headSha: targetRemediationSha,
       lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
     });
-    // STALECLOSER-03: a hammer "no merge" whose only blockers were transient
-    // (exact-head CI pending, mergeability UNKNOWN) leaves this closer head
-    // eligible under the shared predicate once they clear. Re-open the
-    // series/target cap ONCE per head, never the lifetime ceiling, so the
-    // durable retry needs no operator step and no budget bump.
-    const closerAuthoredStale = dispatchContext?.closerAuthoredStale;
-    if (hammerRetryCapDecision.capExhausted && !hammerRetryCapDecision.lifetimeCapExhausted
-      && closerAuthoredStale?.eligible === true && closerAuthoredStale.currentHead === targetRemediationSha) {
-      const grant = grantTransientHammerRetry(rootDir, hammerCapIdentity, {
-        jobKey: reviewedSha,
-        headSha: targetRemediationSha,
-        lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
-        now: dispatchContext.dispatchedAt,
-      });
-      logAmaCloserDispatchEvent(logger, 'ama_closer.transient_retry_grant', {
-        repo, prNumber, headSha: targetRemediationSha, reviewedSha, ...grant,
-      }, { level: grant.granted ? 'info' : 'warn' });
-      if (grant.granted) {
-        hammerRetryCapDecision = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, hammerCapIdentity), {
-          jobKey: reviewedSha,
-          headSha: targetRemediationSha,
-          lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
-        });
-      }
-    }
     sharedNextAction = reviseClosureNextAction(sharedNextAction, { policy: {
       ...sharedNextAction.snapshot.observations.policy?.value,
       hammerCap: { headSha: prMetadata.headSha, retryExhausted: hammerRetryCapDecision.capExhausted,

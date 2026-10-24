@@ -24,6 +24,7 @@ import {
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { readClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
 import {
   acquireAmaCloserLease,
@@ -60,6 +61,7 @@ function hammerDispatchArgs(rootDir, overrides = {}) {
     guardStackedBaseImpl: async () => null,
     reviewState: {
       verdict: 'comment-only',
+      reviewCycleExhausted: true,
       headSha: REVIEWED_HEAD,
       riskClass: 'low',
       remediationPending: false,
@@ -129,7 +131,7 @@ function hammerDispatchDeps(overrides = {}) {
       execCalls.push({ cmd, args });
       return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`, dispatchId: `dispatch_hammer_${execCalls.length}`, launchRequestId: execCalls.length === 1 ? 'lrq_hammer' : `lrq_hammer_${execCalls.length}` }), stderr: '' };
     },
-    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -543,7 +545,7 @@ test('maybeDispatchAmaCloser takes a green descendant after comment-only final r
   const deps = hammerDispatchDeps();
   const result = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootDir, {
-      reviewState: { nonBlockingFindingCount: 1 },
+      reviewState: { nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: true },
       prMetadata: {
         headSha: 'a'.repeat(40),
         statusCheckRollup: [
@@ -1346,7 +1348,7 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
   assert.equal(audit.closureAuthority, 'ham-terminal-remediation');
 });
 
-test('same-head terminal HAM remediation parks for operator when structural gates fail', async (t) => {
+test('same-head terminal HAM evidence cannot merge red CI or invent an operator hold', async (t) => {
   const failureRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-failure-'));
   t.after(() => rmSync(failureRoot, { recursive: true, force: true }));
   const failureDeps = hammerDispatchDeps();
@@ -1394,8 +1396,9 @@ test('same-head terminal HAM remediation parks for operator when structural gate
       }),
     }),
   });
-  assert.equal(failureProbe.reason, 'current-head-ham-terminal-remediation-needs-operator');
-  assert.equal(failureProbe.needsOperator, true);
+  assert.equal(failureProbe.reason, 'existing-dispatch-succeeded');
+  assert.notEqual(failureProbe.needsOperator, true);
+  assert.equal(readClosureNextAction(failureProbe).decision.reason, 'ci-red-final');
   assert.equal(mergeCalls.length, 0);
   assert.equal(
     readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
@@ -1585,7 +1588,7 @@ test('active target-head lease on head advance defers without overwriting old-he
   );
 });
 
-test('stale target-head pending lease on head advance is reclaimed before dispatch', async (t) => {
+test('dead target-head pending lease is reconciled without dispatching over the captured owner', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-target-stale-pending-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   acquireAmaCloserLease({
@@ -1623,11 +1626,10 @@ test('stale target-head pending lease on head advance is reclaimed before dispat
     }),
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.launchRequestId, 'lrq_new_head');
+  assert.equal(result.dispatched, false);
+  assert.equal(readClosureNextAction(result).decision.reason, 'live-owner');
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
-  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
-  assert.equal(currentLease.lrqId, 'lrq_new_head');
+  assert.equal(currentLease, null, 'the dead PID lease is reclaimed; this observation does not authorize a new dispatch');
 });
 
 test('terminal current-head hammer dispatch is not superseded after remediation advances the PR head', async (t) => {
@@ -1690,8 +1692,8 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
   });
 
   assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
-  assert.equal(result.needsOperator, true);
+  assert.equal(result.reason, 'existing-dispatch-succeeded');
+  assert.notEqual(result.needsOperator, true);
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
   assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
   assert.equal(currentLease.terminalOutcome, null);
@@ -1700,7 +1702,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
     { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
     (record) => record,
   );
-  assert.equal(currentRecord.lastError, undefined);
+  assert.equal(currentRecord.lastError, 'terminal-success-awaiting-audit-or-merged-signal');
 });
 
 test('fresh succeeded current-head hammer without HAM evidence is retried as a failure', async (t) => {
@@ -2144,6 +2146,7 @@ test('current-head hammer dispatch ignores old-head audit terminal outcome while
         row: { signal_kind: 'merged', head_sha: ADVANCED_HEAD },
         target: { repo: REPO, prNumber: PR_NUMBER },
       }),
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
     }),
   });
 
@@ -2154,7 +2157,7 @@ test('current-head hammer dispatch ignores old-head audit terminal outcome while
   assert.equal(currentLease.terminalOutcome, null);
 });
 
-test('valid current-head HAM terminal remediation escalates structural misses instead of re-hammering', async (t) => {
+test('valid current-head HAM terminal remediation leaves red CI repair to the shared HAM decision', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-valid-ham-no-rehammer-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = hammerDispatchDeps();
@@ -2179,11 +2182,8 @@ test('valid current-head HAM terminal remediation escalates structural misses in
     ...deps,
   });
 
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
-  assert.equal(result.needsOperator, true);
-  assert.ok(result.reasons.includes('ci-not-green'));
-  assert.equal(deps.execCalls.length, 0);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.execCalls.length, 1);
 });
 
 test('stale dispatched/null closer lease is terminalized instead of held forever', async (t) => {
@@ -2745,7 +2745,7 @@ function closerAuthoredStaleCapArgs(rootDir, closerAuthoredStale) {
   });
 }
 
-test('STALECLOSER-03: an eligible closer-authored head re-opens an exhausted series cap once per head', async (t) => {
+test('a legacy closer-authored eligibility diagnostic cannot reopen an exhausted shared series cap', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-closer-authored-stale-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   _resetHammerRetryCapAlertDebounceForTests();
@@ -2755,22 +2755,22 @@ test('STALECLOSER-03: an eligible closer-authored head re-opens an exhausted ser
   }
   const eligible = { eligible: true, decision: 'eligible', currentHead: ADVANCED_HEAD, reviewedHead: REVIEWED_HEAD };
 
-  // Without the shared predicate the closer refuses the stale head (agent-os#7801).
+  // Both diagnostic values must leave the shared retry ceiling intact.
   const refused = await maybeDispatchAmaCloser({
     ...closerAuthoredStaleCapArgs(rootDir, { ...eligible, eligible: false, decision: 'retry' }),
     ...hammerDispatchDeps({ deliverAlertImpl: async () => {} }),
   });
   assert.equal(refused.dispatched, false);
-  assert.deepEqual(refused.reasons, ['stale-review-head']);
+  assert.equal(refused.reason, 'hammer-retry-cap-exhausted');
 
   const deps = hammerDispatchDeps({ deliverAlertImpl: async () => {} });
   const result = await maybeDispatchAmaCloser({ ...closerAuthoredStaleCapArgs(rootDir, eligible), ...deps });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(deps.execCalls.length, 1, 'the closer re-dispatches without an operator step or budget bump');
+  assert.equal(result.dispatched, false, JSON.stringify(result));
+  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(deps.execCalls.length, 0);
   const ledger = readHammerRetryCapLedger(rootDir, identity);
-  assert.deepEqual(ledger.transientRetryHeads, { [ADVANCED_HEAD]: 1 });
-  assert.equal(ledger.lifetimeAttemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES + 1);
-  assert.equal(ledger.suppressed, false);
+  assert.equal(ledger.transientRetryHeads, undefined);
+  assert.equal(ledger.lifetimeAttemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
 });
 
 test('STALECLOSER-03: a conflicting closer head cannot reopen an exhausted series cap', async (t) => {
@@ -3190,7 +3190,7 @@ test('lease-held refusal leaves no orphaned dispatch reservation or HQ admission
   });
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
   assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'lease-held');
+  assert.equal(result.reason, 'live-owner');
   assert.equal(deps.execCalls.length, 0, 'the lease refusal happens before HQ admission');
   assert.deepEqual(readAmaCloserLease(rootDir, identity), priorLease, 'keep the real lease evidence unchanged');
   const record = readAmaCloserDispatchRecord(rootDir, identity);
@@ -3394,12 +3394,12 @@ for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-me
       });
       const backoff = await run('2026-07-06T12:02:00Z', ADVANCED_HEAD, 'UNKNOWN');
       assert.equal(backoff.reason, leaseWaitExhausted
-        ? (pendingCi ? 'hammer-merge-ready-checks-pending' : 'hammer-merge-ready-mergeability-unknown')
-        : 'hammer-merge-ready-backoff');
+        ? (pendingCi ? 'checks-pending' : 'mergeability-unknown')
+        : 'hammer-deferral-backoff');
       assert.equal(backoff.recoveryWait, true);
       assert.notEqual(backoff.needsOperator, true);
       const waiting = await run('2026-07-06T12:05:00Z', ADVANCED_HEAD, 'UNKNOWN');
-      assert.equal(waiting.reason, pendingCi ? 'hammer-merge-ready-checks-pending' : 'hammer-merge-ready-mergeability-unknown');
+      assert.equal(waiting.reason, pendingCi ? 'checks-pending' : 'mergeability-unknown');
       assert.notEqual(waiting.needsOperator, true);
       assert.equal(waiting.recoveryWait, true);
       assert.equal(merges, 0);
@@ -3466,6 +3466,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       }),
       options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
       ...hammerDispatchDeps({
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: scenario === 'stale park active repair' ? 'running' : 'failed' } }),
         execFileImpl: async (_cmd, args) => {
           calls.push(args);
           if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: scenario === 'stale park active repair' ? 'running' : 'failed' }), stderr: '' };
@@ -3495,9 +3496,9 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       assert.notEqual(result.needsOperator, true, JSON.stringify(result));
       assert.notEqual(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
     } else if (scenario === 'pending CI remains pending') {
-      assert.equal(result.reason, 'hammer-merge-ready-backoff');
+      assert.equal(result.reason, 'hammer-deferral-backoff');
       result = await run('2026-07-06T12:08:00Z');
-      assert.equal(result.reason, 'hammer-merge-ready-checks-pending');
+      assert.equal(result.reason, 'checks-pending');
       assert.equal(merges, 0);
     } else if (scenario === 'corrupt audit') {
       assert.equal(result.reason, 'park-audit-unreadable');
@@ -3547,7 +3548,7 @@ for (const mergeableState of ['MERGEABLE', 'UNKNOWN']) {
 }
 
 for (const scenario of ['missing ledger', 'corrupt ledger', 'wrong job key', 'missing launch id', 'missing dispatch record']) {
-  test(`certified park requires operator when ${scenario}`, async t => {
+  test(`certified park preserves shared CI waits and refuses unbounded merging: ${scenario}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-missing-bound-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
@@ -3578,9 +3579,21 @@ for (const scenario of ['missing ledger', 'corrupt ledger', 'wrong job key', 'mi
         }),
       });
       assert.equal(result.dispatched, false);
-      assert.equal(result.needsOperator, true, JSON.stringify(result));
-      assert.equal(result.reason, ['missing dispatch record', 'missing launch id'].includes(scenario)
-        ? 'current-head-ham-terminal-remediation-needs-operator' : 'hammer-deferral-ledger-unavailable');
+      if (scenario === 'corrupt ledger' && conclusion === 'PENDING') {
+        assert.equal(result.needsOperator, true, JSON.stringify(result));
+        assert.equal(result.reason, 'hammer-lifetime-ceiling-reached');
+      } else if (scenario === 'corrupt ledger') {
+        assert.equal(result.reason, 'hammer-deferral-backoff');
+        assert.notEqual(result.needsOperator, true);
+      } else if (conclusion === 'PENDING' && !['missing dispatch record', 'missing launch id'].includes(scenario)) {
+        assert.notEqual(result.needsOperator, true, JSON.stringify(result));
+        assert.equal(result.reason, 'checks-pending');
+        assert.equal(result.recoveryWait, true);
+      } else {
+        assert.equal(result.needsOperator, true, JSON.stringify(result));
+        assert.equal(result.reason, ['missing dispatch record', 'missing launch id'].includes(scenario)
+          ? 'current-head-ham-terminal-remediation-needs-operator' : 'hammer-deferral-ledger-unavailable');
+      }
     }
   });
 }
@@ -3605,7 +3618,7 @@ test('HAMCIWAKE-01 green own-head resume dispatches under the H1 budget', async 
     headSha: ADVANCED_HEAD, attempt: { outcome: 'deferred', reason: 'required-checks-pending',
       resumeOwed: true, resumeHead: ADVANCED_HEAD }, now: '2026-07-06T11:59:00Z' });
   const args = hammerDispatchArgs(rootDir, {
-    reviewState: { nonBlockingFindingCount: 1 },
+    reviewState: { nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: true },
     prMetadata: { headSha: ADVANCED_HEAD, statusCheckRollup: [
       { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
     ] },

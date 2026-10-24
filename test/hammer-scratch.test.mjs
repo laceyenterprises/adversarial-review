@@ -67,7 +67,7 @@ function dispatchArgs(root) {
   const gate = 'fixture/gate';
   const user = userInfo().username;
   return {
-    reviewState: { verdict: 'comment-only', headSha: head, riskClass: 'low', remediationPending: false,
+    reviewState: { verdict: 'comment-only', reviewCycleExhausted: true, headSha: head, riskClass: 'low', remediationPending: false,
       blockingFindingState: 'known', blockingFindingCount: 0,
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0, prAuthor: 'synthetic-builder' },
     prMetadata: { prNumber: 42, headSha: head, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE',

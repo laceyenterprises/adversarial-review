@@ -2139,7 +2139,7 @@ test('maybeDispatchAmaClosureFor mergeability matrix passes MERGEABLE and CLEAN 
   }
 });
 
-test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {
+test('resolveMergeAgentCoexistenceForWatcher retains AMA ownership after a dispatch failure without a shared successor decision', async () => {
   const decision = await resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow(),
     dispatchJob: {
@@ -2165,11 +2165,9 @@ test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via 
     }),
   });
 
-  assert.equal(decision.outcome, 'dispatch-merge-agent');
+  assert.equal(decision.outcome, 'ama-pending');
   assert.equal(decision.amaClosureResult.reason, 'dispatch-failed');
-  assert.deepEqual(decision.dispatchEnv, {
-    AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true',
-  });
+  assert.equal(decision.dispatchEnv, undefined);
 });
 
 test('resolveMergeAgentCoexistenceForWatcher treats eligible clean AMA dispatch as terminal, not await-operator', async () => {
@@ -2564,7 +2562,7 @@ test('resolveMergeAgentCoexistenceForWatcher retains follow-up findings ownershi
   });
 
   assert.equal(decision.outcome, 'ama-pending');
-  assert.equal(decision.recovery.action, 'await-remediation');
+  assert.equal(decision.recovery, undefined, 'diagnostic findings do not select a successor');
   assert.equal(decision.amaClosureResult.namedReason, 'not-eligible:blocking-findings-present');
 });
 

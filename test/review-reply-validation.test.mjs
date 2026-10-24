@@ -319,8 +319,8 @@ test('REVIEWVALID-01: rescue classifier and closer do not treat placeholders as 
     headSha: 'a'.repeat(40),
     reviewHeadSha: 'a'.repeat(40),
   });
-  assert.equal(rescue.decision, 'inconclusive');
-  assert.equal(rescue.reason, 'malformed-review');
+  assert.equal(rescue.decision, 'wait-closer');
+  assert.equal(rescue.reason, 'pr-unknown');
   assert.deepEqual(rescue.parsedFindings, []);
 
   assert.deepEqual(classifyBlockingFindings(body), { count: 0, state: 'unknown' });
@@ -330,8 +330,9 @@ test('REVIEWVALID-01: rescue classifier and closer do not treat placeholders as 
     reviewBody: VALID_REPLY, labels: [], mergeable: 'MERGEABLE', statusCheckRollup: [],
     headSha: 'a'.repeat(40), reviewHeadSha: 'a'.repeat(40),
   });
-  assert.equal(real.decision, 'remediation-eligible');
-  assert.equal(real.reason, 'addressable-findings');
+  assert.equal(real.decision, 'wait-closer', 'a review body alone cannot select dispatch');
+  assert.equal(real.reason, 'pr-unknown');
+  assert.equal(real.parsedFindings.length, 1);
 });
 
 test('REVIEWVALID-01: corroborating placeholder fields remain malformed', () => {
@@ -373,7 +374,7 @@ test('REVIEWVALID-01: component titles and virtual files retain all addressable 
     assert.equal(classifyMergeAgentRescue({
       reviewBody: reply, labels: [], mergeable: 'MERGEABLE', statusCheckRollup: [],
       headSha: 'a'.repeat(40), reviewHeadSha: 'a'.repeat(40),
-    }).decision, 'remediation-eligible');
+    }).parsedFindings.length, 2);
     const nonBlocking = reply.replace('## Blocking issues', '## Non-blocking issues')
       .replace('## Non-blocking issues\n- None.', '## Blocking issues\n- None.');
     assert.equal(parseReviewFindings(nonBlocking).nonBlocking.count, 2);
@@ -402,7 +403,7 @@ test('REVIEWVALID-01: markup in fenced code and prose labels is not a template e
           reviewBody: body, labels: [], mergeable: 'MERGEABLE', statusCheckRollup: [],
           headSha: 'a'.repeat(40), reviewHeadSha: 'a'.repeat(40),
         });
-        assert.equal(rescue.decision, 'remediation-eligible');
+        assert.equal(rescue.decision, 'wait-closer', 'routing requires a shared decision');
         assert.equal(rescue.parsedFindings.length, 1);
       }
     }

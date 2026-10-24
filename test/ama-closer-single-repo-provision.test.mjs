@@ -66,6 +66,7 @@ function closerArgs(rootDir, repo) {
   return {
     reviewState: {
       verdict: 'comment-only',
+      reviewCycleExhausted: true,
       headSha: HEAD,
       riskClass: 'low',
       remediationPending: false,

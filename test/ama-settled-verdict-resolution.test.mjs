@@ -702,7 +702,7 @@ test('E2E: settled-success + eligible + clean mergeability uses daemon route, no
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'daemon-clean-route');
+  assert.equal(result.reason, 'clean-exact-head');
   assert.equal(execCalls.length, 0, 'clean eligible PR must not spawn a click-only agent');
 });
 

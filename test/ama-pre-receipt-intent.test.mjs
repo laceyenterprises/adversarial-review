@@ -40,6 +40,8 @@ function fixture(t, patch = {}, lease = true) {
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };
+  // Older fixtures do not claim process-scan evidence. Pin unknown explicitly.
+  options.processExecFileSyncImpl = () => { throw Error('synthetic process scan unavailable'); };
   return { rootDir, options, record,
     read: () => readAmaCloserDispatchRecord(rootDir, identity),
     reconcile: extra => reconcilePreReceiptIntent(rootDir, identity, { ...options, ...extra }),
@@ -891,4 +893,174 @@ test('CLOSERINTENT-01: audited keyed recovery removes only a proven misattribute
   assert.equal(applied.evidence.misattributedLeaseLaunchRequestId, 'lrq_conflict');
   assert.equal(f.read().state, 'no-dispatch');
   assert.equal(readAmaCloserLease(f.rootDir, identity), null);
+});
+
+// CLOSERPENDINGDEAD-01: all process observations are synthetic and bounded.
+const processRow = (pid, command = 'synthetic-process', stamp = 'Thu Oct 22 10:18:18 2026') =>
+  `${pid} ${stamp} ${command}\n`;
+const processScan = (output = processRow(99, 'ps -axww -o pid= -o lstart= -o args=')) =>
+  (command, args, options) => {
+    assert.equal(command, 'ps');
+    assert.deepEqual(args, ['-axww', '-o', 'pid=', '-o', 'lstart=', '-o', 'args=']);
+    assert.equal(options.timeout, 1000);
+    assert.equal(options.maxBuffer, 4 * 1024 * 1024);
+    return output;
+  };
+const firstPoll = new Date(Date.parse(started) + 1000).toISOString();
+
+test('CLOSERPENDINGDEAD-01: macOS kernel_task PID 0 permits first-poll recovery', async t => {
+  const f = fixture(t);
+  const result = await f.reconcile({ now: firstPoll,
+    processExecFileSyncImpl: processScan(processRow(0, 'kernel_task') + processRow(99)),
+  });
+  assert.equal(result.status, 'no-launch');
+  assert.equal(f.read().reason, 'dead-submitter-no-launch-proven');
+  assert.equal(f.read().preReceiptReconciliation.processes.key.status, 'absent');
+  assert.equal(f.read().retryCount, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+});
+
+for (const mode of ['missing', 'null-start', 'invalid-start', 'foreign-pid', 'matching']) {
+  test(`CLOSERPENDINGDEAD-01: observed watcher with ${mode} identity overrides ESRCH`, async t => {
+    const dispatchWatcher = mode === 'missing' ? undefined : {
+      pid: mode === 'foreign-pid' ? 54321 : 12345,
+      startedAt: mode === 'null-start' ? null : mode === 'invalid-start' ? 'invalid' : started,
+    };
+    const f = fixture(t, { dispatchWatcher });
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({ now: firstPoll,
+      processExecFileSyncImpl: processScan(processRow(0, 'kernel_task') + processRow(12345)),
+    });
+    const watcher = f.read().preReceiptReconciliation.processes.watcher;
+    assert.equal(result.status, 'unknown');
+    assert.equal(watcher.status, mode === 'matching' ? 'live' : 'unknown');
+    assert.equal(watcher.reason, mode === 'matching' ? 'pid-present' : 'watcher-identity-unverified');
+    assert.equal(watcher.observedStartedAt, '2026-10-22T10:18:18.000Z');
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(f.read().retryCount, 2);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+  });
+}
+
+for (const reused of [false, true]) test(`CLOSERPENDINGDEAD-01: first poll re-takes dead submission (PID reused=${reused})`, async t => {
+  const f = fixture(t, { dispatchWatcher: { pid: 12345, startedAt: '2026-10-22T10:18:18.000Z' },
+    dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });
+  const logs = [];
+  const result = await f.reconcile({ now: firstPoll,
+    processKillImpl: reused ? () => {} : dead,
+    processExecFileSyncImpl: processScan(reused
+      ? processRow(12345, 'unrelated', 'Thu Oct 22 10:18:19 2026')
+        + processRow(12346, 'unrelated', 'Thu Oct 22 10:18:19 2026') : undefined),
+    logger: { warn: line => logs.push(JSON.parse(line)) },
+  });
+  assert.equal(result.status, 'no-launch');
+  assert.equal(f.read().reason, 'dead-submitter-no-launch-proven');
+  assert.equal(f.read().retryCount, 1);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).terminalOutcome, 'deferred');
+  assert.equal(result.record.preReceiptReconciliation.processes.watcher.status, 'gone');
+  assert.equal(result.record.preReceiptReconciliation.processes.submitter.status, 'gone');
+  assert.equal(result.evidence.rowCount, 0);
+  assert.ok(logs.some(log => log.event === 'ama_closer.pre_receipt_dead_submitter_reclaimed'
+    && log.query.rowCount === 0 && log.processes.key.status === 'absent'));
+  assert.equal((await f.reconcile()).status, 'unchanged');
+});
+
+for (const mode of ['unrelated', 'key-continuation', 'recorded-child']) {
+  test(`CLOSERPENDINGDEAD-01: multiline process arguments preserve ${mode} evidence`, async t => {
+    const f = fixture(t, { dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const output = processRow(mode === 'recorded-child' ? 12346 : 99, 'node -e "first line')
+      + '\n  continuation line\n'
+      + (mode === 'key-continuation' ? `hq dispatch --idempotency-key ${key}\n` : '')
+      + 'last line"\n' + processRow(100);
+    const result = await f.reconcile({ now: firstPoll, processExecFileSyncImpl: processScan(output) });
+    const processes = f.read().preReceiptReconciliation.processes;
+    assert.equal(result.status, mode === 'unrelated' ? 'no-launch' : 'unknown');
+    assert.equal(processes.key.status, mode === 'key-continuation' ? 'live' : 'absent');
+    assert.equal(processes.submitter.status, mode === 'recorded-child' ? 'live' : 'gone');
+    assert.deepEqual(processes.key.pids, mode === 'key-continuation' ? [99] : []);
+    assert.ok(!JSON.stringify(processes).includes('continuation line'), 'command lines stay private');
+    if (mode !== 'unrelated') {
+      assert.equal(f.read().retryCount, 2);
+      assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+    }
+  });
+}
+
+for (const mode of ['key-child', 'recorded-child', 'launch', 'watcher-live', 'scan-unreadable', 'scan-malformed', 'scan-orphan-continuation', 'scan-invalid-timestamp', 'scan-empty', 'scan-overflow', 'child-malformed', 'child-start-unreadable', 'watcher-unknown', 'ledger-unreadable']) {
+  test(`CLOSERPENDINGDEAD-01: ${mode} fences early recovery until death and absence are proven`, async t => {
+    const f = fixture(t, { dispatchSubmitter: { pid: 12346, startedAt: '2026-10-22T10:18:18.000Z' } });
+    const extra = { now: firstPoll, processExecFileSyncImpl: processScan() };
+    if (mode === 'key-child') extra.processExecFileSyncImpl = processScan(processRow(12347, `hq dispatch --idempotency-key ${key}`));
+    if (mode === 'recorded-child') extra.processExecFileSyncImpl = processScan(processRow(12346));
+    if (mode === 'launch') f.insert(receipt);
+    if (mode === 'watcher-live') extra.processKillImpl = () => {};
+    if (mode === 'scan-unreadable') extra.processExecFileSyncImpl = () => { throw Object.assign(Error('unavailable'), { code: 'ETIMEDOUT' }); };
+    if (mode === 'scan-malformed') extra.processExecFileSyncImpl = processScan('truncated process output');
+    if (mode === 'scan-orphan-continuation') extra.processExecFileSyncImpl = processScan('orphan continuation\n' + processRow(99));
+    if (mode === 'scan-invalid-timestamp') extra.processExecFileSyncImpl = processScan(processRow(99) + processRow(100, 'synthetic-process', 'invalid timestamp value!'));
+    if (mode === 'scan-empty') extra.processExecFileSyncImpl = processScan('');
+    if (mode === 'scan-overflow') extra.processExecFileSyncImpl = () => { throw Object.assign(Error('buffer limit'), { code: 'ENOBUFS' }); };
+    if (mode === 'child-malformed') updateAmaCloserDispatchRecord(f.rootDir, identity, current => ({ ...current, dispatchSubmitter: { pid: '12346' } }));
+    if (mode === 'child-start-unreadable') {
+      updateAmaCloserDispatchRecord(f.rootDir, identity, current => ({ ...current, dispatchSubmitter: { pid: 12346, startedAt: null } }));
+      extra.processExecFileSyncImpl = processScan(processRow(12346));
+    }
+    if (mode === 'watcher-unknown') extra.processKillImpl = () => { throw Object.assign(Error('unknown'), { code: 'EIO' }); };
+    if (mode === 'ledger-unreadable') extra.readIntentReceiptImpl = () => ({ ok: false, reason: 'synthetic unreadable' });
+    const leaseBefore = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile(extra);
+    assert.equal(result.status, mode === 'launch' ? 'receipt-recovered' : 'unknown');
+    assert.equal(f.read().retryCount, 2);
+    if (mode === 'launch') {
+      assert.equal(f.read().launchRequestId, receipt.launch_request_id);
+      return;
+    }
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), leaseBefore);
+    assert.equal(f.read().preReceiptReconciliation.deadlineAt, new Date(Date.parse(started) + 600_000).toISOString());
+    // The same fenced attempt becomes recoverable on the next poll with proof.
+    if (mode === 'child-malformed') updateAmaCloserDispatchRecord(f.rootDir, identity, current => ({ ...current, dispatchSubmitter: null }));
+    assert.equal((await f.reconcile({ now: firstPoll, processExecFileSyncImpl: processScan() })).status, 'no-launch');
+  });
+}
+
+test('CLOSERPENDINGDEAD-01: scan precedes ledger lookup so a launch committed as the child exits is recovered', async t => {
+  const f = fixture(t);
+  const result = await f.reconcile({ now: firstPoll, processExecFileSyncImpl: (...args) => {
+    f.insert(receipt);
+    return processScan()(...args);
+  } });
+  assert.equal(result.status, 'receipt-recovered');
+  assert.equal(f.read().retryCount, 2);
+});
+
+test('CLOSERPENDINGDEAD-01: unknown process evidence retains the original deadline settlement', async t => {
+  const f = fixture(t);
+  const extra = { processExecFileSyncImpl: () => { throw Error('unavailable'); } };
+  assert.equal((await f.reconcile({ ...extra, now: firstPoll })).status, 'unknown');
+  const result = await f.reconcile({ ...extra, now });
+  assert.equal(result.status, 'no-launch');
+  assert.equal(f.read().reason, 'keyed-no-launch-proven');
+});
+
+for (const liveChild of [false, true]) test(`CLOSERPENDINGDEAD-01: replay after lease deferral re-proves submitter absence (live=${liveChild})`, async t => {
+  const f = fixture(t);
+  updateAmaCloserLease({ rootDir: f.rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred' });
+  const result = await f.reconcile({ now: firstPoll,
+    processExecFileSyncImpl: processScan(liveChild ? processRow(12346, `hq dispatch --idempotency-key ${key}`) : undefined),
+  });
+  assert.equal(result.status, liveChild ? 'unknown' : 'no-launch');
+  assert.equal(f.read().retryCount, liveChild ? 2 : 1);
+});
+
+for (const replacement of ['intent', 'lease']) test(`CLOSERPENDINGDEAD-01: process scan cannot overwrite replacement ${replacement}`, async t => {
+  const f = fixture(t);
+  const result = await f.reconcile({ now: firstPoll, processExecFileSyncImpl: (...args) => {
+    if (replacement === 'intent') writeFileSync(amaCloserDispatchFilePath(f.rootDir, identity), JSON.stringify({ ...f.read(), custom: 'replacement' }));
+    else writeFileSync(amaCloserLeaseFilePath(f.rootDir, identity), JSON.stringify({ ...readAmaCloserLease(f.rootDir, identity), watcherPid: 54321 }));
+    return processScan()(...args);
+  } });
+  assert.equal(result.reason, 'intent-or-lease-changed');
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(f.read().retryCount, 2);
 });

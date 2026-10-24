@@ -51,8 +51,36 @@ routing retain ledger failure details and suppress unchanged repeated failures.
 
 After the persisted dispatch deadline, a successful empty idempotency-key query
 settles a fenced keyed intent as `no-dispatch`, reason `keyed-no-launch-proven`.
-Before the deadline, a submitting intent remains held. Replaced or foreign-host
-leases and leases with launch receipts cannot be cleared by empty-key evidence.
+CLOSERPENDINGDEAD-01 permits earlier settlement of a `submitting` intent only
+with a matching local pending lease, its watcher proven dead or its recorded
+PID start time replaced, no surviving recorded submitter, no process carrying
+the dispatch key, and a subsequent successful empty exact-key ledger query.
+A bounded `ps` scan (one second, 4 MiB, untruncated arguments) runs before the
+ledger read so a launch committed while its submitter exits is still observed.
+The scan accepts system rows such as macOS `kernel_task` (PID 0); recorded
+watcher and submitter handles still require positive PIDs. An observed watcher
+PID overrides an earlier ESRCH: a matching recorded start time is live, a
+different verified start time proves reuse, and missing, invalid or mismatched
+identity stays `unknown` with reason `watcher-identity-unverified`.
+New intents record `dispatchWatcher` and `dispatchSubmitter` as `{ pid,
+startedAt }`; start times are UTC at the operating system's second resolution.
+The background submission records the actual child before awaiting its receipt.
+An interrupted identity write is covered by the key scan. Old keyed intents
+without child identity can recover with the same complete scan and dead-watcher
+proof. A live recorded child holds even if its arguments no longer show the key.
+Unreadable, malformed, empty or overflowing process observations keep today's
+wait to the original deadline; unknown watcher identity cannot authorize early
+settlement. Missing or foreign-host leases, replacements and existing launch
+rows cannot authorize an early re-take. The existing deadline path is unchanged.
+Early settlement uses `no-dispatch`, reason `dead-submitter-no-launch-proven`,
+defers the lease and refunds the intent retry increment once. The next ordinary
+admission in that poll still enforces current-head review binding, eligibility,
+lease acquisition and retry limits. `preReceiptReconciliation.processes` stores
+bounded watcher, submitter and key-presence evidence, without command lines.
+`ama_closer.pre_receipt_dead_submitter_reclaimed` logs that evidence and the
+empty-key query. A crash after lease deferral replays only after re-proving the
+same evidence against that unchanged deferred lease. No config key, CI gate or
+live-state repair is added.
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 
@@ -113,8 +141,8 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
   as `deferred`. The intent's retry increment rolls back once. A crash after
   terminalization resumes this transition. The original owner may also settle
   its own prepared intent on a pre-submit return while still holding the fence.
-- Keyed submitting attempts before their deadline, ambiguous or unreadable
-  evidence stay explicitly unknown. Successful empty-key reads after expiry settle absence. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
+- Keyed submitting attempts without the complete dead-submitter proof above,
+  and ambiguous or unreadable evidence stay explicitly unknown. Successful empty-key reads after expiry settle absence. `preReceiptReconciliation` stores a fixed `firstObservedAt`,
   `deadlineAt`, latest `observedAt`, bounded reason and status. The diagnostic
   deadline is the original dispatch timeout (30 minutes from first observation
   if unavailable). On expiry status becomes `inspection-required`; ownership
@@ -286,6 +314,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
 | `dispatchIdempotencyKey` | optional string | Unique native HQ admission key for this attempt; unchanged across its inline retries. Absent on legacy intents. |
 | `dispatchPhase` | optional `prepared` or `submitting` | Submission boundary, meaningful only with the new key/fence protocol. Never inferred from age. |
+| `dispatchWatcher` / `dispatchSubmitter` | optional `{ pid, startedAt }` | Watcher and actual dispatch child identity. `startedAt` is a UTC ISO timestamp at second resolution, or null when capture is unreadable. Missing evidence stays conservative; the key scan also covers descendants and crashes before child persistence. |
 | `preReceiptReconciliation` | optional object | Bounded status/reason and observation/deadline evidence described above. `receipt-recovered` and `no-launch` store `observedAt`; legacy outcomes also store the bounded `query` evidence above. Unknown uses the fixed inspection horizon; `alertedAt` optionally records the durable inspection alert enqueue. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |

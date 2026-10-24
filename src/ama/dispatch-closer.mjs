@@ -1,5 +1,6 @@
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
+import { captureCloserProcess } from './dispatch-submitter.mjs';
 import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
@@ -4602,6 +4603,7 @@ export async function maybeDispatchAmaCloser(args) {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
           readLegacyIntentLaunchesImpl: args.readLegacyIntentLaunchesImpl,
           processKillImpl: args.processKillImpl, env: args.env || process.env,
+          processExecFileSyncImpl: args.processExecFileSyncImpl,
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
           deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
           readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
@@ -4711,6 +4713,8 @@ async function maybeDispatchAmaCloserAttempt({
   dispatchContext,
   execFileImpl = execFileAsync,
   processKillImpl = process.kill,
+  processExecFileSyncImpl,
+  processExecFileImpl,
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
   writeFileImpl = null,
@@ -7506,6 +7510,7 @@ async function maybeDispatchAmaCloserAttempt({
       state: 'dispatching',
       dispatchIdempotencyKey,
       dispatchPhase: 'prepared',
+      dispatchWatcher: await captureCloserProcess(process.pid, { processExecFileImpl, env }),
       lastObservedStatus: existingRecord?.lastObservedStatus || null,
       lastObservedAt: existingRecord?.lastObservedAt || null,
       lastError: null,
@@ -7950,7 +7955,7 @@ async function maybeDispatchAmaCloserAttempt({
           new Error('closer dispatch intent changed before submission'), { code: 'CLOSER_INTENT_CHANGED' });
         return { ...current, dispatchPhase: 'submitting' };
       });
-      execResult = await execFileImpl(hqPath, activeArgs, {
+      const submission = execFileImpl(hqPath, activeArgs, {
         env: dispatchEnv,
         cwd: AGENT_OS_ROOT,
         maxBuffer: 5 * 1024 * 1024,
@@ -7968,6 +7973,24 @@ async function maybeDispatchAmaCloserAttempt({
         killSignal: 'SIGTERM',
         ...(signal ? { signal } : {}),
       });
+      // promisified execFile exposes the actual spawned ChildProcess. Persist
+      // its identity while this background submission still holds the PR fence.
+      // A crash before this write is covered by the exact-key process scan.
+      // Observe rejection immediately while the asynchronous identity probe runs;
+      // awaiting submission below still propagates the original failure.
+      Promise.resolve(submission).catch(() => {});
+      try {
+        const dispatchSubmitter = await captureCloserProcess(submission?.child?.pid, { processExecFileImpl, env });
+        if (dispatchSubmitter) updateDispatchRecord(rootDir, targetDispatchIdentity, current => {
+          if (current?.dispatchIdempotencyKey !== dispatchIdempotencyKey
+            || current?.state !== 'dispatching') return current;
+          return { ...current, dispatchSubmitter };
+        });
+      } catch (error) {
+        logger?.warn?.(JSON.stringify({ event: 'ama_closer.submitter_identity_write_failed',
+          repo, prNumber, error: error.message }));
+      }
+      execResult = await submission;
       const refused = await refuseForeignLaunch(normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || '')));
       if (refused) return refused;
       retainScratchDir = true;

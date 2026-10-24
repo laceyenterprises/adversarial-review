@@ -1106,11 +1106,27 @@ without advancing the daily deadline; claimed batches retain their dispatch keys
 and concurrent polls cannot overlap a sweep. Valid batch PR evidence clears any
 prior batch error while outcomes remain pending until merge. Hourly settlement-only passes collect worker outcomes and
 observe batch PR merges without claiming new batches or dispatching workers.
-Dropped findings retain no result PR reference. No new smoke promise
+Dropped findings retain no result PR reference. Simplicity advice is a separate
+snapshot ledger with unassigned, dropped, assigned and completed applied/declined
+states. Only the final posted review of a source PR merged at or after the
+simplicity migration receipt can dispatch; historical backfill cannot launch old
+advice. Supersession, unmerged close and unverifiable/pre-cutoff merge timestamps
+record a dropped disposition on unassigned notes; reopen, receipt and metadata
+refreshes can restore current advice. Assigned snapshots remain immutable.
+Notes join a pending finding area or reserved `_simplicity`; advisory-only
+batches have no findings, and mixed-batch advice may touch its cited paths outside
+the finding area. Every note needs a boolean application outcome and nonempty
+reason, normalized to one line. Applied advice requires the same marked, merged
+batch PR as applied findings. Settlement retains only the validated outcome
+projection in `result_json`; backlog health includes waiting/assigned-unsettled
+notes, age and batch errors. No new smoke promise
 or CI gate is added; offline behavior cases cover capture, batch, closure and reporting.
 The SRE session verifies three merged captures before
 backing up config, disabling strict mode and bouncing the watcher, then confirms
-next-day batch PRs and complete applied/dropped coverage. Read per-area size,
+next-day batch PRs and complete applied/dropped coverage. Also observe advisory-only
+and mixed batches, historical-note exclusion, terminal note dispositions and
+normalized applied/declined results as declared in `post-merge-verify.json`.
+Read per-area size,
 age and batch errors through `pipeline-health` JSON (`nonBlockingBacklog`) or
 `node bin/review-findings.mjs backlog --db <existing-review-db>`.
 

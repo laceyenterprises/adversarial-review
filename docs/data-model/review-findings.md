@@ -45,7 +45,9 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 **Store:** `data/reviews.db`
 **Schema:** `migrations/20261021_review_findings.sql`
 **Source of truth:** `src/review-finding-records.mjs`,
-`src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`
+`src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`,
+`src/findings-backlog.mjs`, `src/findings-batch.mjs`,
+`migrations/20261024_simplicity_batch_lifecycle.sql`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and
@@ -161,30 +163,49 @@ Simplicity advisories are separate observations in `finding_batch_notes`, added
 by `migrations/20261024_simplicity_batch.sql`. Capture uses `extractSimplicityNote`
 on the stored review body, including bodies with zero findings. Each record has
 `note_id` (digest of pass ID and note), `pass_id`, `repo`, `pr_number`, `head_sha`,
-`note` and nullable `batch_id`. Re-projecting a pass replaces only its unassigned
-observations. Assigned snapshots are immutable. No advisory becomes a finding
+`note`, nullable `batch_id` and nullable `dropped_reason` (added by
+`migrations/20261024_simplicity_batch_lifecycle.sql`). Re-projecting a pass
+replaces only its unassigned observations. Assigned snapshots are immutable. No advisory becomes a finding
 or changes verdict parsing, strict-mode gates, round counts or retry caps.
 
 Only a confirmed merged source PR's final posted review can supply a note.
+Its verified `reviewed_prs.merged_at` must be at or after the original simplicity
+migration's `schema_migrations.applied_at` receipt, compared as timestamps.
+Historical backfill retains observations with `dropped_reason=historical-merge`
+and cannot dispatch advice for PRs merged before that cutoff. Missing or invalid
+merge timestamps use `merge-time-unverified` until refreshed.
 Final-pass ordering matches the finding backlog below, including late posting
-receipts. Superseded notes remain unassigned and cannot dispatch. Once a note
-on a given repository/PR/head is assigned, identical text on a duplicate pass
+receipts. Superseded or already-owned duplicate notes remain unassigned with
+`dropped_reason=superseded-final-review` and cannot dispatch. Unmerged closes
+use `pr-closed-without-merge`. Source lifecycle/merge-time changes, note capture,
+assignment and posting receipts recompute dispositions only for unassigned notes
+of that PR; reopen and late receipts can restore current advice. The migration
+also classifies existing unassigned rows once. The pending index excludes dropped
+notes, keeping daily scans scoped to live backlog. Once a note on a given
+repository/PR/head is assigned, identical text on a duplicate pass
 cannot dispatch again. Notes join the first pending finding area for their
 source review, or the reserved `_simplicity` area when there are no pending
 findings. The existing daily, transactional per-area fences apply; a batch
 assigns at most 100 notes as well as at most 100 findings. There is no historical
-corpus scan during migration; normal capture/backfill projects stored bodies.
+corpus body scan during migration; normal capture/backfill projects stored bodies
+without making pre-cutoff merged advice dispatchable.
 
 The batch prompt carries these notes separately and requires applying or
-declining each one. Application is allowed only when net lines or runtime cost
-decrease without changing behavior. The existing `outcomes.json` result gains
+declining each one. Advisory fixes may touch their cited files outside the
+finding area, so a mixed batch does not impose contradictory area limits.
+Application is allowed only when net lines or runtime cost decrease without changing behavior. The existing `outcomes.json` result gains
 `simplicityNotes: [{noteId, simplicityNoteApplied, reason}]`, covering every
-assigned note exactly once with a boolean and nonempty one-line reason.
+assigned note exactly once with a boolean and nonempty reason. The collector
+normalizes internal whitespace to one line before storing it, so a formatting
+slip cannot prevent settlement of valid findings.
 An advisory-only batch has `findings: []`. An applied note requires the same
 published PR identity, exact batch marker and confirmed merge as an applied
 finding; a fully declined/dropped batch requires no PR. On settlement, the
-complete validated outcome is retained in `finding_batches.result_json`, so
-true/false applied rates can be counted without reading worker artifacts.
+validated `{batchId, prNumber, headSha, findings, simplicityNotes}` projection
+is retained in `finding_batches.result_json`, so true/false applied rates can be counted without reading worker artifacts.
+Extra worker fields are discarded at both the top level and within outcomes;
+unapplied batches store null PR/head identity. Applied/declined note states derive
+from the completed batch result rather than mutable note columns.
 Historical batches have null `result_json`. Existing batches without notes
 continue to accept their original result shape.
 
@@ -238,8 +259,12 @@ repairing its existing batch; no automatic timeout releases its fence.
 `pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is
 `node bin/review-findings.mjs backlog --db <existing-review-db>`. Each unresolved
 repository/area reports `size`, `oldestAt`, `oldestAgeMs`, `waitingForMerge`,
-`inBatch` and `error`. Missing schema/store reports `available: false`, never a
-healthy empty backlog. No new alert transport or per-item provider read is added.
+`inBatch` and `error`. Size and age cover findings plus pending or
+assigned-unsettled notes, including advisory-only batches and their launch or
+settlement errors; completed notes and dropped unassigned notes are excluded.
+Unassigned notes waiting for a source merge use `_simplicity` until assignment;
+assigned notes retain the owning batch's area. Missing schema/store reports
+`available: false`, never a healthy empty backlog. No new alert transport or per-item provider read is added.
 Ready captures superseded by the final merged review are retained as dropped
 with reason `superseded-final-review`; they cannot inflate a later batch.
 Late posting receipts also enroll findings for already-observed merges.

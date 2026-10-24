@@ -26,6 +26,7 @@ function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'findings-batch-'));
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
+  db.prepare("UPDATE schema_migrations SET applied_at='2026-01-01 00:00:00' WHERE id='20261024_simplicity_batch.sql'").run();
   t.after(() => { db.close(); rmSync(rootDir, { recursive: true, force: true }); });
   const pass = (attempt = 1, text = body, sha = head) => {
     const key = { repo, prNumber: 7, attemptNumber: attempt, passKind: 'first-pass' };
@@ -37,6 +38,7 @@ function fixture(t) {
   };
   db.prepare("INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,revision_ref) VALUES (?,7,?,'codex','open',?)")
     .run(repo, '2026-01-01T00:00:00Z', head);
+  db.prepare("UPDATE reviewed_prs SET merged_at='2026-01-02T00:00:00Z'").run();
   return { rootDir, db, pass };
 }
 
@@ -126,6 +128,138 @@ test('advisory enrollment uses the final posted review, deduplicates, and surviv
     pass(5, adviceOnly);
     assert.deepEqual(claimFindingBatches(db, '2026-01-04'), []);
   } finally { other.close(); }
+});
+
+test('mixed batches let advisories use cited paths outside the finding area', async t => {
+  const { db, pass } = fixture(t);
+  const { claimFindingBatches, findingBatchPrompt } = await import('../src/findings-batch.mjs');
+  pass(1, body.replace('src/result.mjs', 'docs/result.md') + advisory);
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const [batch] = claimFindingBatches(db, '2026-01-02');
+  assert.equal(batch.area, 'docs');
+  const prompt = findingBatchPrompt(batch, [], 'outcomes.json', [{ simplicityNote: note }]);
+  assert.match(prompt, /Work only in area "docs"/);
+  assert.match(prompt, /Advisories may touch their cited files outside the finding area/);
+  assert.match(prompt, /src\/result.mjs:formatResult/);
+});
+
+test('historical backfill cannot dispatch advice; recent merges and late metadata remain recoverable', async t => {
+  const { db, pass } = fixture(t);
+  const { claimFindingBatches } = await import('../src/findings-batch.mjs');
+  const { backfillReviewFindings } = await import('../src/review-finding-records.mjs');
+  pass(1, adviceOnly);
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged',merged_at='2025-12-31T23:59:59Z'").run();
+  backfillReviewFindings(db);
+  assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason, 'historical-merge');
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+  // Unreadable timestamps cannot authorize a worker, and a refresh can repair them.
+  for (const mergedAt of [null, 'not-a-timestamp']) {
+    db.prepare('UPDATE reviewed_prs SET merged_at=?').run(mergedAt);
+    assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+    assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason, 'merge-time-unverified');
+  }
+  db.prepare("UPDATE reviewed_prs SET merged_at='2026-01-02T00:00:00Z'").run();
+  backfillReviewFindings(db);
+  assert.equal(claimFindingBatches(db, '2026-01-02').length, 1);
+});
+
+test('lifecycle migration retires legacy pending advice once and preserves owned notes', async t => {
+  const { db, pass } = fixture(t);
+  // Reconstruct the schema immediately before this additive migration so the
+  // upgrade is exercised against existing rows, not only an empty database.
+  db.exec(`DROP TRIGGER finding_batch_notes_lifecycle; DROP TRIGGER finding_batch_notes_capture;
+    DROP TRIGGER finding_batch_notes_assignment; DROP TRIGGER finding_batch_notes_receipt;
+    DROP VIEW finding_batch_note_candidates; DROP VIEW finding_batch_note_dispositions;
+    DROP INDEX finding_batch_notes_pending; ALTER TABLE finding_batch_notes DROP COLUMN dropped_reason;
+    CREATE INDEX finding_batch_notes_pending ON finding_batch_notes(repo,pr_number) WHERE batch_id IS NULL;
+    DELETE FROM schema_migrations WHERE id='20261024_simplicity_batch_lifecycle.sql';`);
+  const original = readFileSync(new URL('../migrations/20261024_simplicity_batch.sql', import.meta.url), 'utf8');
+  db.exec(original.slice(original.indexOf('CREATE VIEW finding_batch_note_candidates')));
+  const owned = pass(1, adviceOnly);
+  db.prepare("INSERT INTO finding_batches(batch_id,repo,area,day) VALUES ('legacy',?,'_simplicity','2025-12-31')").run(repo);
+  db.prepare("UPDATE finding_batch_notes SET batch_id='legacy' WHERE pass_id=?").run(owned.pass_id);
+  const pending = pass(2, adviceOnly.replace(note, 'Reuse `src/other.mjs` (10 lines saved).'));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged',merged_at='2025-12-31T00:00:00Z'").run();
+  ensureReviewStateSchema(db);
+  const rows = db.prepare('SELECT pass_id,batch_id,dropped_reason FROM finding_batch_notes ORDER BY pass_id').all();
+  assert.deepEqual(rows, [
+    { pass_id: owned.pass_id, batch_id: 'legacy', dropped_reason: null },
+    { pass_id: pending.pass_id, batch_id: null, dropped_reason: 'historical-merge' },
+  ]);
+  ensureReviewStateSchema(db);
+  assert.deepEqual(db.prepare('SELECT pass_id,batch_id,dropped_reason FROM finding_batch_notes ORDER BY pass_id').all(), rows);
+  const { claimFindingBatches } = await import('../src/findings-batch.mjs');
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+});
+
+test('note dispositions retire closed and superseded reviews, preserving assigned snapshots', async t => {
+  const { db, pass } = fixture(t);
+  const { claimFindingBatches } = await import('../src/findings-batch.mjs');
+  const { persistReviewFindings } = await import('../src/review-finding-records.mjs');
+  const old = pass(1, adviceOnly);
+  db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
+  assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason, 'pr-closed-without-merge');
+  db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
+  const current = pass(2, adviceOnly.replace(note, 'Reuse `src/result.mjs` (10 lines saved).'));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes WHERE pass_id=?').get(old.pass_id).dropped_reason,
+    'superseded-final-review');
+  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const assigned = db.prepare('SELECT * FROM finding_batch_notes WHERE pass_id=?').get(current.pass_id);
+  assert.equal(assigned.batch_id, batch.batch_id);
+  db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
+  persistReviewFindings(db, current.pass_id);
+  assert.deepEqual(db.prepare('SELECT * FROM finding_batch_notes WHERE pass_id=?').get(current.pass_id), assigned);
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const duplicate = pass(3, adviceOnly.replace(note, 'Reuse `src/result.mjs` (10 lines saved).'));
+  assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes WHERE pass_id=?').get(duplicate.pass_id).dropped_reason,
+    'superseded-final-review');
+});
+
+test('advisory-only health includes waiting and fenced notes, launch errors and settlement', async t => {
+  const { db, rootDir, pass } = fixture(t);
+  const { claimFindingBatches, settleFindingBatch, runFindingBatches } = await import('../src/findings-batch.mjs');
+  const { summarizeFindingBacklog } = await import('../src/findings-backlog.mjs');
+  pass(1, adviceOnly);
+  let [area] = summarizeFindingBacklog(db, Date.parse('2026-01-03T00:00:00Z')).areas;
+  assert.equal(area.area, '_simplicity');
+  assert.equal(area.size, 1);
+  assert.equal(area.waitingForMerge, 1);
+  assert.equal(area.oldestAt, '2026-01-01T00:00:01Z');
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const [batch] = claimFindingBatches(db, '2026-01-02');
+  await runFindingBatches({ db, rootDir, day: '2026-01-02', env: { HQ_ROOT: rootDir },
+    execFileImpl: async () => { throw Error('launch failed'); }, logger: { warn() {} } });
+  [area] = summarizeFindingBacklog(db).areas;
+  assert.equal(area.inBatch, 1);
+  assert.equal(area.waitingForMerge, 0);
+  assert.equal(area.error, 'launch failed');
+  const { note_id: noteId } = db.prepare('SELECT note_id FROM finding_batch_notes').get();
+  const result = { batchId: batch.batch_id, findings: [], prNumber: 8, headSha: head,
+    simplicityNotes: [{ noteId, simplicityNoteApplied: true, reason: 'Reuse the helper' }] };
+  assert.equal(settleFindingBatch(db, batch, result, { state: 'CLOSED', body: `Finding-Batch: ${batch.batch_id}` }), false);
+  assert.equal(summarizeFindingBacklog(db).areas[0].inBatch, 1);
+  settleFindingBatch(db, batch, result, { state: 'MERGED', body: `Finding-Batch: ${batch.batch_id}` });
+  assert.deepEqual(summarizeFindingBacklog(db).areas, []);
+});
+
+test('mixed settlement normalizes note whitespace and persists only validated fields', async t => {
+  const { db, pass } = fixture(t);
+  const { claimFindingBatches, settleFindingBatch } = await import('../src/findings-batch.mjs');
+  pass(1, body + advisory);
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(batch.batch_id);
+  const { note_id: noteId } = db.prepare('SELECT note_id FROM finding_batch_notes WHERE batch_id=?').get(batch.batch_id);
+  const result = { batchId: batch.batch_id, prNumber: { unvalidated: true }, headSha: 'irrelevant', extra: 'omit me',
+    findings: [{ findingId, outcome: 'dropped', reason: ' Already fixed ', extra: 'omit me' }],
+    simplicityNotes: [{ noteId, simplicityNoteApplied: false, reason: ' Already\r\n fixed\t on main ', extra: 'omit me' }] };
+  assert.equal(settleFindingBatch(db, batch, result), true);
+  assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, 'dropped');
+  const stored = JSON.parse(db.prepare('SELECT result_json FROM finding_batches').get().result_json);
+  assert.deepEqual(stored, { batchId: batch.batch_id, prNumber: null, headSha: null,
+    findings: [{ findingId, outcome: 'dropped', reason: 'Already fixed' }],
+    simplicityNotes: [{ noteId, simplicityNoteApplied: false, reason: 'Already fixed on main' }] });
 });
 
 test('FINDINGSBATCH-01 capture enrolls only the final review, deduplicates and survives reopen', async t => {

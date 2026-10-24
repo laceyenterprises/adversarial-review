@@ -69,7 +69,8 @@ Drop stale findings and noise with no cited line or behaviour (REVIEWEVIDENCE-01
 Apply valid findings together in one PR for this area, through normal review using hq pr open.
 Do not merge the PR yourself. Include the exact marker Finding-Batch: ${batch.batch_id} in its body.
 If all findings are dropped and no advisory is applied, open no PR. Do not change host state or configuration.
-${notes.length ? `This batch owns the simplicity advisories below. Apply each only if it reduces net lines or runtime cost
+${notes.length ? `This batch owns the simplicity advisories below. Advisories may touch their cited files outside the finding area.
+Apply each only if it reduces net lines or runtime cost
 without changing behavior; otherwise decline it. Advice alone never changes a review verdict or requests a remediation round.
 For every noteId, record simplicityNoteApplied as true or false and a one-line reason in simplicityNotes.
 Applied advice must be included in the same published PR as any applied findings.
@@ -98,21 +99,24 @@ export function settleFindingBatch(db, batch, result, pr = null) {
     if (result?.batchId !== batch.batch_id || !Array.isArray(result.findings) || result.findings.length !== ids.size) {
       throw Error('invalid-batch-manifest');
     }
-    for (const f of result.findings) {
+    const findings = result.findings.map(f => {
       if (!ids.delete(f.findingId) || !['applied', 'dropped'].includes(f.outcome)
         || typeof f.reason !== 'string' || !f.reason.trim()) throw Error('invalid-finding-outcome');
-    }
+      return { findingId: f.findingId, outcome: f.outcome, reason: f.reason.trim() };
+    });
     const notes = batchNotes(db, batch.batch_id);
     const noteIds = new Set(notes.map(n => n.noteId));
     const outcomes = result.simplicityNotes ?? [];
     if (!Array.isArray(outcomes) || outcomes.length !== noteIds.size) throw Error('invalid-advisory-manifest');
-    for (const n of outcomes) {
+    const simplicityNotes = outcomes.map(n => {
       if (!noteIds.delete(n.noteId) || typeof n.simplicityNoteApplied !== 'boolean'
-        || typeof n.reason !== 'string' || !n.reason.trim() || /[\r\n]/.test(n.reason.trim())) {
+        || typeof n.reason !== 'string' || !n.reason.trim()) {
         throw Error('invalid-advisory-outcome');
       }
-    }
-    if (hasAppliedOutcome(result)) {
+      return { noteId: n.noteId, simplicityNoteApplied: n.simplicityNoteApplied, reason: n.reason.replace(/\s+/g, ' ').trim() };
+    });
+    const applied = hasAppliedOutcome({ findings, simplicityNotes });
+    if (applied) {
       if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')
         || !hasBatchMarker(pr?.body, batch.batch_id)) {
         throw Error('batch-pr-evidence-mismatch');
@@ -122,10 +126,11 @@ export function settleFindingBatch(db, batch, result, pr = null) {
         return false;
       }
     }
-    for (const f of result.findings) db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
+    for (const f of findings) db.prepare(`UPDATE finding_backlog SET outcome=?,reason=?,result_pr=?
       WHERE batch_id=? AND finding_id=?`).run(f.outcome, f.reason.trim(), f.outcome === 'applied' ? result.prNumber : null, batch.batch_id, f.findingId);
     db.prepare("UPDATE finding_batches SET completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),error=NULL,result_json=? WHERE batch_id=?")
-      .run(JSON.stringify(result), batch.batch_id);
+      .run(JSON.stringify({ batchId: batch.batch_id, prNumber: applied ? result.prNumber : null,
+        headSha: applied ? result.headSha : null, findings, simplicityNotes }), batch.batch_id);
     return true;
   }).immediate();
 }

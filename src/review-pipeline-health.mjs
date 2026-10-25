@@ -1,3 +1,5 @@
+import { openReviewStateReadOnlyDb } from './pipeline-health-db.mjs';
+import { collectLaneLivenessEvidence } from './lane-liveness-evidence.mjs';
 import { summarizeFindingBacklog } from './findings-backlog.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -1331,34 +1333,6 @@ function safeAllCounting(db, sql, params = []) {
   return safeAll(db, holdAccountingAvailable.get(db) ? excludingHeldOpenRows(sql) : sql, params);
 }
 
-function openReviewStateReadOnlyDb(rootDir) {
-  const dbPath = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(dbPath)) {
-    return {
-      db: null,
-      status: { path: dbPath, exists: false, readable: false, error: 'missing' },
-    };
-  }
-  try {
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    db.pragma('busy_timeout = 5000');
-    db.pragma('query_only = 1');
-    return {
-      db,
-      status: { path: dbPath, exists: true, readable: true, error: null },
-    };
-  } catch (error) {
-    return {
-      db: null,
-      status: {
-        path: dbPath,
-        exists: true,
-        readable: false,
-        error: error?.code || error?.message || 'open-failed',
-      },
-    };
-  }
-}
 
 function openReviewStateWritableDb(rootDir) {
   const dbPath = join(rootDir, 'data', 'reviews.db');
@@ -6346,6 +6320,7 @@ function collectReviewPipelineHealth({
           alarmed: [],
         };
     const snapshot = {
+      laneLiveness: collectLaneLivenessEvidence({ db, rootDir, hqRoot, nowMs }),
       nonBlockingBacklog: summarizeFindingBacklog(db, nowMs),
       held: readHeldOpenPrCount(db),
       observedAt,

@@ -3005,3 +3005,16 @@ LVR-02 deployment order: the companion App Contract endpoint must forward
 and direct remediator transports then require push evidence. This uses the
 existing endpoint and worker-pool outcome judgement; no new dispatcher or store
 is introduced. Source changes authorize no service restart.
+
+### Lane-liveness evidence (LVR-05)
+
+The existing pipeline-health JSON includes `laneLiveness` version 1. For the
+Sentinel consumer, `node src/review-pipeline-health-cli.mjs --lane-liveness
+--root <state-root> --hq-root <hq-root>` returns only that local, read-only
+projection. This mode performs no reconciliation, host probe, network read or
+write. It exports four lanes (hammer, daemon, remediation, review), waiting
+items, last real event and at most five chronological outcomes. Missing inputs
+are unavailable, never healthy zeros. It does not change review/merge authority,
+head-binding, configuration, lifecycle states or existing smoke promises.
+
+See [the health contract](docs/review-pipeline-health.md#lane-liveness-evidence).

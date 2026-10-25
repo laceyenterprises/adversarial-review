@@ -365,6 +365,19 @@ if (scenario === 'clean') {
     assert.equal(closeoutRereview(shared).nextAction, shared.decision);
   }
 
+  const { recordHammerEarlyFailure } = await import('../../src/ama/hammer-terminal-audit.mjs');
+  const { readAmaAuditEntry } = await import('../../src/ama/audit.mjs');
+  const { classifySucceededHammerOutcome } = await import('../../src/ama/hammer-outcome-truth.mjs');
+  const auditRoot = join(rootDir, 'early-failure-audit');
+  recordHammerEarlyFailure('early-refusal', { env: {
+    HAM_HQ_ROOT: auditRoot, HAM_REPO: 'owner/repo', HAM_PR_NUMBER: '42',
+    HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40), HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic',
+  } });
+  const earlyAudit = readAmaAuditEntry(auditRoot, 'owner/repo', 42, 'a'.repeat(40));
+  assert.equal(earlyAudit.status, 'failed-without-merge');
+  assert.equal(earlyAudit.attempts[0].launchRequestId, 'lrq_synthetic');
+  assert.equal(earlyAudit.attempts[0].reason, 'early-refusal');
+  assert.equal(classifySucceededHammerOutcome({ livePrState: 'OPEN' }).failure, 'no_work_done');
   // REMEDBRANCH-01: unresolved creation cannot hand a branchless job to a worker.
   const branchRoot = join(rootDir, 'branch-contract');
   const blocked = createFollowUpJob({ rootDir: branchRoot, repo, prNumber,

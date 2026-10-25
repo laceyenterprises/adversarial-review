@@ -2955,3 +2955,28 @@ is valid pending evidence; an organic observation requires a timestamp. See the
 [shadow deployment observation procedure](docs/finalization-executor-promotion-runbook.md#queue-shadow-observation-mgq-07-no-activation),
 [triage guide](docs/finalization-shadow-divergence-triage.md#queue-decision-evidence-mgq-07)
 and [store contract](docs/data-model/finalization-shadow.md#queue-observations-mgq-07).
+
+## Truthful no-op outcomes (LVR-02)
+
+Hammer and closer launches require a launch-bound terminal AMA audit;
+remediators require a push. Early hammer failures write failed-without-merge
+audits before returning, including fatal credential refresh, missing PR state
+and pre-call refusal. A confirmed open PR without a terminal audit records
+failed/no_work_done with its reason, preserving bounded retry refunds. Incident
+body markers prioritize review and merge queues within existing protections;
+daemon reservations and holders retain their semantics. See the
+[operational contract](docs/RUNBOOK-ama-closure.md#truthful-launch-outcomes-and-incident-scheduling-lvr-02).
+
+The existing handoff smoke verifies launch-bound failure audits and no_work_done
+classification with synthetic state. Focused offline tests in
+`test/lvr-no-op-outcomes.test.mjs` cover early exits, redaction and launch flags;
+queue and closer suites cover ordering, retry refunds and persisted failures.
+After deployment, observe `lvr-02-review-required-outcome` passing once; pending
+exit 75 means the deployed checkout has not adopted the contract. No live
+worker dispatch, restart, configuration flip or new CI check is required.
+
+LVR-02 deployment order: the companion App Contract endpoint must forward
+`required_outcome` before deploying the review-service SDK consumer. Both SDK
+and direct remediator transports then require push evidence. This uses the
+existing endpoint and worker-pool outcome judgement; no new dispatcher or store
+is introduced. Source changes authorize no service restart.

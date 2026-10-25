@@ -20,6 +20,7 @@ export function recordPendingAttestation({ hqRoot, repo, prNumber, baseHead, val
   return appendAmaAuditAttempt({ hqRoot, repo, prNumber, headSha: validatedHead,
     metadata: { closureAuthority: 'ham-terminal-remediation' },
     attempt: { outcome: 'deferred', attemptPhase: 'hammer-audit-comment', reason: 'audit-comment-unavailable',
+      ...(process.env.HQ_LAUNCH_REQUEST_ID ? { launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID } : {}),
       pendingAttestation: { baseHead, validatedHead,
         identity: { login: normalizeLogin(identity.login), databaseId: identity.databaseId },
         validationSummary: { rangeVerified: true, ...Object.fromEntries(['total', 'blocking', 'nonBlocking'].map(key => [key, counts[key]])) } } } });

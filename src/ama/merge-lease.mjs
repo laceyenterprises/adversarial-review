@@ -1,3 +1,4 @@
+import { hasDeployIncidentMarker } from '../deploy-incident.mjs';
 import { loadAwareTimeoutMs, loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from '../watcher-poll-interval.mjs';
@@ -421,6 +422,8 @@ function normalizeHolderPid(value) {
 
 function sortWaiters(waiters) {
   return [...waiters].sort((a, b) => {
+    const incident = Number(b.deployIncident === true) - Number(a.deployIncident === true);
+    if (incident !== 0) return incident;
     const arrived = Date.parse(a.arrivedAt) - Date.parse(b.arrivedAt);
     // Stable sort retains insertion order for requests in the same clock tick.
     return arrived;
@@ -906,6 +909,7 @@ export function upsertMergeLeaseWaiter({
   updatedAt,
   attempt = 1,
   priority,
+  prBody,
   effectiveDeadlineSeconds,
   pidAliveFn = pidIsLive,
 } = {}) {
@@ -930,6 +934,7 @@ export function upsertMergeLeaseWaiter({
       head: String(head || ''),
       waiterId,
       ...(priority === 'daemon' ? { priority } : {}),
+      deployIncident: prBody === undefined ? existing?.deployIncident === true : hasDeployIncidentMarker(prBody),
       ...(notBefore ? { notBefore } : {}),
       arrivedAt: arrival?.queueArrivedAt || existing?.arrivedAt || arrivedAt || now,
       // A restored FIFO timestamp must not consume the new invocation's wait budget.
@@ -1028,6 +1033,7 @@ export function acquireMergeLease({
   waiterId,
   registerWaiter = false,
   waiterPriority,
+  prBody,
   waiterDeadlineSeconds,
   acquisitionPid,
   attempt = 1,
@@ -1062,6 +1068,7 @@ export function acquireMergeLease({
       holderHost,
       deadlineSeconds,
       priority: waiterPriority,
+      prBody,
       effectiveDeadlineSeconds: waiterDeadlineSeconds,
       acquisitionPid,
       pidAliveFn,

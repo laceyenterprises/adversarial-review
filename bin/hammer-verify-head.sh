@@ -7,8 +7,8 @@ ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> 
 
 ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
-POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json" || return $?
+POST_REMEDIATION_SHA=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "<<RUN_DIR>>/pr-after.json") || { HAM_PHASE_OUTCOME=missing-pr-state; return 1; }
 # Wait only for read-after-push lag. A third head retains the ordinary race path.
 HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
 HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
@@ -187,7 +187,7 @@ ham_acquire_merge_lease() {
     return 1
   fi
   local ham_required_checks_green_args=()
-  ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
+  ham_lease_pr_view --json body,headRefOid,state,isDraft,labels,statusCheckRollup \
     > "<<RUN_DIR>>/pre-acquire-checks.json" || return 1
   # Live holds/terminal state fence the lane. Historical stops were already
   # evaluated (and, on changed inputs, released) by the closer before dispatch.
@@ -261,6 +261,7 @@ NODE
     --base "$BASE_BRANCH" \
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
+    --pr-state-file "<<RUN_DIR>>/pre-acquire-checks.json" \
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline --wait-by-progress \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
@@ -369,7 +370,7 @@ $HAM_GATE_CAP_COMMENT"
     && [ "$(jq -r '.timedOut // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
     HAM_PARK_WAITED=$(jq -c '.waited_s // null' "<<RUN_DIR>>/merge-lease-acquire.json")
     local ham_lease_wait_green=false ham_lease_wait_retrying=false
-    if ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
+    if ham_lease_pr_view --json body,headRefOid,state,isDraft,labels,statusCheckRollup \
       > "<<RUN_DIR>>/pre-acquire-checks.json" && ham_lease_snapshot_green; then
       ham_lease_wait_green=true
       if [ "$ham_lease_wait_retry" -lt 2 ]; then ham_lease_wait_retrying=true; fi

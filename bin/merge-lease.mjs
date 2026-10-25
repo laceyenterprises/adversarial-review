@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { execFile } from 'node:child_process';
-import { statSync, watch } from 'node:fs';
+import { statSync, watch, readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -57,7 +57,7 @@ const USAGE = `\
 Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
-                      [--root-dir <path>] [--required-checks-green]
+                      [--root-dir <path>] [--required-checks-green] [--pr-state-file <json>]
                       [--wait-for-holder-deadline] [--wait-by-progress]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason> | --merged | --terminal | --yield] [--reason <reason>]
@@ -326,6 +326,7 @@ async function runAcquire(argv, deps) {
   const { values } = parseCommon(argv, {
     pr: { type: 'string' },
     head: { type: 'string' },
+    'pr-state-file': { type: 'string' },
     'owner-pid': { type: 'string' },
     'owner-pgid': { type: 'string' },
     wait: { type: 'string' },
@@ -343,6 +344,8 @@ async function runAcquire(argv, deps) {
   const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const head = requireString(values, 'head');
+  const prBody = values['pr-state-file']
+    ? String(JSON.parse(readFileSync(values['pr-state-file'], 'utf8')).body || '') : undefined;
   const ownerPid = parsePositiveInteger(values['owner-pid'], 'owner-pid');
   const ownerPgid =
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');
@@ -550,6 +553,7 @@ async function runAcquire(argv, deps) {
             base,
             holderPr: pr,
             holderHead: head,
+            prBody,
             holderPid: ownerPid,
             holderHost: deps.host,
             holderProcessGroup: ownerPgid,

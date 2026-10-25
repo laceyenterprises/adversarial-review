@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import {
   maybeDispatchAmaCloser,
   amaCloserDispatchFilePath,
+  readAmaCloserDispatchRecord,
   reconcileAmaCloserLease,
   resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
@@ -242,6 +243,7 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
   assert.equal(deps.calls.length, 1);
   const args = deps.calls[0].args;
   assert.equal(flagValue(args, '--completion-shape'), 'decision-only');
+  assert.equal(flagValue(args, '--required-outcome'), 'terminal-audit');
   assert.equal(flagValue(args, '--task-kind'), 'merge');
   assert.equal(
     flagValue(args, '--priority'),
@@ -796,6 +798,7 @@ test('LCR: forced terminal-remediation prompt dispatches with --priority normal 
   assert.equal(deps.calls.length, 1);
   const args = deps.calls[0].args;
   assert.equal(flagValue(args, '--completion-shape'), 'decision-only');
+  assert.equal(flagValue(args, '--required-outcome'), 'terminal-audit');
   assert.equal(flagValue(args, '--task-kind'), 'merge');
   assert.equal(
     flagValue(args, '--priority'),
@@ -2955,3 +2958,47 @@ test('CLOSERPENDINGDEAD-01: one poll re-takes a dead intent through ordinary dis
   assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
 });
+
+for (const finalHammer of [false, true]) {
+  test(`LVR-02 producer no_work_done records failure and preserves refund policy (final=${finalHammer})`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'no-work-done-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const currentHead = 'b'.repeat(40);
+    const args = findingsRemediationArgs(rootDir, {
+      reviewState: { headSha: HEAD, reviewCycleExhausted: true },
+      prMetadata: { headSha: currentHead },
+      dispatchContext: { reviewedSha: HEAD, targetRemediationSha: currentHead, dispatchRecordHeadSha: HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        ...(finalHammer ? { dispatchReason: 'exhausted-final-hammer' } : {}),
+        livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: currentHead, headBranchExists: true }) },
+    });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-first' });
+    rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: HEAD, toHeadSha: currentHead, now });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-first', retryCount: 1,
+      reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting',
+      ...(finalHammer ? { dispatchReason: 'exhausted-final-hammer' } : {}) }));
+    const { recordHammerRetryDispatch, readHammerRetryCapLedger } = await import('../src/ama/hammer-retry-cap.mjs');
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD, now });
+    const deps = testDeps();
+    const exec = deps.execFileImpl;
+    deps.execFileImpl = (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
+      ? Promise.resolve({ stdout: JSON.stringify({ status: 'failed' }) }) : exec(cmd, argv, options);
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed', failure_class: 'no_work_done' } }),
+      readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: currentHead }),
+      fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: currentHead, comments: [] }),
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.lastObservedStatus, 'failed');
+    assert.equal(record.failure, 'no_work_done', JSON.stringify(record));
+    assert.match(record.failureReason, /open PR and no terminal audit/);
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    assert.equal(ledger.lifetimeAttemptCount, 2);
+    assert.equal(ledger.attemptCount, finalHammer ? 2 : 1);
+  });
+}

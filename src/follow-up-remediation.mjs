@@ -584,6 +584,7 @@ async function dispatchRemediationViaHq({
           worker_class: workerClass,
           task_kind: 'coding',
           completion_shape: 'branch-push',
+          required_outcome: 'push',
           ...(workflowPushBrokerEvidence?.enabled
             ? {
                 credential_requirements: {

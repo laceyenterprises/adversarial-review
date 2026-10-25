@@ -42,7 +42,7 @@ rules run under the existing mutation lock during selection and release-wake
 pruning; they neither release a holder nor change its identity fence.
 
 LEASEFAIR-01 adds optional `priority: "daemon"`. Missing priority means an
-ordinary closer. All roles share arrival order, preserving insertion order for identical timestamps.
+ordinary closer. All roles share incident-first arrival order, preserving insertion order for identical timestamps.
 The legacy priority field identifies the role and carries no scheduling boost. Refreshing
 a request retains its arrival and insertion order. Queue selection, atomic
 holder creation, and served-waiter removal share the existing per-base mutation
@@ -166,3 +166,14 @@ attempt under the existing FIFO lock; they grant no priority or lease authority.
 Watch setup/delivery failures leave polling active, bounded by 15 seconds plus
 local I/O. The watcher closes on every acquisition exit. No new durable files,
 fields, config keys or migration are needed.
+
+## Incident scheduling (LVR-02)
+
+Optional boolean `deployIncident` is derived from a PR body comment
+`<!-- deploy-incident:v1 id=incident-1 -->`. Missing means false. Daemon
+reservations retain their lifetime and ready-time semantics. Incident requests
+precede ordinary requests across roles; FIFO and stable ties remain within each group. No
+holder is preempted. Renewal without a body snapshot retains the stored hint.
+The daemon passes its existing PR snapshot; the hammer passes
+`merge-lease acquire --pr-state-file <snapshot.json>`. No extra GitHub read or
+merge permission is introduced.

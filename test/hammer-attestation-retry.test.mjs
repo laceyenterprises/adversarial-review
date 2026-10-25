@@ -91,7 +91,7 @@ if (!range) process.exit(65);
 console.log(JSON.stringify(range));
 `);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_DIR: dir, COMMENTS_PATH: commentsPath,
-    REAL_NODE: process.execPath, CURRENT_HEAD: validated, BUILT_HEAD: validated, REVIEWED_HEAD: reviewed,
+    HQ_LAUNCH_REQUEST_ID: 'lrq_fixture-attestation', REAL_NODE: process.execPath, CURRENT_HEAD: validated, BUILT_HEAD: validated, REVIEWED_HEAD: reviewed,
     HAM_NODE_BIN: join(bin, 'node-fixture'), HAM_RUN_DIR: dir, HAM_BASE_HEAD: reviewed,
     HAM_AUDIT_DETAILS_FILE: join(dir, 'details.md'), HAM_AUDIT_REMEDIATED_TOTAL: '1',
     HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
@@ -152,6 +152,7 @@ test('five transient failures retain only a validated edge and allow next leased
   assert.equal(readFileSync(join(f.dir, 'backoffs'), 'utf8'), '2\n4\n8\n16\n');
   const audit = f.audit();
   assert.equal(audit.status, 'deferred');
+  assert.equal(audit.attempts.at(-1).launchRequestId, 'lrq_fixture-attestation');
   assert.deepEqual(audit.attempts.at(-1).pendingAttestation, {
     baseHead: reviewed, validatedHead: validated, identity: { login: 'hammer-worker', databaseId: 77 },
     validationSummary: { rangeVerified: true, total: 1, blocking: 1, nonBlocking: 0 } });
@@ -349,7 +350,8 @@ for (const reviewedHead of ['invalid', 'a'.repeat(39), 'z'.repeat(40)]) {
     assert.match(result.stdout, /release-retryable=reviewed-head-unavailable/);
     assert.match(result.stdout, /note=HAM closing status — no merge\. Reviewed starting base SHA was invalid or unavailable; released for the next hammer pass\./);
     assert.deepEqual(f.comments(), []);
-    assert.equal(f.audit(), null);
+    assert.equal(f.audit().status, 'failed-without-merge');
+    assert.equal(f.audit().attempts.at(-1).reason, 'reviewed-head-unavailable');
     assert.equal(existsSync(join(f.dir, 'range.json')), false);
     assert.doesNotMatch(result.stdout + result.stderr, /exact-head-review-required/);
   });

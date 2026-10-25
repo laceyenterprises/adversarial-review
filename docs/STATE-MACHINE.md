@@ -2163,3 +2163,14 @@ stable-key outbox commit together; delivery is retried after lane release
 without repeating the merge. See the
 [durable contract](data-model/finalization-ledger.md#final-eligibility-merge-receipts-and-delivery-outbox-mgq-06)
 and [read-only deployed probe](finalization-executor-promotion-runbook.md#merge-and-receipt-delivery-observation-mgq-06-no-activation).
+
+## Truthful no-op launch observation (LVR-02)
+
+A confirmed open PR with no terminal close audit transitions through existing
+terminal-failure/retry handling: `lastObservedStatus` is `failed` with
+`failure: no_work_done` and a reason, while the compatibility outcome remains
+`hammer-exited-without-close`. Launch success remains unverified until PR or
+audit evidence resolves it. Existing refund bounds and final-hammer charging
+are unchanged. Early helper failures append launch-bound failed-without-merge
+AMA attempts. Incident body markers affect scheduling only; daemon reservation
+precedence and holder exclusivity remain intact.

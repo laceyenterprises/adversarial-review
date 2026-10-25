@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 // Render versioned HAM procedures for manual callers; dispatch renders before launch.
 import { isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { HAMMER_PHASES, renderHammerProcedure } from '../src/hammer-procedure.mj
 const phase = process.argv[2];
 if (!HAMMER_PHASES.includes(phase)
   || process.argv[3] !== '--render' || process.argv.length !== 4) {
+  reportHammerEarlyFailure('invalid-procedure-request');
   process.stderr.write(`usage: hammer-procedure.mjs <${HAMMER_PHASES.join('|')}> --render\n`);
   process.exit(64);
 }
@@ -22,6 +24,7 @@ try {
     .filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]));
   process.stdout.write(renderHammerProcedure(phase, values));
 } catch (error) {
+  reportHammerEarlyFailure('procedure-render-failed');
   process.stderr.write(`${error.message}\n`);
   process.exit(error.exitCode || 64);
 }

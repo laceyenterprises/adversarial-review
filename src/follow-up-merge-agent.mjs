@@ -2663,6 +2663,7 @@ async function dispatchMergeAgentForPR({
     'dispatch',
     '--worker-class', mergeAgentWorkerClass,
     '--task-kind', 'merge',
+    '--required-outcome', 'terminal-audit',
   ];
   const hqDispatchTailArgs = [
     '--repo', repo.split('/')[1] || repo,

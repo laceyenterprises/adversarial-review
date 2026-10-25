@@ -1539,7 +1539,8 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
   const oldRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(oldRecord.headSha, REVIEWED_HEAD);
   assert.equal(oldRecord.launchRequestId, 'lrq_old_head');
-  assert.equal(oldRecord.lastObservedStatus, 'succeeded');
+  assert.equal(oldRecord.lastObservedStatus, 'failed');
+  assert.equal(oldRecord.failure, 'no_work_done');
   // HAMBG-02: open PR, no no-merge audit for the current head.
   assert.equal(oldRecord.lastError, 'hammer-exited-without-close');
   assert.equal(oldRecord.outcome, 'hammer-exited-without-close');

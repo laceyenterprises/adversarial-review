@@ -484,6 +484,11 @@ export function appendAmaAuditAttempt({
       return { filePath, doc, created: true };
     }
 
+    // A stable outbox delivery key appends at most one attempt per key.
+    if (typeof attempt.deliveryKey === 'string' && attempt.deliveryKey
+      && normalizedAttempts(existing).some((prior) => prior?.deliveryKey === attempt.deliveryKey)) {
+      return { filePath, doc: existing, replay: true };
+    }
     const currentStatus = String(existing.status || '').toLowerCase();
     const nextOutcome = String(attempt.outcome || '').toLowerCase();
 

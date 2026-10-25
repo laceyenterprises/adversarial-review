@@ -42,10 +42,13 @@ export function createGithubAdapterMergeSurface({
   execFileImpl = execFileAsync,
   env = process.env,
   rootDir,
+  // A caller that journals its own stable-key receipt (the v2 queue outbox)
+  // disables the adapter's best-effort receipt so accounting is never doubled.
+  recordReceipt = true,
 } = {}) {
   return {
     name: 'github-adapter (local fallback)',
-    async merge({ subjectExternalId, revisionRef, mergeMethod }) {
+    async merge({ subjectExternalId, revisionRef, mergeMethod, timeoutMs }) {
       const parsed = parseCodePrSubject(subjectExternalId);
       if (!parsed) {
         return { ok: false, reason: 'unsupported-subject', detail: `not a code-pr subject: ${subjectExternalId}` };
@@ -59,7 +62,8 @@ export function createGithubAdapterMergeSurface({
           matchHeadCommit: revisionRef,
           mergeMethod: mergeMethod || defaultMergeMethod,
           deleteBranch: true,
-        }, { execFileImpl, env, rootDir, producerClass: 'closer-hammer' });
+        }, { execFileImpl, env, rootDir, producerClass: 'closer-hammer', timeoutMs,
+          ...(recordReceipt ? {} : { recordReceipt: false }) });
       } catch (err) {
         const payload = adapterErrorPayload(err);
         if (isAlreadyMergedAtRevision(payload, revisionRef)) {

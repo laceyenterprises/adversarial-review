@@ -2146,3 +2146,20 @@ before tail readiness. Expired patience never becomes another CI wait.
 Readmission is ordering, not merge authority. See the
 [durable contract](data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
 and [read-only deployed probe](finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).
+
+## V2 queue final merge (MGQ-06, unwired)
+
+`finalizing` advances to `merged` only after final live rereads, a persisted
+eligible decision, an owner-journaled intent and authoritative reconciliation:
+live merged state at the candidate, a structured merge SHA and the attributed
+bot as merger. A no-longer-green rerun returns `finalizing → waiting-checks`;
+base movement returns to `rebasing` with checks and decision cleared under the
+original patience; head change and completed red return to the closer; holds
+and the emergency brake park as `parked-hold`; unavailable dependencies and
+expiry park as `parked-infrastructure` and release the lane; foreign merges
+reconcile as `closed-observed`. Ambiguous intents stay unresolved until drained
+owner takeover. The receipt, merged phase, subject-ledger `finalized` event and
+stable-key outbox commit together; delivery is retried after lane release
+without repeating the merge. See the
+[durable contract](data-model/finalization-ledger.md#final-eligibility-merge-receipts-and-delivery-outbox-mgq-06)
+and [read-only deployed probe](finalization-executor-promotion-runbook.md#merge-and-receipt-delivery-observation-mgq-06-no-activation).

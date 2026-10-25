@@ -1,5 +1,5 @@
 /** Append-only OPSEV1-03 evidence. Receipt failure never changes merge authority. */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, fchmodSync, fchownSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { userInfo } from 'node:os';
@@ -22,12 +22,13 @@ function trusted(path, uid, directory = false, sharedParent = false) {
 }
 
 export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, producerClass = 'ama-daemon',
-  merged, reason = null, executedAt = new Date().toISOString(), action = 'gh pr merge' }) {
+  merged, reason = null, executedAt = new Date().toISOString(), action = 'gh pr merge', deliveryKey = null }) {
   if (!hqRoot) throw new Error('Merge-action receipt requires HQ root');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(prNumber) || prNumber < 1
     || !/^[a-f0-9]{40}$/.test(headSha) || typeof merged !== 'boolean' || (!merged && !isExecutedMergeRefusal(reason))
     || !['ama-daemon', 'closer-hammer'].includes(producerClass)
-    || !['gh pr merge', 'api merge'].includes(action) || !Number.isFinite(Date.parse(executedAt))) {
+    || !['gh pr merge', 'api merge'].includes(action) || !Number.isFinite(Date.parse(executedAt))
+    || (deliveryKey !== null && (typeof deliveryKey !== 'string' || !/^[\w:.-]{1,200}$/.test(deliveryKey)))) {
     throw new Error('Invalid merge-action receipt');
   }
   const identity = userInfo();
@@ -41,9 +42,12 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
     trusted(path, identity.uid, true, path !== directory);
   }
   const record = { actor: producerClass === 'ama-daemon' ? 'AMA' : 'hammer', action, merged,
-    reason, repo, prNumber, headSha, executedAt, producerClass, receiptProtocol: 'OPSEV1-03' };
+    reason, repo, prNumber, headSha, executedAt, producerClass, receiptProtocol: 'OPSEV1-03',
+    ...(deliveryKey ? { deliveryKey } : {}) };
   const temporary = join(directory, `.merge-action-${randomUUID()}`);
-  const target = join(directory, `${repo.replace('/', '-')}-pr-${prNumber}-${headSha}-${randomUUID()}.json`);
+  // A stable delivery key names exactly one receipt; link(2) refuses a second.
+  const suffix = deliveryKey ? `key-${createHash('sha256').update(deliveryKey).digest('hex').slice(0, 32)}` : randomUUID();
+  const target = join(directory, `${repo.replace('/', '-')}-pr-${prNumber}-${headSha}-${suffix}.json`);
   const fd = openSync(temporary, 'wx', 0o640);
   try {
     try {
@@ -54,7 +58,13 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
     } finally {
       closeSync(fd);
     }
-    linkSync(temporary, target);
+    try { linkSync(temporary, target); }
+    catch (error) {
+      if (error.code !== 'EEXIST' || !deliveryKey) throw error;
+      trusted(target, identity.uid);
+      if (readFileSync(target, 'utf8') !== `${JSON.stringify(record)}\n`) throw new Error('Conflicting merge-action delivery key');
+      return target;
+    }
     trusted(target, identity.uid);
     const dirFd = openSync(directory, 'r');
     try { fsyncSync(dirFd); } finally { closeSync(dirFd); }

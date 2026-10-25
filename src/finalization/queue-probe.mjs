@@ -10,6 +10,8 @@ import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
 import { resolveQueueChecksAdapter } from './queue-checks.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
+import { resolveQueueMergeAdapter } from './queue-merge.mjs';
+import { QUEUE_DELIVERY_KINDS } from './queue-delivery.mjs';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 export function queueRuntimeBuild() {
@@ -20,14 +22,16 @@ export function queueRuntimeBuild() {
     'queue-checks.mjs', 'queue-check-reader.mjs', 'queue-check-transport.mjs', '../hammer-token.mjs', '../checks-summary.mjs', '../ama/required-check-contexts.mjs', '../alert-delivery.mjs',
     'queue-rebase.mjs', 'queue-git.mjs', 'queue-rebase-proof.mjs', '../ama/reviewed-rebase.mjs', '../load-aware-timeout.mjs',
     '../../migrations/20261023_finalization_queue.sql', '../../migrations/20261024_finalization_queue_handoff.sql',
-    '../../migrations/20261025_finalization_queue_admission.sql', '../../migrations/20261026_finalization_queue_checks.sql']) {
+    '../../migrations/20261025_finalization_queue_admission.sql', '../../migrations/20261026_finalization_queue_checks.sql',
+    'queue-merge.mjs', 'queue-delivery.mjs', 'execution-surfaces.mjs', '../github-adapter-client.mjs', '../ama/merge-action-receipt.mjs',
+    '../ama/audit.mjs', 'ledger-store.mjs', '../../migrations/20261027_finalization_queue_merge.sql']) {
     hash.update(file).update(readFileSync(join(moduleDir, file)));
   }
   return 'sha256:' + hash.digest('hex');
 }
 
 export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false } }, runtime: {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false } }, runtime: {
     build: queueRuntimeBuild(), pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
@@ -132,6 +136,19 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     } catch {
       result.capabilities.rebase.reason = 'rebase-store-or-git-proof-adapter-unavailable';
     }
+    try {
+      if (!result.capabilities.checks.available) throw new Error('checks unavailable');
+      reference.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
+      const sql = "SELECT type,name,sql FROM sqlite_master WHERE tbl_name IN ('finalization_queue_merge_receipt','finalization_queue_delivery') AND name NOT LIKE 'sqlite_%' ORDER BY name";
+      if (JSON.stringify(db.prepare(sql).all()) !== JSON.stringify(reference.prepare(sql).all())) throw new Error('merge schema unavailable');
+      const adapter = resolveQueueMergeAdapter({ db });
+      const observed = adapter.read();
+      result.observations.merge = { ...observed, organicMergeObserved: observed.receipts > 0,
+        pendingDeliveryObserved: observed.pending > 0 };
+      result.capabilities.merge = { available: true, adapter: adapter.name, schema: '20261027_finalization_queue_merge',
+        mergeSurface: 'guarded-squash-merge-v1', deliveryKinds: [...QUEUE_DELIVERY_KINDS],
+        liveIdentityMergeAndDeliveryAdapters: 'composition-required', routing: 'not-installed-by-this-capability' };
+    } catch { result.capabilities.merge.reason = 'merge-store-or-receipt-adapter-unavailable'; }
   } catch (error) {
     // Error codes are sufficient for operators; do not echo raw DB paths or
     // arbitrary adapter/auth diagnostics into this public read surface.
@@ -140,6 +157,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     result.capabilities.admission.reason = result.capabilities.owner.reason;
     result.capabilities.rebase.reason = result.capabilities.owner.reason;
     result.capabilities.checks.reason = result.capabilities.owner.reason;
+    result.capabilities.merge.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
@@ -147,9 +165,9 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
 export function queueProbeMain(argv = process.argv.slice(2)) {
   let rootDir;
   let capability;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks --json [--root DIR]';
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge --json [--root DIR]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }

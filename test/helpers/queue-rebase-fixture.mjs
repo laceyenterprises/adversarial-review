@@ -5,10 +5,11 @@ import { tmpdir } from 'node:os';
 import { openFinalizationQueueStore } from '../../src/finalization/queue-store.mjs';
 import { createQueueOwner } from '../../src/finalization/queue-owner.mjs';
 import { createCleanReviewService } from '../../src/finalization/queue-clean-review.mjs';
+import { createQueueHandoffService } from '../../src/finalization/queue-handoff-store.mjs';
 import { createQueueAdmissionService } from '../../src/finalization/queue-admission.mjs';
 import { resolveQueueGitAdapter } from '../../src/finalization/queue-git.mjs';
 import { queueCleanFixture, queueLiveFixture } from './queue-clean-fixture.mjs';
-import { handoffTime } from './queue-handoff-fixture.mjs';
+import { handoffTime, queueHandoffFixture } from './queue-handoff-fixture.mjs';
 export const idle = { enabled: false };
 export function localGit(cwd, args, input) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], {
@@ -52,12 +53,13 @@ export function gitFixture(t, { second = false, conflict = false, noop = false, 
   };
   return fixture;
 }
-export async function admitted(f) {
-  let { h, e } = queueCleanFixture();
+export async function admitted(f, { remediated = false } = {}) {
+  let { h, e } = remediated ? queueHandoffFixture(102) : queueCleanFixture();
   // Replace only exact fixture head identities; signatures stay synthetic.
   const replace = value => JSON.parse(JSON.stringify(value).replaceAll('b'.repeat(40), f.oldHead));
   h = replace(h); e = replace(e);
-  const ack = await createCleanReviewService({ store: f.store, now: f.now, load: idle,
+  const service = remediated ? createQueueHandoffService : createCleanReviewService;
+  const ack = await service({ store: f.store, now: f.now, load: idle,
     evidenceAdapter: { read: async () => e } }).submit(h);
   const live = queueLiveFixture(h);
   live.subject.baseSha = f.base;

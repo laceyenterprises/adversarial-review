@@ -124,3 +124,18 @@ test('checkIdentityAttestation: absent surface is local mode (ok); present-and-d
   assert.equal(errored.surfaceError, true);
   assert.match(errored.reason, /fail-closed/);
 });
+
+test('queue composition passes a clipped adapter timeout and owns the merge receipt', async () => {
+  const calls = [];
+  const execFileImpl = async (bin, args, options) => {
+    calls.push({ args, timeout: options.timeout });
+    return { stdout: JSON.stringify({ merged: true, sha: 'merge-sha' }) };
+  };
+  const surface = createGithubAdapterMergeSurface({ execFileImpl, recordReceipt: false,
+    env: { GHA_ADAPTER_BIN: '/fake/github-adapter', HQ_ROOT: '/nonexistent-hq-root' } });
+  const result = await surface.merge({ subjectExternalId: 'owner/repo#17', revisionRef: 'sha-A', mergeMethod: 'squash', timeoutMs: 1234 });
+  assert.equal(result.ok, true);
+  // No `gh pr view` verification call: the adapter receipt path is skipped.
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].timeout, 1234);
+});

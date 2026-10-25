@@ -2908,6 +2908,10 @@ SHA, bot/closer attribution) commits with the merged phase, a subject-ledger
 `finalized` event and stable-key outbox rows for the existing merge-action
 accounting and AMA closure audit. Delivery retries never repeat the merge or an
 action, and pending delivery stays visible after the lane advances.
+Outbox database operations retain the store's configured busy timeout so a
+transient writer can finish after lane release. The merge probe's recent receipt
+`recordedAt` is the authoritative merge time (`merge.mergedAt`). Clean reviews
+have no closer; remediated receipts retain the admitted closer attribution.
 
 No production route, new config, CI check or smoke step is installed. Source
 fixtures are `finalization-queue-merge.test.mjs` and

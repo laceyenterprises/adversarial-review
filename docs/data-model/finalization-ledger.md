@@ -600,6 +600,10 @@ delivery rows and a subject-ledger `finalized` event (`method: squash`,
 entry gains `merge` and `delivery: { receiptDigest, keys }`. The lane is
 released before delivery.
 
+Remediated admission receipts carry the closer under `receipt.handoff.closer`;
+clean-review receipts carry `receipt.input` and prohibit closer adjudication, so
+their decision and merge receipt deliberately record `closer: null`.
+
 Delivery keys are `delivery:<kind>:<entryId>:<mergeSha>`. Kinds are
 `merge-action-receipt` (the existing OPSEV1-03 accounting writer, keyed
 filename, `producerClass` from the attributed bot) and `closure-audit` (the
@@ -609,10 +613,14 @@ existing AMA audit, one `succeeded` attempt per key). Each delivery is bounded
 adapters are idempotent by key, so a crash after the external write but before
 the outbox receipt replays without duplicating accounting. Missing adapters or
 failures remain visible as pending after the lane advances.
+Outbox reads and status writes retain the queue store's configured SQLite busy
+timeout (normally 5s, load-scaled with a 30s ceiling) after lane release, allowing
+transient writers to finish before treating database contention as an error.
 
 `resolveQueueMergeAdapter` is the read-only deployed projection used by the
 `merge` probe: receipt/delivery/pending counts, unresolved merge operations,
-recent receipts (bot login) and pending delivery keys with attempts and last
+recent receipts (bot login and `recordedAt` projected from `merge.mergedAt`)
+and pending delivery keys with attempts and last
 error. Live identity, merge surface, delivery and owner recovery composition and
 per-lane routing remain later integration work; an entry recovered after its
 original deadline cannot merge because the owner refuses issuance past it.

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { userInfo } from 'node:os';
+import { once } from 'node:events';
+import { Worker } from 'node:worker_threads';
 import { createQueueMergeService, observeQueueMergeOperation, reconcileQueueMergeObservation, queueMergeSubject } from '../src/finalization/queue-merge.mjs';
 import { createQueueClosureAuditDelivery, createQueueMergeActionDelivery } from '../src/finalization/queue-delivery.mjs';
 import { createQueueChecksService } from '../src/finalization/queue-checks.mjs';
@@ -25,9 +27,9 @@ const green = entry => ({ head: entry.candidate, base: entry.exactBase, required
 const mergeSha = 'd'.repeat(40);
 const count = (f, table) => f.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 
-// Drive one synthetic clean admission to an exact green `finalizing` candidate.
-async function finalizing(t, { noop = false } = {}) {
-  const f = gitFixture(t, { noop }), a = await admitted(f);
+// Drive one synthetic admission to an exact green `finalizing` candidate.
+async function finalizing(t, { noop = false, remediated = false } = {}) {
+  const f = gitFixture(t, { noop }), a = await admitted(f, { remediated });
   const world = { merged: false, mergedBy: BOT, mergeSha, mergedHead: null };
   const live = { read: async () => {
     const s = a.live.subject;
@@ -84,6 +86,8 @@ test('final eligibility merges the exact candidate once and journals a complete 
   assert.equal(receipt.decision.executionOwnership, 'lane-fence-replaces-merge-lease');
   assert.equal(receipt.merge.mergeSha, mergeSha); assert.equal(receipt.attribution.bot.login, BOT);
   assert.equal(receipt.attribution.worker.workerId, 'builder-1');
+  assert.equal(receipt.attribution.closer, null);
+  assert.equal(receipt.decision.attribution.closer, null);
   assert.equal(count(f, 'finalization_queue_delivery'), 2);
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM finalization_queue_delivery WHERE receipt_json IS NULL').get().n, 0);
   const actions = mergeActions(p);
@@ -94,6 +98,52 @@ test('final eligibility merges the exact candidate once and journals a complete 
   assert.deepEqual(ledger.map(e => [e.type, e.revisionRef]), [['finalized', before.candidate]]);
   assert.equal(f.store.readOwner(before.lane).owner_state, 'idle');
   assert.deepEqual(foldQueue(f.store.readEvents(a.h.lane)).entries[before.entryId], result);
+});
+
+test('remediated admission preserves the admitted closer in the decision and immutable receipt', async t => {
+  const p = await finalizing(t, { remediated: true });
+  const result = await p.finalize();
+  assert.equal(result.phase, 'merged');
+  const receipt = JSON.parse(p.f.store.db.prepare('SELECT receipt_json FROM finalization_queue_merge_receipt').get().receipt_json);
+  assert.equal(receipt.admissionKind, 'remediated');
+  assert.deepEqual(result.decision.attribution.closer, p.a.h.closer);
+  assert.deepEqual(receipt.decision.attribution.closer, p.a.h.closer);
+  assert.deepEqual(receipt.attribution.closer, p.a.h.closer);
+});
+
+test('post-merge delivery waits through a transient SQLite writer using the configured busy timeout', async t => {
+  const p = await finalizing(t);
+  const { f } = p;
+  f.store.db.pragma('busy_timeout = 2000');
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const Database = require('better-sqlite3');
+    const db = new Database(workerData);
+    parentPort.once('message', () => {
+      db.exec('BEGIN IMMEDIATE');
+      parentPort.postMessage('locked');
+      setTimeout(() => { db.exec('COMMIT'); db.close(); parentPort.close(); }, 200);
+    });
+    parentPort.postMessage('ready');
+  `, { eval: true, workerData: join(f.root, 'data/reviews.db') });
+  t.after(() => worker.terminate());
+  assert.deepEqual(await once(worker, 'message'), ['ready']);
+  const exited = once(worker, 'exit');
+  const adapter = p.options.deliveryAdapters['merge-action-receipt'];
+  p.options.deliveryAdapters['merge-action-receipt'] = { read: async request => {
+    const locked = once(worker, 'message');
+    worker.postMessage('lock');
+    assert.deepEqual(await locked, ['locked']);
+    return adapter.read(request);
+  } };
+  const result = await p.finalize();
+  assert.equal(result.phase, 'merged');
+  assert.equal(f.store.readOwner(result.lane).owner_state, 'idle');
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM finalization_queue_delivery WHERE receipt_json IS NULL').get().n, 0);
+  assert.equal(f.store.db.pragma('busy_timeout', { simple: true }), 2000);
+  assert.equal(p.calls.length, 1);
+  assert.equal(mergeActions(p).length, 1);
+  assert.deepEqual(await exited, [0]);
 });
 
 for (const [name, mutate, phase, reason] of [
@@ -252,6 +302,7 @@ test('receipt delivery failure survives restart, stays visible pending and deliv
   assert.equal(probe.observations.merge.pending, 1); assert.equal(probe.observations.merge.organicMergeObserved, true);
   assert.deepEqual(probe.observations.merge.pendingDeliveries.map(d => [d.kind, d.attempts, d.lastError]), [['merge-action-receipt', 1, 'accounting-store-unavailable']]);
   assert.equal(probe.observations.merge.recentReceipts[0].bot, BOT);
+  assert.equal(probe.observations.merge.recentReceipts[0].recordedAt, result.merge.mergedAt);
   f.reopen(); a.owner = createQueueOwner({ store: f.store, now: f.now });
   // A crash after the external write but before its outbox receipt: replay.
   const row = f.store.db.prepare("SELECT payload_json FROM finalization_queue_delivery WHERE kind='merge-action-receipt'").get();

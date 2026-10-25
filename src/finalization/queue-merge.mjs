@@ -67,7 +67,7 @@ export function resolveQueueMergeAdapter({ db }) {
   // Prepare real statements now, so an absent deployment schema fails closed.
   const receipts = db.prepare(`SELECT entry_id,repository,base,pr_number,candidate,merge_sha,operation_id,
     json_extract(receipt_json,'$.attribution.bot.login') AS bot,
-    json_extract(receipt_json,'$.recordedAt') AS recordedAt FROM finalization_queue_merge_receipt ORDER BY rowid DESC LIMIT 100`);
+    json_extract(receipt_json,'$.merge.mergedAt') AS recordedAt FROM finalization_queue_merge_receipt ORDER BY rowid DESC LIMIT 100`);
   const counts = db.prepare(`SELECT (SELECT COUNT(*) FROM finalization_queue_merge_receipt) AS receipts,
     COUNT(*) AS deliveries, COALESCE(SUM(receipt_json IS NULL),0) AS pending FROM finalization_queue_delivery`);
   const pending = db.prepare(`SELECT delivery_key AS deliveryKey,kind,entry_id AS entryId,attempts,last_error AS lastError
@@ -90,11 +90,6 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
   const brake = () => {
     try { return (typeof policy === 'function' ? policy() : policy)?.autonomousExecutionDisabled === true; }
     catch { return true; }
-  };
-  const nonblocking = action => {
-    const prior = store.db.pragma('busy_timeout', { simple: true });
-    store.db.pragma('busy_timeout = 0');
-    try { return action(); } finally { store.db.pragma(`busy_timeout = ${prior}`); }
   };
   const wait = deadline => queueWaitMs(5_000, { ceilingMs: 30_000, deadline, now: now(), load });
   function current(entry, fence) {
@@ -305,10 +300,11 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
   }
 
   /** Outbox delivery. Not lane-fenced: it never merges, and every adapter is
-   * idempotent by key. Missing/failed delivery stays visible as pending. */
+   * idempotent by key. Missing/failed delivery stays visible as pending.
+   * Retain the store's busy timeout after lane release for transient writers. */
   async function deliver({ entryId = null, limit = 100 } = {}) {
-    const rows = nonblocking(() => store.db.prepare(`SELECT * FROM finalization_queue_delivery WHERE receipt_json IS NULL
-      ${entryId ? 'AND entry_id=?' : ''} ORDER BY rowid LIMIT ?`).all(...(entryId ? [entryId] : []), Math.min(Math.max(1, limit), 100)));
+    const rows = store.db.prepare(`SELECT * FROM finalization_queue_delivery WHERE receipt_json IS NULL
+      ${entryId ? 'AND entry_id=?' : ''} ORDER BY rowid LIMIT ?`).all(...(entryId ? [entryId] : []), Math.min(Math.max(1, limit), 100));
     const outcome = { delivered: 0, pending: 0 };
     for (const row of rows) {
       const adapter = deliveryAdapters[row.kind];
@@ -320,9 +316,9 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
         } catch (failure) { error = /^[a-z0-9-]{1,80}$/.test(failure?.message ?? '') ? failure.message : 'delivery-failed'; }
       }
       const delivered = receipt?.id === row.delivery_key && text(receipt.sourceRef);
-      nonblocking(() => store.db.prepare(`UPDATE finalization_queue_delivery SET attempts=attempts+1,last_error=?,
+      store.db.prepare(`UPDATE finalization_queue_delivery SET attempts=attempts+1,last_error=?,
         receipt_json=COALESCE(receipt_json,?) WHERE delivery_key=?`).run(delivered ? null : (receipt ? 'delivery-receipt-invalid' : error),
-        delivered ? JSON.stringify({ id: receipt.id, sourceRef: receipt.sourceRef, at: now() }) : null, row.delivery_key));
+        delivered ? JSON.stringify({ id: receipt.id, sourceRef: receipt.sourceRef, at: now() }) : null, row.delivery_key);
       outcome[delivered ? 'delivered' : 'pending']++;
     }
     return outcome;

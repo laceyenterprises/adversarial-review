@@ -486,7 +486,8 @@ node src/finalization/queue-probe.mjs --capability merge --json
 Require `capabilities.merge.available == true` and `runtime.build != null`.
 Record the checkout/digest, store adapter, schema, delivery kinds, receipt and
 delivery counts, `pending`, `unresolvedMergeOperations`, recent receipts with the
-attributed bot login and every pending delivery key with attempts and last
+attributed bot login and `recordedAt` (the authoritative `merge.mergedAt`),
+and every pending delivery key with attempts and last
 error. Zero receipts are pending organic evidence, not a merge exercise. A
 non-zero `pending` after a lane advanced is the visible outbox backlog; retry it
 through the composed service's `deliver()`, never by deleting rows. A non-zero

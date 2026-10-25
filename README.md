@@ -2920,3 +2920,32 @@ fixtures are `finalization-queue-merge.test.mjs` and
 deployed checkout with a bounded load-aware supervisor. See the
 [store contract](docs/data-model/finalization-ledger.md#final-eligibility-merge-receipts-and-delivery-outbox-mgq-06)
 and [deployment observation procedure](docs/finalization-executor-promotion-runbook.md#merge-and-receipt-delivery-observation-mgq-06-no-activation).
+
+### V2 queue shadow decisions and throughput (MGQ-07)
+
+The finalization port exposes a read-only queue observation consumer alongside
+the existing shadow recorder/store/report. Paired observations carry v1 action
+provenance, lane readiness/order, rebase/check/final proposals and evidence.
+Only telemetry is written; no owner claim, push, merge, remediation dispatch or
+closer budget is available to this consumer. Live composition belongs to the
+routing slice. Unknown store/fold/read results stay open for operator escalation;
+queue differences can be attributed to either v1 or queue defects with recorded
+disposition evidence.
+
+`finalization shadow-report --days 7 --json` now includes separate organic and
+synthetic per-lane metrics: sample/window denominators, total/mean completed
+service time, oldest ready age, arrivals/merges/returns per hour, check waits and
+infrastructure/hold parking. Durable lifecycle replay preserves denominators
+and readiness age over duplicate ticks and restart. Synthetic replay cannot
+establish organic coverage. Existing promotion criteria and smoke promises
+remain; this adds no CI check or automated gate. Focused offline fixtures are
+`test/finalization-queue-shadow.test.mjs` and the existing shadow tests.
+
+After deployment, the runtime owner runs
+`node src/finalization/queue-probe.mjs --capability shadow --json` under the
+existing bounded load-aware supervisor. It reports real schema/adapter
+availability, the probe build, latest organic consumer/time and observation-only
+mode. Absent organic evidence is pending. See the
+[shadow deployment observation procedure](docs/finalization-executor-promotion-runbook.md#queue-shadow-observation-mgq-07-no-activation),
+[triage guide](docs/finalization-shadow-divergence-triage.md#queue-decision-evidence-mgq-07)
+and [store contract](docs/data-model/finalization-shadow.md#queue-observations-mgq-07).

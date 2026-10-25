@@ -514,3 +514,48 @@ variant each issued exactly one merge in 30/30; the complete implementation
 issued exactly one merge in 30/30. A separate overlapping-finalize race is
 already serialized by the MGQ-01 issuance lock and stayed 10/10 under every
 variant. The production source was restored after each experiment.
+
+### Queue shadow observation (MGQ-07; no activation)
+
+After normal reviewed deployment, the runtime owner applies
+`migrations/20261028_finalization_queue_shadow.sql` after the original
+`20260718_finalization_shadow.sql` and existing queue migrations. Opening the
+canonical writable shadow store also converges the additive unique index.
+MGQ-08 owns live observation composition/routing. This slice exposes
+`recordQueueShadow`, `shadowObserveQueue` and `resolveQueueShadowAdapter` through
+the finalization port; it installs no daemon loop or route setting.
+
+Composition supplies a read-only database to the resolved adapter, fresh
+observed evidence or isolated synthetic replay, ledger events, the actual v1
+action/provenance, observation time and consumer identity/build. The adapter
+reads the entry, immutable admission receipt and lane events in one snapshot.
+Only live evidence fields may be supplied over that durable read. The recorder
+can append telemetry but has no execution/owner/pager ports. Its caller must
+surface `persisted: false` through the existing escalation route. Do not call
+queue execution, dispatch a closer or spend its budget to predict an outcome.
+
+From the deployed checkout under its actual runtime owner, use the existing
+load-aware command supervisor (5 seconds nominal, 30 seconds finite ceiling):
+
+```sh
+node src/finalization/queue-probe.mjs --capability shadow --json
+```
+
+Record `capabilities.shadow.available == true`, non-null `runtime.build`,
+`shadow.mode == "observe"`, non-null `shadow.lastObservationAt`, latest
+`shadow.consumer` identity/build, `shadow.noMutation`, counts and
+`lastObservationUnknown`. The capability checks the real schema/indexes and
+resolves the read-only receipt/lifecycle adapter. Missing organic observations
+remain pending; an unknown latest pair needs triage even if a timestamp exists.
+No synthetic traffic or lane mutation may manufacture acceptance evidence.
+The last observation time is the latest unique persisted pair, not a heartbeat;
+consumer metadata identifies the latest producer, not proof it is still running.
+The probe digest identifies its loaded source bytes, not an existing watcher.
+
+Use the existing `finalization shadow-report --days 7 --json` for differences,
+operator dispositions and separate organic/synthetic metrics. Keep the existing
+promotion criteria and explicit operator review. This probe is post-deployment
+observation only, with no new check, blocking gate, smoke action or restart.
+If later composition changes the watcher, the operator follows `DEPLOYMENT.md`
+and the existing drain/system-service restart/loaded-build verification path;
+workers do not perform that step.

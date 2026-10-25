@@ -12,7 +12,7 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // in production, schema convergence that matches the 20260718 migration exactly.
 
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
@@ -46,6 +46,7 @@ export function ensureFinalizationShadowSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_finalization_shadow_subject
       ON finalization_shadow(domain_id, subject_external_id, id);
   `);
+  db.exec(readFileSync(new URL('../../migrations/20261028_finalization_queue_shadow.sql', import.meta.url), 'utf8'));
 }
 
 function openDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
@@ -97,6 +98,7 @@ function observationToColumns(obs) {
       v1Action: obs.v1Action,
       v2Decision: obs.v2Decision,
       classification: obs.classification,
+      ...(obs.queue ? { queue: obs.queue, dedupeKey: obs.dedupeKey } : {}),
     }),
   };
 }
@@ -134,6 +136,7 @@ export function rowToObservation(row) {
     sawHeadMove: row.saw_head_move === 1,
     sawExhaustion: row.saw_exhaustion === 1,
     dispositionOverride: override,
+    ...(payload.queue ? { queue: payload.queue, dedupeKey: payload.dedupeKey } : {}),
   };
 }
 
@@ -158,6 +161,7 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       (@domain_id, @subject_external_id, @revision_ref, @observed_at, @relation, @direction,
        @divergence_class, @disposition, @v1_action_kind, @v2_decision_kind, @fold_error,
        @saw_head_move, @saw_exhaustion, @payload_json)
+    ON CONFLICT DO NOTHING
   `);
 
   const selectWindow = database.prepare(`
@@ -188,6 +192,7 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       COALESCE(SUM(CASE WHEN saw_head_move = 1 THEN 1 ELSE 0 END), 0) AS organic_head_moves,
       COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
     FROM finalization_shadow
+    WHERE (json_type(payload_json,'$.queue') IS NULL OR json_extract(payload_json,'$.queue.source') = 'organic')
   `);
 
   const updateOverride = database.prepare(`
@@ -195,6 +200,7 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
   `);
 
   const selectById = database.prepare('SELECT * FROM finalization_shadow WHERE id = ?');
+  const selectByKey = database.prepare("SELECT * FROM finalization_shadow WHERE json_extract(payload_json,'$.dedupeKey')=?");
 
   return {
     db: database,
@@ -204,7 +210,9 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
      * @param {import('../kernel/contracts.js').ShadowObservation} observation
      */
     append(observation) {
+      if (observation.queue && !observation.dedupeKey) throw new TypeError('queue shadow requires a dedupe key');
       const result = insert.run(observationToColumns(observation));
+      if (!result.changes && observation.dedupeKey) return rowToObservation(selectByKey.get(observation.dedupeKey));
       return { ...observation, id: Number(result.lastInsertRowid) };
     },
 
@@ -227,10 +235,12 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       return rows.map(rowToObservation);
     },
 
-    /**
-     * Return full-table promotion coverage aggregates without materializing the
-     * whole shadow table in JavaScript.
-     */
+    /** Full lifecycle history is needed for arrivals/service before the window. */
+    readQueueHistory({ to } = {}) {
+      return database.prepare("SELECT * FROM finalization_shadow WHERE json_extract(payload_json,'$.queue') IS NOT NULL AND observed_at <= ? ORDER BY observed_at,id")
+        .all(to ?? '9999').map(rowToObservation);
+    },
+    /** Full-table organic promotion coverage, without materializing history. */
     readCoverage() {
       const row = selectCoverage.get();
       return {
@@ -245,13 +255,18 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
      * the classifier proposes, a human disposes). `disposition` is 'resolved' or
      * 'open'; `note`/`principal` document the call.
      * @param {number} id
-     * @param {{ disposition: string, note?: string, principal?: string, at: string }} override
+     * @param {{ disposition: string, direction?: string, note?: string, principal?: string, at: string }} override
      */
     annotate(id, override) {
       if (!override || (override.disposition !== 'resolved' && override.disposition !== 'open')) {
         throw new TypeError("shadow annotate requires disposition 'resolved' or 'open'");
       }
       if (!override.at) throw new TypeError('shadow annotate requires an `at` timestamp');
+      const existing = selectById.get(id);
+      if (existing && rowToObservation(existing).queue && (!override.principal || !override.note
+        || !['v1-defect', 'v2-suspect', 'benign', 'open'].includes(override.direction))) {
+        throw new TypeError('queue triage requires principal, note and bidirectional direction');
+      }
       updateOverride.run({ id, override: JSON.stringify(override) });
       const row = selectById.get(id);
       return row ? rowToObservation(row) : null;
@@ -302,6 +317,7 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } =
         COALESCE(SUM(CASE WHEN saw_head_move = 1 THEN 1 ELSE 0 END), 0) AS organic_head_moves,
         COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
       FROM finalization_shadow
+      WHERE (json_type(payload_json,'$.queue') IS NULL OR json_extract(payload_json,'$.queue.source') = 'organic')
     `);
   } catch (err) {
     database.close();
@@ -322,6 +338,10 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } =
         rows = selectAll.all();
       }
       return rows.map(rowToObservation);
+    },
+    readQueueHistory({ to } = {}) {
+      return database.prepare("SELECT * FROM finalization_shadow WHERE json_extract(payload_json,'$.queue') IS NOT NULL AND observed_at <= ? ORDER BY observed_at,id")
+        .all(to ?? '9999').map(rowToObservation);
     },
     readCoverage() {
       const row = selectCoverage.get();

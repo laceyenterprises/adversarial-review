@@ -131,3 +131,38 @@ the daemon-owned migration rather than creating it from the reporting command.
 Any unmet condition is listed as a blocker. Promotion itself is an **operator
 action** (ARC-17 ships the executor gated off); this gate only reports
 readiness.
+
+## Queue decision evidence (MGQ-07)
+
+The queue consumer pairs each observed v1 action (including its `sourceRef`)
+with proposed lane readiness/order, rebase, exact-candidate checks and final
+eligibility. It uses read-only app-store snapshots and supplied observations;
+it never calls an execution adapter or claims a live lane. No production
+consumer is installed by this slice; later composition supplies observations.
+
+A queue difference is always initially open, including a familiar checks or
+head-move signature. Inspect `divergences[].evidence.queue`, the v1 provenance,
+required-set version, proof/identity references and lifecycle before attributing
+it. Queue prediction can be wrong as well as v1. Annotate through the same
+runtime-owner store API above, additionally specifying `direction: 'v1-defect'`
+or `direction: 'v2-suspect'` (or `benign`/`open`), a principal and an evidence
+note. Keep a suspected queue bug open until its correction is verified. The
+report shows the overriding direction, note, principal and timestamp.
+
+The report's `queue.organic` and `queue.synthetic` objects expose per-lane
+window/rate denominators, total/mean completed service time, oldest ready age,
+arrivals, merges, returns, check waits and infrastructure/hold parking. Service
+time includes waits; infrastructure time is also separately measured. Actual
+remediation runtime is outside this observer. Historical lifecycle events let
+window reports account for entries admitted before the window. Duplicate wakes
+and restart do not increment entry counts or reset readiness age. Unknown pairs
+remain visible. Synthetic replay never establishes organic promotion coverage;
+the existing coverage/head-move/exhaustion and disposition criteria, followed
+by operator review, continue to govern readiness. This adds no check or gate.
+
+Offline contention evidence: ten barrier-synchronized writer pairs each produced
+duplicates with the original append behavior (10/10) and with a pre-read-only
+attempt (10/10). The unique-index implementation retained exactly one row in
+10/10 consecutive trials. The sibling finalization ledger already uses the same
+unique-key/conflict discipline. Tests use disposable databases and fake remote
+boundaries.

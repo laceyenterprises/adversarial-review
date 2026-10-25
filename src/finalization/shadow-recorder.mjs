@@ -21,6 +21,8 @@ import { fold } from './ledger-fold.mjs';
 import { resolveSubjectKey } from './ledger-events.mjs';
 import { classifyDivergence } from './divergence-classifier.mjs';
 import { normalizeV1Action } from './shadow-actions.mjs';
+import { predictQueueShadow } from './queue-shadow.mjs';
+import { handoffDigest } from './queue-handoff.mjs';
 
 /**
  * @typedef {import('../kernel/contracts.js').SubjectRef} SubjectRef
@@ -159,4 +161,65 @@ export function replayV1Trace({ subject, ticks, policy }) {
     observedAt: tick.observedAt,
     policy,
   }));
+}
+
+/** Queue observation seam for explicit composition or isolated replay. Its only
+ * write capability is the existing telemetry store. Never accepts an executor.
+ * A failed append is returned as unknown/escalation, never silently dropped. */
+export function shadowObserveQueue({ subject, events, snapshot, v1Action, observedAt, policy,
+  consumer, source = 'synthetic' }) {
+  const observation = shadowObserve({ subject, events, v1Action, observedAt, policy });
+  try {
+    if (!Number.isFinite(Date.parse(observedAt))) throw new Error('invalid observation time');
+    if (!['organic', 'synthetic'].includes(source) || !consumer?.id || !consumer?.build) throw new Error('shadow consumer unavailable');
+    if (source === 'organic' && !observation.v1Action.sourceRef) throw new Error('v1 provenance unavailable');
+    handoffDigest(snapshot); // Reject non-JSON/partial replay inputs before prediction.
+    if (observation.foldError) throw new Error('shadow ledger fold unavailable');
+    const state = fold(events ?? []);
+    const queue = predictQueueShadow(snapshot, { observedAt, policy, ledgerState: state });
+    if (observation.subjectKey.subjectExternalId !== `${queue.lane.repository}#${snapshot.entry.prNumber}`) throw new Error('foreign shadow subject');
+    observation.queue = { ...queue, consumer: { id: consumer.id, build: consumer.build }, source, mode: 'observe' };
+    observation.v2Decision = makeEligibilityDecision(queue.proposed.kind, {
+      subjectKey: observation.subjectKey, revisionRef: queue.head ?? '', observedAt, reason: queue.proposed.reason,
+    });
+    observation.revisionRef = queue.head ?? '';
+    observation.classification = classifyDivergence({ v1Action: observation.v1Action,
+      v2Decision: observation.v2Decision, queue: observation.queue });
+    // Synthetic replay cannot manufacture organic promotion coverage.
+    observation.sawHeadMove = source === 'organic' && observation.sawHeadMove;
+    observation.sawExhaustion = source === 'organic' && observation.sawExhaustion;
+  } catch {
+    observation.foldError = true;
+    observation.queue = { mode: 'observe', source, consumer: consumer ?? null, error: 'queue-observation-unavailable' };
+    observation.v2Decision = makeEligibilityDecision('escalate', { subjectKey: observation.subjectKey,
+      revisionRef: observation.revisionRef, observedAt, reason: 'shadow queue observation unavailable' });
+    observation.classification = { relation: 'diverge', direction: 'open', class: 'queue-observation-unavailable',
+      disposition: 'open', reason: 'queue observation unknown; inspect store/fold and both decisions' };
+    observation.sawHeadMove = false; observation.sawExhaustion = false;
+  }
+  try { observation.dedupeKey = 'queue-shadow:' + handoffDigest({ subject: observation.subjectKey,
+    // Exclude delivery time and process identity: retries/restarts retain one pair.
+    source, snapshot: snapshot ?? null, events: events ?? [], v1Action: observation.v1Action, policy: policy ?? null,
+    result: { kind: observation.v2Decision.kind, reason: observation.v2Decision.reason ?? null, foldError: observation.foldError } }); }
+  catch { observation.dedupeKey = 'queue-shadow-error:' + handoffDigest({ subject: observation.subjectKey, observedAt,
+    v1Action: observation.v1Action }); }
+  return observation;
+}
+
+export function recordQueueShadow({ reader, shadowStore, entryId, ...args }) {
+  let snapshot;
+  try { snapshot = reader.read(entryId); } catch { snapshot = null; }
+  const evidence = Object.fromEntries(['live', 'checks', 'identity', 'derivation']
+    .filter(key => args.snapshot?.[key] !== undefined).map(key => [key, args.snapshot[key]]));
+  const observation = shadowObserveQueue({ ...args, snapshot: snapshot && { ...snapshot, ...evidence } });
+  try { return { persisted: true, observation: shadowStore.append(observation) }; }
+  catch {
+    const failed = { ...observation, foldError: true,
+      queue: { ...observation.queue, error: 'shadow-store-unavailable', finalEligibility: 'unknown' },
+      v2Decision: makeEligibilityDecision('escalate', { subjectKey: observation.subjectKey,
+        revisionRef: observation.revisionRef, observedAt: observation.observedAt, reason: 'shadow observation store unavailable' }),
+      classification: { relation: 'diverge', direction: 'open', class: 'shadow-store-unavailable',
+        disposition: 'open', reason: 'observation not persisted; operator escalation required' } };
+    return { persisted: false, observation: failed };
+  }
 }

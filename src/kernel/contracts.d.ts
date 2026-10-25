@@ -1027,6 +1027,7 @@ export interface DivergenceClassification {
 /** A human's overriding triage disposition recorded on an observation (§5.2). */
 export interface ShadowDispositionOverride {
   disposition: 'resolved' | 'open';
+  direction?: DivergenceClassification['direction'];
   note?: string;
   principal?: string;
   at: IsoTimestamp;
@@ -1048,10 +1049,16 @@ export interface ShadowObservation {
   sawHeadMove: boolean;
   sawExhaustion: boolean;
   dispositionOverride?: ShadowDispositionOverride | null;
+  /** Queue pair identity excludes poll time; the store enforces uniqueness. */
+  dedupeKey?: string;
+  /** Extensible observation evidence, never an executable decision or owner. */
+  queue?: JsonObject;
 }
 
 /** The model `finalization shadow-report` renders (SPEC §1 Win 3). */
 export interface ShadowReportModel {
+  /** Separate organic and isolated replay cohorts, with durable event denominators. */
+  queue?: { organic: JsonObject; synthetic: JsonObject };
   now: IsoTimestamp;
   windowDays: number;
   window: { from: IsoTimestamp; to: IsoTimestamp };
@@ -1074,6 +1081,7 @@ export interface ShadowReportModel {
     disposition: 'resolved' | 'open';
     overridden: boolean;
     tag: string;
+    evidence?: JsonObject;
   }[];
   organicHeadMoves: number;
   exhaustionCloses: number;

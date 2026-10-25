@@ -484,12 +484,18 @@ change or new check is required.
 ## Shared next action shadow (NXA-02)
 
 CIREDOWNER-01: red CI with remediation rounds left belongs to the remediator
-only while a pending/in-progress job exists for the current head, or a posted
-current-head review has findings awaiting job creation. That admission wait
+while a pending/in-progress job exists for the PR, regardless of revision and
+repository-name case, or a posted current-head review has findings awaiting job
+creation. Closure reuses the gate's live-job observation and reads terminal
+history only when no live job exists. A same-head terminal job created before
+the latest review cannot suppress that review's job-creation wait. That wait
 expires at the existing five-minute deadline, using the closure-wait durable
-anchor. Clean verdicts, terminal jobs and expired missing-job waits select the
-hammer with `ci-red-clean-verdict`. Wait reports use `active-remediation-job`
-only for a live current-head job; otherwise they use `remediation-job-missing`.
+anchor. NXA-04 also preserves admission for a completed non-final round at its
+pushed head with a review of the prior head: watcher CI admission requeues red
+CI for the remaining round. Otherwise clean verdicts, terminal jobs and expired
+missing-job waits select the hammer with `ci-red-clean-verdict`. Wait reports
+use `active-remediation-job` only for a live PR job; otherwise they use
+`remediation-job-missing`.
 The hammer still re-proves findings remediation, exact-head review, green checks
 and lease ownership before merge. After normal deployment, observe the next
 naturally clean-reviewed red-CI head selecting hammer; offline fixtures alone

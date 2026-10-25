@@ -1578,11 +1578,15 @@ async function dispatchAmaClosureFor({
     checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
     // Read the queue, not the dispatch projection: a clean review can leave a
     // terminal job, while the next posted finding may still await job creation.
-    followUpJob: ['pending', 'inProgress', 'completed', 'failed', 'stopped']
-      .flatMap(key => listFollowUpJobsInDir(rootDir, key, { repo: repoPath, prNumber }))
+    // Reuse the gate's PR-scoped, case-insensitive live owner. Do not scan
+    // growing terminal directories again while a live job already owns the PR.
+    followUpJob: gateSnapshot.activeFollowUpJob || ['completed', 'failed', 'stopped']
+      .flatMap(key => listFollowUpJobsInDir(rootDir, key, { repo: repoPath, prNumber, caseInsensitiveRepo: true }))
       .map(entry => entry.job)
-      .find(job => job.repo === repoPath && Number(job.prNumber) === Number(prNumber)
-        && (job.headSha || job.revisionRef) === currentPrHeadSha) || null,
+      .filter(job => String(job.repo || '').toLowerCase() === repoPath.toLowerCase()
+        && Number(job.prNumber) === Number(prNumber)
+        && (job.headSha || job.revisionRef) === currentPrHeadSha)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0] || null,
     roundsLeft: !reviewCycleExhausted && !finalPush && gateSnapshot.settledReview?.commentOnlyFinalRoundPush !== true, ciBlockedHammerOwner,
     finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached

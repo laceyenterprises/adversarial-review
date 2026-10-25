@@ -140,7 +140,7 @@ function reviewFacts(reviews, head, policy, labels) {
   };
 }
 
-function remediationFacts(remediation, head) {
+function remediationFacts(remediation) {
   const value = remediation.value || {};
   const job = plain(value.job) || (Object.hasOwn(value, 'status') ? value : null);
   const plan = plain(job?.remediationPlan);
@@ -154,10 +154,13 @@ function remediationFacts(remediation, head) {
     roundsLeft: remediation.state === 'complete' ? roundsLeft : null,
     nextRound: completed !== null ? completed + 1 : null,
     jobStatus: lower(job?.status) || null,
-    jobLive: remediation.state === 'complete' && sameHead(job?.headSha, head)
+    // Remediation observations belong to this PR; a head move or retrigger
+    // with no revision does not release its live worker's ownership.
+    jobLive: remediation.state === 'complete'
       && ['pending', 'in_progress'].includes(lower(job?.status)),
     jobClean: job?.clean === true,
     jobHead: text(job?.headSha) || null,
+    jobCreatedMs: timeMs(job?.createdAt),
     jobDeadlineMs: timeMs(job?.deadlineAt ?? job?.heartbeatDeadlineAt),
     finalPush: finalPush && finalPush.suppressed === true ? { headSha: text(finalPush.headSha) || null } : null,
   };
@@ -230,7 +233,7 @@ function snapshotFacts(snapshot) {
     labels,
     checks: checksFacts(sources.checks),
     review: reviewFacts(sources.reviews, head, policyValue, labels),
-    remediation: remediationFacts(sources.remediation, head),
+    remediation: remediationFacts(sources.remediation),
     launch: launchFacts(sources.launches, head),
     lease: leaseFacts(sources.leases, head),
     policy: sources.policy.state === 'complete' ? policyValue : null,
@@ -427,8 +430,8 @@ function selectRow(facts) {
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
   }
 
-  // R09: a remaining round owns CI repair only with a current-head job or
-  // a posted finding that will produce one. Admission expires if none arrives.
+  // R09: live PR remediation, a new finding's bounded admission wait, or
+  // non-final pushed-head closeout owns CI repair. Terminal history alone does not.
   if (checks.state === 'FAILURE') {
     if (checks.runnerless) {
       return { row: 'R09-ci-red', action: 'hammer', actor: 'hammer', reason: 'ci-runnerless', deadlineKind: 'admission', queue: 'dispatch' };
@@ -439,8 +442,14 @@ function selectRow(facts) {
     }
     const jobWillBeCreated = review.known && review.verdict && review.hasFindings
       && sameHead(review.reviewedHead, head) && review.postedMs !== null
-      && !sameHead(remediation.jobHead, head);
-    if (remediation.jobLive || (jobWillBeCreated && !facts.admissionExpired)) {
+      && (!sameHead(remediation.jobHead, head)
+        || (remediation.jobCreatedMs !== null && remediation.jobCreatedMs < review.postedMs));
+    // NXA-04: the completed round produced this unreviewed head. The watcher
+    // must retain admission intent so red CI can requeue its remaining round.
+    const nonFinalCloseout = remediation.jobStatus === 'completed'
+      && sameHead(remediation.jobHead, head) && review.known
+      && Boolean(review.reviewedHead) && !sameHead(review.reviewedHead, head);
+    if (remediation.jobLive || nonFinalCloseout || (jobWillBeCreated && !facts.admissionExpired)) {
       return { row: 'R09-ci-red', action: 'remediate', actor: 'remediator', reason: 'ci-red', deadlineKind: 'admission',
         queue: 'dispatch', round: remediation.nextRound };
     }

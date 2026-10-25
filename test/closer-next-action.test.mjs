@@ -1,6 +1,8 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -533,7 +535,7 @@ test('a recorded terminal judgment on an unchanged head retains daemon ownership
 });
 
 
-function redCiFixture(t, { findings = true, elapsed = 60_000, jobStatus = null, jobHead = HEAD } = {}) {
+function redCiFixture(t, { findings = true, elapsed = 60_000, jobStatus = null, jobHead = HEAD, jobRepo = identity.repo, jobCreatedAt = AT } = {}) {
   const f = cleanClosureFixture(t);
   const body = findings
     ? '## Blocking issues\n- Synthetic defect\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes'
@@ -548,8 +550,8 @@ function redCiFixture(t, { findings = true, elapsed = 60_000, jobStatus = null, 
     const key = jobStatus === 'in_progress' ? 'inProgress' : jobStatus;
     const dir = getFollowUpJobDir(f.args.rootDir, key);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${followUpJobFilePrefix(identity.repo, 5)}synthetic.json`), JSON.stringify({
-      repo: identity.repo, prNumber: 5, revisionRef: jobHead, status: jobStatus, createdAt: AT,
+    writeFileSync(join(dir, `${followUpJobFilePrefix(jobRepo, 5)}synthetic.json`), JSON.stringify({
+      repo: jobRepo, prNumber: 5, revisionRef: jobHead, status: jobStatus, createdAt: jobCreatedAt, reviewBody: body,
     }));
   }
   return f;
@@ -609,9 +611,38 @@ test('a missing queue job replaces a stale pass owner before red-CI routing', as
   assert.equal(result.dispatched, true);
 });
 
-test('a live job on another head cannot own the current clean red-CI head', async t => {
-  const f = redCiFixture(t, { findings: false, jobStatus: 'in_progress', jobHead: OLD });
-  const result = await maybeDispatchAmaClosureFor(f.args);
-  assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
-  assert.equal(result.dispatched, true);
-});
+for (const jobStatus of ['pending', 'in_progress']) {
+  for (const jobHead of [OLD, null]) {
+    test(`gate and closure agree on mixed-case ${jobStatus} PR ownership at ${jobHead}`, async t => {
+      const f = redCiFixture(t, { findings: false, jobStatus, jobHead, jobRepo: identity.repo.toUpperCase() });
+      const terminalDir = getFollowUpJobDir(f.args.rootDir, 'completed');
+      mkdirSync(terminalDir, { recursive: true });
+      const originalReadDir = fs.readdirSync;
+      let terminalReads = 0;
+      fs.readdirSync = function (path, ...args) {
+        if (path === terminalDir) terminalReads++;
+        return originalReadDir.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+      let result;
+      try { result = await maybeDispatchAmaClosureFor(f.args); }
+      finally { fs.readdirSync = originalReadDir; syncBuiltinESMExports(); }
+      assert.equal(result.nextAction.action, 'remediate');
+      assert.equal(result.reason, 'active-remediation-job');
+      assert.equal(result.dispatched, false);
+      assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+      assert.equal(terminalReads, 3, 'gate and ledger reads only; closure adds no terminal scan for a live owner');
+    });
+  }
+}
+
+for (const jobStatus of ['failed', 'stopped']) {
+  test(`a new same-head review waits after an older ${jobStatus} job`, async t => {
+    const f = redCiFixture(t, { jobStatus, jobCreatedAt: '2025-12-31T23:59:00.000Z' });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.nextAction.action, 'remediate', JSON.stringify(result.nextAction));
+    assert.equal(result.reason, 'remediation-job-missing');
+    assert.equal(result.dispatched, false);
+    assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+  });
+}

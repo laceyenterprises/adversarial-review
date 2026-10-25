@@ -155,7 +155,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     remediation: { roundsLeft: typeof input.roundsLeft === 'boolean' ? input.roundsLeft : null,
       ...(input.finalPush ? { finalPush: input.finalPush } : {}),
       ...(input.followUpJob !== undefined ? { job: input.followUpJob ? {
-        ...pick(input.followUpJob, ['status', 'clean', 'headSha']),
+        ...pick(input.followUpJob, ['status', 'clean', 'headSha', 'createdAt']),
         headSha: input.followUpJob.headSha || input.followUpJob.revisionRef || null,
       } : null } : {}) },
     leases: input.lease === undefined ? undefined : { closer: lease },

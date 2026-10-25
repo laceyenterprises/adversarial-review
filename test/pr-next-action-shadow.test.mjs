@@ -181,7 +181,8 @@ test('round enrichment preserves the original pass remediation owner with failed
   assert.equal(shared.decision, retained.decision);
   const samePass = await run({ status: 'completed', headSha: HEAD });
   assert.equal(samePass.decision, retained.decision, 'new facts cannot overwrite a resolved generation');
-  const replaced = await run({ status: 'completed', headSha: HEAD }, base());
+  const replaced = await run({ status: 'completed', headSha: HEAD },
+    base({ observations: { reviews: { verdict: 'approved', headSha: HEAD } } }));
   assert.deepEqual([replaced.decision.reason, replaced.decision.queue.intent], ['ci-red-clean-verdict', 'dispatch'],
     'explicit new job evidence replaces the inherited owner');
   assert.equal(pass.observations.remediation.value.job.status, 'in_progress');

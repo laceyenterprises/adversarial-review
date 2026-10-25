@@ -1217,9 +1217,6 @@ async function dispatchAmaClosureFor({
         'closer-only-review-delta',
         ({ signal: operationSignal }) => proveCloserAuthoredStaleHeadImpl({
           reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
-          anchorHeads: commentOnlyFinalRoundPushedHeads
-            .filter((entry) => entry?.reviewedHead === originalReviewedHead)
-            .map((entry) => entry.workerPushedHeadSha),
           rootDir, repoPath, prNumber, env, logger, signal: operationSignal,
           suppressionImpl: cachedSuppression,
           fetchCommitImpl: cachedCommit,

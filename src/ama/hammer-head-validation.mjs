@@ -57,7 +57,7 @@ export function hammerAttestationChain(comments, reviewedHead, currentHead, reme
   if (!reviewedHead || !currentHead || currentHead === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
   const edges = (Array.isArray(comments) ? comments : []).map(hammerProvenanceEdge).filter(Boolean);
-  edges.push(...remediationRounds.filter(round => round.state === 'completed'
+  edges.push(...(Array.isArray(remediationRounds) ? remediationRounds : []).filter(round => round.state === 'completed'
     && round.startHeadSha && round.resultingHeadSha && round.resultingHeadSha !== currentHead)
     .map(round => ({ base: round.startHeadSha, head: round.resultingHeadSha })));
   for (let pass = 0; pass < edges.length; pass++) {

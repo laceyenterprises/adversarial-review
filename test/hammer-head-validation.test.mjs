@@ -167,6 +167,15 @@ test('zero-edge proofs cannot masquerade as App or completed-round chains', asyn
   }
 });
 
+test('HAMROUNDEDGE-01 non-array rounds preserve App proof without granting round authority', () => {
+  const comments = [{ author: 'hammer-worker',
+    body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' }];
+  for (const rounds of [undefined, null, {}, 'invalid', false]) {
+    assert.deepEqual(hammerAttestationChain(comments, 'reviewed', 'head', rounds), ['head']);
+    assert.equal(hammerAttestationChain([], 'reviewed', 'head', rounds), null);
+  }
+});
+
 test('HAMROUNDEDGE-01 mixed chain follows unordered rounds and authenticated hammer edges', () => {
   const audit = (base, head) => ({ author: 'hammer-worker',
     body: `HAM-Base-Head: ${base}\nHAM-Validated-Head: ${head}` });

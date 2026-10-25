@@ -4112,6 +4112,16 @@ required for a group signal after leader exit. Unknown process inspection refuse
 startup or retains `cleanup-unconfirmed` with status 125; it cannot establish
 absence or release a matching lease. An empty/malformed census fails closed.
 
+LAC-2091 (agent-os#9186): the controller hands its inherited env and
+`HAM_HQ_ROOT` to `resolveSessionLedgerReadTarget`. When `session_ledger.backend`
+is Postgres, a SQLite-era `.hq/config.json` `ledgerDbPath` is ignored, as in
+Python `session_ledger.db_path.resolve_ledger_target`; it no longer refuses
+bootstrap as `legacy-hq-config` / `postgres-configured-but-sqlite-resolved`.
+An explicit `ledgerTarget`/`AGENT_OS_SESSION_LEDGER_TARGET` still wins.
+`--ledger-db`, `AGENT_OS_SESSION_LEDGER_DB_PATH` and `SESSION_LEDGER_DB_PATH`
+SQLite paths still fail closed under Postgres. A stale explicit target returns
+`missing-launch-request-row`; that is a correct refusal, not a routing defect.
+
 During cancellation the shell defers its trap release. Only after confirmed
 group drain may fallback cleanup release the exact acquisition receipt's local
 host/PID/PR/head/lease-ID/acquisition-time match under the existing mutation lock.

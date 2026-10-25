@@ -283,10 +283,11 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
  * directories, opening a writable SQLite handle, or converging the schema.
  * The daemon-owned writable store/migration must create the table first.
  *
- * @param {{ rootDir: string, busyTimeoutMs?: number }} options
+ * A supplied DB is borrowed without schema writes or connection changes; the caller owns it.
+ * @param {{ rootDir?: string, db?: import('better-sqlite3').Database, busyTimeoutMs?: number }} options
  */
-export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } = {}) {
-  const database = openReadOnlyDb(rootDir, { busyTimeoutMs });
+export function openReadOnlyFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {}) {
+  const database = db ?? openReadOnlyDb(rootDir, { busyTimeoutMs });
   let selectWindow;
   let selectFrom;
   let selectTo;
@@ -320,7 +321,7 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } =
       WHERE (json_type(payload_json,'$.queue') IS NULL OR json_extract(payload_json,'$.queue.source') = 'organic')
     `);
   } catch (err) {
-    database.close();
+    if (!db) database.close();
     throw err;
   }
 
@@ -352,7 +353,7 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } =
       };
     },
     close() {
-      database.close();
+      if (!db) database.close();
     },
   };
 }

@@ -79,7 +79,10 @@ an absolute bounded deadline. It is not a standalone activation CLI.
    operator's `scripts/os-restart.sh` procedure, then have that operator bounce
    the affected watcher/follow-up services. Do not edit plists or substitute a
    user-domain restart. No worker runs this step.
-5. Re-observe the loaded writer build, PID, owner/fence, config generation,
+5. Re-observe every loaded writer process (watcher, follow-up and active helpers):
+   record its service, build, PID, config generation and fresh sourced timestamps
+   in `deployment.writers`. Include every instance of each service, even when the
+   most recent routed writer already matches. Separately observe owner/fence,
    effective executor and zero legacy inventory after the bounce. Verify the
    required producers and identity surfaces under that generation. Source
    deployment without these observations is pending. Resume organic admissions
@@ -95,6 +98,8 @@ through the existing load-aware bounded command supervisor (5 seconds nominal,
 node src/finalization/queue-probe.mjs --capability canary --json
 ```
 
+Canary reads and private `rollout` evidence are emitted only for this capability;
+existing routing, shadow and merge probes do not run the canary projection.
 The existing probe uses a 1-second nominal SQLite/Git read wait capped at 5
 seconds, scaled once. No new polling or wait is added by the canary reader.
 Do not scale owner expiry, observation freshness or an already-scaled deadline.
@@ -106,6 +111,10 @@ The operator maintains the local observation artifact described in the
 Without it, organic evidence is pending. Fresh process/inventory/producer/identity
 observations last at most five minutes. Historical canary entry and rehearsal
 records stay durable; refresh runtime evidence from actual observations.
+The route runtime row is a last-writer hint, which can name an exited CLI. It
+cannot prove all services match. A stale build in any inventoried writer keeps
+preflight pending even when the latest writer matches. Normal owner ID/generation
+churn does not require refreshing process observations; owner expiry still does.
 
 Observe at least **20 unique actual queue entries**, including both zero-finding
 and remediated admissions, over a declared window. Retain entry/ack IDs, immutable
@@ -120,13 +129,18 @@ The ticket's observation predicate is:
 
 ```jq
 .capabilities.canary.available == true and .runtime.build != null and
+.rollout.canary.status == "complete" and
+.rollout.canary.preflight.ready == true and
+(.rollout.canary.rejected | length) == 0 and
+.rollout.canary.pendingDeliveries == 0 and
 .rollout.canary.entries >= 20 and .rollout.canary.clean > 0 and
 .rollout.canary.remediated > 0 and
 .rollout.canary.recoveryComplete == true and
 .rollout.canary.rollbackRehearsed == true
 ```
 
-Also inspect `status`, `pending`, `preflight`, outcomes and pending delivery;
+Also inspect `pending`, per-service `preflight.writers`, the last-writer hint,
+owner state, outcomes and pending delivery;
 the predicate alone does not authorize promotion or certify process liveness.
 Capability availability means the deployed read model/schema/adapters resolve,
 not that rollout is complete. A test fixture cannot establish live success.

@@ -12,7 +12,7 @@ import { createQueueAdmissionService } from '../src/finalization/queue-admission
 import { openFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
 import { probeQueueOwner, queueProbeMain } from '../src/finalization/queue-probe.mjs';
 import { queueRuntimeBuild } from '../src/finalization/queue-build.mjs';
-import { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, resolveQueueCanaryAdapter } from '../src/finalization/queue-canary.mjs';
+import { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, CANARY_WRITER_SERVICES, resolveQueueCanaryAdapter } from '../src/finalization/queue-canary.mjs';
 import { queueCleanFixture, queueLiveFixture } from './helpers/queue-clean-fixture.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
 
@@ -54,8 +54,8 @@ async function fixture(t, { count = 20, mixed = true } = {}) {
       patch: { reason: 'fixture:conflict' } });
   }
   const evidence = { schemaVersion: 1, lane, window: { from: '2026-10-25T00:00:00.000Z', to: now },
-    deployment: { ...sourced, build, pid: 42, ownerId: fence.ownerId, ownerGeneration: fence.generation,
-      routeGeneration: fence.routeGeneration, configGeneration: resolveLaneRoute(cfg, lane).configGeneration,
+    deployment: { ...sourced, writers: CANARY_WRITER_SERVICES.map((service, i) => ({ ...sourced, service, build, pid: 42 + i,
+      configGeneration: resolveLaneRoute(cfg, lane).configGeneration })),
       inventory: { ...sourced, legacyWriters: 0 }, identity: { ...sourced, result: 'verified' },
       producers: CANARY_PRODUCERS.map(kind => ({ ...sourced, kind, adapter: `fake:${kind}` })) },
     entries: store.entries(lane).map(e => ({ entryId: e.entryId, source: 'organic', sourceRef: 'fixture:organic-observation' })),
@@ -72,7 +72,7 @@ test('read-only deployed probe joins receipts, organic observations, metrics and
   const f = await fixture(t); f.save();
   const before = readFileSync(join(f.rootDir, 'data/reviews.db'));
   const files = readdirSync(join(f.rootDir, 'data'), { recursive: true });
-  const result = probeQueueOwner({ rootDir: f.rootDir, now, readConfig: () => cfg });
+  const result = probeQueueOwner({ rootDir: f.rootDir, now, capability: 'canary', readConfig: () => cfg });
   assert.equal(result.capabilities.canary.available, true); assert.ok(result.runtime.build);
   const c = result.rollout.canary;
   assert.equal(c.status, 'complete'); assert.equal(c.entries, 20);
@@ -110,19 +110,20 @@ test('counts exclude duplicate IDs, synthetic, foreign, missing and out-of-windo
   f.evidence.entries.push(f.evidence.entries[0], { entryId: 'foreign', source: 'organic', sourceRef: 'fixture' });
   f.evidence.entries[1].source = 'synthetic';
   const c = f.read(); assert.equal(c.entries, 19); assert.equal(c.rejected.length, 2);
+  assert.equal(c.metrics.lanes[0].arrivals, 19);
   f.evidence.window.from = '2026-10-25T00:02:00.000Z'; assert.equal(f.read().entries, 0);
   f.evidence.window.to = '2026-10-26T00:00:00Z'; assert.throws(f.read, /window/);
 });
 
 test('before activation report build/config mismatch, stale observations, live writers and missing producers', async t => {
   const f = await fixture(t);
-  f.evidence.deployment.build = 'old-build'; f.evidence.deployment.configGeneration = 'old-config';
+  f.evidence.deployment.writers[0].build = 'old-build'; f.evidence.deployment.writers[0].configGeneration = 'old-config';
   f.evidence.deployment.validUntil = now; f.evidence.deployment.inventory.legacyWriters = 1;
   f.evidence.deployment.producers.pop(); f.evidence.deployment.identity.result = 'unknown';
-  f.evidence.deployment.routeGeneration--;
+  f.evidence.deployment.writers[1].validUntil = now;
   const c = f.read(); assert.equal(c.preflight.ready, false);
   for (const issue of ['running-build-mismatch', 'running-config-mismatch', 'running-observation-stale-or-missing',
-    'legacy-writers-live-or-unknown', 'producer-unavailable', 'identity-unverified', 'running-owner-unverified']) assert.ok(c.preflight.issues.includes(issue), issue);
+    'legacy-writers-live-or-unknown', 'producer-unavailable', 'identity-unverified', 'running-writer-inventory-incomplete']) assert.ok(c.preflight.issues.includes(issue), issue);
   assert.deepEqual(c.preflight.missingProducers, ['drain-reconciliation']);
 });
 
@@ -147,10 +148,10 @@ test('registered writer, stale entry deadline and unresolved intent remain opera
 
 test('empty or unreadable observation file is pending; incompatible schema unavailable; diagnostics are redacted', async t => {
   const f = await fixture(t, { count: 0 });
-  const probe = () => probeQueueOwner({ rootDir: f.rootDir, now, readConfig: () => cfg });
+  const probe = () => probeQueueOwner({ rootDir: f.rootDir, now, capability: 'canary', readConfig: () => cfg });
   assert.equal(probe().capabilities.canary.available, true);
   assert.equal(probe().rollout.canary.status, 'pending');
-  for (const bytes of ['secret-like invalid input', '{"schemaVersion":2}']) {
+  for (const bytes of ['secret-like invalid input', '{"schemaVersion":2}', 'null', '[]']) {
     writeFileSync(f.path, bytes); const r = probe();
     assert.equal(r.rollout.canary.entries, 0); assert.equal(r.rollout.canary.recoveryComplete, false);
     assert.doesNotMatch(JSON.stringify(r), /secret-like/);
@@ -205,4 +206,85 @@ test('rehearsal uses real fence/drain/reconcile/return/reverse-selector/bounce/r
   assert.equal(f.routing.read(lane).pendingReturns.length, 0);
   assert.equal(f.store.readEntry(entry.entryId).phase, 'returned-to-closer');
   assert.equal(f.store.entries(lane).length, 1);
+});
+
+
+test('only the requested canary capability reads or emits private rollout evidence', async t => {
+  const f = await fixture(t); f.save();
+  for (const capability of ['routing', 'shadow', 'merge', undefined]) {
+    const result = probeQueueOwner({ rootDir: f.rootDir, now, capability, readConfig: () => cfg });
+    assert.equal(result.capabilities.routing.available, true);
+    assert.equal(result.capabilities.canary.available, false);
+    assert.equal(Object.hasOwn(result, 'rollout'), false);
+    assert.doesNotMatch(JSON.stringify(result), /fixture:organic-observation|fixture:recovery/);
+  }
+  let output = '';
+  assert.equal(queueProbeMain(['--capability', 'canary', '--json'], {
+    probe: options => probeQueueOwner({ ...options, rootDir: f.rootDir, now, readConfig: () => cfg }),
+    stdout: { write: s => { output += s; } },
+  }), 0);
+  assert.equal(JSON.parse(output).rollout.canary.status, 'complete');
+  // Invalid canary-only input must not affect another capability.
+  f.evidence.lane = null; f.save();
+  assert.equal(probeQueueOwner({ rootDir: f.rootDir, now, capability: 'routing', readConfig: () => cfg }).capabilities.routing.available, true);
+});
+
+test('wrongly shaped evidence collections stay available and pending with field diagnostics', async t => {
+  const f = await fixture(t);
+  const original = JSON.stringify(f.evidence);
+  for (const [path, value] of [
+    ['entries', [null]], ['entries', {}], ['recoveries', {}], ['recoveries', [null]],
+    ['deployment.producers', {}], ['deployment.producers', [null]],
+    ['deployment.writers', {}], ['deployment.writers', [null]],
+    ['rollback.steps', {}], ['rollback.steps', [null]],
+  ]) {
+    Object.assign(f.evidence, JSON.parse(original));
+    const keys = path.split('.'), key = keys.pop();
+    const parent = keys.reduce((obj, k) => obj[k], f.evidence);
+    parent[key] = value; f.save();
+    const result = probeQueueOwner({ rootDir: f.rootDir, now, capability: 'canary', readConfig: () => cfg });
+    assert.equal(result.capabilities.canary.available, true, path);
+    assert.equal(result.rollout.canary.status, 'pending', path);
+    assert.ok(result.rollout.canary.pending.some(p => p.startsWith(`operator-evidence-malformed:${path}`)), path);
+    if (path === 'entries' && Array.isArray(value)) assert.deepEqual(result.rollout.canary.rejected, [null]);
+    if (path === 'recoveries') assert.equal(result.rollout.canary.recoveryComplete, false);
+    if (path === 'rollback.steps') assert.equal(result.rollout.canary.rollbackRehearsed, false);
+  }
+});
+
+test('a fresh last writer cannot hide a stale build in another deployed service', async t => {
+  const f = await fixture(t);
+  assert.equal(f.read().preflight.ready, true);
+  // The route row still names the current-build watcher, but the closer is old.
+  f.evidence.deployment.writers[1].build = 'unbounced-follow-up';
+  let c = f.read();
+  assert.equal(c.status, 'pending');
+  assert.ok(c.preflight.issues.includes('running-build-mismatch'));
+  assert.equal(c.preflight.running.build, f.evidence.deployment.writers[0].build);
+  f.evidence.deployment.writers.pop();
+  c = f.read();
+  assert.equal(c.preflight.ready, false);
+  assert.deepEqual(c.preflight.missingWriterServices, ['follow-up']);
+  // An old single-process evidence record cannot serve as a complete inventory.
+  delete f.evidence.deployment.writers;
+  assert.ok(f.read().preflight.issues.includes('running-writer-inventory-incomplete'));
+});
+
+test('short-lived CLI last-writer hints and normal owner churn do not invalidate a fresh inventory', async t => {
+  const f = await fixture(t);
+  const cli = createLaneRoutingController({ store: f.store, now: () => now,
+    runtime: { build: queueRuntimeBuild(), pid: 999 } });
+  assert.equal((await cli.run({ cfg, lane, kind: 'closer' })).reason, 'queue-composition-unavailable');
+  await f.owner.release({ fence: f.fence });
+  let c = f.read();
+  assert.equal(c.preflight.running.pid, 999);
+  assert.equal(c.preflight.owner.owner_id, null);
+  assert.equal(c.preflight.ready, true);
+  assert.equal(c.status, 'complete');
+  const stale = createLaneRoutingController({ store: f.store, now: () => now,
+    runtime: { build: 'stale-cli', pid: 998 } });
+  await stale.run({ cfg, lane, kind: 'closer' });
+  c = f.read();
+  assert.equal(c.preflight.ready, false);
+  assert.ok(c.preflight.issues.includes('last-writer-build-mismatch'));
 });

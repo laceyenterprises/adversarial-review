@@ -22,7 +22,7 @@ export { queueRuntimeBuild } from './queue-build.mjs';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
-export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load, configPath, readConfig = readRoutingConfig } = {}) {
+export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load, configPath, capability, readConfig = readRoutingConfig } = {}) {
   const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false }, canary: { available: false } }, runtime: {
     build: queueRuntimeBuild(), role: 'read-only-observer', pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
@@ -181,7 +181,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
       result.capabilities.routing = { available: true, adapter: adapter.name, schema: '20261029_finalization_queue_routing',
         selector: 'roles.adversarial.merge_authority.lane_routes', defaultExecutor: 'legacy' };
     } catch { result.capabilities.routing.reason = 'routing-store-config-or-adapter-unavailable'; }
-    try {
+    if (capability === 'canary') try {
       if (!result.capabilities.routing.available || !result.capabilities.shadow.available) throw new Error('canary prerequisites unavailable');
       const adapter = resolveQueueCanaryAdapter({ db });
       let evidence = null;
@@ -228,7 +228,7 @@ export function queueProbeMain(argv = process.argv.slice(2), { stdout = process.
     else throw new Error(usage);
   }
   if (!capability) throw new Error(usage);
-  const result = probe({ rootDir, configPath });
+  const result = probe({ rootDir, configPath, capability });
   stdout.write(JSON.stringify(result) + '\n');
   return result.capabilities[capability].available ? 0 : 1;
 }

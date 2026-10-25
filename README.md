@@ -3053,9 +3053,13 @@ queue store, resolved adapters and runtime build with privately supplied operato
 observations. It reports unique organic entries by clean/remediated admission and
 current outcome, metric denominators, each isolated recovery result and ordered
 rollback/reactivation evidence. Fewer than 20 entries, either missing admission
-type or an unknown recovery remains pending. Preflight exposes stale process or
-entry deadlines, build/config mismatch, live legacy writers, missing producers,
-identity uncertainty and existing shadow readiness before activation.
+type or an unknown recovery remains pending. Only the canary capability reads
+and emits private rollout evidence. Preflight requires fresh observations for
+every deployed writer, including watcher and follow-up services; the route runtime
+is only a last-writer hint and owner-generation churn is not process proof.
+Preflight exposes stale process or entry deadlines, build/config mismatch, live
+legacy writers, missing producers, identity uncertainty and existing shadow
+readiness before activation.
 
 The [canary walkthrough](docs/finalization-queue-canary-runbook.md) covers whole-lane
 fence/drain/reconcile/transfer, the reviewed selector change, registered

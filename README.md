@@ -3046,6 +3046,33 @@ for runtime-owner composition, registered service restart, transfer and rollback
 The v2 subject merge executor also requires the shared lane port when the cached
 selector is empty. Missing lane composition refuses merge; an empty cached policy
 cannot bypass a durable queue owner. Other domain finalizers are unchanged.
+### Queue canary observations and operator rehearsal (MGQ-09)
+
+`node src/finalization/queue-probe.mjs --capability canary --json` joins the real
+queue store, resolved adapters and runtime build with privately supplied operator
+observations. It reports unique organic entries by clean/remediated admission and
+current outcome, metric denominators, each isolated recovery result and ordered
+rollback/reactivation evidence. Fewer than 20 entries, either missing admission
+type or an unknown recovery remains pending. Only the canary capability reads
+and emits private rollout evidence. Preflight requires fresh observations for
+every deployed writer, including watcher and follow-up services; the route runtime
+is only a last-writer hint and owner-generation churn is not process proof.
+Preflight exposes stale process or entry deadlines, build/config mismatch, live
+legacy writers, missing producers, identity uncertainty and existing shadow
+readiness before activation.
+
+The [canary walkthrough](docs/finalization-queue-canary-runbook.md) covers whole-lane
+fence/drain/reconcile/transfer, the reviewed selector change, registered
+system-service bounce/verification, organic observation and reversible rollback.
+The [observation contract](docs/data-model/finalization-queue-canary.md) documents
+`data/finalization-queue-canary.json`; the probe never writes it or the queue.
+Fresh sourced process observations are necessary: observer bytes and historical
+writer registration alone cannot prove a live process. Missing evidence is pending.
+Focused offline fixtures use fake boundaries and disposable stores only. No new
+smoke action, check or promotion gate is installed. Workers publish source PRs;
+the named operator separately deploys, verifies installed composition, performs
+rollout/rehearsal and explicitly approves durable evidence after merge.
+
 ### Lane-liveness evidence (LVR-05)
 
 The existing pipeline-health JSON includes `laneLiveness` version 1. For the

@@ -1,6 +1,7 @@
 {
   "version": 1,
   "entries": [
+    {"id": "finalization-queue-canary","title": "Queue Canary Rollout Observations","path": "docs/data-model/finalization-queue-canary.md","store": "data/finalization-queue-canary.json and read-only joins to data/reviews.db","schemaSurface": "src/finalization/queue-canary.mjs","relatedSchemaSurfaces": ["src/finalization/queue-probe.mjs","src/finalization/queue-routing.mjs","src/finalization/queue-admission.mjs","src/finalization/shadow-report.mjs","src/finalization/shadow-store.mjs"],"owner": "v2 finalization rollout operator; observation only"},
     {
       "id": "hammer-controllers",
       "title": "Hammer Controller Registrations",

@@ -160,3 +160,5 @@ export { QUEUE_DELIVERY_KINDS, createQueueClosureAuditDelivery, createQueueMerge
 export { resolveLaneRoute, resolveQueueRoutingStore, createLaneRoutingController } from './queue-routing.mjs';
 export { routeFinalizationWriter, createFinalizationLaneRouting } from './queue-routing-boundary.mjs';
 export { openQueueStatus, readRoutingConfig, renderQueueStatus } from './queue-status.mjs';
+
+export { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, resolveQueueCanaryAdapter, readCanaryEvidence } from './queue-canary.mjs';

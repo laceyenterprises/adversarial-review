@@ -561,3 +561,14 @@ observation only, with no new check, blocking gate, smoke action or restart.
 If later composition changes the watcher, the operator follows `DEPLOYMENT.md`
 and the existing drain/system-service restart/loaded-build verification path;
 workers do not perform that step.
+
+## Whole-lane canary and reversible rehearsal (MGQ-09)
+
+For queue lane rollout use the [canary procedure](finalization-queue-canary-runbook.md)
+and its [observation data contract](data-model/finalization-queue-canary.md).
+`node src/finalization/queue-probe.mjs --capability canary --json` is read-only;
+it requires deployed schemas/adapters and sourced operator observations for
+organic admissions, runtime readiness and isolated recovery results. Missing
+organic evidence is pending. The existing shadow readiness criteria above remain
+unchanged. Only the operator transfers ownership, applies a reviewed single-lane
+selector, bounces/verifies registered system services and records approval.

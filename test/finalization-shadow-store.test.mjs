@@ -170,3 +170,25 @@ test('the writable store refuses a caller that does not own the canonical data d
     Object.defineProperty(process, 'getuid', descriptor);
   }
 });
+
+
+test('reporting can borrow a snapshot connection without changing or closing it', () => {
+  const db = new Database(':memory:');
+  const writable = openFinalizationShadowStore({ db });
+  writable.append(cleanObs(t(0), { sawHeadMove: true }));
+  writable.append(cleanObs(t(200), { sawExhaustion: true }));
+  const version = db.pragma('schema_version', { simple: true });
+  const reporting = openReadOnlyFinalizationShadowStore({ db });
+  db.transaction(() => {
+    assert.deepEqual(reporting.read({ from: t(100), to: t(200) }).map(o => o.observedAt), [t(200)]);
+    assert.deepEqual(reporting.readCoverage(), { earliestObservedAt: t(0), organicHeadMoves: 1, exhaustionCloses: 1 });
+  })();
+  reporting.close();
+  assert.equal(db.open, true);
+  assert.equal(db.pragma('schema_version', { simple: true }), version);
+  db.close();
+  const missing = new Database(':memory:');
+  assert.throws(() => openReadOnlyFinalizationShadowStore({ db: missing }), /no such table/);
+  assert.equal(missing.open, true);
+  missing.close();
+});

@@ -10,6 +10,7 @@ export function queueRuntimeBuild() {
     '../../package.json',
     '../../package-lock.json',
     'queue-probe.mjs',
+    'queue-canary.mjs',
     'queue-routing.mjs',
     'queue-routing-boundary.mjs',
     'legacy-lane-write.mjs',

@@ -4105,8 +4105,19 @@ merge-agent prompt uses the same wrapper and named acquisition receipt.
 
 The controller registers before execution and watches its exact HQ launch through
 the existing read adapter and producer vocabulary. Validation runs in that shell's
-group. Terminal, parked, unreadable or mismatched ownership stops the round;
-retries cannot keep an old controller alive. TERM has two seconds before KILL,
+group. Terminal, parked or mismatched ownership stops the round at once; failed
+reads stop it only after two minutes without a permitted read, widened under load
+to the poll plus two read timeouts (HAMCTLPOLL-01).
+Lease acquisition and the merge click run `assert-launch`, which proceeds only on
+a fresh permitted read. A stale-read gate has a bounded three-read budget sized
+from the current load-aware timeout (60-second floor), and an admitted read may
+finish after its deadline. The unreadable grace waits for that gate budget;
+terminal evidence, signals and the absolute controller ceiling still stop at once.
+FD-4 requests and replies carry a per-caller UUID so late replies cannot authorize
+another step; the controller advertises the gate socket timeout before reading.
+The registration's `launchReadFailures`,
+`launchReadFirstFailureAt` and `launchReadLastError` separate a transient read
+from a cancellation; retries cannot keep an old controller alive. TERM has two seconds before KILL,
 then one second to confirm drain. A current witnessed PID/birth identity is
 required for a group signal after leader exit. Unknown process inspection refuses
 startup or retains `cleanup-unconfirmed` with status 125; it cannot establish

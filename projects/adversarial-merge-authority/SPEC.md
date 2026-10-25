@@ -627,9 +627,16 @@ selection and activation are governed by credential-capacity-expansion CCX-13.
 A dispatched closer's persistent shell must run through the versioned
 `hammer-controller.mjs` entrypoint before acquiring a merge lease. The controller
 registers the exact HQ LRQ, generation and shell group before execution, preserves
-HQ spawn attribution, and keeps validators in that group. Terminal/parked or
-unreadable launch ownership, signals and validator timeout stop the round. A
-terminal LRQ alone never proves process quiescence. Confirm group drain before
+HQ spawn attribution, and keeps validators in that group. Terminal/parked launch
+ownership, signals and validator timeout stop the round; failed launch reads stop
+it only after a bounded grace window, and lease acquisition and merge proceed only
+on a fresh permitted read (HAMCTLPOLL-01). Each stale-read gate has a bounded
+three-read load-aware budget with a 60-second floor; admitted reads finish before
+deadline refusal. Unreadable grace waits for this budget, without deferring
+terminal evidence or other stop reasons. The controller advertises the socket
+timeout and correlates all FD-4 completion/launch replies by per-request UUID,
+so timed-out predecessors cannot authorize later steps. A terminal LRQ alone never
+proves process quiescence. Confirm group drain before
 cancellation fallback release; require local host/PID plus the complete existing
 lease ID/PR/head/acquisition-time fence. Unknown drain retains ownership evidence
 and fails closed; unrelated processes and successor leases must survive.

@@ -1182,13 +1182,18 @@ acceptance and historical evidence: [LAC-2093](docs/validation/lac-2093.md).
 LAC-2093 recurrence: newly rendered closers run their persistent script through
 `bin/hammer-controller.mjs run`. A private registration binds the exact HQ launch
 to the shell group before execution; dispatched acquisition refuses an
-unregistered shell. Validators share that group. Terminal/parked/unreadable
-launch evidence and signals transition `running` → `stopping` → `quiescent`,
+unregistered shell. Validators share that group. Terminal/parked launch
+evidence, failed launch reads past a bounded grace window (HAMCTLPOLL-01; lease
+and merge steps still require a fresh permitted read, with a bounded three-read
+load-aware gate budget that the unreadable grace accommodates) and signals
+transition `running` → `stopping` → `quiescent`,
 or `cleanup-unconfirmed` on missing drain proof. Cancellation defers trap release
 until confirmed drain; the existing full lease-generation fence protects other
 holders. An empty census before the shell exit event waits for that event,
 preserves the script's exit status and grants no signaling or lease-release
-authority by itself. [Controller data](docs/data-model/hammer-controllers.md) describes the
+authority by itself. FD-4 handshakes correlate replies by per-request UUID and
+advertise gate timeout budgets; stale replies cannot authorize a later step.
+[Controller data](docs/data-model/hammer-controllers.md) describes the
 two-second TERM grace, one-second drain bound and retained scratch. Focused
 offline `hammer-controller` tests extend source acceptance; the existing
 `smv-handoff` smoke promise is unchanged. Deployed organic cancellation and

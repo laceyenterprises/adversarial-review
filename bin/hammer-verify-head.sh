@@ -176,9 +176,10 @@ ham_lease_pr_view() {
 
 ham_acquire_merge_lease() {
   # HQ cancellation only owns the recorded worker group. Dispatched closers
-  # must enter the versioned, launch-bound controller before taking a lease.
+  # must enter the versioned, launch-bound controller before taking a lease,
+  # and take it only on a fresh permitted launch read.
   if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-owner || return 125
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch || return 125
   fi
   local ham_lease_wait_retry=${1:-0}
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then

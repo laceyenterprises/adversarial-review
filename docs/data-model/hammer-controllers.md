@@ -18,15 +18,48 @@ Version 1 fields: `schemaVersion`, random `token`, exact `launchRequestId`,
 `controllerPid`, isolated `shellPid` (also the PGID), ISO `startedAt`, and `state`.
 States are `running`, `stopping`, `quiescent`, and `cleanup-unconfirmed`.
 Normal shell exit, TERM/INT/HUP/ALRM, the absolute two-hour ceiling, validator
-timeout, or terminal/parked/unreadable exact-launch evidence starts stopping.
+timeout, or terminal/parked/foreign exact-launch evidence starts stopping.
 The controller reads through the existing bounded session-ledger adapter and
-producer status vocabulary, at one-second intervals with a two-second read
-deadline. It does not adopt a successor LRQ or follow retries to authorize the
-old process. A failed initial launch read or process census refuses execution.
+producer status vocabulary every 10 seconds (`LAUNCH_POLL_MS`, never load
+scaled), one read at a time and without blocking the one-second process census.
+Each read uses the adapter's load-aware ledger timeout with a matching abort
+signal. A readable terminal, parked or foreign row stops at once (`launch-ended`).
+A failed read (timeout, spawn error, unreadable target) is recorded and the
+round continues; it stops with `launch-unreadable` only after
+`LAUNCH_UNREADABLE_GRACE_MS` (120 seconds, widened to the poll plus two read
+timeouts under load) passes with no permitted read. It does not adopt a
+successor LRQ or follow retries to authorize the old process. Start retries an
+unreadable launch read up to three times within that window; a terminal or
+parked start read, or an unreadable process census, refuses execution at once.
+
+Lease acquisition and the merge click call `assert-launch`: the ownership
+checks of `assert-owner`, then a `launch:<pid>:<nonce>` request on FD 4. The controller
+answers `clear` only when its newest permitted read started no longer ago than
+one poll interval plus that read's timeout. Otherwise it first takes fresh reads
+(up to three, counting an already in-flight read as the first attempt). The gate
+freezes its per-read timeout at the greater of the current load-aware timeout and
+the latest read timeout. Its deadline allows three such reads plus census polling
+slack, with `LAUNCH_GATE_WAIT_MS` (60 seconds) as a floor. A read admitted before
+that deadline may finish; no new read starts after it. The unreadable grace waits
+for this bounded gate budget before stopping the round, while terminal evidence,
+signals and the absolute controller ceiling still stop it immediately. Exhausted
+or expired unreadable gates answer `blocked`; a blocked step refuses.
+
+The controller first sends `wait:<nonce>:<socket-timeout-ms>` to advertise the
+gate budget plus one admitted read and ten seconds of transport/census slack.
+The caller adjusts its socket timeout to that budget. Final replies are
+`clear:<nonce>` or `blocked:<nonce>`. Validator completion uses
+`complete:<pid>:<nonce>` with the same correlated final replies and its existing
+ten-second timeout. Each caller generates a UUID nonce and discards replies for
+other requests, including late replies left by a timed-out predecessor. Missing
+or malformed matching replies fail closed. This changes no receipt fields.
 
 Final receipts add `reason`, `finishedAt`, `termSent`, `killSent`, `drained`,
 and `leaseCleanup`; `probeError`, `signalError`, or `errorCode` record bounded
 error codes without process commands, environment contents or credentials.
+Every write carries `launchReadFailures`, `launchReadFirstFailureAt` and
+`launchReadLastError` (a bounded reason or error code), so a no-merge audit can
+tell a transient read from a real cancellation.
 `directTermSent` / `directKillSent` identify a direct-child-only fallback when
 the census becomes unreadable; they do not certify descendant drain.
 Bootstrap errors retain `cleanup-unconfirmed` and their error code even when

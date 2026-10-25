@@ -4668,6 +4668,12 @@ never claim `HAM-Validated-Head` until exact-head CI passes. Publication
 provenance comments are distinct from the successful in-lease validation audit.
 `hammerAttestationChain` reads both kinds for the closer's range proof and the
 shared stale-head rule consumed by watcher closure, hammer wake and rescue.
+HAMROUNDEDGE-01 also lets the shared stale-head proof bridge the reviewed head
+to a hammer base using completed `startHeadSha` / `resultingHeadSha` edges from
+`readCompletedRemediationRounds` under the caller's runtime root, scoped to the
+same repository and PR. The exact current head must still end in an
+authenticated hammer App edge; round-only heads remain ineligible for this
+carry-forward. All mixed-chain edges count toward the existing length limit.
 Pushed provenance carries the verdict but never certifies CI; the closer reads
 and validates current exact-head required checks before merging.
 GitHub authenticates each comment's

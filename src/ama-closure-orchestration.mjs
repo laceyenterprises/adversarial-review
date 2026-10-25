@@ -1208,9 +1208,8 @@ async function dispatchAmaClosureFor({
           }));
       }).catch(() => {});
   }
-  // STALECLOSER-03: the anchors are the reviewed head plus the comment-only
-  // final-round pushes recorded for it, which already carry its verdict; the
-  // hammer often stacks its closer commit on that push (agent-os#7818/#7822).
+  // HAMROUNDEDGE-01: the shared proof bridges daemon-owned completed rounds
+  // into authenticated hammer edges; plain worker anchor heads confer nothing.
   let closerHeadProof = { proven: false, reason: 'not-stale' };
   if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
     try {
@@ -1221,7 +1220,7 @@ async function dispatchAmaClosureFor({
           anchorHeads: commentOnlyFinalRoundPushedHeads
             .filter((entry) => entry?.reviewedHead === originalReviewedHead)
             .map((entry) => entry.workerPushedHeadSha),
-          repoPath, prNumber, env, logger, signal: operationSignal,
+          rootDir, repoPath, prNumber, env, logger, signal: operationSignal,
           suppressionImpl: cachedSuppression,
           fetchCommitImpl: cachedCommit,
         }),

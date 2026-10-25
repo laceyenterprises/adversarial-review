@@ -6,7 +6,7 @@ import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
 import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -1106,6 +1106,30 @@ function closerAuthoredStaleWakes(args) {
   });
   return watcherWakes;
 }
+
+test('HAMROUNDEDGE-01 closure passes its round root to the shared proof and wakes the hammer', async t => {
+  const { args, payloads } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const dir = path.join(args.rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'subject-07-pr-7-round.json'), JSON.stringify({
+    repo: args.repoPath, prNumber: args.prNumber, status: 'completed', remediationPlan: { rounds: [
+      { state: 'completed', startHeadSha: HEAD, resultingHeadSha: 'remediated' },
+    ] },
+  }));
+  args.proveCloserAuthoredStaleHeadImpl = input => {
+    assert.equal(input.rootDir, args.rootDir);
+    return proveCloserAuthoredStaleHead({ ...input, comments: [{ author: 'hammer-worker',
+      body: 'HAM-Base-Head: remediated\nHAM-Pushed-Head: H1' }] });
+  };
+  const wakes = closerAuthoredStaleWakes(args);
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.closerAuthoredStale.decision, 'eligible');
+  assert.deepEqual(result.closerAuthoredStale.closerCommits, ['H1', 'remediated']);
+  assert.equal(wakes.length, 1);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].dispatchContext.closerAuthoredStale.eligible, true);
+});
 
 test('STALECLOSER-03 closer head: mergeability UNKNOWN then CLEAN produces a wake and a closer', async t => {
   const { args, payloads } = closerResumeFixture('green');

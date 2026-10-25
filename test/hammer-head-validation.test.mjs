@@ -167,6 +167,25 @@ test('zero-edge proofs cannot masquerade as App or completed-round chains', asyn
   }
 });
 
+test('HAMROUNDEDGE-01 mixed chain follows unordered rounds and authenticated hammer edges', () => {
+  const audit = (base, head) => ({ author: 'hammer-worker',
+    body: `HAM-Base-Head: ${base}\nHAM-Validated-Head: ${head}` });
+  const round = (startHeadSha, resultingHeadSha) => ({ state: 'completed', startHeadSha, resultingHeadSha });
+  const comments = [audit('second-round', 'head'), audit('first-round', 'hammer')];
+  const rounds = [round('hammer', 'second-round'), round('reviewed', 'first-round')];
+  assert.deepEqual(hammerAttestationChain(comments, 'reviewed', 'head', rounds),
+    ['first-round', 'hammer', 'second-round', 'head']);
+  assert.equal(hammerAttestationChain(comments, 'reviewed', 'second-round', rounds), null,
+    'the terminal edge must be a hammer edge, even with an earlier hammer');
+  assert.equal(hammerAttestationChain(comments, 'reviewed', 'head', [rounds[0],
+    { ...rounds[1], state: 'spawned' }]), null);
+  assert.equal(hammerAttestationChain([audit('cycle', 'head')], 'reviewed', 'head',
+    [round('head', 'cycle'), round('cycle', 'head')]), null);
+  // A competing round to the tip cannot obscure an authenticated terminal edge.
+  assert.deepEqual(hammerAttestationChain(comments, 'reviewed', 'head',
+    [round('reviewed', 'head'), ...rounds]), ['first-round', 'hammer', 'second-round', 'head']);
+});
+
 test('reviewed starting base has an explicit proof, independent of completed rounds', async () => {
   const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head',
     hammerBaseHead: 'reviewed', remediationRounds: [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }],

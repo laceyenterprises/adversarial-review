@@ -1,0 +1,5 @@
+export FIXTURE_GH_TOKEN=synthetic-token
+export GH_TOKEN=synthetic-token
+export GITHUB_TOKEN=synthetic-token
+export FIXTURE_GH_TOKEN_EXPIRES_AT=2000-01-01T00:00:00Z
+export GH_TOKEN_EXPIRES_AT=2000-01-01T00:00:00Z

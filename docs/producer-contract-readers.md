@@ -1,10 +1,13 @@
 # Producer evidence in the review consumer
 
-Portable artifacts are pinned to producer revision
+Historical portable artifacts are pinned to producer revision
 `f54169eb71c6f0b55b51d3025dd435c88652277e`, including its repaired fleet
 capture scenario. The scenario invokes the real quota-input publisher before
 reading status JSON, using disposable state and fake external transport. See
 [validation evidence](validation/prm-06.md).
+
+LVR-09 recordings are separately pinned to the SDK 0.4.0 release below; existing
+capture provenance is retained rather than relabelled as a new recording.
 
 The review service reads five existing producer boundaries without depending on
 an Agent OS checkout or a Python process at runtime. Routing, holds, retry
@@ -76,7 +79,7 @@ servable degraded provider, with its existing legacy `providers` boolean fallbac
 Aggregate HTTP status and the provider name `google` never stand in for the
 broker's registered provider `gemini`.
 
-Launch evidence comes from the committed SDK 0.3.0 release artifact in
+Launch evidence comes from the committed SDK 0.4.0 release artifact in
 `vendor/`, pinned by npm's lockfile integrity. `src/producer-contracts/launch-status.mjs`
 re-exports SDK readers and vocabulary sets; it contains no status interpretation.
 The release bundles the public `statusVocabulary` export and runs offline without
@@ -119,6 +122,67 @@ consumed here, including accepted creates followed by local closeout exit 3.
 The service does not gain a second D1 completion classifier or PR-create route.
 
 ## Portable artifacts and exact refresh
+
+### Recorded producer examples (LVR-10)
+
+The immutable SDK 0.4.0 release from merged producer revision
+`1c60bb0f82e2924f5df7c11003a3d523917f3cc8` carries the LVR-09 recordings in
+its full Node snapshot. `provenance.json` keeps their per-producer capture
+versions, source revisions, shape/content hashes and fixture byte hashes under
+`recorded`, plus `producerHashes` for the producer's report-only stale command.
+The older `files`/`revision` pins and `released-provenance.json` retain their
+independent historical provenance. A release revision can differ from a capture's
+source revision: the latter identifies the producer when it was recorded.
+
+Adopt a reviewed, merged release artifact unchanged in `vendor/`, update the
+`file:` dependency and npm lockfile, then extract its recorded examples:
+
+```bash
+npm install --offline --ignore-scripts --no-audit --no-fund
+python3 scripts/contracts/refresh-recorded.py vendor/agent-os-app-sdk-0.4.0.tgz 1c60bb0f82e2924f5df7c11003a3d523917f3cc8
+```
+
+The refresher reads only the tarball's public snapshot and package metadata,
+verifies every recording content hash before writing, and preserves historical
+captures. A missing provenance manifest starts with an empty dictionary; a
+missing fixture directory is created only after input validation succeeds.
+It never imports producer code or invokes a live command. Review the
+artifact SHA-256 against [the release record](../vendor/README.md) and verify it
+matches the release committed at the named merged revision. A refresh is not a
+recapture; request changed examples from the producer owner.
+
+JSON fixture files use the producer's compact, sorted JSON spelling, including
+`1.0`, with non-ASCII characters preserved as UTF-8 bytes rather than Unicode
+escapes; no trailing newline is added. Their bytes hash to `contentHash`. Token text
+is extracted verbatim, including its trailing newline; its `contentHash` hashes
+the JSON string encoding, while `sha256` hashes the actual text bytes. Never
+derive `producerHashes` from pretty-printed JSON. Tests compare both hashes and
+the parsed example against the installed SDK snapshot, and verify npm integrity.
+
+`test/hammer-token.test.mjs` uses `github-token-refresh.v1.txt` for its shared
+refresh stub. Dedicated consumer tests exercise fleet routing, registry model
+selection and launch status/ownership from the other three recordings. Negative
+mutations fail as `<producer> contract <version>: recorded producer fixture drift`
+without embedding payloads or underlying assertion errors. Existing shell quote,
+alias, expiry and routing edge cases remain labelled consumer mutations or
+compatibility tests.
+
+The fleet recording anonymizes account-map keys, so unknown account evidence
+must hold even with an `ok` provider. Positive account admission remains covered
+by the public reserve-floor fixtures below. There is no `worker-class show`
+stdout consumer here: the test explicitly projects its `className`/`spec`
+envelope into the existing registry mirror, retaining the recorded spec. The
+launch test supplies the complete captured row at the ledger snapshot seam; it
+does not qualify live database transport. No production source, lifecycle,
+durable state, smoke promise, CI gate or service configuration changes.
+
+The existing plan assertion `lvr-10-consumer-fixture-pinned` returns 75 until
+the token fixture reaches the deployed submodule, then passes on its presence.
+Normal deployment supplies the artifact; no restart, config flip or live action
+is requested by this ticket. Tests demonstrate offline consumer compatibility,
+not deployed activation. See [validation evidence](validation/lvr-10.md).
+
+### Historical owner captures
 
 [`provenance.json`](../test/fixtures/producer-contracts/provenance.json) pins the
 Agent OS revision, source path and SHA-256 for every copied artifact. Definitions
@@ -232,7 +296,7 @@ Producer terminality alone is not child-exit or ownership-release authority:
 `blocked_needs_decision` is itself terminal in the producer vocabulary, including
 when the wire explicitly reports `terminal: true`. A live wire-only observation
 without a status string retains ownership and uses an `unknown` wait reason.
-The installed SDK 0.3.0 `readDispatchStatus` reader interprets its bundled
+The installed SDK 0.4.0 `readDispatchStatus` reader interprets its bundled
 public `statusVocabulary`. Each explicit boolean wins independently, including
 false; absent or invalid booleans use the vocabulary and malformed values carry
 diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reaped`

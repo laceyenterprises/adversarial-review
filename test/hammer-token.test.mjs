@@ -9,14 +9,15 @@ import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { hammerTokenSession, withHammerTokenSync } from '../src/hammer-token.mjs';
 import { githubCredential, githubBudgetKey, markGitHubRateLimited, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
+import { assertProducerContract, recordedFixture, fixtureProvenance } from './helpers/recorded-producer-fixtures.mjs';
 
 const expired = 'synthetic-expired-token';
-const fresh = 'synthetic-fresh-token';
+const fresh = 'synthetic-token';
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 // Python shlex.quote, as the launch refresh command quotes each exported value.
 const shlexQuote = value => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
-// The real producer shape: one export line per variable. The fixture's expiry is
-// inside the skip margin, so every call still refreshes.
+// Explicit consumer mutations/compatibility cases for aliases, expiry and shell
+// quoting. The shared happy-path refresh below uses recorded producer bytes.
 const exportLines = (entitled, token, { expiresAt = new Date(Date.now() + 60_000).toISOString(), ...overrides } = {}) =>
   Object.entries({ [entitled]: token, GH_TOKEN: token, GITHUB_TOKEN: token,
     [`${entitled}_EXPIRES_AT`]: expiresAt, GH_TOKEN_EXPIRES_AT: expiresAt, ...overrides })
@@ -31,7 +32,7 @@ function fixture(t) {
   writeFileSync(command, `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(refreshes)}, 'refresh\\n');
 process.stderr.write(${JSON.stringify(fresh)});
-process.stdout.write(${JSON.stringify(exportLines('HAMMER_LACEY_GH_TOKEN', fresh))});
+process.stdout.write(${JSON.stringify(recordedFixture('github-token-refresh'))});
 `);
   const env = { PATH: dir, HOME: dir, HAM_ROOT_DIR: dir, HAMMER_LACEY_GH_TOKEN: expired,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
@@ -39,6 +40,33 @@ process.stdout.write(${JSON.stringify(exportLines('HAMMER_LACEY_GH_TOKEN', fresh
   return { dir, env, refreshes, count: () => readFileSync(refreshes, 'utf8').trim().split('\n').length };
 }
 const rejected = () => Object.assign(new Error('gh: Bad credentials (HTTP 401)'), { stderr: 'Bad credentials', code: 1 });
+
+function checkRecordedRefresh(t, output) {
+  assertProducerContract('github-token-refresh', () => {
+    const f = fixture(t);
+    delete f.env.HAMMER_LACEY_GH_TOKEN;
+    writeFileSync(join(f.dir, 'refresh.cjs'), `process.stdout.write(${JSON.stringify(output)});`);
+    const session = hammerTokenSession({ env: f.env });
+    const prepared = session.prepare();
+    assert.equal(prepared.env.GH_TOKEN, fresh);
+    assert.equal(prepared.env.GITHUB_TOKEN, fresh);
+    assert.equal(session.redact(fresh), '[redacted]');
+  });
+}
+
+test('parses the recorded hq github-token refresh export lines and redacts the token', t => {
+  checkRecordedRefresh(t, recordedFixture('github-token-refresh'));
+});
+
+test('negative recorded refresh mutation fails with producer/version and no token output', t => {
+  const output = recordedFixture('github-token-refresh').replaceAll('export ', 'invalid ');
+  assert.throws(() => checkRecordedRefresh(t, output), error => {
+    assert.equal(error.message, `github-token-refresh contract ${fixtureProvenance.recorded.producers['github-token-refresh'].contractVersion}: recorded producer fixture drift`);
+    assert.doesNotMatch(error.stack, /synthetic-token/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
 
 test('dedicated refresh-only entitlement takes precedence over legacy static and refresh credentials', t => {
   const f = fixture(t);

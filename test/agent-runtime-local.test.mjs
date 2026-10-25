@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   DEFAULT_LOCAL_RUN_CAP,
@@ -31,6 +31,18 @@ import {
   readReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
+
+// An auth fixture below /Users/<operator>/ still belongs to that operator.
+// Keep the auth path disposable and explicit so fake spawns never materialize
+// per-worker credentials in the operator home when TMPDIR is below /Users.
+function codexFixtureEnv(home) {
+  const operatorHome = resolve(home).match(/^\/Users\/[^/]+/)?.[0] || home;
+  return {
+    HOME: operatorHome,
+    CODEX_HOME: join(home, '.codex'),
+    CODEX_AUTH_PATH: join(home, '.codex', 'auth.json'),
+  };
+}
 
 test('non-blocking Codex model and effort require the remediator allowlists', () => {
   const root = mkdtempSync(join(tmpdir(), 'remwaste-model-'));
@@ -70,7 +82,7 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
       }));
       const configPath = join(root, 'config.yaml');
       writeFileSync(configPath, `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: ${model}\n`);
-      const env = { HQ_ROOT: root, HOME: root, AGENT_OS_CONFIG_PATH: configPath };
+      const env = { HQ_ROOT: root, ...codexFixtureEnv(root), AGENT_OS_CONFIG_PATH: configPath };
       assert.equal(resolveConfiguredNonBlockingCodexModel(env).resolvedModel, model);
       assert.equal(resolveNonBlockingCodexModel({ model, env }).modelSource, 'non-blocking-config');
       assert.notEqual(resolveCodexRemediationModel(env), model);
@@ -456,9 +468,7 @@ test('local remediation spawners retain reply bookkeeping on worker records', ()
     const codexAuthDir = join(codexHome, '.codex');
     mkdirSync(codexAuthDir, { recursive: true });
     const codex = withEnv({
-      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
-      CODEX_HOME: codexAuthDir,
-      HOME: codexHome,
+      ...codexFixtureEnv(codexHome),
     }, () => spawnCodexRemediationWorker(shared));
     assert.equal(codex.replyPath, replyPath);
     assert.equal(codex.launchRequestId, 'lrq_local_reply_state');
@@ -489,9 +499,7 @@ test('remediation spawners use governed models and reasoning from the HQ mirror'
     launchRequestId: 'lrq_model_fixture',
     sourceEnv: {
       HQ_ROOT: root,
-      HOME: root,
-      CODEX_AUTH_PATH: join(root, '.codex', 'auth.json'),
-      CODEX_HOME: join(root, '.codex'),
+      ...codexFixtureEnv(root),
     },
     enforceHarnessIdentity: false,
     spawnImpl: (command, args) => {
@@ -733,9 +741,7 @@ test('codex remediation startup evidence preserves policy violation schema alias
   mkdirSync(codexAuthDir, { recursive: true });
   try {
     const { startupEvidence } = withEnv({
-      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
-      CODEX_HOME: codexAuthDir,
-      HOME: codexHome,
+      ...codexFixtureEnv(codexHome),
     }, () => prepareCodexRemediationStartupEnv());
     assert.deepEqual(startupEvidence.policy_violations, []);
     assert.equal(startupEvidence.policyViolations, startupEvidence.policy_violations);
@@ -744,22 +750,23 @@ test('codex remediation startup evidence preserves policy violation schema alias
   }
 });
 
-test('codex remediation startup evidence resolves auth owner on Linux home paths', () => {
-  const rootDir = makeRoot();
-  const linuxHome = join(rootDir, 'home', 'runner');
-  const codexAuthDir = join(linuxHome, '.codex');
-  mkdirSync(codexAuthDir, { recursive: true });
-  try {
-    const { startupEvidence } = withEnv({
-      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
-      CODEX_HOME: codexAuthDir,
-      HOME: linuxHome,
-    }, () => prepareCodexRemediationStartupEnv());
-    assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, 'runner');
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
+for (const [home, authDir, owner] of [
+  ['/home/runner', '/home/runner/.codex', 'runner'],
+  ['/Users/operator', '/Users/operator/worker/.codex', 'operator'],
+]) {
+  test(`codex remediation startup evidence resolves auth owner for ${authDir}`, () => {
+    // Startup preparation with an explicit path does not read or write auth.
+    const { startupEvidence } = prepareCodexRemediationStartupEnv({
+      sourceEnv: {
+        CODEX_AUTH_PATH: join(authDir, 'auth.json'),
+        CODEX_HOME: authDir,
+        HOME: home,
+      },
+    });
+    assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, owner);
+    assert.equal(startupEvidence.resolvedStartup.authHome, home);
+  });
+}
 
 test('local remediation cancel ignores process exit races after identity verification', async () => {
   for (const code of ['ESRCH', 'EPERM']) {
@@ -876,9 +883,7 @@ test('gemini and codex remediation spawners close earlier fds when later sync op
         const codexAuthDir = join(codexHome, '.codex');
         mkdirSync(codexAuthDir, { recursive: true });
         return withEnv({
-          CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
-          CODEX_HOME: codexAuthDir,
-          HOME: codexHome,
+          ...codexFixtureEnv(codexHome),
         }, () => spawnCodexRemediationWorker(opts));
       }, { outputPath: join(rootDir, 'codex-output.txt'), logPath: missingLogPath }],
     ]) {

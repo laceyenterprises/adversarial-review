@@ -1214,10 +1214,13 @@ separate those fixtures from loaded organic worker proof. Existing lifecycle
 states and the `smv-handoff` smoke promise are unchanged.
 
 
-Launch evidence uses the pinned SDK 0.3.0 `readDispatchStatus` and public
+Launch evidence uses the pinned SDK 0.4.0 `readDispatchStatus` and public
 `statusVocabulary`. Explicit terminal/succeeded false values win independently;
 missing booleans fall back to vocabulary. Legacy launch aliases remain unknown.
 The SDK artifact is installed through the npm lockfile before service startup.
+Offline consumer regressions use its recorded token-refresh, fleet-quota,
+worker-class and launch-row examples, with per-producer version/hash diagnostics.
+See the [fixture refresh procedure](docs/producer-contract-readers.md#recorded-producer-examples-lvr-10).
 Wire-only terminal evidence is recorded even without a status string: closer
 records use `succeeded` or `failed`, and explicit `succeeded: false` prevents a
 success record. Merge cancellation may confirm terminality without a status

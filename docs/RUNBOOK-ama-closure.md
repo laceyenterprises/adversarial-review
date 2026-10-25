@@ -5765,3 +5765,14 @@ validation alone does not establish deployment or canary success.
 The v2 subject merge executor also requires the shared lane port when the cached
 selector is empty. Missing lane composition refuses merge; an empty cached policy
 cannot bypass a durable queue owner. Other domain finalizers are unchanged.
+
+### Whole-lane canary evidence (MGQ-09)
+
+The [canary procedure](finalization-queue-canary-runbook.md) extends the fenced
+routing sequence above with pre-activation running-build/config/producer and
+writer-inventory evidence, at least 20 organic entries of both admission types,
+isolated fault results and reversible rollback/reactivation. The runtime-owner
+`node src/finalization/queue-probe.mjs --capability canary --json` observation
+joins existing store/schema/adapters with private operator evidence; it never
+activates a lane. Missing evidence remains pending, and explicit operator
+approval after merge is separate from source publication or JSON availability.

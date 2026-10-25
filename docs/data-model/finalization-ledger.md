@@ -658,3 +658,12 @@ metrics reuse the existing durable-event metric builder. Runtime observer build
 and last registered writer build are distinct; a never-observed writer is null.
 No read path converges schema or transfers ownership. See the closure runbook's
 per-lane routing section for operator transfer, rollback and pending composition.
+
+## Canary observation joins (MGQ-09)
+
+The read-only [canary projection](finalization-queue-canary.md) joins these queue
+records to privately supplied operator observations without schema changes or
+an additional execution authority. Counts require unique organic observations,
+immutable admission receipts and live admission provenance in one lane/window.
+Runtime, recovery and rollback evidence remain separately sourced; missing
+observations never become successful execution or operator approval.

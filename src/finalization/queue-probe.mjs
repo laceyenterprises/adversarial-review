@@ -15,13 +15,15 @@ import { readRoutingConfig, verifyRoutingSchema } from './queue-status.mjs';
 import { resolveQueueRoutingStore, resolveLaneRoute } from './queue-routing.mjs';
 import { resolveQueueShadowAdapter } from './queue-shadow.mjs';
 
+import { readCanaryEvidence, resolveQueueCanaryAdapter } from './queue-canary.mjs';
+
 import { queueRuntimeBuild } from './queue-build.mjs';
 export { queueRuntimeBuild } from './queue-build.mjs';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load, configPath, readConfig = readRoutingConfig } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false } }, runtime: {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false }, canary: { available: false } }, runtime: {
     build: queueRuntimeBuild(), role: 'read-only-observer', pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
@@ -179,6 +181,21 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
       result.capabilities.routing = { available: true, adapter: adapter.name, schema: '20261029_finalization_queue_routing',
         selector: 'roles.adversarial.merge_authority.lane_routes', defaultExecutor: 'legacy' };
     } catch { result.capabilities.routing.reason = 'routing-store-config-or-adapter-unavailable'; }
+    try {
+      if (!result.capabilities.routing.available || !result.capabilities.shadow.available) throw new Error('canary prerequisites unavailable');
+      const adapter = resolveQueueCanaryAdapter({ db });
+      let evidence = null;
+      let evidenceReason;
+      try { evidence = readCanaryEvidence(rootDir); }
+      catch (error) { evidenceReason = error.code === 'ENOENT' ? 'operator-evidence-unavailable' : 'operator-evidence-unreadable-or-invalid'; }
+      const canary = adapter.read({ evidence, cfg: readConfig({ rootDir, configPath }), build: result.runtime.build, now });
+      if (evidenceReason) {
+        canary.pending = [evidenceReason];
+        canary.preflight.issues = [evidenceReason];
+      }
+      result.rollout = { canary };
+      result.capabilities.canary = { available: true, adapter: adapter.name, schema: 'operator-observations-v1', noMutation: true };
+    } catch { result.capabilities.canary.reason = 'canary-store-config-or-evidence-incompatible'; }
   } catch (error) {
     // Error codes are sufficient for operators; do not echo raw DB paths or
     // arbitrary adapter/auth diagnostics into this public read surface.
@@ -190,6 +207,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     result.capabilities.merge.reason = result.capabilities.owner.reason;
     result.capabilities.shadow.reason = result.capabilities.owner.reason;
     result.capabilities.routing.reason = result.capabilities.owner.reason;
+    result.capabilities.canary.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
@@ -198,9 +216,9 @@ export function queueProbeMain(argv = process.argv.slice(2), { stdout = process.
   let rootDir;
   let capability;
   let configPath;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow|routing --json [--root DIR] [--config FILE]';
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow|routing|canary --json [--root DIR] [--config FILE]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow', 'routing'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow', 'routing', 'canary'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }

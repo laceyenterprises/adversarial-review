@@ -8,7 +8,7 @@ import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController,
-  LAUNCH_POLL_MS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
+  LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import Database from 'better-sqlite3';
@@ -245,14 +245,19 @@ for (const [status, rows, outcome] of [
         reads.push({ hqRoot: args.hqRoot, probe });
         return probe;
       },
+      delayImpl: async () => {},
       spawnImpl: () => { throw new Error('spawn-reached'); },
     }), outcome);
-    assert.deepEqual(psql, [{ command: 'psql', dsn: true }]);
-    assert.equal(reads.length, 1);
-    assert.equal(reads[0].hqRoot, hqRoot);
-    assert.equal(reads[0].probe.target.backend, 'postgres');
-    if (rows) assert.equal(reads[0].probe.row.status, status);
-    else assert.equal(reads[0].probe.reason, 'missing-launch-request-row');
+    // A missing row exhausts the bounded start reads before refusing.
+    const expectedReads = status === 'missing' ? LAUNCH_READ_ATTEMPTS : 1;
+    assert.deepEqual(psql, Array.from({ length: expectedReads }, () => ({ command: 'psql', dsn: true })));
+    assert.equal(reads.length, expectedReads);
+    for (const read of reads) {
+      assert.equal(read.hqRoot, hqRoot);
+      assert.equal(read.probe.target.backend, 'postgres');
+      if (rows) assert.equal(read.probe.row.status, status);
+      else assert.equal(read.probe.reason, 'missing-launch-request-row');
+    }
   });
 }
 

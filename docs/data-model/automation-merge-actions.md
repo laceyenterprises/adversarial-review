@@ -17,6 +17,13 @@ Filenames are `<owner>-<repo>-pr-<number>-<headSha>-<uuid>.json`. Repeated
 calls append distinct files; consumers must not infer a unique attempt from the
 PR/head tuple alone. There is no in-place update or deletion by the writer.
 
+An optional `deliveryKey` (word characters, `:`, `.` or `-`, at most 200) names
+exactly one receipt: the filename suffix becomes `key-<first 32 hex of
+sha256(deliveryKey)>` and the record carries `deliveryKey`. A repeated write
+with the identical record is a replay that returns the existing file; a
+different record under the same key refuses. The v2 queue outbox (MGQ-06) uses
+this so a lost outbox receipt or restart cannot double automation accounting.
+
 | Field | Shape | Contract |
 |---|---|---|
 | `receiptProtocol` | string | Always `OPSEV1-03`. |
@@ -29,6 +36,7 @@ PR/head tuple alone. There is no in-place update or deletion by the writer.
 | `merged` | boolean | Whether this producer executed a verified merge. |
 | `reason` | string or null | Required and non-empty for refusal; defaults to null for success. |
 | `executedAt` | timestamp string | Parseable date; defaults to the writer's current ISO timestamp. |
+| `deliveryKey` | string (optional) | Present only for stable-key outbox deliveries; see above. |
 
 ## Receipt ownership and executed refusals
 

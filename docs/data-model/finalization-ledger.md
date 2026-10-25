@@ -533,3 +533,86 @@ runtime modules. It reports bounded stored observations and enqueue counts;
 missing organic evidence stays pending. Live policy, credential, pager and owner
 composition and per-lane routing remain explicit later integration work. No
 production route, CI check, new config setting or smoke step is installed.
+
+### Final eligibility, merge receipts and delivery outbox (MGQ-06)
+
+`migrations/20261027_finalization_queue_merge.sql` adds two additive tables.
+`finalization_queue_merge_receipt(entry_id PRIMARY KEY, repository, base,
+pr_number, candidate, merge_sha, operation_id UNIQUE, receipt_digest,
+receipt_json)` holds one immutable receipt per merged entry.
+`finalization_queue_delivery(delivery_key PRIMARY KEY, entry_id, kind,
+payload_json, attempts, last_error, receipt_json, UNIQUE(entry_id, kind))` is
+the outbox; a null `receipt_json` is a pending delivery and a partial index
+keeps pending rows cheap to scan. Retain both with the entry audit; never erase
+a row to retry delivery.
+
+`createQueueMergeService().finalize` accepts only a `finalizing` entry with an
+exact published candidate. Immediately before mutation it rereads, in order:
+the existing emergency execution brake (an unreadable policy counts as
+engaged), the per-subject v2 ledger fold (an escalated/halted/closed subject
+parks), the immutable admission receipt and its digest against
+`rebase.sourceReceiptDigest`, live lifecycle/head/base, the shared admission
+predicate (holds, identity, branch rights, primary change and existing
+structural eligibility through `evaluateMergeEligibility`), the recomputed
+derivation proof, a complete exact-candidate check snapshot through the shared
+classifier, and the identity surface. The identity read is mandatory here:
+absence is not local mode, because the receipt attributes the merging bot
+(`login`, `producerClass` in `closer-hammer|ama-daemon`, `sourceRef`). The owner
+fence and route generation are asserted on every write. The lane fence replaces
+only the legacy merge-lease execution input (`leaseHeld`); no other condition is
+skipped. Each read uses `queueWaitMs(5s nominal, 30s ceiling)` clipped to the
+entry's persisted deadline; nothing rescales or extends `patience`.
+
+Outcomes before mutation: head change returns to the closer; base change
+(`baseSha` differs or `BEHIND`) clears `checks` and `decision` and returns to
+`rebasing` under the original deadline; a no-longer-green rerun returns
+`finalizing → waiting-checks` (the only backward actionable transition the store
+permits besides `rebasing`); completed red returns; holds and the brake park as
+`parked-hold`; unavailable identity/receipt/observation/Git and an expired
+deadline park as `parked-infrastructure` with the MGQ-05 cause journal and lane
+release. Merged or closed PRs reconcile as `closed-observed`.
+
+A passing read persists `decision` (`kind: eligible`, head/base, labels, check
+reason and required-set version, structural source, primary change, proof and
+receipt digests, admission kind, subject-ledger event count, attribution of
+bot/closer/worker, `id: decision:<digest>`), then the owner journals the merge
+intent `merge:<sha256(entryId, candidate, exactBase, progressVersion)>` before
+invocation. Under the issuance lock the service rechecks the brake, entry
+snapshot, settled merges, subject-ledger event count and a last live read, then
+calls the existing squash expected-head surface with an already-clipped timeout
+(at most 60s). A reply is never success evidence. `reconcileQueueMergeObservation`
+requires live `merged` state at the candidate, a structured `mergeCommitSha`
+(matching any reported SHA), `mergedAt` and `mergedBy` equal to the attributed
+bot. A merged foreign head or foreign merger settles not-applied and reconciles
+`closed-observed` with no receipt or deliveries. A missing SHA, lagging open
+state or unknown reply leaves the intent unresolved; only owner takeover with
+proven drain (`observeQueueMergeOperation`, which never invokes a merge) may
+settle it. A settled succeeded operation found on restart records the receipt
+without another merge.
+
+The receipt records old (admission) head, expected old head, candidate/new head,
+exact base, rebase provenance (source receipt digest, publication, proof kind,
+no-op flag, digest, fork, replayed commits, derivation hop count), the complete
+final check snapshot, the final decision, merge operation/method/SHA/time/merger,
+attribution and the owner fence, plus `digest`. The `merged` phase, receipt,
+delivery rows and a subject-ledger `finalized` event (`method: squash`,
+`sourceRef: github:merge:<sha>`, appended once) commit in one transaction. The
+entry gains `merge` and `delivery: { receiptDigest, keys }`. The lane is
+released before delivery.
+
+Delivery keys are `delivery:<kind>:<entryId>:<mergeSha>`. Kinds are
+`merge-action-receipt` (the existing OPSEV1-03 accounting writer, keyed
+filename, `producerClass` from the attributed bot) and `closure-audit` (the
+existing AMA audit, one `succeeded` attempt per key). Each delivery is bounded
+(5s nominal, 30s ceiling, scaled once), records `attempts` and a sanitized
+`last_error` code, and settles only on a receipt whose id equals the key. Both
+adapters are idempotent by key, so a crash after the external write but before
+the outbox receipt replays without duplicating accounting. Missing adapters or
+failures remain visible as pending after the lane advances.
+
+`resolveQueueMergeAdapter` is the read-only deployed projection used by the
+`merge` probe: receipt/delivery/pending counts, unresolved merge operations,
+recent receipts (bot login) and pending delivery keys with attempts and last
+error. Live identity, merge surface, delivery and owner recovery composition and
+per-lane routing remain later integration work; an entry recovered after its
+original deadline cannot merge because the owner refuses issuance past it.

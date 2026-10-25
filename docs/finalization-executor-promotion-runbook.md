@@ -466,3 +466,50 @@ responses; the complete snapshot-plus-store-CAS implementation also rejected
 after each experiment. Sibling admission and rebase services use the same
 persisted snapshot/version discipline. Reprobe releases its temporary owner even
 when recovery remains unavailable or rejoins behind a predecessor.
+
+### Merge and receipt delivery observation (MGQ-06; no activation)
+
+After normal deployment, the runtime owner applies
+`migrations/20261027_finalization_queue_merge.sql` through the existing app-store
+migration procedure, after the four earlier queue migrations. Writable
+queue-store opening also converges it; the read-only probe never does. This
+slice authorizes no worker restart, route change, merge, production fault
+injection or pager test.
+
+From the deployed checkout, under its actual runtime owner and the existing
+bounded load-aware supervisor (5 seconds nominal, 30 seconds maximum), run:
+
+```sh
+node src/finalization/queue-probe.mjs --capability merge --json
+```
+
+Require `capabilities.merge.available == true` and `runtime.build != null`.
+Record the checkout/digest, store adapter, schema, delivery kinds, receipt and
+delivery counts, `pending`, `unresolvedMergeOperations`, recent receipts with the
+attributed bot login and every pending delivery key with attempts and last
+error. Zero receipts are pending organic evidence, not a merge exercise. A
+non-zero `pending` after a lane advanced is the visible outbox backlog; retry it
+through the composed service's `deliver()`, never by deleting rows. A non-zero
+`unresolvedMergeOperations` means an ambiguous merge awaits drained owner
+takeover; do not clear it by hand.
+
+The capability remains unwired. Future composition must supply the live
+admission reader (including `mergeCommitSha`, `mergedAt` and `mergedBy`), the
+complete check reader, Git derivation verifier, a mandatory identity surface
+that names the merging bot, the existing squash expected-head surface with
+`recordReceipt: false` (the outbox owns accounting), the existing merge-action
+and AMA audit delivery adapters with the deployment HQ root, the Sentinel page
+adapter and an owner recovery adapter that proves drain before calling
+`observeQueueMergeOperation`. The existing emergency brake stays independent and
+intercepts both before the intent and under the issuance lock.
+
+Offline concurrency measurements use a deterministic stale observer: observer B
+passes the start checks and keeps serving a pre-merge live snapshot (a stale
+read cache) while A merges, settles and pauses before recording. Three runs of
+ten consecutive races each: the deliberately unguarded variant (decision
+snapshot CAS, in-lock snapshot check and settled-merge guard removed) issued a
+second merge in 30/30 races; the CAS-only variant and the settled-guard-only
+variant each issued exactly one merge in 30/30; the complete implementation
+issued exactly one merge in 30/30. A separate overlapping-finalize race is
+already serialized by the MGQ-01 issuance lock and stayed 10/10 under every
+variant. The production source was restored after each experiment.

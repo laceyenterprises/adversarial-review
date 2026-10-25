@@ -1,4 +1,4 @@
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from './load-aware-timeout.mjs';
 import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
@@ -568,6 +568,7 @@ async function writeGitHubAdapter(kind, params = {}, {
   execFileImpl,
   env = process.env,
   rootDir,
+  timeoutMs,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new TypeError('writeGitHubAdapter requires execFileImpl');
@@ -577,7 +578,8 @@ async function writeGitHubAdapter(kind, params = {}, {
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
   const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
-    timeout: loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
+    // Callers with a persisted deadline pass an already-scaled, clipped budget.
+    timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_TIMER_DELAY_MS) : loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
     env: buildAdapterEnv(env),
   });
   const receipt = readAdapterReceipt(parseAdapterJson(stdout, kind));

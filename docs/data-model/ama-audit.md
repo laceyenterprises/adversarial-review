@@ -228,3 +228,15 @@ non-permanent `failed-without-merge` entries. The first two failures set
 and null `retryAfter`. Later observations return
 `attestation-record-retry-exhausted` without audit writes or lease acquisition.
 A new head has independent history. An unreadable audit defers without recording.
+
+## Stable-key queue deliveries (MGQ-06)
+
+`appendAmaAuditAttempt` treats a non-empty `attempt.deliveryKey` as an outbox
+idempotency key: when an existing attempt already carries the same key it
+returns `{ filePath, doc, replay: true }` without rewriting the file. The v2
+queue delivers one `succeeded` attempt per merge with `closureAuthority:
+merge-queue-v2` metadata on a newly created record and attempt fields
+`attemptPhase: queue-squash-merge`, `reviewedHead`, `validatedHead`,
+`rebasedOntoBase`, `mergeMethod`, `mergeCommitSha`, `mergedAt`, `mergedBy`,
+`receiptDigest` and `queueEntryId`. Attempts without a delivery key keep their
+existing append semantics.

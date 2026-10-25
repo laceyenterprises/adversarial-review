@@ -2886,3 +2886,33 @@ runs `node src/finalization/queue-probe.mjs --capability checks --json` from the
 deployed checkout with a bounded load-aware supervisor. See the
 [store contract](docs/data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
 and [deployment observation procedure](docs/finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).
+
+### V2 final eligibility, guarded merge and receipts (MGQ-06)
+
+The unwired v2 merge step consumes a `finalizing` exact candidate. Immediately
+before mutation it rereads the existing emergency brake, subject ledger,
+immutable receipt and disposition digest, live head/base/holds, identity, branch
+rights, primary change, existing structural eligibility, the recomputed rebase
+proof and a complete exact-candidate check snapshot. The live owner fence and
+route generation replace only the legacy merge-lease execution input. Head
+changes return to the closer; holds and the brake park; an outside base write
+clears stale readiness and rebases/retests under the original deadline.
+
+The final decision and owner-journaled intent precede the existing squash
+expected-head surface. A reply is never success: only live merged state at the
+candidate with a structured merge SHA and the attributed bot as merger records a
+receipt. Mismatched, unstructured or foreign already-merged replies are not
+success, and an invisible ambiguous merge waits for drained owner takeover. The
+receipt (old/new head, base, rebase provenance, check snapshot, decision, merge
+SHA, bot/closer attribution) commits with the merged phase, a subject-ledger
+`finalized` event and stable-key outbox rows for the existing merge-action
+accounting and AMA closure audit. Delivery retries never repeat the merge or an
+action, and pending delivery stays visible after the lane advances.
+
+No production route, new config, CI check or smoke step is installed. Source
+fixtures are `finalization-queue-merge.test.mjs` and
+`finalization-execution-surfaces.test.mjs`. The runtime owner separately runs
+`node src/finalization/queue-probe.mjs --capability merge --json` from the
+deployed checkout with a bounded load-aware supervisor. See the
+[store contract](docs/data-model/finalization-ledger.md#final-eligibility-merge-receipts-and-delivery-outbox-mgq-06)
+and [deployment observation procedure](docs/finalization-executor-promotion-runbook.md#merge-and-receipt-delivery-observation-mgq-06-no-activation).

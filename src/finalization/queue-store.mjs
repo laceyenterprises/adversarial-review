@@ -12,6 +12,7 @@ export function ensureFinalizationQueueSchema(db) {
   db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
 }
 
 export function assertQueueStoreOwner(rootDir) {
@@ -110,7 +111,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     progress({ fence, entryId, phase, patch = {}, at, readmit = false, recoveryObservation, expectedEntry }) {
       at = queueTime(at);
       if (!QUEUE_PHASES.includes(phase)) throw new TypeError('invalid queue phase');
-      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission', 'rebase', 'infrastructure'];
+      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission', 'rebase', 'infrastructure', 'merge'];
       if (Object.keys(patch).some(key => !allowed.includes(key))) throw new TypeError('immutable queue entry field');
       return tx(() => {
         assertFence(fence, at);
@@ -133,8 +134,11 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
           throw new Error('queue predecessor active');
         }
         if (readmit && (wasActive || phase !== 'ready')) throw new Error('invalid readmission');
+        // A final re-read that no longer sees green checks returns to the
+        // original bounded wait; it never skips back past publication.
         if (wasActive && becomesActive && QUEUE_ACTIONABLE_PHASES.indexOf(phase) !== QUEUE_ACTIONABLE_PHASES.indexOf(entry.phase) + 1
-          && phase !== entry.phase && phase !== 'rebasing' && !recoveryObservation) throw new Error('invalid queue transition');
+          && phase !== entry.phase && phase !== 'rebasing' && !recoveryObservation
+          && !(entry.phase === 'finalizing' && phase === 'waiting-checks')) throw new Error('invalid queue transition');
         if (phase === 'merged' && entry.phase !== 'finalizing') throw new Error('invalid merged transition');
         const progressVersion = (entry.progressVersion ?? 0) + 1;
         if (!Number.isSafeInteger(progressVersion)) throw new Error('queue progress version exhausted');

@@ -5,7 +5,7 @@ import { constants, hostname } from 'node:os';
 import { join } from 'node:path';
 import { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { configuredSessionLedgerBackend, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
@@ -29,10 +29,11 @@ const LAUNCH_READ_NOMINAL_MS = 30_000;
 export function launchReadTimeoutMs() { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS); }
 
 // Worker tests keep the ordinary DSN; this controller reads live launch truth.
-// Leave resolution implicit when no canonical runtime DSN was supplied.
+// The configured backend still gates Postgres, including during rollback.
 export function controllerLedgerTarget(env = process.env) {
   const dsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
-  return dsn ? { backend: 'postgres', dsn } : undefined;
+  return dsn && configuredSessionLedgerBackend({ env }) === 'postgres'
+    ? { backend: 'postgres', dsn, source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' } : undefined;
 }
 
 // Registration belongs to this invocation, never the shared PR or LRQ name.
@@ -185,17 +186,19 @@ export async function runHammerController(script, args = [], {
   }
   // Reads abandoned at exit must not hold the process open until they time out.
   const closing = new AbortController();
-  const launchReads = { failures: 0, firstFailureAt: null, lastError: null };
+  const launchReads = { failures: 0, firstFailureAt: null, lastError: null, source: null };
   let lastPermitted, latestReadTimeoutMs;
   // Returns permitted, ended (a readable row that forbids continuing) or unreadable.
   async function readLaunch(readTimeoutMs = readTimeoutImpl()) {
     const startedRead = nowImpl();
     latestReadTimeoutMs = readTimeoutMs;
+    launchReads.source = null;
     let outcome, error;
     try {
       const probe = await readLaunchImpl({ launchRequestId, env, rootDir: env.HAM_ROOT_DIR,
         hqRoot: env.HAM_HQ_ROOT, ledgerTarget: controllerLedgerTarget(env), timeoutMs: readTimeoutMs,
         signal: AbortSignal.any([AbortSignal.timeout(readTimeoutMs), closing.signal]) });
+      launchReads.source = probe?.target?.source || null;
       const meaning = launchRequestMeaning(probe?.row);
       if (probe?.ok !== true) { outcome = 'unreadable'; error = probe?.reason || probe?.code || 'not-ok'; }
       else outcome = probe.row?.launch_request_id === launchRequestId
@@ -245,7 +248,8 @@ export async function runHammerController(script, args = [], {
     shellPid: child.pid, startedAt, state: 'running' };
   // A no-merge audit separates a transient read from a real cancellation.
   const withReads = () => Object.assign(record, { launchReadFailures: launchReads.failures,
-    launchReadFirstFailureAt: launchReads.firstFailureAt, launchReadLastError: launchReads.lastError });
+    launchReadFirstFailureAt: launchReads.firstFailureAt, launchReadLastError: launchReads.lastError,
+    launchReadSource: launchReads.source });
   const persist = () => writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600 });
   const witnessed = new Map();
   let reason, stopAt, termSent = false, killSent = false, drained = false;

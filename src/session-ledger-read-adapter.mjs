@@ -104,7 +104,7 @@ function postgresTargetFromConfig({ cfg, env }) {
   };
 }
 
-function configuredSessionLedgerBackend({ env }) {
+export function configuredSessionLedgerBackend({ env }) {
   try {
     const cfg = loadConfig({ env });
     return normalizeText(cfg.get('session_ledger.backend'))?.toLowerCase() || null;

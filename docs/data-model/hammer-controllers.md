@@ -1,6 +1,7 @@
 # Data Model — Hammer Controller Registrations
 
 **Owner:** versioned closer controller (`src/ama/hammer-controller.mjs`)
+**Source of truth:** `src/ama/hammer-controller.mjs`
 **Store:** `<HAM_RUN_DIR>/controller-<uuid>.json`, mode 0600
 **Entrypoint:** `bin/hammer-controller.mjs run <script> [args...]`
 
@@ -60,6 +61,12 @@ error codes without process commands, environment contents or credentials.
 Every write carries `launchReadFailures`, `launchReadFirstFailureAt` and
 `launchReadLastError` (a bounded reason or error code), so a no-merge audit can
 tell a transient read from a real cancellation.
+`launchReadSource` records the latest read's adapter target source, or null
+when unavailable. Under the Postgres backend, a non-empty canonical DSN sets
+this to `env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN` and overrides the worker's
+target/DSN. Under SQLite (including the default), canonical DSNs are ignored.
+Only the source label is stored; connection DSNs, credentials and paths are
+never copied into the registration. Older version 1 receipts omit this field.
 `directTermSent` / `directKillSent` identify a direct-child-only fallback when
 the census becomes unreadable; they do not certify descendant drain.
 Bootstrap errors retain `cleanup-unconfirmed` and their error code even when

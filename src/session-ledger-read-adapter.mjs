@@ -297,14 +297,18 @@ export function resolveSessionLedgerReadTarget({
       return failIfPostgresConfiguredSqliteResolved(result, { env });
     }
   }
+  // LAC-2091: `.hq/config.json` ledgerDbPath is an implicit SQLite-era
+  // default, not a caller choice. The canonical Python resolver
+  // (session_ledger.db_path.resolve_ledger_target) consults it only once the
+  // backend resolves to SQLite, so a stale pointer must not outrank a
+  // configured Postgres backend. Explicit and env SQLite targets above still
+  // fail closed under Postgres.
   const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
-  if (legacyHqLedgerDbPath) {
+  if (legacyHqLedgerDbPath && configuredSessionLedgerBackend({ env }) !== 'postgres') {
     const result = usableSqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config', {
       requiredTables,
     });
-    if (result.ok || result.reason === 'malformed-ledger-target') {
-      return failIfPostgresConfiguredSqliteResolved(result, { env });
-    }
+    if (result.ok || result.reason === 'malformed-ledger-target') return result;
   }
   try {
     const cfg = loadConfig({ env });

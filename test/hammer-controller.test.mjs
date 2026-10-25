@@ -9,6 +9,8 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import Database from 'better-sqlite3';
 
 const root = resolve(import.meta.dirname, '..');
 const head = 'a'.repeat(40);
@@ -209,6 +211,48 @@ test('Darwin native census returns the same members and births as legacy ps pars
         JSON.stringify({ native, legacy }));
     }
   });
+
+// LAC-2091 (agent-os#9186): the controller hands its own env and HAM_HQ_ROOT
+// to the shared reader. A stale SQLite-era HQ ledgerDbPath beside configured
+// Postgres must neither refuse bootstrap nor stand in for the canonical row.
+for (const [status, rows, outcome] of [
+  ['running', 1, /spawn-reached/],
+  ['succeeded', 1, /refusing controller start/],
+  ['missing', 0, /refusing controller start/],
+]) {
+  test(`LAC-2091: controller bootstrap reads the canonical postgres launch (${status}) past a stale legacy HQ ledger`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-controller-lac2091-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const hqRoot = join(dir, 'agent-os-hq'), staleLedger = join(dir, 'stale-legacy.db');
+    mkdirSync(join(hqRoot, '.hq'), { recursive: true });
+    writeFileSync(join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ledgerDbPath: staleLedger }));
+    const db = new Database(staleLedger);
+    db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
+    db.close();
+    const reads = [], psql = [];
+    await assert.rejects(runHammerController('/does-not-run', [], {
+      env: { HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
+        HAM_HQ_ROOT: hqRoot, HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres', AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger' },
+      readLaunchImpl: async args => {
+        const probe = await readLaunchRequestStatusFromLedgerAsync({ ...args, spawnAsyncImpl: async (command, argv) => {
+          psql.push({ command, dsn: argv.includes('postgres://ledger.example/agent_os_ledger') });
+          return { status: 0, stderr: '', stdout: rows ? `${JSON.stringify({ launch_request_id: 'lrq_controller-test',
+            status, updated_at: '2026-10-25T00:47:00Z', terminal_at: null, failure_class: null })}\n` : '' };
+        } });
+        reads.push({ hqRoot: args.hqRoot, probe });
+        return probe;
+      },
+      spawnImpl: () => { throw new Error('spawn-reached'); },
+    }), outcome);
+    assert.deepEqual(psql, [{ command: 'psql', dsn: true }]);
+    assert.equal(reads.length, 1);
+    assert.equal(reads[0].hqRoot, hqRoot);
+    assert.equal(reads[0].probe.target.backend, 'postgres');
+    if (rows) assert.equal(reads[0].probe.row.status, status);
+    else assert.equal(reads[0].probe.reason, 'missing-launch-request-row');
+  });
+}
 
 for (const probe of [launch('canceled'), launch('blocked_needs_decision'), { ok: false }, launch('future-status')]) {
   test(`start refuses non-executable launch ${probe.row?.status || 'unreadable'}`, async () => {

@@ -234,6 +234,133 @@ test('resolveSessionLedgerReadTarget falls through stale legacy HQ ledgerDbPath 
   assert.equal(result.target.source, 'roots.runtime_home');
 });
 
+// LAC-2091 (agent-os#9186): a deployed HQ root kept a SQLite-era
+// `.hq/config.json` ledgerDbPath pointing at a real but stale ledger.db while
+// the host was configured for Postgres. The pointer outranked the configured
+// backend, so every implicit read refused `postgres-configured-but-sqlite-resolved`.
+const LAC2091_POSTGRES_ENV = {
+  ...HERMETIC_CONFIG_ENV,
+  AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+  AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
+};
+
+function staleLegacyHqFixture() {
+  const rootDir = tempRoot();
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  const staleLedger = path.join(rootDir, 'stale-legacy.db');
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(path.join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ledgerDbPath: staleLedger }), 'utf8');
+  const db = new Database(staleLedger);
+  db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
+  db.close();
+  return { rootDir, hqRoot, staleLedger };
+}
+
+test('LAC-2091: configured postgres outranks a stale legacy HQ ledgerDbPath', () => {
+  const { hqRoot } = staleLegacyHqFixture();
+  for (const env of [
+    { ...LAC2091_POSTGRES_ENV, HQ_ROOT: hqRoot },
+    { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger', HQ_ROOT: hqRoot },
+  ]) {
+    const result = resolveSessionLedgerReadTarget({ requiredTables: ['launch_requests'], env });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.target.backend, 'postgres');
+    assert.equal(result.target.source, 'config:session_ledger.dsn');
+  }
+  const viaParam = resolveSessionLedgerReadTarget({ requiredTables: ['launch_requests'], env: LAC2091_POSTGRES_ENV, hqRoot });
+  assert.equal(viaParam.ok, true);
+  assert.equal(viaParam.target.backend, 'postgres');
+});
+
+test('LAC-2091: launch status reads the canonical postgres row despite a stale legacy HQ ledger', () => {
+  const { hqRoot } = staleLegacyHqFixture();
+  const calls = [];
+  const result = readLaunchRequestStatusFromLedger({
+    launchRequestId: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6',
+    env: LAC2091_POSTGRES_ENV,
+    hqRoot,
+    spawnSyncImpl: (command, args) => {
+      calls.push(command);
+      assert.equal(command, 'psql');
+      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
+      return { status: 0, stderr: '', stdout: `${JSON.stringify({
+        launch_request_id: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6', status: 'succeeded',
+        updated_at: '2026-10-25T00:47:00Z', terminal_at: '2026-10-25T00:47:00Z', failure_class: null })}\n` };
+    },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.target.backend, 'postgres');
+  assert.equal(result.row.status, 'succeeded');
+  assert.deepEqual(calls, ['psql']);
+});
+
+test('LAC-2091: postgres without a DSN binds the canonical database name, never the legacy sqlite', () => {
+  const { hqRoot } = staleLegacyHqFixture();
+  const result = resolveSessionLedgerReadTarget({
+    requiredTables: ['launch_requests'],
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres', HQ_ROOT: hqRoot },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.target.backend, 'postgres');
+  assert.equal(result.target.dsn, null);
+  assert.equal(result.target.source, 'config:session_ledger.database_name');
+});
+
+test('LAC-2091: the legacy HQ ledgerDbPath is still honored on sqlite deploys', () => {
+  const { hqRoot, staleLedger } = staleLegacyHqFixture();
+  for (const env of [
+    { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
+    { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite', HQ_ROOT: hqRoot },
+  ]) {
+    const result = resolveSessionLedgerReadTarget({ requiredTables: ['launch_requests'], env, rootDir: null });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.target.backend, 'sqlite');
+    assert.equal(result.target.path, staleLedger);
+    assert.equal(result.target.source, 'legacy-hq-config');
+  }
+});
+
+test('LAC-2091: explicit targets keep their policy beside a stale legacy HQ ledger under postgres', () => {
+  const { hqRoot, staleLedger } = staleLegacyHqFixture();
+  const env = { ...LAC2091_POSTGRES_ENV, HQ_ROOT: hqRoot };
+  const explicit = resolveSessionLedgerReadTarget({ ledgerTarget: { backend: 'sqlite', path: staleLedger }, env });
+  assert.equal(explicit.ok, true);
+  assert.equal(explicit.target.backend, 'sqlite');
+  assert.equal(explicit.target.source, 'explicit-ledger-target');
+
+  // A deliberately chosen stale target fails closed on the absent row; the
+  // reader never substitutes the canonical backend or invents a launch.
+  const missing = readLaunchRequestStatusFromLedger({
+    launchRequestId: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6',
+    ledgerTarget: { backend: 'sqlite', path: staleLedger },
+    env,
+    spawnSyncImpl: () => assert.fail('explicit sqlite target must not query postgres'),
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'missing-launch-request-row');
+
+  for (const [label, args] of [
+    ['deprecated alias', { ledgerDbPath: staleLedger, env }],
+    ['env db path', { env: { ...env, AGENT_OS_SESSION_LEDGER_DB_PATH: staleLedger } }],
+    ['legacy env db path', { env: { ...env, SESSION_LEDGER_DB_PATH: staleLedger } }],
+  ]) {
+    const result = resolveSessionLedgerReadTarget({ requiredTables: ['launch_requests'], ...args });
+    assert.equal(result.ok, false, label);
+    assert.equal(result.reason, 'postgres-configured-but-sqlite-resolved', label);
+    assert.equal(result.target.path, staleLedger, label);
+  }
+
+  for (const ledgerTarget of [{ backend: 'postgres' }, { backend: 'mysql', path: staleLedger }, '   ']) {
+    const result = resolveSessionLedgerReadTarget({ ledgerTarget, env });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'malformed-ledger-target');
+  }
+  const malformedEnv = resolveSessionLedgerReadTarget({ env: { ...env, AGENT_OS_SESSION_LEDGER_TARGET: '   ' } });
+  assert.equal(malformedEnv.ok, false);
+  assert.equal(malformedEnv.reason, 'malformed-ledger-target');
+});
+
 test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest timestamped row', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');

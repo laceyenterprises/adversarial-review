@@ -175,7 +175,9 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...(input.terminalReview ? { terminalReview: pick(input.terminalReview, ['validated', 'headSha', 'reviewedHeadSha']) } : {}),
       ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
     ...(input.hammerStop ? { controls: {
-      stop: { deterministic: true, fingerprint: input.hammerStop.stopKey || input.hammerStop.predicate },
+      stop: { deterministic: true, fingerprint: input.hammerStop.stopKey || input.hammerStop.predicate,
+        headSha: input.hammerStop.headSha || head,
+        recordedAt: input.hammerStop.recordedAt ?? input.hammerStop.recorded_at ?? null },
       ...(input.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: input.hammerStop.predicate,
       } } : {}),

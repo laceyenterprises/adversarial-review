@@ -519,6 +519,19 @@ prevents a certified completion from selecting another no-merge retry while
 preserving CI waits and repair, live ownership, stop controls and retry limits.
 A handed-to-review lease cannot reuse that terminal proof.
 
+STOPSTALE-01: a deterministic automated stop may be superseded by a review
+posted strictly after its recorded time on the same exact head, when
+`isDaemonMergeReviewAllowed` accepts the findings under the current strict-mode
+policy and the settled verdict reaches the ordinary daemon-merge rows. Closure
+input and result adapters accept stop timestamps as `recordedAt` or
+`recorded_at`, preferring a non-null `recordedAt` when both are supplied. The
+decision retains the stop fingerprint and records
+`stop-superseded-by-exact-head-review` in `evidenceRefs`. Missing timestamps,
+blocking or unknown findings, foreign-head reviews and reviews rejected by
+strict mode keep R07. The stop is passed over only for daemon ownership;
+hammer lifetime/retry caps and final-no-merge still prevent hammer relaunch.
+All live merge predicates remain in force. No stop record is deleted or reset.
+
 The shadow (`src/pr-next-action-shadow.mjs`, reached through the import-free
 consumer seam `src/pr-next-action-consumer.mjs`) runs at closure orchestration
 (selected shared workflow), the posted-review handler, the no-progress lane, the

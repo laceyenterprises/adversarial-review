@@ -280,7 +280,7 @@ function decisionKey(snapshot, fields) {
 // it returns the owned snapshot refresh instead.
 const DISPATCH_ACTORS = new Set(['reviewer', 'remediator', 'hammer']);
 
-function selectRow(facts) {
+function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   const { pr, review, remediation, launch, lease, checks, policy, controls, progress, head } = facts;
   const refresh = (reason, refs = []) => ({ row: 'R16-refresh', action: 'wait-for-CI', actor: 'watcher', reason,
     deadlineKind: 'refresh', queue: 'observe', refs });
@@ -393,20 +393,36 @@ function selectRow(facts) {
   }
 
   // R07: deterministic automatic stops and existing retry exhaustion keep a
-  // recovery owner. Real caps stay real: no relaunch is queued here.
+  // recovery owner. A newer eligible exact-head verdict may pass a stop only
+  // for daemon merge. Hammer dispatch remains stopped, including at real caps.
   const stop = plain(controls?.stop);
   const automatedHold = (facts.labels || []).find(label => OPERATOR_HOLD_LABELS.includes(label.name));
-  if ((stop && stop.deterministic === true) || automatedHold) {
+  if ((!daemonAfterSupersededStop && stop?.deterministic === true) || automatedHold) {
+    const recordedMs = timeMs(stop?.recordedAt);
+    const newerExactHeadReview = stop?.deterministic === true && review.known && review.clean
+      && sameHead(review.reviewedHead, head) && (!text(stop.headSha) || sameHead(stop.headSha, head))
+      && recordedMs !== null && review.postedMs !== null && review.postedMs > recordedMs;
+    if (!daemonAfterSupersededStop && !automatedHold && newerExactHeadReview) {
+      // Re-run the normal gates with hammer history set aside, accepting only
+      // daemon ownership. A red/conflicting head, a daemon transport failure,
+      // or any other repair need keeps the stop: this can never restart hammer.
+      const next = selectRow(facts, { daemonAfterSupersededStop: true });
+      if (next.action === 'daemon-merge' && next.actor === 'daemon') {
+        return { ...next, refs: [...(next.refs || []), `stop:${text(stop.fingerprint) || 'unfingerprinted'}`,
+          'stop-superseded-by-exact-head-review'] };
+      }
+    }
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'automated-stop',
       deadlineKind: 'recovery', queue: 'reconcile',
       refs: [stop ? `stop:${text(stop.fingerprint) || 'unfingerprinted'}` : `label:${automatedHold.name}:automation`] };
   }
   const cap = plain(policy?.hammerCap);
-  if (cap?.lifetimeExhausted === true || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head)))) {
+  if (!daemonAfterSupersededStop && (cap?.lifetimeExhausted === true
+    || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head))))) {
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery',
       reason: cap.lifetimeExhausted === true ? 'lifetime-exhausted' : 'retry-exhausted', deadlineKind: 'recovery', queue: 'reconcile' };
   }
-  if (launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === false) {
+  if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === false) {
     // The hammer's final adjudication on this head; a new head is new work.
     return { row: 'R07-stop', action: 'hammer', actor: 'closure-recovery', reason: 'hammer-final-no-merge',
       deadlineKind: 'recovery', queue: 'reconcile', attempt: launch.attempt };
@@ -425,7 +441,7 @@ function selectRow(facts) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
       deadlineKind: 'admission', queue: 'dispatch' };
   }
-  if (launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true && !terminalHead) {
+  if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === true && !terminalHead) {
     return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge', deadlineKind: 'admission',
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
   }

@@ -1104,6 +1104,66 @@ test('REVTOKENFLOOR-01: a re-served cached token caps its floor at its remaining
   assert.equal(calls, 2);
 });
 
+for (const minTokenLifetimeMs of [null, 50 * MINUTE_MS]) {
+  test(`REVTOKENFLOOR-01: cached tokens below the ${minTokenLifetimeMs == null ? 'nominal reviewer' : 'fixed remediation'} floor wait before fetching again`, async () => {
+    _resetReviewerTokenRefreshClockForTest();
+    const env = makeEnv();
+    const t0 = 23_500_000;
+    const floorMs = minTokenLifetimeMs ?? NORMAL_LOAD_RUN_MS + REVIEWER_TOKEN_POST_SLACK_MS;
+    const retryMs = 30_000;
+    const due = t0 + HOUR_MS - floorMs;
+    let calls = 0;
+    const opts = {
+      env, minTokenLifetimeMs, reviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS,
+      nominalReviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS, failureRetryMs: retryMs,
+      readFileImpl: readSecret, log: silentLog,
+      fetchImpl: async () => {
+        calls += 1;
+        return brokerOk('github-app-claude-reviewer', calls < 3 ? 'ghs_cached' : 'ghs_rotated', {
+          expiresAt: new Date(calls < 3 ? t0 + HOUR_MS : due + retryMs + HOUR_MS).toISOString(),
+        });
+      },
+    };
+    await refreshReviewerBrokerTokens({ ...opts, now: t0 });
+    const cached = await refreshReviewerBrokerTokens({ ...opts, now: due });
+    assert.equal(calls, 2);
+    assert.equal(cached.handoffSafe[0].safe, false);
+    assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_cached');
+    for (const offset of [1, 1_000, retryMs - 1]) {
+      const waiting = await refreshReviewerBrokerTokens({ ...opts, now: due + offset });
+      assert.equal(calls, 2, 'cached response must not cause per-tick broker polling');
+      assert.equal(waiting.handoffSafe[0].safe, false, 'waiting cannot admit an unsafe handoff');
+    }
+    const rotated = await refreshReviewerBrokerTokens({ ...opts, now: due + retryMs });
+    assert.equal(calls, 3, 'retry at the configured boundary discovers rotation');
+    assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_rotated');
+    assert.equal(rotated.handoffSafe[0].safe, true);
+  });
+}
+
+test('REVTOKENFLOOR-01: a startup token inside the refresh skew waits the default retry interval', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 23_750_000;
+  let calls = 0;
+  const opts = {
+    env, minTokenLifetimeMs: 5 * MINUTE_MS, readFileImpl: readSecret, log: silentLog,
+    fetchImpl: async () => {
+      calls += 1;
+      return brokerOk('github-app-claude-reviewer', 'ghs_short', {
+        expiresAt: new Date(t0 + 10 * MINUTE_MS).toISOString(),
+      });
+    },
+  };
+  const first = await refreshReviewerBrokerTokens({ ...opts, now: t0 });
+  assert.equal(first.handoffSafe[0].safe, true);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_short');
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 + REVIEWER_TOKEN_FAILURE_RETRY_MS - 1 });
+  assert.equal(calls, 1);
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 + REVIEWER_TOKEN_FAILURE_RETRY_MS });
+  assert.equal(calls, 2);
+});
+
 test('REVTOKENFLOOR-01: under normal load the floor and schedule are unchanged', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();

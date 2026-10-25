@@ -1154,7 +1154,11 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   the held one. A stale broker answer then backs off briefly
   (`REVIEWER_TOKEN_FAILURE_RETRY_MS`) while the held token stays outside its
   floor. The floor marks a handoff safe or unsafe and sets the next refresh
-  (`expires_at` minus the larger of the skew and the floor). The watcher's floor
+  (`expires_at` minus the larger of the skew and the floor). If a fetched token
+  is already inside that refresh window, it is still adopted, but the next
+  fetch waits `REVIEWER_TOKEN_FAILURE_RETRY_MS` (default 60s), including when the
+  broker re-serves the same cached token. Handoff safety is re-evaluated on each
+  tick during that wait; unsafe tokens cannot admit a worker. The watcher's floor
   is the reviewer timeout plus runtime post slack
   (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). The reviewer timeout is
   load-aware, so under host load that sum can exceed anything a 60-minute
@@ -1166,8 +1170,11 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   records `loadScaledLifetimeMs` and `handoffShortfallMs`, the time by which a
   load-scaled run can outlive the token. The watcher logs a shortfall once per
   role per episode. The follow-up daemon passes a fixed remediation-worker floor
-  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 22m) that is
-  not load-scaled or capped. When the summary cannot prove every
+  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 22m, defined by
+  `DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS` in
+  `scripts/adversarial-follow-up-daemon.mjs`) that is not load-scaled or capped.
+  The 50m floor used in broker-refresh fixtures is an explicit override, not
+  the daemon default. When the summary cannot prove every
   broker-backed reviewer token handoff-safe, the daemon skips only worker spawn
   until a handoff-safe token is available.
 - **Reviewers re-resolve before their GitHub side calls.** A spawned reviewer
@@ -1175,7 +1182,8 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   inherited token. After the model run, before the label read, pre-write review
   list, review post and stale Request changes dismissal, the reviewer reads the
   broker's current token for its selected role (no forced mint). It adopts that
-  token when it has not expired, then re-pins `GH_TOKEN`/`GITHUB_TOKEN`. A
+  token when it has not expired, then re-pins `GH_TOKEN`/`GITHUB_TOKEN` to the
+  effective routed reviewer, even when the token string is unchanged. A
   broker failure keeps the inherited token. The review post keeps its existing
   forced re-mint and one retry on a GitHub auth failure.
 - **Operator config rotations bypass the schedule.** The refresh clock records a

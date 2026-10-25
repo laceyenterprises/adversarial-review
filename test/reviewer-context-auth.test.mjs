@@ -359,3 +359,47 @@ test('REVTOKENFLOOR-01: side-call refresh keeps the inherited token on broker fa
     assert.equal(env.GH_TOKEN, 'fixture-first-token');
   }
 });
+
+test('REVTOKENFLOOR-01: an unchanged broker token repairs missing or incorrect GitHub identity pins', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  for (const pinnedToken of [undefined, 'fixture-other-identity']) {
+    const env = sideCallEnv({ GH_TOKEN: pinnedToken, GITHUB_TOKEN: pinnedToken });
+    const broker = sideCallBroker(nowMs, { token: env.GH_CODEX_REVIEWER_TOKEN });
+    const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN'], {
+      pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs,
+      log: { log() {}, warn() {} }, ...broker,
+    });
+    assert.deepEqual(result.adopted, [], 're-pinning does not report a new token adoption');
+    assert.equal(env.GH_TOKEN, env.GH_CODEX_REVIEWER_TOKEN);
+    assert.equal(env.GITHUB_TOKEN, env.GH_CODEX_REVIEWER_TOKEN);
+    assert.equal(broker.urls.length, 1);
+  }
+});
+
+test('REVTOKENFLOOR-01: routed side calls use the effective reviewer after refreshing both roles', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  // Exercise both route directions and both changed and unchanged tokens.
+  for (const roles of [BROKER_REVIEWER_ROLES.slice(0, 2), BROKER_REVIEWER_ROLES.slice(0, 2).reverse()]) {
+    for (const unchanged of [false, true]) {
+      const [original, effective] = roles;
+      const env = sideCallEnv({ [original.flag]: 'true', [effective.flag]: 'true',
+        [effective.envVar]: unchanged ? `fixture-${effective.role}` : 'fixture-expired' });
+      const result = await refreshReviewerTokensForSideCalls([original.envVar, effective.envVar], {
+        pinBotTokenEnv: effective.envVar, env, now: () => nowMs, log: { log() {}, warn() {} },
+        readFileImpl: () => 'fixture-broker-secret',
+        fetchImpl: async (url) => {
+          const provider = new URL(url).searchParams.get('provider');
+          return { ok: true, json: async () => ({
+            access_token: `fixture-${provider.replace('github-app-', '')}`, provider,
+            expires_at: new Date(nowMs + 3600_000).toISOString(), metadata: {},
+          }) };
+        },
+      });
+      assert.equal(env[original.envVar], `fixture-${original.role}`);
+      assert.equal(env[effective.envVar], `fixture-${effective.role}`);
+      assert.equal(env.GH_TOKEN, `fixture-${effective.role}`);
+      assert.equal(env.GITHUB_TOKEN, `fixture-${effective.role}`);
+      assert.equal(result.adopted.includes(effective.envVar), !unchanged);
+    }
+  }
+});

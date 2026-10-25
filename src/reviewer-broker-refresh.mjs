@@ -42,8 +42,8 @@ const DEFAULT_OAUTH_BROKER_FALLBACK_URL = 'http://127.0.0.1:4097';
 // tokens (`"cached": true`) that may already be partway through their ~60 min
 // life — observed 2026-06-13: a freshly-fetched token had only ~40 min left.
 // A blind TTL would happily hold such a token past its expiry. 15 min of skew
-// keeps us comfortably ahead; during the last 15 min we re-check each tick and
-// pick up the broker's re-minted token as soon as it rotates.
+// keeps us comfortably ahead; inside the refresh window a short retry interval
+// bounds how often we check for the broker's re-minted token.
 export const REVIEWER_TOKEN_REFRESH_SKEW_MS = 15 * 60 * 1000;
 
 // Fallback cadence used only when the broker response omits / malforms
@@ -553,12 +553,14 @@ export async function refreshReviewerBrokerTokens({
       // a newly-spawned reviewer could inherit a token too short to survive its
       // run and post — the very HTTP 401 this module prevents. With the defaults
       // (skew 15m, required ~22m) the required-lifetime bound is the earlier one.
-      // The capped floor keeps this in the future under load, so a fresh token
-      // is not re-fetched every tick. Clamp to > now so we always make progress.
+      // A cached or short-lived token can already be inside this window. Keep
+      // the freshest token, but wait the bounded retry interval before asking
+      // again; a 1ms schedule would fetch on every daemon tick.
       const refreshLeadMs = Math.max(skewMs, requiredLifetimeMs);
       const byExpiry = expiresAtMs != null ? expiresAtMs - refreshLeadMs : null;
       const byFallback = now + fallbackTtlMs;
-      const next = byExpiry != null ? Math.max(byExpiry, now + 1) : byFallback;
+      const next = byExpiry == null ? byFallback
+        : byExpiry <= now ? now + effectiveFailureRetryMs : byExpiry;
       refreshClock.set(envVar, {
         nextRefreshAtMs: next,
         configFingerprint,

@@ -2226,7 +2226,7 @@ async function main() {
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
   // REVTOKENFLOOR-01: a load-scaled run can outlive the token inherited at spawn.
-  await refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: botTokenEnv });
+  await refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv });
   const verdictModeResolution = await fetchCurrentHeadVerdictMode({
     repo,
     prNumber,

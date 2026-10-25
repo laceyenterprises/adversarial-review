@@ -128,9 +128,10 @@ async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
       log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker returned no unexpired replacement`);
       continue;
     }
-    if (refreshed.token === env[botTokenEnv]) continue;
+    const changed = refreshed.token !== env[botTokenEnv];
     env[botTokenEnv] = refreshed.token;
     if (botTokenEnv === pinBotTokenEnv) pinReviewerGhIdentity(env, botTokenEnv);
+    if (!changed) continue;
     adopted.push(botTokenEnv);
     log.log?.(`[reviewer] adopted the broker's current ${botTokenEnv} before GitHub side calls`);
   }

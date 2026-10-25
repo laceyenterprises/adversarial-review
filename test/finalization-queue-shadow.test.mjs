@@ -83,6 +83,33 @@ test('head/base moves yield distinct stable pairs and preserve original deadline
   assert.equal(f.entry.patience.deadline, deadline);
 });
 
+for (const [name, invalidate, reason] of [
+  ['missing derivation', f => { delete f.snapshot.derivation; }, 'derivation-unverified'],
+  ['unverified derivation', f => { f.snapshot.derivation.verified = false; }, 'derivation-unverified'],
+  ['missing derivation provenance', f => { delete f.snapshot.derivation.sourceRef; }, 'derivation-unverified'],
+  ['mismatched derivation digest', f => { f.snapshot.derivation.receiptDigest = 'foreign'; }, 'derivation-unverified'],
+  ['missing identity', f => { delete f.snapshot.identity; }, 'identity-unresolved'],
+  ['unresolved identity', f => { f.snapshot.identity.ok = false; }, 'identity-unresolved'],
+  ['missing identity provenance', f => { delete f.snapshot.identity.sourceRef; }, 'identity-unresolved'],
+  ['missing identity login', f => { delete f.snapshot.identity.login; }, 'identity-unresolved'],
+  ['unsupported producer', f => { f.snapshot.identity.producerClass = 'builder'; }, 'identity-unresolved'],
+  ['missing publication', f => { f.step('waiting-checks', 5, { rebase: null }); }, 'publication-unverified'],
+  ['mismatched publication', f => {
+    f.step('waiting-checks', 5, { rebase: { ...f.entry.rebase, publication: { head: 'foreign', base: f.entry.exactBase } } });
+  }, 'publication-unverified'],
+]) {
+  test(`green checks identify withholding cause: ${name}`, () => {
+    const f = prepared(fixture());
+    invalidate(f);
+    const observation = observe(f);
+    assert.equal(observation.queue.admission.phase, 'ready');
+    assert.equal(observation.queue.checks.kind, 'green');
+    assert.equal(observation.queue.finalEligibility, 'unknown');
+    assert.equal(observation.v2Decision.kind, 'wait');
+    assert.equal(observation.v2Decision.reason, reason);
+  });
+}
+
 test('predecessor order, holds, terminal subjects, red and missing checks fail closed', () => {
   const f = prepared(fixture());
   const prior = { ...f.entry, entryId: 'q-100', prNumber: 100, readinessSeq: 0, phase: 'ready' };
@@ -201,11 +228,13 @@ test('probe verifies real schema/read adapter, reports pending organic evidence 
   const pending = probeQueueOwner({ rootDir: root, now: time(10), load: { enabled: false } });
   assert.equal(pending.capabilities.shadow.available, true);
   assert.equal(pending.shadow.lastObservationAt, null);
+  assert.equal(pending.shadow.organicEvidence, 'pending');
   const args = fixture().args;
   recordQueueShadow({ ...args, source: 'organic', reader: adapter, shadowStore: store, entryId: ack.entryId,
     snapshot: { live: queueLiveFixture(h) } });
   const observed = probeQueueOwner({ rootDir: root, now: time(10), load: { enabled: false } });
   assert.equal(observed.shadow.lastObservationAt, time(10));
+  assert.equal(observed.shadow.organicEvidence, 'observed');
   assert.deepEqual(observed.shadow.consumer, consumer);
   assert.equal(observed.shadow.mode, 'observe'); assert.equal(observed.shadow.noMutation, true);
   assert.ok(observed.runtime.build.startsWith('sha256:'));

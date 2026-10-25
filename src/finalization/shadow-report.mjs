@@ -186,7 +186,7 @@ export function renderShadowReport(model) {
   const lines = [];
   lines.push(`shadowed finalizations: ${model.shadowed}   agree: ${model.agree}   diverge: ${model.diverge}`);
   for (const sample of Object.values(model.queue ?? {})) {
-    for (const lane of sample.lanes) lines.push(`queue ${lane.lane.repository}/${lane.lane.base} (${sample.source}): entries=${lane.entries} service_samples=${lane.serviceTimeSamples} service_total_ms=${lane.totalServiceTimeMs} service_mean_ms=${lane.serviceTimeMeanMs ?? 'unknown'} oldest_ready_ms=${lane.oldestReadyAgeMs ?? 'none'} arrivals/hour=${lane.arrivalsPerHour} merges/hour=${lane.mergesPerHour} returns/hour=${lane.returnsToRemediationPerHour} infrastructure_wait_ms=${lane.infrastructureWaitMs} infrastructure_park_ms=${lane.infrastructureParkMs} window_hours=${sample.window.hours}`);
+    for (const lane of sample.lanes) lines.push(`queue ${lane.lane.repository}/${lane.lane.base} (${sample.source}): entries=${lane.entries} service_samples=${lane.serviceTimeSamples} service_total_ms=${lane.totalServiceTimeMs} service_mean_ms=${lane.serviceTimeMeanMs ?? 'unknown'} oldest_ready_ms=${lane.oldestReadyAgeMs ?? 'none'} arrivals/hour=${lane.arrivalsPerHour.toFixed(2)} merges/hour=${lane.mergesPerHour.toFixed(2)} returns/hour=${lane.returnsToRemediationPerHour.toFixed(2)} infrastructure_wait_ms=${lane.infrastructureWaitMs} infrastructure_park_ms=${lane.infrastructureParkMs} window_hours=${sample.window.hours}`);
   }
 
   if (model.divergences.length > 0) {

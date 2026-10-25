@@ -2937,15 +2937,18 @@ synthetic per-lane metrics: sample/window denominators, total/mean completed
 service time, oldest ready age, arrivals/merges/returns per hour, check waits and
 infrastructure/hold parking. Durable lifecycle replay preserves denominators
 and readiness age over duplicate ticks and restart. Synthetic replay cannot
-establish organic coverage. Existing promotion criteria and smoke promises
-remain; this adds no CI check or automated gate. Focused offline fixtures are
-`test/finalization-queue-shadow.test.mjs` and the existing shadow tests.
+establish organic coverage. The text report rounds hourly rates to two decimal
+places; the JSON model retains numeric precision. Existing promotion criteria
+and smoke promises remain; this adds no CI check or automated gate. Focused
+offline fixtures are `test/finalization-queue-shadow.test.mjs` and the existing
+shadow tests.
 
 After deployment, the runtime owner runs
 `node src/finalization/queue-probe.mjs --capability shadow --json` under the
 existing bounded load-aware supervisor. It reports real schema/adapter
 availability, the probe build, latest organic consumer/time and observation-only
-mode. Absent organic evidence is pending. See the
+mode. A null `shadow.lastObservationAt` with `shadow.organicEvidence == "pending"`
+is valid pending evidence; an organic observation requires a timestamp. See the
 [shadow deployment observation procedure](docs/finalization-executor-promotion-runbook.md#queue-shadow-observation-mgq-07-no-activation),
 [triage guide](docs/finalization-shadow-divergence-triage.md#queue-decision-evidence-mgq-07)
 and [store contract](docs/data-model/finalization-shadow.md#queue-observations-mgq-07).

@@ -542,11 +542,13 @@ node src/finalization/queue-probe.mjs --capability shadow --json
 ```
 
 Record `capabilities.shadow.available == true`, non-null `runtime.build`,
-`shadow.mode == "observe"`, non-null `shadow.lastObservationAt`, latest
-`shadow.consumer` identity/build, `shadow.noMutation`, counts and
-`lastObservationUnknown`. The capability checks the real schema/indexes and
-resolves the read-only receipt/lifecycle adapter. Missing organic observations
-remain pending; an unknown latest pair needs triage even if a timestamp exists.
+`shadow.mode == "observe"`, `shadow.noMutation`, counts and
+`lastObservationUnknown`. Accept null `shadow.lastObservationAt` when
+`shadow.organicEvidence == "pending"`; once organic observations exist, require
+a non-null timestamp and record latest `shadow.consumer` identity/build.
+The capability checks the real schema/indexes and resolves the read-only
+receipt/lifecycle adapter. Missing organic observations remain pending; an
+unknown latest pair needs triage even if a timestamp exists.
 No synthetic traffic or lane mutation may manufacture acceptance evidence.
 The last observation time is the latest unique persisted pair, not a heartbeat;
 consumer metadata identifies the latest producer, not proof it is still running.

@@ -140,6 +140,12 @@ eligibility. It uses read-only app-store snapshots and supplied observations;
 it never calls an execution adapter or claims a live lane. No production
 consumer is installed by this slice; later composition supplies observations.
 
+For a first-position candidate with green checks, a wait proposal identifies
+missing derivation evidence as `derivation-unverified`, missing or unsupported
+merge producer identity as `identity-unresolved`, and a mismatched or missing
+publication receipt as `publication-unverified`. Checks remain green in the
+recorded evidence; these reasons identify the separate final-eligibility gate.
+
 A queue difference is always initially open, including a familiar checks or
 head-move signature. Inspect `divergences[].evidence.queue`, the v1 provenance,
 required-set version, proof/identity references and lifecycle before attributing

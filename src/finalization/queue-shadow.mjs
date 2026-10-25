@@ -55,12 +55,18 @@ export function predictQueueShadow(snapshot, { observedAt, policy, ledgerState }
     proposed = { kind: 'wait', reason: rebase === 'propose-rebase' ? 'rebase-required' : check.reason };
     if (rebase !== 'propose-rebase') {
       if (check.kind === 'red') proposed = { kind: 'remediate', reason: check.reason };
-      else if (check.kind === 'green' && proof && identity?.ok === true && identity.sourceRef
-        && identity.login && ['closer-hammer', 'ama-daemon'].includes(identity.producerClass)
-        && entry.rebase?.publication?.head === entry.candidate && entry.rebase.publication.base === entry.exactBase
-        && entry.rebase.sourceReceiptDigest === derivation.receiptDigest && !ledgerState?.terminal) {
-        finalEligibility = 'eligible';
-        proposed = { kind: 'finalize-now', reason: 'observed queue eligibility; proposal only' };
+      else if (check.kind === 'green') {
+        if (!proof) proposed = { kind: 'wait', reason: 'derivation-unverified' };
+        else if (identity?.ok !== true || !identity.sourceRef || !identity.login
+          || !['closer-hammer', 'ama-daemon'].includes(identity.producerClass)) {
+          proposed = { kind: 'wait', reason: 'identity-unresolved' };
+        } else if (entry.rebase?.publication?.head !== entry.candidate || entry.rebase.publication.base !== entry.exactBase
+          || entry.rebase.sourceReceiptDigest !== derivation.receiptDigest) {
+          proposed = { kind: 'wait', reason: 'publication-unverified' };
+        } else if (!ledgerState?.terminal) {
+          finalEligibility = 'eligible';
+          proposed = { kind: 'finalize-now', reason: 'observed queue eligibility; proposal only' };
+        }
       }
     }
   }

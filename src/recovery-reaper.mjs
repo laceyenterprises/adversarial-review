@@ -912,6 +912,7 @@ export async function runStaleStateReaper({
   now = new Date().toISOString(),
   logger = console,
   isProcessAlive = null,
+  captureProcessImpl,
   phase = 'periodic',
 } = {}) {
   const out = {
@@ -940,6 +941,7 @@ export async function runStaleStateReaper({
       deadHolderThresholdMs: resolveDeadHolderCloserLeaseMs(env),
       pruneAfterMs: resolveTerminalCloserLeasePruneMs(env),
       isProcessAlive,
+      captureProcessImpl,
       entryScanLimit: resolveCloserLeaseEntryScanLimit(env),
       readLimit: resolveCloserLeaseReadLimit(env),
       logger,

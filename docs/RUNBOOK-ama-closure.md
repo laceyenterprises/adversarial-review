@@ -4793,6 +4793,10 @@ The terminal receipt remains until normal exclusive reacquisition. Startup logs
 the released count. Current-process leases, review handoffs, live launches and
 operator holds retain their handling. Unresolved keyed dispatch intents stay
 fenced for native reconciliation; abandonment alone cannot prove no submission.
+`runStaleStateReaper` and its startup wrapper accept `captureProcessImpl` and
+forward it to the closer-lease sweep for process start-time verification.
+Omitting it uses `captureCloserProcessSync`; injected capture failures retain
+ownership until the persisted deadline, just like default capture failures.
 The [lease data model](data-model/ama-closer-leases.md#abandoned-pending-holders-closerleasedead-01)
 describes the recorded outcomes and mutation fence. After normal deployment,
 observe a naturally abandoned lease recording its outcome and normal next

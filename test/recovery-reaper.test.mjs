@@ -23,6 +23,7 @@ import {
   resolveStaleStateReaperIntervalMs,
   resolveTerminalCloserLeasePruneMs,
   runStartupStaleStateReaper,
+  runStaleStateReaper,
   selectPrunableCloserLeases,
   selectReleasableCloserLeases,
   selectStaleRunningReviewerPasses,
@@ -1352,6 +1353,36 @@ test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loo
   assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
 });
 
+
+for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
+  for (const scenario of ['reused', 'matching', 'unreadable']) {
+    test(`${runSweep.name} forwards process capture for ${scenario} watcher identity`, async t => {
+      const rootDir = tempRoot();
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
+        status: 'pending', lrqId: null, terminalOutcome: null,
+        acquiredAt: minutesAgo(1), updatedAt: minutesAgo(1), dispatchTimeoutMs: 120_000,
+        holderHost: THIS_HOST, watcherPid: DEAD_PID };
+      const path = writeLease(rootDir, lease);
+      const capturedPids = [];
+      const result = await runSweep({ rootDir, now: NOW, env: {}, isProcessAlive: () => true,
+        captureProcessImpl: pid => {
+          capturedPids.push(pid);
+          if (scenario === 'unreadable') throw Error('process table unavailable');
+          return { startedAt: scenario === 'reused' ? minutesAgo(0.5) : minutesAgo(2) };
+        },
+        logger: { warn() {}, error() {}, log() {} } });
+      assert.ok(capturedPids.length > 0, 'the supplied process capture must be used');
+      assert.ok(capturedPids.every(pid => pid === DEAD_PID));
+      assert.equal(result.closerLeases.released, scenario === 'reused' ? 1 : 0);
+      const after = JSON.parse(readFileSync(path, 'utf8'));
+      if (scenario === 'reused') {
+        assert.equal(after.status, 'terminal');
+        assert.equal(after.terminalOutcome, 'abandoned-holder-dead');
+      } else assert.deepEqual(after, lease);
+    });
+  }
+}
 
 for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff', 'intent']) {
   test(`CLOSERLEASEDEAD-01 startup sweep ${scenario}`, async t => {

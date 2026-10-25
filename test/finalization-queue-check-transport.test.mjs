@@ -73,7 +73,7 @@ test('uppercase candidate SHAs use the same entitled read path', async () => {
 for (const kind of ['statuses', 'check-runs']) test(`${kind} pagination accepts split Link headers and canonical repository paths`, async () => {
   const original = `/repos/example/review/commits/${head}/${kind}?per_page=100&page=1${kind === 'check-runs' ? '&filter=all' : ''}`;
   const canonical = original.replace('/repos/example/review', '/repositories/123');
-  for (const split of [', ', '\r\nlInK: ']) {
+  for (const split of [', ', '\r\nlInK: ', '\r\nlink:\t  ']) {
     const reader = createEntitledQueueCheckRequest({ credentialEnv: env(), load: idle, now: () => handoffTime(0),
       execFileImpl: async (_cmd, args) => {
         assert.equal(args[4], original);

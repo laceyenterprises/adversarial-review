@@ -40,7 +40,7 @@ export function createEntitledQueueCheckRequest({ credentialEnv, execFileImpl = 
       const links = match[1].split(/\r?\n/).filter(line => /^link:/i.test(line));
       let nextPage = null;
       if (links.length) {
-        for (const link of links.map(line => line.slice(5)).join(',').split(',')) {
+        for (const link of links.map(line => line.replace(/^link:\s*/i, '')).join(',').split(',')) {
           const part = /^\s*<([^>]+)>;\s*rel="(next|prev|first|last)"\s*$/.exec(link);
           if (!part) throw new Error('checks-pagination-unreadable');
           if (part[2] === 'next') {

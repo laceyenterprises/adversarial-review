@@ -885,8 +885,9 @@ existing lease ID/PR/head/acquisition-time fence plus local host/PID ownership.
 HQ terminality alone is not this lifecycle's quiescence. Existing closer-lease
 and review-row states, merge eligibility and smoke promises remain unchanged.
 See [controller registration data](data-model/hammer-controllers.md).
-LAC-2108 supplies the same census contract through bounded kernel-filtered
-libproc PID/PGID/exact-birth reads on Darwin and native current-PGID assertion.
+LAC-2108 supplies the same census contract through a bounded kernel-filtered
+`kern.proc.pgrp` sysctl PID/PGID/exact-birth snapshot on Darwin (never setuid
+`/bin/ps`) and native current-PGID assertion.
 Initial capability denial still refuses readiness; lost/partial evidence never
 proves drain. Other hosts retain ps. Lifecycle states and transitions above are
 unchanged. Actual-provider offline fixtures and separate loaded-worker acceptance

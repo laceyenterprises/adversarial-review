@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync } from 'node:fs';
@@ -131,18 +131,84 @@ test('PID reuse or unknown group membership never authorizes a signal', () => {
   }
 });
 
-test('production census excludes unrelated groups and zombies, and fails closed on unreadable data', () => {
+test('non-Darwin ps census excludes unrelated groups and zombies, and fails closed on unreadable data', () => {
   const source = '100 100 S Sat Oct 24 08:00:00 2026\n101 100 Z Sat Oct 24 08:01:00 2026\n200 200 S Sat Oct 24 08:02:00 2026\n';
-  const result = controllerGroupSnapshot(100, { execFileSyncImpl: () => source });
+  const platform = 'linux';
+  const result = controllerGroupSnapshot(100, { platform, execFileSyncImpl: () => source });
   assert.deepEqual(result, [{ pid: 100, birth: 'Sat Oct 24 08:00:00 2026' }]);
-  assert.deepEqual(controllerGroupSnapshot(999, { execFileSyncImpl: () => source }), []);
+  assert.deepEqual(controllerGroupSnapshot(999, { platform, execFileSyncImpl: () => source }), []);
   for (const text of ['', 'truncated', source + 'malformed']) {
-    assert.throws(() => controllerGroupSnapshot(100, { execFileSyncImpl: () => text }), /census/);
+    assert.throws(() => controllerGroupSnapshot(100, { platform, execFileSyncImpl: () => text }), /census/);
   }
-  assert.throws(() => controllerGroupSnapshot(100, { execFileSyncImpl() {
+  assert.throws(() => controllerGroupSnapshot(100, { platform, execFileSyncImpl() {
     throw Object.assign(new Error('fixture refusal'), { code: 'EPERM' });
   } }), { code: 'EPERM' });
 });
+
+test('Darwin census never executes setuid /bin/ps, so a sandbox exec refusal cannot reach it', () => {
+  const executed = [];
+  const execFileSyncImpl = bin => {
+    executed.push(bin);
+    throw Object.assign(new Error(`spawnSync ${bin} EPERM`), { code: 'EPERM' });
+  };
+  // Same synthetic group the ps fixture above describes: a live leader, a
+  // zombie child and an unrelated group. The kernel filters the group.
+  const members = [{ pid: 100, birth: '1792828800.000000' }];
+  const nativeImpl = (verb, pgid) => { assert.deepEqual([verb, pgid], ['group', 100]); return members; };
+  assert.deepEqual(controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl, nativeImpl }), members);
+  assert.deepEqual(executed, []);
+  const refusal = Object.assign(new Error('controller process census unavailable'), { code: 'EPERM' });
+  assert.throws(() => controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl,
+    nativeImpl() { throw refusal; } }), refusal);
+  assert.deepEqual(executed, []);
+});
+
+test('Darwin census forwards the subprocess runner through the default native provider', () => {
+  const members = [{ pid: 100, birth: '1792828800.000000' }];
+  const executed = [];
+  const result = controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl(bin, args, options) {
+    executed.push(bin);
+    assert.notEqual(bin, '/bin/ps');
+    assert.deepEqual(args.slice(0, 2), ['-I', '-B']);
+    assert.match(args[2], /controller_process_census\.py$/);
+    assert.deepEqual(args.slice(3), ['group', '100']);
+    assert.equal(options.timeout, 2000);
+    return JSON.stringify(members);
+  } });
+  assert.deepEqual(result, members);
+  assert.equal(executed.length, 1);
+});
+
+test('Darwin native census returns the same members and births as legacy ps parsing for a fake group',
+  { skip: process.platform !== 'darwin', timeout: 15000 }, async t => {
+    const leader = spawn(process.execPath, ['-e', `
+      const child=require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});
+      console.log(child.pid); setInterval(()=>{},1000);`], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    t.after(() => { try { process.kill(-leader.pid, 'SIGKILL'); } catch { /* already drained */ } });
+    let output = '';
+    leader.stdout.on('data', chunk => { output += chunk; });
+    const childPid = await until(() => output.endsWith('\n') && Number(output.trim()));
+    // Compare results, not the production 2s deadline, on a loaded test host.
+    const execFileSyncImpl = (bin, args, options) => execFileSync(bin, args, { ...options, timeout: 10000 });
+    const native = controllerGroupSnapshot(leader.pid, { execFileSyncImpl });
+    assert.deepEqual(native.map(member => member.pid).sort((a, b) => a - b),
+      [leader.pid, childPid].sort((a, b) => a - b), JSON.stringify(native));
+    let legacy;
+    try { legacy = controllerGroupSnapshot(leader.pid, { platform: 'linux', execFileSyncImpl }); }
+    catch (error) {
+      if (error.code !== 'EPERM') throw error;
+      t.skip('setuid /bin/ps is denied in this sandbox; the native census above still read the group');
+      return;
+    }
+    const byPid = new Map(legacy.map(member => [member.pid, member.birth]));
+    assert.deepEqual([...byPid.keys()].sort((a, b) => a - b), native.map(member => member.pid).sort((a, b) => a - b),
+      JSON.stringify({ native, legacy }));
+    for (const member of native) {
+      // ps lstart is the UTC second of the same kernel start time.
+      assert.equal(Math.floor(Number(member.birth)) * 1000, Date.parse(`${byPid.get(member.pid)} GMT`),
+        JSON.stringify({ native, legacy }));
+    }
+  });
 
 for (const probe of [launch('canceled'), launch('blocked_needs_decision'), { ok: false }, launch('future-status')]) {
   test(`start refuses non-executable launch ${probe.row?.status || 'unreadable'}`, async () => {
@@ -470,6 +536,8 @@ test('missing native execution capability refuses readiness before any lease or 
     f.env.HQ_PYTHON3 = join(f.dir, 'missing-python');
     const p = f.start();
     assert.equal((await p.closed)[0], 125);
+    assert.match(p.output(), /refused before readiness: controller process census unavailable: kern\.proc\.pgrp sysctl census helper .* failed \(ENOENT\); it executes no setuid binary and needs no operator process-introspection change/);
+    assert.equal(f.receipt().errorCode, 'ENOENT');
     assert.equal(f.receipt().state, 'cleanup-unconfirmed');
     assert.equal(f.receipt().drained, false);
     assert.equal(existsSync(join(f.dir, 'merge-lease-acquire.json')), false);

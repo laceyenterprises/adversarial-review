@@ -6,76 +6,62 @@ import json
 import os
 import sys
 
+CTL_KERN, KERN_PROC, KERN_PROC_PGRP = 1, 14, 2
+SZOMB = 5
 
-class ProcBsdInfo(ctypes.Structure):
-    """Darwin <sys/proc_info.h> proc_bsdinfo, stable 136-byte ABI."""
+
+class KinfoProc(ctypes.Structure):
+    """Darwin <sys/sysctl.h> kinfo_proc, stable 648-byte LP64 ABI.
+
+    Only the fields the census reads are named: kp_proc.p_starttime (offset 0),
+    kp_proc.p_stat (36), kp_proc.p_pid (40) and kp_eproc.e_pgid (564).
+    """
 
     _fields_ = [
-        (name, ctypes.c_uint32)
-        for name in (
-            "flags",
-            "status",
-            "xstatus",
-            "pid",
-            "ppid",
-            "uid",
-            "gid",
-            "ruid",
-            "rgid",
-            "svuid",
-            "svgid",
-            "rfu",
-        )
-    ] + [
-        ("comm", ctypes.c_char * 16),
-        ("name", ctypes.c_char * 32),
-        ("nfiles", ctypes.c_uint32),
-        ("pgid", ctypes.c_uint32),
-        ("pjobc", ctypes.c_uint32),
-        ("tdev", ctypes.c_uint32),
-        ("tpgid", ctypes.c_uint32),
-        ("nice", ctypes.c_int32),
-        ("start_sec", ctypes.c_uint64),
-        ("start_usec", ctypes.c_uint64),
+        ("start_sec", ctypes.c_int64),
+        ("start_usec", ctypes.c_int32),
+        ("_pad0", ctypes.c_char * 24),
+        ("stat", ctypes.c_uint8),
+        ("_pad1", ctypes.c_char * 3),
+        ("pid", ctypes.c_int32),
+        ("_pad2", ctypes.c_char * 520),
+        ("pgid", ctypes.c_int32),
+        ("_pad3", ctypes.c_char * 80),
     ]
 
 
-def group_snapshot(pgid, lib):
-    # PROC_PGRP_ONLY=2 filters in the kernel; never read unrelated identities.
-    # Spare capacity detects truncation. Bound growth even under process churn.
-    for capacity in (256, 1024, 4096, 16384, 65536):
-        pids = (ctypes.c_int * capacity)()
+def group_snapshot(pgid, sysctl):
+    # KERN_PROC_PGRP filters in the kernel and returns one snapshot: the same
+    # records ps reads, without a setuid helper. Unlike per-PID libproc reads it
+    # needs no same-user check, so a member running a setuid tool stays visible.
+    mib = (ctypes.c_int * 4)(CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid)
+    record = ctypes.sizeof(KinfoProc)
+    # ENOMEM reports truncation. Bound growth even under process churn.
+    for capacity in (64, 1024, 16384, 65536):
+        records = (KinfoProc * capacity)()
+        size = ctypes.c_size_t(ctypes.sizeof(records))
         ctypes.set_errno(0)
-        size = lib.proc_listpids(2, pgid, pids, ctypes.sizeof(pids))
-        error = ctypes.get_errno()
-        if size < 0 or error or size % ctypes.sizeof(ctypes.c_int):
-            raise OSError(error or errno.EIO, "group census unavailable")
-        if size < ctypes.sizeof(pids):
+        if sysctl(mib, 4, records, ctypes.byref(size), None, 0) == 0:
             break
+        error = ctypes.get_errno()
+        if error != errno.ENOMEM:
+            raise OSError(error or errno.EIO, "group census unavailable")
     else:
         raise OSError(errno.EOVERFLOW, "group census truncated")
+    if size.value % record or size.value > ctypes.sizeof(records):
+        raise OSError(errno.EIO, "group census misaligned")
     members = []
-    for pid in pids[: size // ctypes.sizeof(ctypes.c_int)]:
-        if pid <= 0:
-            raise OSError(errno.EIO, "invalid census pid")
-        info = ProcBsdInfo()
-        ctypes.set_errno(0)
-        count = lib.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
-        error = ctypes.get_errno()
-        if count == 0 and error == errno.ESRCH:
-            continue  # Exited during enumeration, as with a non-atomic ps read.
-        if count != ctypes.sizeof(info) or error:
-            raise OSError(error or errno.EIO, "group identity unavailable")
+    for info in records[: size.value // record]:
         if (
-            info.pid != pid
+            info.pid <= 0
             or info.pgid != pgid
-            or not info.start_sec
-            or info.start_usec >= 1_000_000
+            or info.start_sec <= 0
+            or not 0 <= info.start_usec < 1_000_000
         ):
             raise OSError(errno.EIO, "group identity inconsistent")
-        if info.status != 5:  # SZOMB; a zombie cannot execute or hold a lease.
+        if info.stat != SZOMB:  # A zombie cannot execute or hold a lease.
             members.append(
-                {"pid": pid, "birth": f"{info.start_sec}.{info.start_usec:06d}"}
+                {"pid": info.pid, "birth": f"{info.start_sec}.{info.start_usec:06d}"}
             )
     return members
 
@@ -88,27 +74,32 @@ def main():
     if verb == "pgid":
         result = os.getpgid(pid)
     elif verb == "group" and sys.platform == "darwin":
-        lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-        lib.proc_listpids.argtypes = [
-            ctypes.c_uint32,
-            ctypes.c_uint32,
+        if ctypes.sizeof(ctypes.c_void_p) != 8:
+            raise OSError(errno.ENOTSUP, "kinfo_proc ABI requires LP64")
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_uint,
             ctypes.c_void_p,
-            ctypes.c_int,
-        ]
-        lib.proc_listpids.restype = ctypes.c_int
-        lib.proc_pidinfo.argtypes = [
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_uint64,
+            ctypes.POINTER(ctypes.c_size_t),
             ctypes.c_void_p,
-            ctypes.c_int,
+            ctypes.c_size_t,
         ]
-        lib.proc_pidinfo.restype = ctypes.c_int
-        result = group_snapshot(pid, lib)
+        libc.sysctl.restype = ctypes.c_int
+        result = group_snapshot(pid, libc.sysctl)
     else:
         raise ValueError("unsupported census operation")
     print(json.dumps(result))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError:
+        print("controller census: EINVAL", file=sys.stderr)
+        sys.exit(2)
+    except OSError as error:
+        # Only the errno name leaves the helper; the caller names the mechanism.
+        name = errno.errorcode.get(error.errno, "EIO")
+        print(f"controller census: {name}", file=sys.stderr)
+        sys.exit(2)

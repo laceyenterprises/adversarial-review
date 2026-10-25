@@ -303,12 +303,14 @@ export function resolveSessionLedgerReadTarget({
   // backend resolves to SQLite, so a stale pointer must not outrank a
   // configured Postgres backend. Explicit and env SQLite targets above still
   // fail closed under Postgres.
-  const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
-  if (legacyHqLedgerDbPath && configuredSessionLedgerBackend({ env }) !== 'postgres') {
-    const result = usableSqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config', {
-      requiredTables,
-    });
-    if (result.ok || result.reason === 'malformed-ledger-target') return result;
+  if (configuredSessionLedgerBackend({ env }) !== 'postgres') {
+    const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
+    if (legacyHqLedgerDbPath) {
+      const result = usableSqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config', {
+        requiredTables,
+      });
+      if (result.ok || result.reason === 'malformed-ledger-target') return result;
+    }
   }
   try {
     const cfg = loadConfig({ env });

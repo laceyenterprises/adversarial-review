@@ -3,7 +3,8 @@ import { withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -271,6 +272,36 @@ test('LAC-2091: configured postgres outranks a stale legacy HQ ledgerDbPath', ()
   const viaParam = resolveSessionLedgerReadTarget({ requiredTables: ['launch_requests'], env: LAC2091_POSTGRES_ENV, hqRoot });
   assert.equal(viaParam.ok, true);
   assert.equal(viaParam.target.backend, 'postgres');
+});
+
+test('LAC-2091: postgres resolution never reads the legacy HQ config', (t) => {
+  const { rootDir, hqRoot } = staleLegacyHqFixture();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const legacyConfigPath = path.join(hqRoot, '.hq', 'config.json');
+  const read = fs.readFileSync;
+  const legacyReads = [];
+  const spy = t.mock.method(fs, 'readFileSync', (...args) => {
+    if (String(args[0]) === legacyConfigPath) legacyReads.push(args[0]);
+    return read(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    for (const options of [
+      { env: { ...LAC2091_POSTGRES_ENV, HQ_ROOT: hqRoot } },
+      { env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+        AGENT_OS_SESSION_LEDGER_DSN: LAC2091_POSTGRES_ENV.AGENT_OS_SESSION_LEDGER_DSN,
+        HQ_ROOT: hqRoot } },
+      { env: LAC2091_POSTGRES_ENV, hqRoot },
+    ]) {
+      const result = resolveSessionLedgerReadTarget(options);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.target.backend, 'postgres');
+    }
+    assert.deepEqual(legacyReads, []);
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('LAC-2091: launch status reads the canonical postgres row despite a stale legacy HQ ledger', () => {

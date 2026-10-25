@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renam
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController,
+import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -120,6 +120,18 @@ test('launch identity refuses missing, conflicting and non-LRQ owners', () => {
   for (const env of [{}, { HQ_LAUNCH_REQUEST_ID: 'wrong' },
     { HQ_LAUNCH_REQUEST_ID: 'lrq_one', AGENT_OS_WORKER_LRQ_ID: 'lrq_other' }]) {
     assert.throws(() => controllerLaunchId(env), /unambiguous/);
+  }
+});
+
+test('controller ledger target selects the canonical runtime DSN only when non-empty', () => {
+  const env = { AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger' };
+  for (const canonical of [undefined, '', '   ']) {
+    assert.equal(controllerLedgerTarget({ ...env, AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical }), undefined);
+  }
+  for (const base of [{}, env]) {
+    assert.deepEqual(controllerLedgerTarget({ ...base,
+      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgres://runtime.example/ledger' }),
+    { backend: 'postgres', dsn: 'postgres://runtime.example/ledger' });
   }
 });
 
@@ -597,7 +609,7 @@ test('missing native execution capability refuses readiness before any lease or 
 
 // HAMCTLPOLL-01: a fake clock drives the controller loop; the fake shell
 // leaves only after the scenario says so, or on the controller's TERM.
-function simulate(t, { reads, onTick = () => {}, ...options }) {
+function simulate(t, { reads, onTick = () => {}, env = {}, ...options }) {
   const f = fixture(t, 'exit 0');
   let clock = 0, exited = false;
   const answers = [], readCalls = [], signals = [];
@@ -612,7 +624,7 @@ function simulate(t, { reads, onTick = () => {}, ...options }) {
       exited = true; child.emit('exit', code, signal);
     } };
   const run = runHammerController('/fixture', [], {
-    env: f.env, timeoutMs: 3_600_000, readTimeoutImpl: () => 30_000, nowImpl: () => clock,
+    env: { ...f.env, ...env }, timeoutMs: 3_600_000, readTimeoutImpl: () => 30_000, nowImpl: () => clock,
     delayImpl: ms => { clock += ms; onTick(sim); return new Promise(resolve => setImmediate(resolve)); },
     readLaunchImpl: async args => { readCalls.push({ ...args, at: clock }); return reads(readCalls.length, sim); },
     spawnImpl: () => child,
@@ -631,6 +643,24 @@ const unreadable = () => ({ ok: false, reason: 'fixture-read-timeout' });
 const gateToken = '11111111-1111-4111-8111-111111111111';
 const gateRequest = `launch:123:${gateToken}\n`;
 const gateReplies = sim => sim.answers.filter(answer => !answer.startsWith('wait:'));
+
+for (const canonical of [undefined, '', 'postgres://runtime.example/ledger']) {
+  test(`controller startup and polling use ${canonical ? 'the canonical target' : 'implicit ledger resolution'}`, async t => {
+    const sim = simulate(t, {
+      env: { AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger',
+        AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical },
+      reads: n => launch(n === 1 ? 'running' : 'canceled'),
+    });
+    const { status, receipt } = await sim.done;
+    assert.equal(status, 143);
+    assert.equal(receipt.reason, 'launch-ended');
+    assert.ok(sim.readCalls.length >= 2);
+    for (const read of sim.readCalls) {
+      assert.deepEqual(read.ledgerTarget, canonical ? { backend: 'postgres', dsn: canonical } : undefined);
+      assert.equal(read.env.AGENT_OS_SESSION_LEDGER_DSN, 'postgres://test.example/ledger');
+    }
+  });
+}
 
 test('one failed launch read mid-run does not stop the round', async t => {
   const sim = simulate(t, { reads: n => (n === 3 ? unreadable() : launch('running')),

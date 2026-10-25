@@ -28,6 +28,13 @@ const LAUNCH_READ_NOMINAL_MS = 30_000;
 
 export function launchReadTimeoutMs() { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS); }
 
+// Worker tests keep the ordinary DSN; this controller reads live launch truth.
+// Leave resolution implicit when no canonical runtime DSN was supplied.
+export function controllerLedgerTarget(env = process.env) {
+  const dsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
+  return dsn ? { backend: 'postgres', dsn } : undefined;
+}
+
 // Registration belongs to this invocation, never the shared PR or LRQ name.
 export function controllerLaunchId(env) {
   const ids = [...new Set([env.HQ_LAUNCH_REQUEST_ID, env.AGENT_OS_WORKER_LRQ_ID,
@@ -187,7 +194,7 @@ export async function runHammerController(script, args = [], {
     let outcome, error;
     try {
       const probe = await readLaunchImpl({ launchRequestId, env, rootDir: env.HAM_ROOT_DIR,
-        hqRoot: env.HAM_HQ_ROOT, timeoutMs: readTimeoutMs,
+        hqRoot: env.HAM_HQ_ROOT, ledgerTarget: controllerLedgerTarget(env), timeoutMs: readTimeoutMs,
         signal: AbortSignal.any([AbortSignal.timeout(readTimeoutMs), closing.signal]) });
       const meaning = launchRequestMeaning(probe?.row);
       if (probe?.ok !== true) { outcome = 'unreadable'; error = probe?.reason || probe?.code || 'not-ok'; }

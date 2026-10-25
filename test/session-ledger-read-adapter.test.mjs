@@ -24,6 +24,27 @@ import {
 
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
+test('generic implicit launch reads retain the test DSN when a canonical runtime DSN is also set', () => {
+  let calls = 0;
+  const result = readLaunchRequestStatusFromLedger({
+    launchRequestId: 'lrq_fixture',
+    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+      AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger',
+      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgres://runtime.example/ledger' },
+    spawnSyncImpl: (command, args) => {
+      calls += 1;
+      assert.equal(command, 'psql');
+      assert.ok(args.includes('postgres://test.example/ledger'));
+      assert.ok(!args.includes('postgres://runtime.example/ledger'));
+      return { status: 0, stderr: '', stdout: JSON.stringify({ launch_request_id: 'lrq_fixture', status: 'running' }) };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.target.dsn, 'postgres://test.example/ledger');
+  assert.equal(result.row.status, 'running');
+});
+
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'session-ledger-adapter-'));
 }

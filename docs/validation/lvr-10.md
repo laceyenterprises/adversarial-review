@@ -84,3 +84,16 @@ remain in their owning suites. No other LVR ticket's scope is implemented.
 Activation remains the existing `lvr-10-consumer-fixture-pinned` presence
 assertion. It is pending (exit 75) until the recorded token file reaches the
 deployed submodule. This worker performs no deployment, restart or config flip.
+
+Hammer close-out validation resolved the seven scoped runtime failures above.
+Fixtures nested under `/Users/<operator>/` now declare the operator HOME and
+an explicit disposable auth path, matching the existing startup contract and
+avoiding per-worker credential materialization during fake spawns. Separate
+read/write-free assertions cover Linux and nested macOS auth-owner paths.
+Production authentication behavior is unchanged. The ten-file consumer command
+above now passes without failures, skips or cancellations. Lint (zero errors,
+146 existing warnings), contract typecheck, the byte-equivalence demo, changed-test
+ESLint and `git diff --check` also pass. Both final review fixes remain covered:
+UTF-8 canonical hashes (including supplementary Unicode) and refresh from an
+absent manifest/fixture tree. No local full-suite green is claimed; required
+GitHub checks on the settled head remain the merge authority.

@@ -290,14 +290,14 @@
       ],
       "transitions": [
         {"id": "closure-owner.01","from": "[*]","to": "hammer","trigger": "empty-diff closure recovery until remote termination","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.02","from": "[*]","to": "hammer","trigger": "automatic stops or exhaustion retain closure-recovery actor","codeSource": "src/pr-next-action.mjs"},
+        {"id": "closure-owner.02","from": "[*]","to": "hammer","trigger": "current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge","codeSource": "src/pr-next-action.mjs"},
         {"id": "closure-owner.03","from": "[*]","to": "wait","trigger": "project shared next action: wait","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.04","from": "[*]","to": "hammer","trigger": "project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.05","from": "[*]","to": "review","trigger": "project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.06","from": "[*]","to": "remediation","trigger": "project shared next action: remediation","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.07","from": "[*]","to": "remediation","trigger": "proven live remediation owner retained","codeSource": "src/pr-next-action.mjs"},
         {"id": "closure-owner.08","from": "[*]","to": "hammer","trigger": "confirmed conflict selects capped repair with merge safety retained","codeSource": "src/pr-next-action.mjs"},
-        {"id": "closure-owner.09","from": "[*]","to": "daemon-merge","trigger": "project shared next action: daemon-merge","codeSource": "src/ama/closure-next-action.mjs"},
+        {"id": "closure-owner.09","from": "[*]","to": "daemon-merge","trigger": "project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.10","from": "wait","to": "[*]","trigger": "next bounded observation; overdue reporting preserves the selected workflow","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.11","from": "[*]","to": "operator-hold","trigger": "explicit hold, draft or disabled execution intent","codeSource": "src/ama/closure-next-action.mjs"},
         {"id": "closure-owner.12","from": "[*]","to": "done","trigger": "confirmed merged or closed PR","codeSource": "src/ama/closure-next-action.mjs"}

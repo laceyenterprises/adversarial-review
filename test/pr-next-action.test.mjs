@@ -52,6 +52,86 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
+const STOP = { deterministic: true, headSha: HEAD, recordedAt: ANCHOR, fingerprint: `${HEAD}:2:${ANCHOR}` };
+const AFTER_STOP = '2026-01-01T00:00:30.000Z';
+const stopped = {
+  controls: { stop: STOP },
+  reviews: { verdict: 'comment-only', nonBlockingFindingCount: 2, postedAt: AFTER_STOP },
+  policy: { strictMode: false },
+  remediation: { roundsLeft: false, job: { status: 'completed', headSha: HEAD } },
+};
+
+test('STOPSTALE-01: newer eligible exact-head evidence supersedes the stop only for daemon merge', () => {
+  for (const retryable of [undefined, true, false]) {
+    for (const hammerCap of [undefined, { lifetimeExhausted: true }, { headSha: HEAD, retryExhausted: true }]) {
+      const decision = nextAction(snap({ ...stopped, policy: { ...stopped.policy, hammerCap },
+        launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable, attempt: 2 } } }));
+      assert.deepEqual(pick(decision), ['daemon-merge', 'daemon', 'clean-exact-head']);
+      assert.equal(decision.row, 'R15-daemon');
+      assert.equal(decision.queue.intent, 'daemon');
+      assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+      assert.ok(decision.evidenceRefs.includes(`stop:${STOP.fingerprint}`));
+    }
+  }
+});
+
+for (const [name, changes] of [
+  ['missing review timestamp', { reviews: { postedAt: undefined } }],
+  ['older review', { reviews: { postedAt: '2025-12-31T23:59:00.000Z' } }],
+  ['equal review timestamp', { reviews: { postedAt: ANCHOR } }],
+  ['invalid review timestamp', { reviews: { postedAt: 'invalid' } }],
+  ['missing stop timestamp', { controls: { stop: { ...STOP, recordedAt: null } } }],
+  ['invalid stop timestamp', { controls: { stop: { ...STOP, recordedAt: 'invalid' } } }],
+  ['blocking findings', { reviews: { blockingFindingCount: 1 } }],
+  ['unknown finding classification', { reviews: { blockingFindingState: 'unknown' } }],
+  ['unsettled verdict', { reviews: { verdict: 'request-changes' } }],
+  ['different review head', { reviews: { headSha: OLD } }],
+  ['different stop head', { controls: { stop: { ...STOP, headSha: OTHER } } }],
+  ['strict findings policy', { policy: { strictMode: true } }],
+  ['unreadable review', { states: { reviews: 'error' } }],
+  ['invalid attestation', { reviews: { attestation: 'invalid' } }],
+  ['unknown attestation', { reviews: { attestation: 'unknown' } }],
+  ['red checks', { checks: { conclusion: 'FAILURE' } }],
+  ['pending checks', { checks: { conclusion: 'PENDING' } }],
+  ['conflicting head', { pr: { mergeable: 'CONFLICTING' } }],
+  ['dirty head', { pr: { mergeStateStatus: 'DIRTY' } }],
+  ['automated hold label', { pr: { labels: [{ name: 'do-not-merge', actorKind: 'bot' }] } }],
+  ['daemon transport exhausted', { progress: { daemonExecution: { headSha: HEAD, reason: 'merge-retry-budget-exhausted' } } }],
+]) test(`STOPSTALE-01: ${name} retains R07 and never relaunches a capped hammer`, () => {
+  const options = { ...stopped, ...changes,
+    reviews: { ...stopped.reviews, ...changes.reviews },
+    policy: { ...stopped.policy, hammerCap: { lifetimeExhausted: true }, ...changes.policy },
+    launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable: false } } };
+  const decision = nextAction(snap(options));
+  assert.deepEqual(pick(decision), ['hammer', 'closure-recovery', 'automated-stop']);
+  assert.equal(decision.row, 'R07-stop');
+  assert.equal(decision.queue.intent, 'reconcile');
+  assert.ok(!decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+});
+
+test('STOPSTALE-01: timestamp comparisons accept epoch milliseconds without mutating the snapshot', () => {
+  const snapshot = snap({ ...stopped, controls: { stop: { ...STOP, recordedAt: Date.parse(ANCHOR) } },
+    reviews: { ...stopped.reviews, postedAt: Date.parse(AFTER_STOP) } });
+  const before = JSON.stringify(snapshot);
+  const decision = nextAction(snapshot);
+  assert.equal(decision.action, 'daemon-merge');
+  assert.deepEqual(nextAction(snapshot), decision);
+  assert.equal(JSON.stringify(snapshot), before);
+});
+
+test('STOPSTALE-01: newer reviews alone cannot bypass lifetime or final-no-merge hammer fences', () => {
+  for (const conclusion of ['FAILURE', 'SUCCESS']) {
+    const capped = nextAction(snap({ ...stopped, controls: {}, checks: { conclusion },
+      policy: { ...stopped.policy, hammerCap: { lifetimeExhausted: true } } }));
+    assert.equal(capped.reason, 'lifetime-exhausted');
+    assert.equal(capped.queue.intent, 'reconcile');
+    const final = nextAction(snap({ ...stopped, controls: {}, checks: { conclusion },
+      launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable: false } } }));
+    assert.equal(final.reason, 'hammer-final-no-merge');
+    assert.equal(final.queue.intent, 'reconcile');
+  }
+});
+
 test('verified terminal HAM completion crosses the retry row only with matching heads and safety gates', () => {
   const options = {
     reviews: { headSha: OLD, verdict: 'request changes', blockingFindingCount: 1 },

@@ -41,6 +41,34 @@ function root(t) {
   return value;
 }
 
+test('STOPSTALE-01: closure projects the recorded stop time and routes newer exact-head evidence to daemon', async () => {
+  const later = '2026-01-01T00:00:30.000Z';
+  const hammerStop = { headSha: HEAD, recordedAt: AT, stopKey: `${HEAD}:2:${AT}`, predicate: 'synthetic-unattested-head' };
+  const input = { currentHead: HEAD, reviewState: { ...clean, verdict: 'comment-only',
+    nonBlockingFindingCount: 2, postedAt: later }, strictMode: false, hammerStop,
+    lease: null, roundsLeft: false, checks: 'SUCCESS', lifetimeExhausted: true, retryExhausted: true };
+  const shared = await resolveClosureNextAction({ input,
+    passSnapshot: base({ launches: { closer: { headSha: HEAD, status: 'succeeded', outcome: 'no-merge', retryable: false } } }),
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true, observedAt: later });
+  assert.equal(shared.snapshot.observations.controls.value.stop.recordedAt, AT);
+  assert.deepEqual(tuple(shared.decision), ['daemon-merge', 'daemon', 'clean-exact-head']);
+  assert.equal(closureOwnerFromDecision(shared.decision).owner, 'daemon-merge');
+  assert.equal(hasHammerDispatchIntent(shared, identity), false);
+  assert.ok(shared.decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+
+  const observed = observeClosureResult(shared, { hammerStop });
+  assert.equal(observed.snapshot.observations.controls.value.stop.fingerprint, hammerStop.stopKey);
+  assert.equal(observed.snapshot.observations.controls.value.stop.recordedAt, AT);
+  assert.equal(observed.decision.action, 'daemon-merge');
+  const red = reviseClosureNextAction(observed, { checks: { conclusion: 'FAILURE' } });
+  assert.equal(red.decision.reason, 'automated-stop');
+  assert.equal(hasHammerDispatchIntent(red, identity), false);
+  const blocked = reviseClosureNextAction(observed, { reviews: { ...input.reviewState, blockingFindingCount: 1 } });
+  assert.equal(blocked.decision.reason, 'automated-stop');
+  assert.equal(hasHammerDispatchIntent(blocked, identity), false);
+});
+
 test('hammer intent fails closed when a matching decision has no queue', () => {
   const selected = pair(base({ checks: { conclusion: 'FAILURE' } }));
   for (const queue of [undefined, null]) {
@@ -530,6 +558,26 @@ test('a recorded terminal judgment on an unchanged head retains daemon ownership
   f.args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true });
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(f.effects[0][1].decision.action, 'daemon-merge');
+  assert.equal(result.nextAction.action, 'done');
+  assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+});
+
+test('STOPSTALE-01: orchestration reaches daemon merge after a recorded stop and newer non-blocking review', async t => {
+  const f = closureFixture(t);
+  f.args.passSnapshot = base();
+  const stopAt = '2025-12-31T23:59:00.000Z';
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode: false }) });
+  f.args.readHammerStopForHeadImpl = () => ({ headSha: HEAD, predicate: 'synthetic-unattested-head',
+    recordedAt: stopAt, stopKey: `${HEAD}:2:${stopAt}` });
+  let daemonCalls = 0;
+  f.args.runDaemonCleanMergeAttemptImpl = async () => {
+    daemonCalls++;
+    const nextActionShared = await resolveSharedNextAction({ passSnapshot: f.args.passSnapshot });
+    assert.ok(nextActionShared.decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+    return { disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(daemonCalls, 1);
   assert.equal(result.nextAction.action, 'done');
   assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
 });

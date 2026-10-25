@@ -16,6 +16,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
+import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
@@ -230,6 +231,29 @@ for (const account of ['personal', 'corporate', 'pinned-personal']) test(`LANEFA
   const choices = logs.filter(line => line.includes('codex_account='));
   assert.equal(choices.length, 1);
   assert.match(choices[0], new RegExp(`codex_account=${account === 'pinned-personal' ? 'personal' : account} .*reason=`));
+});
+
+test('STOPSTALE-01: dispatch respects daemon ownership after a superseded automated stop', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'stopstale-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = baseArgs(rootDir, {
+    reviewState: { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1,
+      postedAt: '2026-01-01T00:01:00.000Z' },
+    cfg: { strictMode: false },
+  });
+  const sharedNextAction = await resolveClosureNextAction({
+    subjectKey: `${args.dispatchContext.repo}#404`, observedAt: '2026-01-01T00:02:00.000Z',
+    input: { reviewState: args.reviewState, currentHead: HEAD, strictMode: false,
+      roundsLeft: false, lease: null, checks: 'SUCCESS', lifetimeExhausted: true,
+      hammerStop: { headSha: HEAD, recordedAt: '2026-01-01T00:00:00.000Z', predicate: 'synthetic-unattested-head' } },
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true,
+  });
+  assert.equal(sharedNextAction.decision.action, 'daemon-merge');
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps, sharedNextAction });
+  assert.equal(result.dispatched, false);
+  assert.equal(deps.calls.length, 0, 'no hammer launch after passing over an automated stop');
 });
 
 test('LCR: findings-remediation hammer dispatches with --priority normal', async (t) => {

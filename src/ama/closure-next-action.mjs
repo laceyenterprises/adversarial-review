@@ -196,7 +196,9 @@ export function observeClosureResult(shared, result, passSnapshot = null) {
   }, passSnapshot);
   if (result.hammerStop) return reviseClosureNextAction(shared, {
     controls: { ...shared.snapshot.observations.controls?.value,
-      stop: { deterministic: true, fingerprint: result.hammerStop.predicate },
+      stop: { deterministic: true, fingerprint: result.hammerStop.stopKey || result.hammerStop.predicate,
+        headSha: result.hammerStop.headSha || shared.decision.head,
+        recordedAt: result.hammerStop.recordedAt ?? null },
       ...(result.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: result.hammerStop.predicate,
       } } : {}) },

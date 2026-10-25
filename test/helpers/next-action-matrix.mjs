@@ -30,6 +30,13 @@ const cases = [
     drain: { active: true, epoch: 7 }, capacity: { hammer: { inFlight: 2, cap: 2 } } } }, 'hammer', 'hammer'],
   ['semantic rebase', { reviews: { ...clean, headSha: OLD }, progress: {
     contentProof: { kind: 'context-only-rebase', semantic: true, fromHead: OLD, toHead: HEAD } } }, 'daemon-merge', 'daemon'],
+  ['new exact-head review supersedes an automated stop', {
+    controls: { stop: { deterministic: true, headSha: HEAD, recordedAt: '2025-12-31T23:59:00.000Z',
+      fingerprint: `${HEAD}:2:2025-12-31T23:59:00.000Z` } },
+    reviews: { ...clean, verdict: 'comment-only', nonBlockingFindingCount: 2, postedAt: AT },
+    launches: { closer: { ...terminal, retryable: false } },
+    policy: { ...policy, strictMode: false, hammerCap: { lifetimeExhausted: true } },
+  }, 'daemon-merge', 'daemon'],
   ['empty diff remains open', { progress: { diffEmpty: true } }, 'hammer', 'closure-recovery'],
   ['unknown descendants plus stop', { launches: { closer: { ...terminal, retryChainUnreadable: true } },
     controls: { stop: { deterministic: true, fingerprint: 'stop-07' } } }, 'hammer', 'closure-recovery'],

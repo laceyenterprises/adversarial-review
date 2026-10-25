@@ -850,6 +850,14 @@ required-check, identity, arming and shared-lease checks. The compatibility owne
 projection adds `operator-hold` and `done` evaluation outputs; durable launch,
 lease and review lifecycle states are unchanged. See the
 [adoption runbook](RUNBOOK-ama-closure.md#closer-and-recovery-adoption-nxa-05).
+
+STOPSTALE-01 permits daemon ownership after a deterministic automated stop
+only when a strictly newer, same-head settled review is eligible under the
+current findings policy and the ordinary daemon gates select merge. The
+decision records `stop-superseded-by-exact-head-review`. Stops with no qualifying
+review retain recovery ownership; lifetime/retry caps and final-no-merge remain
+binding for hammer dispatch. Durable lifecycle states are unchanged.
+
 DOCSFASTPATH-01 admits an exact-head docs-only change directly to the existing
 inline daemon merge lane, before reviewer admission or closer dispatch. Every
 old and new changed path must be under `docs/` and end in `.md` or an image

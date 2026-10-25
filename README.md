@@ -1812,8 +1812,12 @@ deployed hammer that publishes and stops without merging reaches merge or an
 exact-head review within one poll without manual rescue.
 
 <a id="smv-handoff"></a>**smv-handoff:** NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
-retain hammer intent and its deadline, and deterministic automatic stops retain
-closure-recovery ownership. NXA-04 verifies one closeout successor through pending, green
+retain hammer intent and its deadline, and current deterministic automatic stops retain
+closure-recovery ownership. STOPSTALE-01 verifies that a strictly newer eligible
+exact-head review can instead select daemon merge with
+`stop-superseded-by-exact-head-review` in the decision refs, even after hammer
+caps or final-no-merge. A head needing repair retains its stop and cannot
+relaunch hammer. NXA-04 verifies one closeout successor through pending, green
 and red CI without another remediation round, plus durable re-review admission
 intent for a pending non-final round. NXA-03 verifies shared immutable
 decision wake routing, live-owner suppression and one wake per reconciled
@@ -2149,14 +2153,14 @@ stateDiagram-v2
     state "operator-hold" as s5
     state "done" as s6
     [*] --> s1: closure-owner.01 empty-diff closure recovery until remote termination
-    [*] --> s1: closure-owner.02 automatic stops or exhaustion retain closure-recovery actor
+    [*] --> s1: closure-owner.02 current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge
     [*] --> s0: closure-owner.03 project shared next action: wait
     [*] --> s1: closure-owner.04 project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
     [*] --> s3: closure-owner.06 project shared next action: remediation
     [*] --> s3: closure-owner.07 proven live remediation owner retained
     [*] --> s1: closure-owner.08 confirmed conflict selects capped repair with merge safety retained
-    [*] --> s4: closure-owner.09 project shared next action: daemon-merge
+    [*] --> s4: closure-owner.09 project shared next action: daemon-merge, including a stop superseded by newer eligible exact-head review
     s0 --> [*]: closure-owner.10 next bounded observation; overdue reporting preserves the selected workflow
     [*] --> s5: closure-owner.11 explicit hold, draft or disabled execution intent
     [*] --> s6: closure-owner.12 confirmed merged or closed PR

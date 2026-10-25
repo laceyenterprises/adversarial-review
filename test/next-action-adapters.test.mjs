@@ -25,6 +25,10 @@ for (const [name, observations, action, actor] of cases) {
     const { snapshot } = shared;
     const decision = shared.decision;
     assert.deepEqual([decision.action, decision.actor], [action, actor]);
+    if (name === 'new exact-head review supersedes an automated stop') {
+      assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+      assert.equal(decision.queue.intent, 'daemon');
+    }
     if (!['done', 'operator-hold'].includes(action)) {
       assert.equal(decision.deadline.anchoredAt, AT);
       assert.ok(decision.deadline.at.endsWith('Z'));

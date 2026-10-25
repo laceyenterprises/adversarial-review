@@ -2106,6 +2106,17 @@ stateDiagram-v2
 
 ### closer-lease
 
+CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
+launch-less pending leases with a confirmed absent/reused same-host watcher PID
+or an elapsed dispatch timeout. Startup sweeps log releases; closure resumes
+normal next-action admission that pass. Uncertain probes cannot refresh the
+deadline. Existing submission fences, current-process leases, review handoffs,
+launch ownership and operator holds remain. Offline coverage is in the closer
+lease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke
+promises are unchanged. After normal deployment, observe natural abandonment
+and next-owner admission read-only; no restart or manual recovery is part of
+this change.
+
 ```mermaid
 stateDiagram-v2
     state "pending" as s0
@@ -2114,7 +2125,7 @@ stateDiagram-v2
     state "terminal" as s3
     [*] --> s0: closer-lease.01 exclusive acquisition
     s0 --> s1: closer-lease.02 launch receipt
-    s0 --> s3: closer-lease.03 terminal observed before launch
+    s0 --> s3: closer-lease.03 terminal observed before launch or launch-less holder abandoned after local death/PID reuse or dispatch timeout
     s1 --> s3: closer-lease.04 terminal settlement after readable 60s grace; armed auto-merge holds only inside fixed 30-minute dispatched-lease window unless no-merge audit resolves exit
     s0 --> s2: closer-lease.05 bounded review request accepted
     s1 --> s2: closer-lease.06 bounded review request accepted

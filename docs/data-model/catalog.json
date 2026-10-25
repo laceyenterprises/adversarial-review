@@ -830,6 +830,7 @@
     },
     {
       "id": "ama-closer-leases",
+      "pendingAbandonment": "CLOSERLEASEDEAD-01: pending without lrqId records terminal abandoned-holder-dead for a confirmed absent/reused same-host PID, or abandoned-timeout strictly after acquiredAt + dispatchTimeoutMs. Current-process ownership remains. Intent lock and expected-lease CAS preserve unresolved submissions and replacements. Startup logs releases; closure recomputes next action including after uncertain yielded probes. Terminal outcomes are reclaimed by ordinary dispatch.",
       "preReceiptReaper": "LAC-2081: unresolved dispatching intents preserve leases and retry budget; native proof owns settlement; lease mutations share reclaim flock and compare expected owner",
       "parkedOwnership": "LRQSTATUS-01: a matching terminal deferred lease continues to fence redispatch and inline daemon merge through resumed execution, including rekeyed heads; only confirmed terminal launch/retry evidence releases ownership",
       "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable after the readable 60-second terminal grace (immediate without a timestamp), with armed auto-merge held only inside the fixed 30-minute dispatched-lease window unless a no-merge audit resolves it; merged success stays sticky. TERMLEASE-01 reclaims terminal superseded/failed-without-merge/deferred on the same pass with proven ended/absent launch; live or unproven launches hold. Superseded dispatches release matching rekeyed leases and retain the dispatch outcome.",

@@ -4782,6 +4782,26 @@ including Comment only findings, admit another hammer through the existing
 retry and lifetime caps. Reclaiming the handed lease for that hammer is locked
 and still uses atomic single-claim acquisition.
 
+
+CLOSERLEASEDEAD-01: startup/periodic sweeps and closure routing terminalize a
+pending lease with no launch ID as `abandoned-holder-dead` when a same-host PID
+is absent or started after acquisition, or `abandoned-timeout` strictly after
+its persisted `acquiredAt + dispatchTimeoutMs`. Uncertain process/ownership
+reads cannot extend that deadline; closure rechecks after a yielded ownership
+probe and proceeds through ordinary next-action admission in the same pass.
+The terminal receipt remains until normal exclusive reacquisition. Startup logs
+the released count. Current-process leases, review handoffs, live launches and
+operator holds retain their handling. Unresolved keyed dispatch intents stay
+fenced for native reconciliation; abandonment alone cannot prove no submission.
+`runStaleStateReaper` and its startup wrapper accept `captureProcessImpl` and
+forward it to the closer-lease sweep for process start-time verification.
+Omitting it uses `captureCloserProcessSync`; injected capture failures retain
+ownership until the persisted deadline, just like default capture failures.
+The [lease data model](data-model/ama-closer-leases.md#abandoned-pending-holders-closerleasedead-01)
+describes the recorded outcomes and mutation fence. After normal deployment,
+observe a naturally abandoned lease recording its outcome and normal next
+owner; this source change performs no live recovery or restart.
+
 `nextAction` exposes the shared workflow alongside orchestration results;
 `decideClosureOwner` projects a supplied shared decision or snapshot. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
@@ -4806,7 +4826,8 @@ lease; foreign-host pending leases rely only on age expiry. Both reclaim
 predicates accept ISO strings or numeric epoch milliseconds for `now`. Ordinary routing
 then selects the owner, including hammer for final comment-only findings in
 strict mode, without an operator step. The decision leaves lease files intact;
-the acquisition path reclaims them. Live pending leases and sticky succeeded
+the acquisition path reclaims them. The launch-less abandonment rule above records
+terminal outcomes before routing; legacy fallback ages remain. Live pending leases and sticky succeeded
 outcomes retain their holds. The daemon retries lease contention after 250 and
 500 ms in the same tick, retaining its FIFO reservation when
 still contended. Pending gates, uncertain/live ownership and deferred daemon

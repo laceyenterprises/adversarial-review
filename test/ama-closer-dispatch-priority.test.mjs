@@ -2223,7 +2223,8 @@ test('HAMMERQUOTAREAD-01: snapshot provenance survives personal dispatch and aud
 });
 
 // TERMLEASE-01 fixtures contain only synthetic heads, launches and repository IDs.
-for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succeeded']) {
+for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succeeded',
+  'abandoned-holder-dead', 'abandoned-timeout']) {
   test(`TERMLEASE-01: current-head terminal ${outcome} with a finished launch`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'termlease-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -2232,10 +2233,14 @@ for (const outcome of ['superseded', 'failed-without-merge', 'deferred', 'succee
       reviewCycleExhausted: true, blockingFindingCount: 0, nonBlockingFindingCount: 2 } });
     const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
     const now = args.dispatchContext.dispatchedAt;
-    acquireAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now });
-    updateAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now,
-      status: 'dispatched', lrqId: 'synthetic-finished' });
-    rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: oldHead, toHeadSha: HEAD, now });
+    if (outcome.startsWith('abandoned-')) {
+      acquireAmaCloserLease({ rootDir, ...identity, now });
+    } else {
+      acquireAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now });
+      updateAmaCloserLease({ rootDir, ...identity, headSha: oldHead, now,
+        status: 'dispatched', lrqId: 'synthetic-finished' });
+      rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: oldHead, toHeadSha: HEAD, now });
+    }
     updateAmaCloserLease({ rootDir, ...identity, now, status: 'terminal', terminalOutcome: outcome });
     // The launch exited successfully after pushing; it did not merge this head.
     appendAmaAuditAttempt({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: oldHead,

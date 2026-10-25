@@ -60,6 +60,7 @@ import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import {
@@ -912,6 +913,7 @@ async function dispatchAmaClosureFor({
   probeCloserAuthoredStale = false,
   closureOwnerSink = null,
   probeClosureOwnershipImpl = probeOrphanOwnership,
+  closerLeaseLivenessOptions = {},
   observeClosureWaitImpl = observeClosureWait,
   readHammerStopForHeadImpl = readHammerStopForHead,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
@@ -1551,9 +1553,15 @@ async function dispatchAmaClosureFor({
   const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) || hammerSettled
     ? 'settled-success'
     : String(gateSnapshot?.settledReview?.verdict || '');
-  const handoffLease = currentPrHeadSha && readAmaCloserLease(rootDir, {
+  let handoffLease = currentPrHeadSha && readAmaCloserLease(rootDir, {
     repo: repoPath, prNumber, headSha: currentPrHeadSha,
   });
+  if (autonomousMergeExecutionEnabled && !(labelNames || []).some(label =>
+    [...OPERATOR_HOLD_LABELS, 'duplicate-family-hold', 'adversarial-merge-blocked'].includes(label))) {
+    const abandoned = abandonAmaCloserLease(rootDir, handoffLease,
+      { ...closerLeaseLivenessOptions, now: now(), logger });
+    if (abandoned) handoffLease = abandoned;
+  }
   const ownerCap = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, { repo: repoPath, prNumber }), {
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,
     lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
@@ -1591,12 +1599,13 @@ async function dispatchAmaClosureFor({
     finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };
-  let shared = await resolveClosureNextAction({ input: closureOwnerInput, passSnapshot,
+  const resolveOwner = () => resolveClosureNextAction({ input: closureOwnerInput, passSnapshot,
     subjectKey: `${repoPath}#${prNumber}`, autonomousMergeExecutionEnabled,
     rootDir, observedAt: new Date(now()).toISOString(),
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
+  let shared = await resolveOwner();
   let closureOwner = closureOwnerFromDecision(shared.decision);
   if (closureOwnerSink) closureOwnerSink.shared = shared;
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
@@ -1688,13 +1697,27 @@ async function dispatchAmaClosureFor({
     const flight = handoffLease && ['pending', 'dispatched'].includes(handoffLease.status);
     const ownership = flight ? await probeClosureOwnershipImpl({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: loadAwareTimeoutMs(5000), logger }) : null;
+    // A yielded ownership read cannot carry an uncertain pending lease across
+    // its deadline. Recompute routing from the recorded terminal transition.
+    const abandoned = abandonAmaCloserLease(rootDir, handoffLease,
+      { ...closerLeaseLivenessOptions, now: now(), logger });
+    if (abandoned) {
+      handoffLease = abandoned;
+      closureOwnerInput.lease = abandoned;
+      shared = await resolveOwner();
+      closureOwner = closureOwnerFromDecision(shared.decision);
+      if (closureOwnerSink) {
+        closureOwnerSink.shared = shared;
+        closureOwnerSink.value = closureOwner;
+      }
+    }
     const background = resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background'
       ? amaHammerBackgroundQueueImpl({ maxConcurrent: cfg.amaCloserMaxConcurrentLaunches }).get?.(
         amaHammerBackgroundKey({ repo: repoPath, prNumber, headSha: currentPrHeadSha })) : null;
     const launchProgress = ownLease ? amaHammerBackgroundProgress(background, now()) : {};
     // Apply the actual outcome below instead of hiding a refusal behind the
     // pending lease left by that completed dispatch.
-    if (!(ownLease && background?.state === 'settled')
+    if (!abandoned && !(ownLease && background?.state === 'settled')
       && (launchProgress.closerProgressAt || !flight || ownership?.owned !== false || ownership?.uncertain === true)) {
       // A confirmed closer or this process's running dispatch gets a fixed
       // progress window. Other pending/uncertain ownership keeps its stall clock.

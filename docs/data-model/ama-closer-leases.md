@@ -33,10 +33,12 @@ deferral or supersession cannot demote it to a terminal failure. Findings from
 that review may acquire a fresh hammer lease through `fromReviewHandoff` under
 the sibling `.handoff.lock` exclusive flock and atomic single-claim acquisition.
 Clean reviews use daemon merge. Existing hammer retry and lifetime caps remain.
-`acquiredAt`, `updatedAt`, `watcherPid`, `host`, and `dispatchTimeoutMs`
+`acquiredAt`, `updatedAt`, `watcherPid`, `holderHost`, and `dispatchTimeoutMs`
 identify the launch window. LOADAR-01 records the load-aware effective
-subprocess budget in `dispatchTimeoutMs`; pending-lease expiry consumes that
-value once, including the existing retry and token-poll overhead. Nominal
+subprocess budget in `dispatchTimeoutMs`. CLOSERLEASEDEAD-01 expires a pending,
+launch-less lease strictly after `acquiredAt + dispatchTimeoutMs`, without
+scaling or adding retry overhead. Dispatch-record expiry retains its existing
+retry and token-poll window. Nominal
 pending fallback and dispatched/unknown reclaim ages use the shared load-aware
 helper. Confirmed live launches still retain ownership at any age; no store
 fields or lifecycle states change. A dispatched lease carries `lrqId`. Rekeys retain
@@ -46,7 +48,7 @@ the original dispatch record after the PR head changes.
 The terminal `terminalOutcome` is one of `succeeded`,
 `failed-without-merge`, `deferred`, `superseded`, `pr-merged-externally`,
 `pr-closed-externally`, `no-merge:concurrent-writer`, or
-`no-merge:pr-merged-externally`. Terminal leases are never demoted in place. TERMLEASE-01 removes a terminal
+`no-merge:pr-merged-externally`, `abandoned-holder-dead`, or `abandoned-timeout`. Terminal leases are never demoted in place. TERMLEASE-01 removes a terminal
 `superseded`, `failed-without-merge` or `deferred` lease immediately when its
 launch is terminal in the ledger or a matching dispatch record, or the ledger
 confirms the launch is absent. Positive live launch/retry evidence and unreadable
@@ -58,8 +60,8 @@ existing exclusive acquisition CAS on the same pass. It emits
 `succeeded` remains sticky. A superseded dispatch records its outcome on the
 dispatch record and releases its matching rekeyed lease, preserving any successor
 lease and completed review handoff. No store fields or status values change. The
-pending reclaim age includes the configured dispatch timeout and retry and
-token-poll windows; dispatched leases use their separate stale boundary. A
+legacy pending reclaim age and dispatch-record window retain retry and
+token-poll overhead; dispatched leases use their separate stale boundary. A
 launch-only dispatch record remains active for that full pending reclaim
 window. Dispatch-record listing reads leases without deleting them; pending
 lease reclamation belongs to the closer dispatch path after its owner or age
@@ -111,3 +113,28 @@ diagnostics. Launch aliases `completed`, `complete`, `done`, `cancelled`, `reape
 and `rejected` remain unknown rather than authorizing success or retries.
 Worker-run and app-owned lifecycle spellings are separate contracts. Unknown
 status-only evidence remains unknown. No new durable states or fields are added.
+
+
+## Abandoned pending holders (CLOSERLEASEDEAD-01)
+
+Startup/periodic sweeps and closure routing share the abandonment rule for
+`pending` leases without `lrqId`. A matching `holderHost` permits a local PID
+probe: a confirmed absent PID or a process started after `acquiredAt` records
+`abandoned-holder-dead`. Unreadable identity evidence retains the lease until
+its own persisted dispatch timeout; even foreign-host leases record
+`abandoned-timeout` strictly after that deadline. Observation never refreshes
+`acquiredAt`. Current-process leases and review handoffs retain ownership.
+Leases carrying launch IDs keep launch-based ownership.
+
+Abandonment takes the existing dispatch-intent lock, preserves unresolved
+`dispatching` intents for keyed reconciliation, and compares the observed lease
+under the reclaim flock before writing `terminal`. A concurrent launch receipt
+or replacement holder defeats that write. The terminal outcome remains on disk
+until ordinary dispatch reclaims it through the existing exclusive acquisition
+CAS; startup logs the released count. Closure recomputes its next action from
+that terminal lease, including when an uncertain ownership read crosses the
+deadline. Operator holds still suppress closure routing and lease mutation.
+No merge eligibility, finding-remediation or current-head proof is granted by
+abandonment. Offline regressions cover dead/reused PIDs, uncertain and foreign
+ownership, deadline boundaries, a raced launch, retained live owners and
+same-pass hammer admission.

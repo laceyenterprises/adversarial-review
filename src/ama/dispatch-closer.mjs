@@ -6985,7 +6985,8 @@ async function maybeDispatchAmaCloserAttempt({
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'lease-held', existingLease });
     }
     if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
-      && ['superseded', 'failed-without-merge', 'deferred'].includes(existingLease.terminalOutcome)) {
+      && ['superseded', 'failed-without-merge', 'deferred',
+        'abandoned-holder-dead', 'abandoned-timeout'].includes(existingLease.terminalOutcome)) {
       const probe = existingLease.lrqId
         ? await Promise.resolve().then(() => readLaunchRequestStatusImpl({
           launchRequestId: existingLease.lrqId, rootDir, hqRoot, signal, env,

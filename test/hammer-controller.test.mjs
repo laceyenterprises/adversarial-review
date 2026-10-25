@@ -2,13 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { PassThrough } from 'node:stream';
+import { Duplex, PassThrough } from 'node:stream';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController } from '../src/ama/hammer-controller.mjs';
+import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController,
+  LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
+import Database from 'better-sqlite3';
 
 const root = resolve(import.meta.dirname, '..');
 const head = 'a'.repeat(40);
@@ -58,7 +61,8 @@ function fixture(t, script, { realCensus = false } = {}) {
     import {readFileSync,writeFileSync,renameSync} from 'node:fs';
     import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
-      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000,
+      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000, launchPollMs:20, gateWaitMs:2000,
+      unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>50,
       readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
       // The test owns these exact births. Inject the OS census so this offline
       // regression also runs in workers whose sandbox forbids ps.
@@ -210,12 +214,59 @@ test('Darwin native census returns the same members and births as legacy ps pars
     }
   });
 
+// LAC-2091 (agent-os#9186): the controller hands its own env and HAM_HQ_ROOT
+// to the shared reader. A stale SQLite-era HQ ledgerDbPath beside configured
+// Postgres must neither refuse bootstrap nor stand in for the canonical row.
+for (const [status, rows, outcome] of [
+  ['running', 1, /spawn-reached/],
+  ['succeeded', 1, /refusing controller start/],
+  ['missing', 0, /refusing controller start/],
+]) {
+  test(`LAC-2091: controller bootstrap reads the canonical postgres launch (${status}) past a stale legacy HQ ledger`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-controller-lac2091-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const hqRoot = join(dir, 'agent-os-hq'), staleLedger = join(dir, 'stale-legacy.db');
+    mkdirSync(join(hqRoot, '.hq'), { recursive: true });
+    writeFileSync(join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ledgerDbPath: staleLedger }));
+    const db = new Database(staleLedger);
+    db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
+    db.close();
+    const reads = [], psql = [];
+    await assert.rejects(runHammerController('/does-not-run', [], {
+      env: { HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
+        HAM_HQ_ROOT: hqRoot, HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres', AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger' },
+      readLaunchImpl: async args => {
+        const probe = await readLaunchRequestStatusFromLedgerAsync({ ...args, spawnAsyncImpl: async (command, argv) => {
+          psql.push({ command, dsn: argv.includes('postgres://ledger.example/agent_os_ledger') });
+          return { status: 0, stderr: '', stdout: rows ? `${JSON.stringify({ launch_request_id: 'lrq_controller-test',
+            status, updated_at: '2026-10-25T00:47:00Z', terminal_at: null, failure_class: null })}\n` : '' };
+        } });
+        reads.push({ hqRoot: args.hqRoot, probe });
+        return probe;
+      },
+      delayImpl: async () => {},
+      spawnImpl: () => { throw new Error('spawn-reached'); },
+    }), outcome);
+    // A missing row exhausts the bounded start reads before refusing.
+    const expectedReads = status === 'missing' ? LAUNCH_READ_ATTEMPTS : 1;
+    assert.deepEqual(psql, Array.from({ length: expectedReads }, () => ({ command: 'psql', dsn: true })));
+    assert.equal(reads.length, expectedReads);
+    for (const read of reads) {
+      assert.equal(read.hqRoot, hqRoot);
+      assert.equal(read.probe.target.backend, 'postgres');
+      if (rows) assert.equal(read.probe.row.status, status);
+      else assert.equal(read.probe.reason, 'missing-launch-request-row');
+    }
+  });
+}
+
 for (const probe of [launch('canceled'), launch('blocked_needs_decision'), { ok: false }, launch('future-status')]) {
   test(`start refuses non-executable launch ${probe.row?.status || 'unreadable'}`, async () => {
     await assert.rejects(runHammerController('/does-not-run', [], {
       env: { HAM_RUN_DIR: '/fixture', HAM_ROOT_DIR: '/fixture', HAM_REPO: 'fixture/repo',
         HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test' },
-      readLaunchImpl: async () => probe,
+      readLaunchImpl: async () => probe, delayImpl: async () => {},
     }), /refusing controller start/);
   });
 }
@@ -377,7 +428,7 @@ test('a refused child kill is not a failed spawn and never proves quiescence', a
   });
   let reads = 0;
   const status = await runHammerController('/fixture', [], {
-    env: f.env, pollMs: 5, graceMs: 30, drainMs: 30,
+    env: f.env, pollMs: 5, graceMs: 30, drainMs: 30, launchPollMs: 5,
     readLaunchImpl: async () => launch(++reads === 1 ? 'running' : 'canceled'),
     snapshotImpl: () => [{ pid: 4242, birth: 'fixture-birth' }], spawnImpl: () => child,
     signalGroupImpl(pid) {
@@ -543,3 +594,357 @@ test('missing native execution capability refuses readiness before any lease or 
     assert.equal(existsSync(join(f.dir, 'merge-lease-acquire.json')), false);
     assert.equal(existsSync(join(f.dir, 'audit')), false);
   });
+
+// HAMCTLPOLL-01: a fake clock drives the controller loop; the fake shell
+// leaves only after the scenario says so, or on the controller's TERM.
+function simulate(t, { reads, onTick = () => {}, ...options }) {
+  const f = fixture(t, 'exit 0');
+  let clock = 0, exited = false;
+  const answers = [], readCalls = [], signals = [];
+  const control = new Duplex({ read() {}, write(chunk, _encoding, done) { answers.push(String(chunk)); done(); } });
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4242, stdin: new PassThrough(), stdio: [null, null, null, null, control],
+    kill() { return true; }, unref() {},
+  });
+  const sim = { answers, readCalls, signals, control, clock: () => clock,
+    exit(code, signal = null) {
+      if (exited) return;
+      exited = true; child.emit('exit', code, signal);
+    } };
+  const run = runHammerController('/fixture', [], {
+    env: f.env, timeoutMs: 3_600_000, readTimeoutImpl: () => 30_000, nowImpl: () => clock,
+    delayImpl: ms => { clock += ms; onTick(sim); return new Promise(resolve => setImmediate(resolve)); },
+    readLaunchImpl: async args => { readCalls.push({ ...args, at: clock }); return reads(readCalls.length, sim); },
+    spawnImpl: () => child,
+    snapshotImpl: () => (exited ? [] : [{ pid: 4242, birth: 'fixture-birth' }]),
+    signalGroupImpl(pid, signal) {
+      assert.equal(pid, -4242);
+      signals.push({ signal, at: clock });
+      setImmediate(() => sim.exit(null, signal));
+    },
+    releaseImpl: () => ({ released: false, reason: 'no-acquisition-receipt' }),
+    ...options,
+  });
+  return { ...sim, done: run.then(status => ({ status, receipt: f.receipt() })) };
+}
+const unreadable = () => ({ ok: false, reason: 'fixture-read-timeout' });
+const gateToken = '11111111-1111-4111-8111-111111111111';
+const gateRequest = `launch:123:${gateToken}\n`;
+const gateReplies = sim => sim.answers.filter(answer => !answer.startsWith('wait:'));
+
+test('one failed launch read mid-run does not stop the round', async t => {
+  const sim = simulate(t, { reads: n => (n === 3 ? unreadable() : launch('running')),
+    onTick: s => { if (s.clock() >= 45_000) s.exit(0); } });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 0);
+  assert.equal(receipt.reason, 'shell-exited');
+  assert.deepEqual(sim.signals, []);
+  assert.equal(receipt.launchReadFailures, 1);
+  assert.equal(receipt.launchReadLastError, 'fixture-read-timeout');
+  assert.ok(Number.isFinite(Date.parse(receipt.launchReadFirstFailureAt)));
+});
+
+test('failed launch reads sustained past the grace window stop the round as unreadable', async t => {
+  const sim = simulate(t, { reads: n => {
+    if (n === 1) return launch('running');
+    throw Object.assign(new Error('fixture read timeout'), { code: 'ETIMEDOUT' });
+  } });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 143);
+  assert.equal(receipt.reason, 'launch-unreadable');
+  assert.equal(sim.signals[0].signal, 'SIGTERM');
+  // No stop before the window, and none long after it.
+  assert.ok(sim.signals[0].at >= LAUNCH_UNREADABLE_GRACE_MS, JSON.stringify(sim.signals));
+  assert.ok(sim.signals[0].at <= LAUNCH_UNREADABLE_GRACE_MS + 2000, JSON.stringify(sim.signals));
+  assert.ok(receipt.launchReadFailures >= 10 && receipt.launchReadFailures <= 12, String(receipt.launchReadFailures));
+  assert.equal(receipt.launchReadLastError, 'ETIMEDOUT');
+});
+
+for (const status of ['canceled', 'blocked_needs_decision']) {
+  test(`a readable ${status} launch stops the round at once`, async t => {
+    const sim = simulate(t, { reads: n => launch(n === 3 ? status : 'running') });
+    const result = await sim.done;
+    assert.equal(result.status, 143);
+    assert.equal(result.receipt.reason, 'launch-ended');
+    assert.equal(sim.readCalls.length, 3);
+    // The third read is due 20s in; the stop lands on the next pass.
+    assert.ok(sim.signals[0].at <= 2 * LAUNCH_POLL_MS + 1000, JSON.stringify(sim.signals));
+    assert.equal(result.receipt.launchReadFailures, 0);
+  });
+}
+
+test('the launch read runs every 10 seconds, about 6 times a minute, never while one is in flight', async t => {
+  let inFlight = 0, overlapped = false;
+  const sim = simulate(t, {
+    reads: async () => {
+      if (++inFlight > 1) overlapped = true;
+      await new Promise(resolve => setImmediate(resolve));
+      inFlight -= 1;
+      return launch('running');
+    },
+    onTick: s => { if (s.clock() >= 60_000) s.exit(0); },
+  });
+  assert.equal((await sim.done).status, 0);
+  // The start read plus one every 10s; a 1s cadence would make about 60.
+  assert.ok(sim.readCalls.length >= 6 && sim.readCalls.length <= 7, String(sim.readCalls.length));
+  assert.deepEqual(sim.readCalls.slice(1, 6).map(read => read.at), [10_000, 20_000, 30_000, 40_000, 50_000]);
+  assert.equal(overlapped, false);
+});
+
+test('each launch read uses the load-aware ledger timeout with a matching abort signal', async t => {
+  const sim = simulate(t, { readTimeoutImpl: undefined, reads: () => launch('running'),
+    onTick: s => { if (s.clock() >= 15_000) s.exit(0); } });
+  assert.equal((await sim.done).status, 0);
+  for (const read of sim.readCalls) {
+    // The adapter's 30s nominal psql timeout, scaled up under load and never capped at 2s.
+    assert.ok(read.timeoutMs >= 30_000, String(read.timeoutMs));
+    assert.ok(read.signal instanceof AbortSignal);
+  }
+  // Abandoned reads cannot hold a finished controller open.
+  assert.equal(sim.readCalls.at(-1).signal.aborted, true);
+  const scaled = simulate(t, { readTimeoutImpl: () => 95_000, reads: () => launch('running'),
+    onTick: s => { if (s.clock() >= 5_000) s.exit(0); } });
+  assert.equal((await scaled.done).status, 0);
+  assert.equal(scaled.readCalls[0].timeoutMs, 95_000);
+});
+
+test('start retries one failed launch read, then runs on a good one', async t => {
+  const sim = simulate(t, { reads: n => (n === 1 ? unreadable() : launch('running')),
+    onTick: s => { if (s.clock() >= 5_000) s.exit(0); } });
+  const { status, receipt } = await sim.done;
+  assert.equal(status, 0);
+  assert.deepEqual(sim.readCalls.slice(0, 2).map(read => read.at), [0, 1000]);
+  assert.equal(receipt.launchReadFailures, 1);
+});
+
+test('start refuses a terminal read at once and an unreadable launch after three reads', async () => {
+  const env = { HAM_RUN_DIR: '/fixture', HAM_ROOT_DIR: '/fixture', HAM_REPO: 'fixture/repo',
+    HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test' };
+  for (const [probe, expected] of [[launch('canceled'), 1], [unreadable(), 3]]) {
+    let reads = 0;
+    await assert.rejects(runHammerController('/does-not-run', [], { env, delayImpl: async () => {},
+      readLaunchImpl: async () => { reads += 1; return probe; } }), /refusing controller start/);
+    assert.equal(reads, expected);
+  }
+});
+
+for (const [kind, gateRead, answer, reason] of [
+  ['permitted', () => launch('running'), 'clear\n', 'shell-exited'],
+  ['terminal', () => launch('canceled'), 'blocked\n', 'launch-ended'],
+  ['unreadable', unreadable, 'blocked\n', 'shell-exited'],
+]) {
+  test(`a lease or merge step with a stale read takes a fresh read first: ${kind}`, async t => {
+    let gateAt, readsAtGate;
+    const sim = simulate(t, {
+      // Periodic reads fail, so the newest permitted read (t=0) goes stale.
+      reads: n => (n === 1 ? launch('running') : gateAt === undefined ? unreadable() : gateRead()),
+      onTick: s => {
+        if (gateAt === undefined && s.clock() >= 50_000) {
+          gateAt = s.clock(); readsAtGate = s.readCalls.length;
+          s.control.push(gateRequest);
+        }
+        if (gateAt !== undefined && s.clock() >= gateAt + 10_000) s.exit(0);
+      },
+    });
+    const { receipt } = await sim.done;
+    assert.equal(gateReplies(sim)[0], answer.trim() + ':' + gateToken + '\n');
+    assert.ok(sim.readCalls.length > readsAtGate, 'the step took a fresh read');
+    assert.equal(receipt.reason, reason);
+    // An unreadable gate blocks only the step; the grace window alone ends a round.
+    if (kind === 'unreadable') assert.deepEqual(sim.signals, []);
+  });
+}
+
+test('a lease or merge step with a fresh permitted read clears without another read', async t => {
+  let readsAtGate, readsAtAnswer;
+  const sim = simulate(t, {
+    reads: () => launch('running'),
+    onTick: s => {
+      if (s.clock() === 3_000) { readsAtGate = s.readCalls.length; s.control.push(gateRequest); }
+      if (readsAtAnswer === undefined && s.answers.length) readsAtAnswer = s.readCalls.length;
+      if (s.clock() >= 8_000) s.exit(0);
+    },
+  });
+  assert.equal((await sim.done).status, 0);
+  assert.deepEqual(gateReplies(sim), [`clear:${gateToken}\n`]);
+  assert.equal(readsAtAnswer, readsAtGate);
+});
+
+for (const readMs of [30_000, 90_000, 180_000]) {
+  test(`a gate allows all three ${readMs}ms reads, including beyond the round grace`, async t => {
+    let gateAt, pendingRead, attempts = 0;
+    const sim = simulate(t, {
+      readTimeoutImpl: () => readMs,
+      reads: (n, s) => {
+        if (n === 1) return launch('running');
+        if (gateAt === undefined) return unreadable();
+        if (gateReplies(s).length) return unreadable(); // Subsequent periodic read is outside the gate.
+        attempts += 1;
+        return new Promise(resolve => { pendingRead = { resolve, at: s.clock() + readMs, attempt: attempts }; });
+      },
+      onTick: s => {
+        if (gateAt === undefined && s.clock() >= readMs + 20_000) {
+          gateAt = s.clock(); s.control.push(gateRequest);
+        }
+        if (pendingRead && s.clock() >= pendingRead.at) {
+          pendingRead.resolve(pendingRead.attempt === 3 ? launch('running') : unreadable());
+          pendingRead = undefined;
+        }
+        if (gateReplies(s).length) s.exit(0);
+      },
+    });
+    const result = await sim.done;
+    assert.equal(result.status, 0);
+    assert.equal(attempts, 3);
+    assert.deepEqual(gateReplies(sim), [`clear:${gateToken}\n`]);
+    assert.deepEqual(sim.signals, []);
+    const advertised = Number(sim.answers[0].trim().split(':')[2]);
+    assert.ok(advertised >= 3 * readMs + 10_000);
+    assert.ok(sim.clock() >= gateAt + 3 * readMs);
+  });
+}
+
+test('a read already in flight at the gate deadline resolves before a blocked reply', async t => {
+  let gateAt, resolveRead, resolvedAt;
+  const sim = simulate(t, {
+    reads: n => {
+      if (n === 1) return launch('running');
+      if (gateAt === undefined) return unreadable();
+      return new Promise(resolve => { resolveRead = resolve; });
+    },
+    onTick: s => {
+      if (gateAt === undefined && s.clock() >= 50_000) {
+        gateAt = s.clock(); s.control.push(gateRequest);
+      }
+      if (resolveRead && s.clock() >= gateAt + 100_000) {
+        assert.deepEqual(gateReplies(s), [], 'no premature answer at the gate deadline');
+        resolvedAt = s.clock(); resolveRead(unreadable()); resolveRead = undefined;
+      }
+      if (gateReplies(s).length) s.exit(0);
+    },
+  });
+  await sim.done;
+  assert.ok(resolvedAt >= gateAt + 100_000);
+  assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
+});
+
+test('an unreadable gate exhausts three load-scaled reads and then the round grace stops it', async t => {
+  let gateAt, pendingRead, attempts = 0;
+  const sim = simulate(t, {
+    readTimeoutImpl: () => 90_000,
+    reads: (n, s) => {
+      if (n === 1) return launch('running');
+      if (gateAt === undefined) return unreadable();
+      if (gateReplies(s).length) return unreadable();
+      attempts += 1;
+      return new Promise(resolve => { pendingRead = { resolve, at: s.clock() + 90_000 }; });
+    },
+    onTick: s => {
+      if (gateAt === undefined && s.clock() >= 110_000) { gateAt = s.clock(); s.control.push(gateRequest); }
+      if (pendingRead && s.clock() >= pendingRead.at) { pendingRead.resolve(unreadable()); pendingRead = undefined; }
+    },
+  });
+  const result = await sim.done;
+  assert.equal(result.receipt.reason, 'launch-unreadable');
+  assert.equal(attempts, 3);
+  assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
+  assert.ok(sim.signals[0].at >= gateAt + 270_000);
+});
+
+for (const verb of ['complete', 'launch']) {
+  test(`${verb} handshake discards stale replies and parses fragmented correlated frames`, { timeout: 5000 }, async t => {
+    const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { confirmControllerLaunch, confirmControllerValidation } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+      process.exitCode = await ${verb === 'launch' ? 'confirmControllerLaunch' : 'confirmControllerValidation'}() ? 0 : 1;
+    `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+    t.after(() => helper.kill());
+    const closed = once(helper, 'close');
+    let input = '';
+    helper.stdio[4].on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const [requestVerb, pid, token] = input.trim().split(':');
+      assert.equal(requestVerb, verb);
+      assert.equal(Number(pid), helper.pid);
+      assert.match(token, /^[a-f0-9-]{36}$/);
+      // Both stale negatives and stale positives must be ignored, even when
+      // coalesced with a partial reply for this caller.
+      helper.stdio[4].write(`blocked:${gateToken}\nclear:${gateToken}\nclear:${token.slice(0, 10)}`);
+      setImmediate(() => helper.stdio[4].end(`${token.slice(10)}\n`));
+    });
+    assert.equal((await closed)[0], 0);
+  });
+}
+
+test('a stale clear cannot override a correlated blocked handshake', { timeout: 5000 }, async t => {
+  const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { confirmControllerLaunch } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    process.exitCode = await confirmControllerLaunch() ? 1 : 0;
+  `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+  t.after(() => helper.kill());
+  const closed = once(helper, 'close');
+  let input = '';
+  helper.stdio[4].on('data', chunk => {
+    input += chunk;
+    if (!input.includes('\n')) return;
+    const token = input.trim().split(':')[2];
+    helper.stdio[4].end(`clear:${gateToken}\nwait:${token}:1000\nblocked:${token}\n`);
+  });
+  assert.equal((await closed)[0], 0);
+});
+
+test('a launch handshake adopts the controller advertised socket timeout', { timeout: 5000 }, async t => {
+  const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { confirmControllerLaunch } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    process.exitCode = await confirmControllerLaunch() ? 1 : 0;
+  `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+  t.after(() => helper.kill());
+  const closed = once(helper, 'close');
+  let input = '';
+  helper.stdio[4].on('data', chunk => {
+    input += chunk;
+    if (!input.includes('\n')) return;
+    const token = input.trim().split(':')[2];
+    // Keep the socket open: only adoption of this budget can end the wait.
+    helper.stdio[4].write(`wait:${token}:20\n`);
+  });
+  assert.equal((await closed)[0], 0);
+});
+
+test('real shell: assert-launch clears on a fresh read and blocks a stale unreadable launch without ending the round',
+  { timeout: 20000 }, async t => {
+    const gate = `printf ready > "$HAM_RUN_DIR/ready"
+      while [ ! -e "$HAM_RUN_DIR/go" ]; do sleep 0.05; done
+      if "${process.execPath}" "${root}/bin/hammer-controller.mjs" assert-launch; then
+        printf cleared > "$HAM_RUN_DIR/audit"
+      else printf blocked > "$HAM_RUN_DIR/audit"; fi`;
+    const clear = fixture(t, gate);
+    writeFileSync(join(clear.dir, 'go'), 'go');
+    const p = clear.start();
+    assert.equal((await p.closed)[0], 0, `${p.output()} ${JSON.stringify(clear.receipt())}`);
+    assert.equal(readFileSync(join(clear.dir, 'audit'), 'utf8'), 'cleared');
+
+    const blocked = fixture(t, gate);
+    blocked.env.FIXTURE_GRACE_MS = '60000';
+    const q = blocked.start();
+    await until(() => existsSync(join(blocked.dir, 'ready')));
+    blocked.cancel({ ok: false, reason: 'fixture-read-timeout' });
+    // Let the newest permitted read age past one poll plus one read timeout.
+    await delay(300);
+    writeFileSync(join(blocked.dir, 'go'), 'go');
+    assert.equal((await q.closed)[0], 0, `${q.output()} ${JSON.stringify(blocked.receipt())}`);
+    assert.equal(readFileSync(join(blocked.dir, 'audit'), 'utf8'), 'blocked');
+    assert.equal(blocked.receipt().reason, 'shell-exited');
+    assert.ok(blocked.receipt().launchReadFailures > 0);
+    assert.equal(blocked.receipt().launchReadLastError, 'fixture-read-timeout');
+  });
+
+test('closing scripts take the lease and click merge only after assert-launch', () => {
+  const acquire = readFileSync(join(root, 'bin/hammer-verify-head.sh'), 'utf8');
+  const body = acquire.slice(acquire.indexOf('ham_acquire_merge_lease() {'));
+  assert.ok(body.indexOf('assert-launch') < body.indexOf('merge-lease.mjs acquire'));
+  const merge = readFileSync(join(root, 'bin/hammer-merge.sh'), 'utf8');
+  const click = merge.indexOf('ham_gh pr merge <<PR_URL>>');
+  // The gate follows the last pre-click recheck, so each retried click repeats it.
+  assert.ok(click > 0 && merge.lastIndexOf('assert-launch', click) > merge.lastIndexOf('stacked-base-check.mjs', click));
+});

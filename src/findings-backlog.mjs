@@ -31,11 +31,19 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
 export function summarizeFindingBacklog(db, now = Date.now()) {
   if (!db) return { available: false, error: 'review-store-unavailable', areas: null };
   try {
-    const areas = db.prepare(`SELECT b.repo,b.area,count(*) AS size,min(b.captured_at) AS oldestAt,
-      sum(b.batch_id IS NOT NULL) AS inBatch,sum(r.pr_state<>'merged') AS waitingForMerge,
-      max(a.error) AS error FROM finding_backlog b
-      JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
-      LEFT JOIN finding_batches a USING(batch_id) WHERE b.outcome IS NULL
+    const areas = db.prepare(`WITH unresolved AS (
+      SELECT b.repo,b.area,b.captured_at,b.batch_id,r.pr_state FROM finding_backlog b
+      JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number WHERE b.outcome IS NULL
+      UNION ALL
+      SELECT n.repo,coalesce(a.area,c.area,'_simplicity'),p.body_captured_at,n.batch_id,r.pr_state
+      FROM finding_batch_notes n JOIN reviewer_passes p USING(pass_id)
+      JOIN reviewed_prs r ON r.repo=n.repo AND r.pr_number=n.pr_number
+      LEFT JOIN finding_batches a USING(batch_id)
+      LEFT JOIN finding_batch_note_candidates c USING(note_id)
+      WHERE n.dropped_reason IS NULL AND (n.batch_id IS NULL OR a.completed_at IS NULL)
+    ) SELECT b.repo,b.area,count(*) AS size,min(b.captured_at) AS oldestAt,
+      sum(b.batch_id IS NOT NULL) AS inBatch,sum(b.pr_state<>'merged') AS waitingForMerge,
+      max(a.error) AS error FROM unresolved b LEFT JOIN finding_batches a USING(batch_id)
       GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all()
       .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
     return { available: true, areas };

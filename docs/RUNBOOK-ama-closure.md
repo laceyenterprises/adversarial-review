@@ -74,7 +74,16 @@ outside finding counts and all merge/round/retry decisions. Existing remediation
 or Hammer work may apply it only when behavior stays the same and net lines or
 runtime cost decrease. Remediation replies and round completions record
 `simplicityNoteApplied`; Hammer's existing audit text records the same boolean
-with a reason. No configuration or deployment migration is needed.
+with a reason. No configuration change is needed.
+
+Recurring runtime-cost defects belong in findings, with head-file/line evidence;
+unbounded, unjustified cost per worker, review, request or tick is blocking.
+Pure simplicity remains advisory. After the source PR merges, the non-blocking
+findings batch owns applying or declining its final review's advisory, even if
+there are no findings. Each note records `simplicityNoteApplied` and a one-line
+reason in the batch outcome. Applied notes use the existing merged batch-PR
+evidence; neither advice nor batch bookkeeping changes source-PR merge gates.
+The normal review-store migration runner installs this batch storage extension.
 
 After deploy, the SRE session samples the next 20 reviews, counts those with a
 note, and confirms none changed the verdict or added a round. See the existing

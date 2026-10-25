@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
+import { extractSimplicityNote } from './kernel/verdict.mjs';
 import { disputeEvidenceForFinding, normalizeCoverageTitle, validateRemediationReply } from './kernel/remediation-reply.mjs';
 import { blockingFindingIdentity, evidenceDigest, REMEDIATOR_WITHDRAWN_RESOLUTION } from './ama/hammer-adjudication.mjs';
 import { attributeFindingCommits, findingPath } from './finding-commit-attribution.mjs';
@@ -18,6 +19,13 @@ export function persistReviewFindings(db, passId) {
   return db.transaction(() => {
     const pass = db.prepare('SELECT * FROM reviewer_passes WHERE pass_id = ?').get(passId);
     if (!pass?.body_md || !REVIEW_KINDS.has(pass.pass_kind)) return 0;
+    const note = extractSimplicityNote(pass.body_md);
+    // Snapshot advice independently: an advisory-only review has no finding row.
+    db.prepare('DELETE FROM finding_batch_notes WHERE pass_id=? AND batch_id IS NULL').run(passId);
+    if (note && pass.head_sha) db.prepare(`INSERT INTO finding_batch_notes
+      (note_id,pass_id,repo,pr_number,head_sha,note) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(note_id) DO NOTHING`)
+      .run(digest([passId, note]), passId, pass.repo, pass.pr_number, pass.head_sha, note);
     const parsed = parseReviewFindings(pass.body_md);
     const findings = [...parsed.blocking.findings.map(f => ({ f, blocking: 1 })),
       ...parsed.nonBlocking.findings.map(f => ({ f, blocking: 0 }))];

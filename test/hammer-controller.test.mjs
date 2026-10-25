@@ -579,6 +579,9 @@ function simulate(t, { reads, onTick = () => {}, ...options }) {
   return { ...sim, done: run.then(status => ({ status, receipt: f.receipt() })) };
 }
 const unreadable = () => ({ ok: false, reason: 'fixture-read-timeout' });
+const gateToken = '11111111-1111-4111-8111-111111111111';
+const gateRequest = `launch:123:${gateToken}\n`;
+const gateReplies = sim => sim.answers.filter(answer => !answer.startsWith('wait:'));
 
 test('one failed launch read mid-run does not stop the round', async t => {
   const sim = simulate(t, { reads: n => (n === 3 ? unreadable() : launch('running')),
@@ -689,13 +692,13 @@ for (const [kind, gateRead, answer, reason] of [
       onTick: s => {
         if (gateAt === undefined && s.clock() >= 50_000) {
           gateAt = s.clock(); readsAtGate = s.readCalls.length;
-          s.control.push('launch:123\n');
+          s.control.push(gateRequest);
         }
         if (gateAt !== undefined && s.clock() >= gateAt + 10_000) s.exit(0);
       },
     });
     const { receipt } = await sim.done;
-    assert.equal(sim.answers[0], answer);
+    assert.equal(gateReplies(sim)[0], answer.trim() + ':' + gateToken + '\n');
     assert.ok(sim.readCalls.length > readsAtGate, 'the step took a fresh read');
     assert.equal(receipt.reason, reason);
     // An unreadable gate blocks only the step; the grace window alone ends a round.
@@ -708,14 +711,155 @@ test('a lease or merge step with a fresh permitted read clears without another r
   const sim = simulate(t, {
     reads: () => launch('running'),
     onTick: s => {
-      if (s.clock() === 3_000) { readsAtGate = s.readCalls.length; s.control.push('launch:123\n'); }
+      if (s.clock() === 3_000) { readsAtGate = s.readCalls.length; s.control.push(gateRequest); }
       if (readsAtAnswer === undefined && s.answers.length) readsAtAnswer = s.readCalls.length;
       if (s.clock() >= 8_000) s.exit(0);
     },
   });
   assert.equal((await sim.done).status, 0);
-  assert.deepEqual(sim.answers, ['clear\n']);
+  assert.deepEqual(gateReplies(sim), [`clear:${gateToken}\n`]);
   assert.equal(readsAtAnswer, readsAtGate);
+});
+
+for (const readMs of [30_000, 90_000, 180_000]) {
+  test(`a gate allows all three ${readMs}ms reads, including beyond the round grace`, async t => {
+    let gateAt, pendingRead, attempts = 0;
+    const sim = simulate(t, {
+      readTimeoutImpl: () => readMs,
+      reads: (n, s) => {
+        if (n === 1) return launch('running');
+        if (gateAt === undefined) return unreadable();
+        if (gateReplies(s).length) return unreadable(); // Subsequent periodic read is outside the gate.
+        attempts += 1;
+        return new Promise(resolve => { pendingRead = { resolve, at: s.clock() + readMs, attempt: attempts }; });
+      },
+      onTick: s => {
+        if (gateAt === undefined && s.clock() >= readMs + 20_000) {
+          gateAt = s.clock(); s.control.push(gateRequest);
+        }
+        if (pendingRead && s.clock() >= pendingRead.at) {
+          pendingRead.resolve(pendingRead.attempt === 3 ? launch('running') : unreadable());
+          pendingRead = undefined;
+        }
+        if (gateReplies(s).length) s.exit(0);
+      },
+    });
+    const result = await sim.done;
+    assert.equal(result.status, 0);
+    assert.equal(attempts, 3);
+    assert.deepEqual(gateReplies(sim), [`clear:${gateToken}\n`]);
+    assert.deepEqual(sim.signals, []);
+    const advertised = Number(sim.answers[0].trim().split(':')[2]);
+    assert.ok(advertised >= 3 * readMs + 10_000);
+    assert.ok(sim.clock() >= gateAt + 3 * readMs);
+  });
+}
+
+test('a read already in flight at the gate deadline resolves before a blocked reply', async t => {
+  let gateAt, resolveRead, resolvedAt;
+  const sim = simulate(t, {
+    reads: n => {
+      if (n === 1) return launch('running');
+      if (gateAt === undefined) return unreadable();
+      return new Promise(resolve => { resolveRead = resolve; });
+    },
+    onTick: s => {
+      if (gateAt === undefined && s.clock() >= 50_000) {
+        gateAt = s.clock(); s.control.push(gateRequest);
+      }
+      if (resolveRead && s.clock() >= gateAt + 100_000) {
+        assert.deepEqual(gateReplies(s), [], 'no premature answer at the gate deadline');
+        resolvedAt = s.clock(); resolveRead(unreadable()); resolveRead = undefined;
+      }
+      if (gateReplies(s).length) s.exit(0);
+    },
+  });
+  await sim.done;
+  assert.ok(resolvedAt >= gateAt + 100_000);
+  assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
+});
+
+test('an unreadable gate exhausts three load-scaled reads and then the round grace stops it', async t => {
+  let gateAt, pendingRead, attempts = 0;
+  const sim = simulate(t, {
+    readTimeoutImpl: () => 90_000,
+    reads: (n, s) => {
+      if (n === 1) return launch('running');
+      if (gateAt === undefined) return unreadable();
+      if (gateReplies(s).length) return unreadable();
+      attempts += 1;
+      return new Promise(resolve => { pendingRead = { resolve, at: s.clock() + 90_000 }; });
+    },
+    onTick: s => {
+      if (gateAt === undefined && s.clock() >= 110_000) { gateAt = s.clock(); s.control.push(gateRequest); }
+      if (pendingRead && s.clock() >= pendingRead.at) { pendingRead.resolve(unreadable()); pendingRead = undefined; }
+    },
+  });
+  const result = await sim.done;
+  assert.equal(result.receipt.reason, 'launch-unreadable');
+  assert.equal(attempts, 3);
+  assert.deepEqual(gateReplies(sim), [`blocked:${gateToken}\n`]);
+  assert.ok(sim.signals[0].at >= gateAt + 270_000);
+});
+
+for (const verb of ['complete', 'launch']) {
+  test(`${verb} handshake discards stale replies and parses fragmented correlated frames`, { timeout: 5000 }, async t => {
+    const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { confirmControllerLaunch, confirmControllerValidation } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+      process.exitCode = await ${verb === 'launch' ? 'confirmControllerLaunch' : 'confirmControllerValidation'}() ? 0 : 1;
+    `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+    t.after(() => helper.kill());
+    const closed = once(helper, 'close');
+    let input = '';
+    helper.stdio[4].on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const [requestVerb, pid, token] = input.trim().split(':');
+      assert.equal(requestVerb, verb);
+      assert.equal(Number(pid), helper.pid);
+      assert.match(token, /^[a-f0-9-]{36}$/);
+      // Both stale negatives and stale positives must be ignored, even when
+      // coalesced with a partial reply for this caller.
+      helper.stdio[4].write(`blocked:${gateToken}\nclear:${gateToken}\nclear:${token.slice(0, 10)}`);
+      setImmediate(() => helper.stdio[4].end(`${token.slice(10)}\n`));
+    });
+    assert.equal((await closed)[0], 0);
+  });
+}
+
+test('a stale clear cannot override a correlated blocked handshake', { timeout: 5000 }, async t => {
+  const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { confirmControllerLaunch } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    process.exitCode = await confirmControllerLaunch() ? 1 : 0;
+  `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+  t.after(() => helper.kill());
+  const closed = once(helper, 'close');
+  let input = '';
+  helper.stdio[4].on('data', chunk => {
+    input += chunk;
+    if (!input.includes('\n')) return;
+    const token = input.trim().split(':')[2];
+    helper.stdio[4].end(`clear:${gateToken}\nwait:${token}:1000\nblocked:${token}\n`);
+  });
+  assert.equal((await closed)[0], 0);
+});
+
+test('a launch handshake adopts the controller advertised socket timeout', { timeout: 5000 }, async t => {
+  const helper = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { confirmControllerLaunch } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    process.exitCode = await confirmControllerLaunch() ? 1 : 0;
+  `], { stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] });
+  t.after(() => helper.kill());
+  const closed = once(helper, 'close');
+  let input = '';
+  helper.stdio[4].on('data', chunk => {
+    input += chunk;
+    if (!input.includes('\n')) return;
+    const token = input.trim().split(':')[2];
+    // Keep the socket open: only adoption of this budget can end the wait.
+    helper.stdio[4].write(`wait:${token}:20\n`);
+  });
+  assert.equal((await closed)[0], 0);
 });
 
 test('real shell: assert-launch clears on a fresh read and blocks a stale unreadable launch without ending the round',

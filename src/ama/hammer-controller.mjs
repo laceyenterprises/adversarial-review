@@ -21,7 +21,7 @@ export const LAUNCH_POLL_MS = 10_000;
 export const LAUNCH_UNREADABLE_GRACE_MS = 120_000;
 // Reads a start, lease or merge step takes before it refuses on unreadable.
 export const LAUNCH_READ_ATTEMPTS = 3;
-// Lease and merge steps wait this long for the controller's fresh-read answer.
+// Minimum budget for the controller's fresh-read answer; widened under load.
 export const LAUNCH_GATE_WAIT_MS = 60_000;
 // The session-ledger adapter's nominal psql timeout, scaled once per read.
 const LAUNCH_READ_NOMINAL_MS = 30_000;
@@ -56,8 +56,9 @@ export function assertHammerController(env = process.env, { readGroupImpl = curr
   return record;
 }
 
-function controllerHandshake(request, timeoutMs) {
+function controllerHandshake(verb, timeoutMs) {
   return new Promise(resolve => {
+    const token = randomUUID();
     let pipe;
     try { pipe = new Socket({ fd: 4, readable: true, writable: true }); }
     catch { resolve(false); return; }
@@ -68,9 +69,21 @@ function controllerHandshake(request, timeoutMs) {
     pipe.on('close', () => finish(false));
     pipe.on('data', chunk => {
       received += chunk;
-      if (received.includes('\n')) finish(received === 'clear\n');
+      while (!done && received.includes('\n')) {
+        const end = received.indexOf('\n');
+        const line = received.slice(0, end); received = received.slice(end + 1);
+        const [answer, responseToken, budget] = line.split(':');
+        // A timed-out predecessor can leave bytes on this inherited socket.
+        if (responseToken !== token) continue;
+        if (line === `clear:${token}`) finish(true);
+        else if (verb === 'launch' && answer === 'wait' && /^[1-9]\d*$/.test(budget)
+            && Number(budget) <= 2 ** 31 - 1 && line === `wait:${token}:${budget}`) {
+          pipe.setTimeout(Number(budget), () => finish(false));
+        } else finish(false);
+      }
+      if (received.length > 1024) finish(false);
     });
-    pipe.write(request);
+    pipe.write(`${verb}:${process.pid}:${token}\n`);
   });
 }
 
@@ -78,13 +91,13 @@ export function confirmControllerValidation() {
   // The controller probes from outside the test group. Do not accept a test
   // while background descendants remain, even if they closed both output pipes.
   // Allow one poll and bounded process census to complete.
-  return controllerHandshake(`complete:${process.pid}\n`, 10_000);
+  return controllerHandshake('complete', 10_000);
 }
 
 // Lease acquisition and merge proceed only on a fresh permitted launch read.
-// The controller answers within its gate wait; the slack covers one census pass.
+// The controller advertises its current load-aware budget before doing reads.
 export function confirmControllerLaunch() {
-  return controllerHandshake(`launch:${process.pid}\n`, LAUNCH_GATE_WAIT_MS + 10_000);
+  return controllerHandshake('launch', LAUNCH_GATE_WAIT_MS + 10_000);
 }
 
 // No environment/command census: retain only identities in our owned group.
@@ -168,8 +181,8 @@ export async function runHammerController(script, args = [], {
   const launchReads = { failures: 0, firstFailureAt: null, lastError: null };
   let lastPermitted, latestReadTimeoutMs;
   // Returns permitted, ended (a readable row that forbids continuing) or unreadable.
-  async function readLaunch() {
-    const startedRead = nowImpl(), readTimeoutMs = readTimeoutImpl();
+  async function readLaunch(readTimeoutMs = readTimeoutImpl()) {
+    const startedRead = nowImpl();
     latestReadTimeoutMs = readTimeoutMs;
     let outcome, error;
     try {
@@ -244,8 +257,19 @@ export async function runHammerController(script, args = [], {
     while (controlInput.includes('\n')) {
       const end = controlInput.indexOf('\n');
       const line = controlInput.slice(0, end); controlInput = controlInput.slice(end + 1);
-      if (/^complete:[1-9]\d*$/.test(line)) pendingValidator = Number(line.slice(9));
-      else if (/^launch:[1-9]\d*$/.test(line)) pendingGate ??= { deadline: nowImpl() + gateWaitMs, reads: 0 };
+      const request = /^(complete|launch):([1-9]\d*):([a-f0-9-]{36})$/.exec(line);
+      if (request?.[1] === 'complete') pendingValidator = { pid: Number(request[2]), token: request[3] };
+      else if (request?.[1] === 'launch' && !pendingGate) {
+        // Freeze this gate's per-read budget so changing host load cannot make
+        // its server deadline outrun the caller's socket timeout. Count any
+        // existing read as the first attempt; reads never overlap.
+        const readTimeoutMs = Math.max(latestReadTimeoutMs, readTimeoutImpl());
+        const waitMs = Math.max(gateWaitMs, LAUNCH_READ_ATTEMPTS * (readTimeoutMs + pollMs));
+        pendingGate = { token: request[3], deadline: nowImpl() + waitMs,
+          readTimeoutMs, reads: reading ? 1 : 0 };
+        // A read admitted just before the deadline may finish after it.
+        child.stdio[4].write(`wait:${pendingGate.token}:${waitMs + readTimeoutMs + 10_000}\n`);
+      }
       else stop('validation-stopped');
     }
   });
@@ -256,7 +280,8 @@ export async function runHammerController(script, args = [], {
   // continuing stops at once; a failure is recorded and the round continues.
   const beginRead = () => {
     nextRead = nowImpl() + launchPollMs;
-    reading = readLaunch().then(outcome => {
+    if (pendingGate) pendingGate.reads += 1;
+    reading = readLaunch(pendingGate?.readTimeoutMs).then(outcome => {
       reading = undefined;
       if (outcome === 'ended') stop('launch-ended');
     });
@@ -274,8 +299,9 @@ export async function runHammerController(script, args = [], {
     while (true) {
       const now = nowImpl();
       if (spawnError) { stop('spawn-failed'); drained = true; break; }
-      if (!reason && !reading && now >= nextRead) beginRead();
-      if (!reason && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
+      if (!reason && !pendingGate && !reading && now >= nextRead) beginRead();
+      const gateReading = pendingGate && (reading || now < pendingGate.deadline);
+      if (!reason && !gateReading && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
       if (now - begun >= timeoutMs) stop('controller-timeout');
       if (exited) stop('shell-exited');
       let members;
@@ -291,21 +317,21 @@ export async function runHammerController(script, args = [], {
       // before deciding whether the completed script succeeded.
       if (members?.length && !owned) stop('process-identity-unconfirmed');
       if (pendingValidator) {
-        const clear = !reason && owned && members.some(member => member.pid === pendingValidator)
-          && members.every(member => member.pid === child.pid || member.pid === pendingValidator);
+        const clear = !reason && owned && members.some(member => member.pid === pendingValidator.pid)
+          && members.every(member => member.pid === child.pid || member.pid === pendingValidator.pid);
         if (!clear) stop('validation-descendants-or-probe-unconfirmed');
-        child.stdio[4].write(clear ? 'clear\n' : 'blocked\n');
+        child.stdio[4].write(`${clear ? 'clear' : 'blocked'}:${pendingValidator.token}\n`);
         pendingValidator = undefined;
       }
       if (pendingGate) {
         // Fresh: started no longer ago than one poll interval plus its timeout.
         const fresh = nowImpl() - lastPermitted.at <= launchPollMs + lastPermitted.readTimeoutMs;
-        if (!reason && fresh) { child.stdio[4].write('clear\n'); pendingGate = undefined; }
-        else if (reason || nowImpl() >= pendingGate.deadline
-            || (!reading && pendingGate.reads >= LAUNCH_READ_ATTEMPTS)) {
+        if (!reason && fresh) { child.stdio[4].write(`clear:${pendingGate.token}\n`); pendingGate = undefined; }
+        else if (reason || (!reading && (nowImpl() >= pendingGate.deadline
+            || pendingGate.reads >= LAUNCH_READ_ATTEMPTS))) {
           // An unreadable launch blocks this step; only the grace window ends the round.
-          child.stdio[4].write('blocked\n'); pendingGate = undefined;
-        } else if (!reading) { pendingGate.reads += 1; beginRead(); }
+          child.stdio[4].write(`blocked:${pendingGate.token}\n`); pendingGate = undefined;
+        } else if (!reading) beginRead();
       }
       if (reason) {
         if (record.state !== 'stopping') { record.state = 'stopping'; persist(); }

@@ -33,12 +33,26 @@ unreadable launch read up to three times within that window; a terminal or
 parked start read, or an unreadable process census, refuses execution at once.
 
 Lease acquisition and the merge click call `assert-launch`: the ownership
-checks of `assert-owner`, then a `launch:<pid>` request on FD 4. The controller
+checks of `assert-owner`, then a `launch:<pid>:<nonce>` request on FD 4. The controller
 answers `clear` only when its newest permitted read started no longer ago than
 one poll interval plus that read's timeout. Otherwise it first takes fresh reads
-(up to three, within `LAUNCH_GATE_WAIT_MS`) and answers `blocked` if they are
-terminal, parked or still unreadable. A blocked step refuses; an unreadable
-answer alone does not end the round.
+(up to three, counting an already in-flight read as the first attempt). The gate
+freezes its per-read timeout at the greater of the current load-aware timeout and
+the latest read timeout. Its deadline allows three such reads plus census polling
+slack, with `LAUNCH_GATE_WAIT_MS` (60 seconds) as a floor. A read admitted before
+that deadline may finish; no new read starts after it. The unreadable grace waits
+for this bounded gate budget before stopping the round, while terminal evidence,
+signals and the absolute controller ceiling still stop it immediately. Exhausted
+or expired unreadable gates answer `blocked`; a blocked step refuses.
+
+The controller first sends `wait:<nonce>:<socket-timeout-ms>` to advertise the
+gate budget plus one admitted read and ten seconds of transport/census slack.
+The caller adjusts its socket timeout to that budget. Final replies are
+`clear:<nonce>` or `blocked:<nonce>`. Validator completion uses
+`complete:<pid>:<nonce>` with the same correlated final replies and its existing
+ten-second timeout. Each caller generates a UUID nonce and discards replies for
+other requests, including late replies left by a timed-out predecessor. Missing
+or malformed matching replies fail closed. This changes no receipt fields.
 
 Final receipts add `reason`, `finishedAt`, `termSent`, `killSent`, `drained`,
 and `leaseCleanup`; `probeError`, `signalError`, or `errorCode` record bounded

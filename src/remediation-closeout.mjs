@@ -60,6 +60,11 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
     : { conclusion: 'PENDING' };
   const checkReadState = ciGate?.headSha !== head ? 'unknown'
     : ['green', 'failed', 'pending'].includes(ciGate?.state) ? 'complete' : ciGate?.error ? 'error' : 'unknown';
+  // Without a proven publish, failed CI still belongs to the active job's
+  // existing retry path. Completing that owner here would strand legacy jobs
+  // whose review head is missing before reconciliation can requeue them.
+  const retryActiveJob = roundsLeft === true && job.status === 'in_progress'
+    && workerPushedHeadSha !== head && checkReadState === 'complete' && ciGate.state === 'failed';
   // The normalized observer conclusion is pending, while the original read
   // state stays explicit in both the snapshot and the decision's evidence refs.
   const checks = { state: 'complete', value: checksValue,
@@ -79,7 +84,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       pr,
       reviews,
       remediation: { completedRounds: round, maxRounds: max, roundsLeft,
-        job: { status: 'completed', headSha: head },
+        job: { status: retryActiveJob ? 'in_progress' : 'completed', headSha: head },
         ...(final && workerPushedHeadSha === head ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')

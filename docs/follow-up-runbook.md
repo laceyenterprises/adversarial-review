@@ -4,8 +4,15 @@ Pending or unreadable CI at non-final closeout completes the worker round and
 registers durable re-review intent with the watcher. `reReview.nextAction` stays
 `wait-for-CI`; the `pending` review row supplies the active observer after the
 follow-up job leaves `in-progress`. Reviewer CI admission holds until settlement:
-green permits review, red requeues the remaining remediation round. Final pushed
-heads keep their existing hammer handoff and re-review suppression.
+green permits review, red requeues the remaining remediation round, including a
+recovered non-final push whose CI is already red at closeout. A completed job at
+that pushed head with a prior-head review retains this admission intent while
+rounds remain. Final pushed heads keep their existing hammer handoff and
+re-review suppression.
+
+When publication is unproven and CI has failed, an active non-final job retains
+its existing retry ownership, including legacy jobs without a review head.
+Reconciliation requeues that job instead of completing its owner prematurely.
 
 Before claiming a remediation job, the daemon checks for a live AMA closer
 lease for the same PR at any head, including a rekeyed hammer head. An active

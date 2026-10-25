@@ -1,4 +1,4 @@
-import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
+import { deriveNextActionSnapshot, hasLiveRemediationJob, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -87,7 +87,7 @@ import {
   proveCloserAuthoredStaleHead,
   writeCloserAuthoredStaleAudit,
 } from './closer-authored-stale.mjs';
-import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import { listFollowUpJobsInDir, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { findFinalRemediationPushJob } from './comment-only-final-round.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
@@ -1576,6 +1576,17 @@ async function dispatchAmaClosureFor({
       headSha: handoffLease?.rekeyedFromHeadSha || currentPrHeadSha }),
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
     checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
+    // Read the queue, not the dispatch projection: a clean review can leave a
+    // terminal job, while the next posted finding may still await job creation.
+    // Reuse the gate's PR-scoped, case-insensitive live owner. Do not scan
+    // growing terminal directories again while a live job already owns the PR.
+    followUpJob: gateSnapshot.activeFollowUpJob || ['completed', 'failed', 'stopped']
+      .flatMap(key => listFollowUpJobsInDir(rootDir, key, { repo: repoPath, prNumber, caseInsensitiveRepo: true }))
+      .map(entry => entry.job)
+      .filter(job => String(job.repo || '').toLowerCase() === repoPath.toLowerCase()
+        && Number(job.prNumber) === Number(prNumber)
+        && (job.headSha || job.revisionRef) === currentPrHeadSha)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0] || null,
     roundsLeft: !reviewCycleExhausted && !finalPush && gateSnapshot.settledReview?.commentOnlyFinalRoundPush !== true, ciBlockedHammerOwner,
     finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
@@ -2063,7 +2074,8 @@ async function dispatchAmaClosureFor({
         reason: `action=${decision.action} actor=${decision.actor} reason=${decision.reason} head=${decision.head}` });
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-      reason: decision.action === 'review' ? 'handed-to-review' : 'active-remediation-job',
+      reason: decision.action === 'review' ? 'handed-to-review'
+        : hasLiveRemediationJob(shared.snapshot) ? 'active-remediation-job' : 'remediation-job-missing',
       nextAction: decision, boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
 
@@ -2311,7 +2323,8 @@ async function dispatchAmaClosureFor({
     } catch (error) { logger?.warn?.(`[watcher] next-action observation failed: ${error.message}`); }
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: decision.action === 'review' ? 'handed-to-review' : decision.action === 'remediate'
-        ? 'active-remediation-job' : 'pending-required-checks', nextAction: decision,
+        ? hasLiveRemediationJob(shared.snapshot) ? 'active-remediation-job' : 'remediation-job-missing'
+        : 'pending-required-checks', nextAction: decision,
       boundedWait, retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
   }
   // Final-push provenance was collected into the shared snapshot above. Its

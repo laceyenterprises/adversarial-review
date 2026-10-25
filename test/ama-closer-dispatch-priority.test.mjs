@@ -1287,7 +1287,7 @@ test('LABELGATE-01: ineligible PRs neither read jobs nor page', async t => {
   for (const overrides of [
     { prMetadata: { isOpen: false } }, { prMetadata: { headSha: null } },
     { prMetadata: { isDraft: true } }, { reviewState: { riskClass: 'critical' } },
-    { reviewState: { remediationPending: true } }, { reviewState: { reviewCycleExhausted: false } },
+    { reviewState: { remediationPending: true } },
   ]) {
     const args = findingsRemediationArgs(rootDir);
     const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),

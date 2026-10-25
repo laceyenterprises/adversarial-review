@@ -127,6 +127,8 @@ function reviewFacts(reviews, head, policy, labels) {
     currentHeadVerdictAbsent: reviews.state === 'complete'
       && (normalized ? !verdict || !sameHead(reviewedHead, head) : !sameHead(reviewedHead, head)),
     clean,
+    hasFindings: (value.blockingFindingState === 'known' && value.blockingFindingCount > 0)
+      || (value.nonBlockingFindingState === 'known' && value.nonBlockingFindingCount > 0),
     operatorOverride: hasOperatorApprovedOverride({ operatorApprovedEvidence: value.operatorApprovedEvidence,
       operatorLogins: policy?.operatorLogins,
       operatorLabelActorEnforcement: clean ? policy?.operatorLabelActorEnforcement : 'enforce',
@@ -152,8 +154,13 @@ function remediationFacts(remediation) {
     roundsLeft: remediation.state === 'complete' ? roundsLeft : null,
     nextRound: completed !== null ? completed + 1 : null,
     jobStatus: lower(job?.status) || null,
+    // Remediation observations belong to this PR; a head move or retrigger
+    // with no revision does not release its live worker's ownership.
+    jobLive: remediation.state === 'complete'
+      && ['pending', 'in_progress'].includes(lower(job?.status)),
     jobClean: job?.clean === true,
     jobHead: text(job?.headSha) || null,
+    jobCreatedMs: timeMs(job?.createdAt),
     jobDeadlineMs: timeMs(job?.deadlineAt ?? job?.heartbeatDeadlineAt),
     finalPush: finalPush && finalPush.suppressed === true ? { headSha: text(finalPush.headSha) || null } : null,
   };
@@ -309,7 +316,7 @@ function selectRow(facts) {
     return { row: 'R03-live-owner', action: 'hammer', actor: 'hammer', reason: 'live-owner', deadlineKind: 'liveDispatched',
       deadlineAtMs: launch.deadlineMs ?? lease.deadlineMs, queue: 'owned', refs: [`launch:${launch.launchRef || 'unidentified'}`] };
   }
-  if (remediation.jobStatus === 'in_progress' && (!remediation.jobHead || sameHead(remediation.jobHead, head))) {
+  if (remediation.jobLive && remediation.jobStatus === 'in_progress') {
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator', reason: 'live-owner', deadlineKind: 'liveDispatched',
       deadlineAtMs: remediation.jobDeadlineMs, queue: 'owned', round: remediation.nextRound };
   }
@@ -423,16 +430,31 @@ function selectRow(facts) {
       queue: 'dispatch', attempt: launch.attempt !== null ? launch.attempt + 1 : null };
   }
 
-  // R09: failed CI goes to a remaining remediation round or the final hammer.
+  // R09: live PR remediation, a new finding's bounded admission wait, or
+  // non-final pushed-head closeout owns CI repair. Terminal history alone does not.
   if (checks.state === 'FAILURE') {
     if (checks.runnerless) {
       return { row: 'R09-ci-red', action: 'hammer', actor: 'hammer', reason: 'ci-runnerless', deadlineKind: 'admission', queue: 'dispatch' };
     }
     if (remediation.roundsLeft === null) return refresh('rounds-unknown', ['checks:failure']);
-    return remediation.roundsLeft
-      ? { row: 'R09-ci-red', action: 'remediate', actor: 'remediator', reason: 'ci-red', deadlineKind: 'admission',
-        queue: 'dispatch', round: remediation.nextRound }
-      : { row: 'R09-ci-red', action: 'hammer', actor: 'hammer', reason: 'ci-red-final', deadlineKind: 'admission', queue: 'dispatch' };
+    if (!remediation.roundsLeft) {
+      return { row: 'R09-ci-red', action: 'hammer', actor: 'hammer', reason: 'ci-red-final', deadlineKind: 'admission', queue: 'dispatch' };
+    }
+    const jobWillBeCreated = review.known && review.verdict && review.hasFindings
+      && sameHead(review.reviewedHead, head) && review.postedMs !== null
+      && (!sameHead(remediation.jobHead, head)
+        || (remediation.jobCreatedMs !== null && remediation.jobCreatedMs < review.postedMs));
+    // NXA-04: the completed round produced this unreviewed head. The watcher
+    // must retain admission intent so red CI can requeue its remaining round.
+    const nonFinalCloseout = remediation.jobStatus === 'completed'
+      && sameHead(remediation.jobHead, head) && review.known
+      && Boolean(review.reviewedHead) && !sameHead(review.reviewedHead, head);
+    if (remediation.jobLive || nonFinalCloseout || (jobWillBeCreated && !facts.admissionExpired)) {
+      return { row: 'R09-ci-red', action: 'remediate', actor: 'remediator', reason: 'ci-red', deadlineKind: 'admission',
+        queue: 'dispatch', round: remediation.nextRound };
+    }
+    return { row: 'R09-ci-red', action: 'hammer', actor: 'hammer', reason: 'ci-red-clean-verdict',
+      deadlineKind: 'admission', queue: 'dispatch' };
   }
   // R10: confirmed conflict or DIRTY needs a rebase owner.
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
@@ -548,6 +570,9 @@ export function nextAction(snapshot) {
   let selected;
   try {
     facts = snapshotFacts(snapshot);
+    const admission = deadline(snapshot, facts, 'admission');
+    facts.admissionExpired = facts.observedMs !== null && admission.at !== null
+      && facts.observedMs >= timeMs(admission.at);
     selected = selectRow(facts);
   } catch {
     // Totality: malformed evidence is an owned refresh, never an exception.
@@ -575,6 +600,11 @@ export function nextAction(snapshot) {
     generation: finite(snapshot?.generation),
     passId: text(snapshot?.passId) || null,
   });
+}
+
+// Diagnostic blockers use the same exact-head liveness proof as selection.
+export function hasLiveRemediationJob(snapshot) {
+  return snapshotFacts(snapshot).remediation.jobLive;
 }
 
 // ── Snapshot derivation for consumers that already read their evidence ──────

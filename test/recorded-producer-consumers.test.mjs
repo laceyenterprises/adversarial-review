@@ -134,10 +134,19 @@ test('SDK refresh is deterministic, preserves historical evidence and rejects co
   const archive = join(root, sdk.file);
   copyFileSync(new URL(`../${sdk.file}`, import.meta.url), archive);
   const manifestPath = join(fixtures, 'provenance.json');
+  const run = () => spawnSync('python3', ['-I', script, archive, sdk.releaseRevision], options);
+  for (const removeTree of [false, true]) {
+    if (removeTree) rmSync(fixtures, { recursive: true });
+    const fresh = run();
+    assert.ifError(fresh.error);
+    assert.equal(fresh.status, 0, fresh.stderr);
+    const initialized = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    assert.deepEqual(initialized.recorded.producers, fixtureProvenance.recorded.producers);
+    assert.deepEqual(initialized.producerHashes, fixtureProvenance.producerHashes);
+  }
   writeFileSync(manifestPath, JSON.stringify(fixtureProvenance));
   const releasedPath = join(fixtures, 'released-provenance.json');
   writeFileSync(releasedPath, 'separately maintained');
-  const run = () => spawnSync('python3', ['-I', script, archive, sdk.releaseRevision], options);
   const first = run();
   assert.ifError(first.error);
   assert.equal(first.status, 0, first.stderr);
@@ -176,4 +185,51 @@ with tarfile.open(path,'w:gz') as output:
   assert.ok(rejected.stderr.includes(`github-token-refresh contract ${version}: content hash mismatch`));
   assert.doesNotMatch(rejected.stdout + rejected.stderr, /synthetic-payload-must-not-appear/);
   paths.forEach((path, i) => assert.deepEqual(readFileSync(join(fixtures, path)), before[i]));
+});
+
+test('SDK refresh hashes Unicode JSON and token strings with UTF-8 bytes', t => {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PYTHON')));
+  const options = { encoding: 'utf8', timeout: 10000, env };
+  const probe = spawnSync('python3', ['-I', '-c', 'import sys'], options);
+  if (probe.error || probe.status !== 0) return t.skip('python3 is optional; no working refresh interpreter');
+  const root = mkdtempSync(join(tmpdir(), 'recorded-refresh-unicode-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixtures = join(root, 'test/fixtures/producer-contracts');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'provenance.json'), '{}');
+  mkdirSync(join(root, 'scripts/contracts'), { recursive: true });
+  const script = join(root, 'scripts/contracts/refresh-recorded.py');
+  copyFileSync(new URL('../scripts/contracts/refresh-recorded.py', import.meta.url), script);
+  const archive = join(root, 'sdk.tgz');
+  const bundle = JSON.parse(sdkSnapshotBytes);
+  const expected = new Map();
+  for (const [name, record] of Object.entries(fixtureProvenance.recorded.producers)) {
+    const producer = bundle.producers[name];
+    // Labelled consumer mutations: sorted keys match the producer's canonical
+    // JSON; BMP and supplementary characters exercise raw UTF-8 in both paths.
+    const value = name === 'github-token-refresh' ? 'élève 東京 😀\n' : { author: 'Zoë', note: '東京 😀' };
+    producer.examples.find(entry => entry.provenance === 'producer-recorded').value = value;
+    producer.recording.contentHash = sha256(JSON.stringify(value));
+    expected.set(record.file, { name, value, hash: producer.recording.contentHash });
+  }
+  const packed = spawnSync('python3', ['-I', '-c', `import io,sys,tarfile
+with tarfile.open(sys.argv[1], 'w:gz') as archive:
+    for name, data in [('package/package.json', b'{"version":"0.4.0"}'),
+                       ('package/src/producer-contracts-v1.json', sys.stdin.buffer.read())]:
+        member = tarfile.TarInfo(name)
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+`, archive], { ...options, input: JSON.stringify(bundle) });
+  assert.ifError(packed.error);
+  assert.equal(packed.status, 0, packed.stderr);
+  const refreshed = spawnSync('python3', ['-I', script, archive, fixtureProvenance.recorded.sdk.releaseRevision], options);
+  assert.ifError(refreshed.error);
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const manifest = JSON.parse(readFileSync(join(fixtures, 'provenance.json'), 'utf8'));
+  for (const [file, { name, value, hash }] of expected) {
+    const bytes = readFileSync(join(fixtures, file));
+    assert.deepEqual(bytes, Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)));
+    assert.equal(sha256(bytes), manifest.recorded.producers[name].sha256);
+    assert.equal(manifest.producerHashes[name], hash);
+  }
 });

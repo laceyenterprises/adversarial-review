@@ -144,13 +144,16 @@ python3 scripts/contracts/refresh-recorded.py vendor/agent-os-app-sdk-0.4.0.tgz 
 
 The refresher reads only the tarball's public snapshot and package metadata,
 verifies every recording content hash before writing, and preserves historical
-captures. It never imports producer code or invokes a live command. Review the
+captures. A missing provenance manifest starts with an empty dictionary; a
+missing fixture directory is created only after input validation succeeds.
+It never imports producer code or invokes a live command. Review the
 artifact SHA-256 against [the release record](../vendor/README.md) and verify it
 matches the release committed at the named merged revision. A refresh is not a
 recapture; request changed examples from the producer owner.
 
 JSON fixture files use the producer's compact, sorted JSON spelling, including
-`1.0`; no trailing newline is added. Their bytes hash to `contentHash`. Token text
+`1.0`, with non-ASCII characters preserved as UTF-8 bytes rather than Unicode
+escapes; no trailing newline is added. Their bytes hash to `contentHash`. Token text
 is extracted verbatim, including its trailing newline; its `contentHash` hashes
 the JSON string encoding, while `sha256` hashes the actual text bytes. Never
 derive `producerHashes` from pretty-printed JSON. Tests compare both hashes and

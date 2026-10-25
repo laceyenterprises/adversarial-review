@@ -41,7 +41,9 @@ def refresh(archive, revision, root):
         if len(examples) != 1:
             raise ValueError(f"{label}: expected one producer-recorded example")
         value = examples[0]
-        canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        canonical = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
         if sha256(canonical) != recording["contentHash"]:
             raise ValueError(f"{label}: content hash mismatch")
         # JSON bytes retain Python's numeric spelling (1.0 versus 1). Token text
@@ -53,7 +55,11 @@ def refresh(archive, revision, root):
             "sha256": sha256(artifacts[path]),
             "producerCommand": producer["producerCommand"],
         }
-    manifest = json.loads((dest / "provenance.json").read_text())
+    manifest = (
+        json.loads((dest / "provenance.json").read_text())
+        if (dest / "provenance.json").exists()
+        else {}
+    )
     manifest["producerHashes"] = {
         name: record["contentHash"] for name, record in records.items()
     }
@@ -70,6 +76,7 @@ def refresh(archive, revision, root):
         "refresh": "python3 scripts/contracts/refresh-recorded.py <vendored-sdk.tgz> <release-revision>",
     }
     # Validate the entire input before changing any consumer artifacts.
+    dest.mkdir(parents=True, exist_ok=True)
     for path, content in artifacts.items():
         (dest / path).write_bytes(content)
     (dest / "provenance.json").write_text(

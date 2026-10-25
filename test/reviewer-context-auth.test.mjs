@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { __test__ } from '../src/reviewer.mjs';
-import { fetchPRContext } from '../src/reviewer-context-auth.mjs';
+import { fetchPRContext, refreshReviewerTokensForSideCalls } from '../src/reviewer-context-auth.mjs';
 import { BROKER_REVIEWER_ROLES } from '../src/reviewer-broker-refresh.mjs';
 import { GithubAuthOutageError } from '../src/gh-cli.mjs';
 
@@ -281,4 +281,81 @@ test('401 on a later context page restarts capture; partial first-pass context i
   assert.equal(context.body, 'required context');
   assert.deepEqual(calls.reads, ['fixture-rejected', 'fixture-rejected', 'fixture-replacement']);
   assert.equal(calls.mints.length, 1);
+});
+
+// REVTOKENFLOOR-01: a load-scaled reviewer run can outlive the token it
+// inherited at spawn. Its GitHub side calls must run on a refreshed token.
+function sideCallEnv(overrides = {}) {
+  return {
+    CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_URL: 'http://broker.fixture',
+    OAUTH_BROKER_URL_FALLBACK: 'http://broker.fixture',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/fixture/secret',
+    GH_CODEX_REVIEWER_TOKEN: 'fixture-first-token',
+    GH_TOKEN: 'fixture-first-token',
+    GITHUB_TOKEN: 'fixture-first-token',
+    ...overrides,
+  };
+}
+
+function sideCallBroker(nowMs, { token = 'fixture-second-token', expiresAtMs = nowMs + 3600_000 } = {}) {
+  const urls = [];
+  return {
+    urls,
+    readFileImpl: () => 'fixture-broker-secret',
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return { ok: true, json: async () => ({
+        access_token: token,
+        provider: 'github-app-codex-reviewer',
+        expires_at: new Date(expiresAtMs).toISOString(),
+        metadata: {},
+      }) };
+    },
+  };
+}
+
+test('REVTOKENFLOOR-01: a reviewer side call that outlives its first token uses a refreshed token', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  const env = sideCallEnv();
+  const broker = sideCallBroker(nowMs);
+  const seen = [];
+  // A synthetic side call: GitHub accepts only the second token, as it would
+  // once the first token has expired mid-run.
+  const sideCall = async () => {
+    seen.push(env.GH_TOKEN);
+    if (env.GH_TOKEN !== 'fixture-second-token') throw rejected();
+    return 'ok';
+  };
+  const logs = [];
+  const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN', 'GH_CODEX_REVIEWER_TOKEN'], {
+    pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs, log: { log: (m) => logs.push(m), warn: (m) => logs.push(m) },
+    ...broker,
+  });
+  assert.deepEqual(result.adopted, ['GH_CODEX_REVIEWER_TOKEN']);
+  assert.equal(await sideCall(), 'ok');
+  assert.deepEqual(seen, ['fixture-second-token']);
+  assert.equal(env.GH_CODEX_REVIEWER_TOKEN, 'fixture-second-token');
+  assert.equal(env.GITHUB_TOKEN, 'fixture-second-token');
+  // A plain read of the broker's current token, never a forced mint.
+  assert.deepEqual(broker.urls, ['http://broker.fixture/token?provider=github-app-codex-reviewer']);
+  assert.ok(logs.every((m) => !m.includes('fixture-second-token')));
+});
+
+test('REVTOKENFLOOR-01: side-call refresh keeps the inherited token on broker failure, expiry or disabled broker mode', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  const quiet = { log() {}, warn() {} };
+  const cases = [
+    { env: sideCallEnv(), broker: { readFileImpl: () => 'fixture-broker-secret', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } } },
+    { env: sideCallEnv(), broker: sideCallBroker(nowMs, { expiresAtMs: nowMs }) },
+    { env: sideCallEnv({ CODEX_REVIEWER_AUTH_VIA_BROKER: 'false' }), broker: sideCallBroker(nowMs) },
+  ];
+  for (const { env, broker } of cases) {
+    const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN'], {
+      pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs, log: quiet, ...broker,
+    });
+    assert.deepEqual(result.adopted, []);
+    assert.equal(env.GH_CODEX_REVIEWER_TOKEN, 'fixture-first-token');
+    assert.equal(env.GH_TOKEN, 'fixture-first-token');
+  }
 });

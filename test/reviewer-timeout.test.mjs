@@ -16,6 +16,7 @@ import {
   resolveGeminiReviewerProcessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveFirstOutputTimeoutMs,
+  resolveNominalReviewerTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
@@ -1097,4 +1098,13 @@ test('GEMTIMEOUT-01: maximum load scales each call once, never the refusal cap',
   const saturated = resolveAgyChunkTimeoutPlan({ chunkCount: 3, env: {} });
   assert.ok(saturated.perChunkTimeoutMs < saturated.requestedPerChunkTimeoutMs);
   assert.equal(resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }), AGY_CHUNK_TIMEOUT_CAP_MS);
+});
+
+test('REVTOKENFLOOR-01: the nominal reviewer timeout ignores host load; the resolved timeout stays load-aware', async t => {
+  const { underMaxLoad } = await import('./helpers/load-time-kit.mjs');
+  const multiplier = underMaxLoad(t);
+  const env = { ADVERSARIAL_REVIEWER_TIMEOUT_MS: String(30 * 60 * 1000) };
+  assert.equal(resolveNominalReviewerTimeoutMs(env), 30 * 60 * 1000);
+  assert.equal(resolveNominalReviewerTimeoutMs({ ADVERSARIAL_REVIEWER_TIMEOUT_MS: '0' }), DEFAULT_REVIEWER_TIMEOUT_MS);
+  assert.equal(resolveReviewerTimeoutMs(env), 30 * 60 * 1000 * multiplier);
 });

@@ -98,4 +98,43 @@ async function fetchPRContext(repo, prNumber, {
   }
 }
 
-export { fetchPRContext, pinReviewerGhIdentity };
+// REVTOKENFLOOR-01: under host load a reviewer's run can outlive the token it
+// inherited at spawn, and the label read, pre-write review list and stale
+// Request changes dismissal then fail 401. Before those side calls, adopt the
+// broker's current token (no forced mint) when it expires in the future. The
+// spawn-time token came from the same broker earlier, so this one is no older.
+// Fail-safe: a broker error or an expired answer keeps the inherited token.
+async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
+  pinBotTokenEnv = null,
+  env = process.env,
+  fetchImpl,
+  readFileImpl,
+  now = Date.now,
+  log = console,
+} = {}) {
+  const adopted = [];
+  for (const botTokenEnv of new Set(botTokenEnvs.filter(Boolean))) {
+    const role = BROKER_REVIEWER_ROLES.find((entry) => entry.envVar === botTokenEnv);
+    if (!role || String(env[role.flag] || '').trim() !== 'true') continue;
+    let refreshed;
+    try {
+      refreshed = await resolveReviewerAppToken(botTokenEnv, { env: { ...env }, fetchImpl, readFileImpl });
+    } catch (err) {
+      log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker refresh failed: ${err?.message || err}`);
+      continue;
+    }
+    if (refreshed.envVar !== botTokenEnv || !refreshed.token
+      || refreshed.expiresAtMs == null || refreshed.expiresAtMs <= now()) {
+      log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker returned no unexpired replacement`);
+      continue;
+    }
+    if (refreshed.token === env[botTokenEnv]) continue;
+    env[botTokenEnv] = refreshed.token;
+    if (botTokenEnv === pinBotTokenEnv) pinReviewerGhIdentity(env, botTokenEnv);
+    adopted.push(botTokenEnv);
+    log.log?.(`[reviewer] adopted the broker's current ${botTokenEnv} before GitHub side calls`);
+  }
+  return { adopted };
+}
+
+export { fetchPRContext, pinReviewerGhIdentity, refreshReviewerTokensForSideCalls };

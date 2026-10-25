@@ -1145,19 +1145,39 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   off the broker response's `expires_at` minus a 15-minute skew; a fixed
   fallback TTL applies only when `expires_at` is absent. The first sight of a
   role always re-fetches (the startup token's expiry is unknown to the watcher).
-- **Subprocess handoff requires enough remaining lifetime.** A token with a
-  parseable `expires_at` is written into the runtime environment only when its
-  remaining lifetime exceeds the caller's handoff floor. The watcher uses the
-  configured reviewer timeout plus runtime post slack
-  (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). The follow-up daemon passes a
-  separate remediation-worker floor
-  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 50m) before
-  `consume` can spawn detached workers. Short-lived cached broker responses are
-  rejected and the prior token, if any, remains in place, because each spawned
-  reviewer or remediation subprocess snapshots `process.env` at spawn and
-  cannot benefit from a later daemon refresh. If that prior token has already
-  aged below the remediation-worker floor, the follow-up daemon leaves the token
-  untouched but skips only worker spawn until a handoff-safe token is available.
+- **The freshest token wins; the handoff floor decides safety and timing.**
+  A fetched token is written into the runtime environment whenever it expires
+  later than the token held for the current broker config, or the held token's
+  expiry is unknown (startup, config rotation). This holds even when the fetched
+  token is below the handoff floor. The prior token stays in place only when the
+  fetch fails, the fetched token has already expired, or it expires sooner than
+  the held one. A stale broker answer then backs off briefly
+  (`REVIEWER_TOKEN_FAILURE_RETRY_MS`) while the held token stays outside its
+  floor. The floor marks a handoff safe or unsafe and sets the next refresh
+  (`expires_at` minus the larger of the skew and the floor). The watcher's floor
+  is the reviewer timeout plus runtime post slack
+  (`REVIEWER_TOKEN_POST_SLACK_MS`, default 2m). The reviewer timeout is
+  load-aware, so under host load that sum can exceed anything a 60-minute
+  GitHub App installation token can cover. The floor therefore caps only the
+  load-scaled excess at `observed token lifetime - skew`: the fetched token's
+  `expires_at` minus fetch time, or 60 minutes when `expires_at` is absent. The
+  nominal (unscaled) timeout plus slack is never lowered, so an idle host keeps
+  its existing floor and schedule. Each refresh summary and handoff state
+  records `loadScaledLifetimeMs` and `handoffShortfallMs`, the time by which a
+  load-scaled run can outlive the token. The watcher logs a shortfall once per
+  role per episode. The follow-up daemon passes a fixed remediation-worker floor
+  (`ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS`, default 22m) that is
+  not load-scaled or capped. When the summary cannot prove every
+  broker-backed reviewer token handoff-safe, the daemon skips only worker spawn
+  until a handoff-safe token is available.
+- **Reviewers re-resolve before their GitHub side calls.** A spawned reviewer
+  snapshots `process.env` at spawn, so a load-scaled run can outlive its
+  inherited token. After the model run, before the label read, pre-write review
+  list, review post and stale Request changes dismissal, the reviewer reads the
+  broker's current token for its selected role (no forced mint). It adopts that
+  token when it has not expired, then re-pins `GH_TOKEN`/`GITHUB_TOKEN`. A
+  broker failure keeps the inherited token. The review post keeps its existing
+  forced re-mint and one retry on a GitHub auth failure.
 - **Operator config rotations bypass the schedule.** The refresh clock records a
   per-role fingerprint covering broker URL, provider, expected app ID, expected
   installation ID, shared-secret file path, and the broker-mode flag. Any change

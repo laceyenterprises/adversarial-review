@@ -206,11 +206,11 @@ test('re-fetches before the required-lifetime floor, not only before the skew wi
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_2');
 });
 
-test('rejects a cached token that cannot survive reviewer timeout plus post slack', async () => {
-  // Reproduces the real broker behavior: the first response is a cached token
-  // with only a few minutes of life left. A reviewer subprocess snapshots env at
-  // spawn and can run until the reviewer timeout before posting, so this token
-  // must not be handed to a newly spawned reviewer.
+test('installs a short cached token over a startup token of unknown expiry and reports it unsafe', async () => {
+  // REVTOKENFLOOR-01: the broker's cached token has only a few minutes left,
+  // but the startup token's expiry is unknown and it came from the same broker
+  // earlier, so it is no fresher. Install the freshest token; the handoff
+  // floor still reports it unsafe and records the shortfall.
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 9_000_000;
@@ -224,15 +224,20 @@ test('rejects a cached token that cannot survive reviewer timeout plus post slac
     fetchImpl,
     readFileImpl: readSecret,
     log: silentLog,
+    reviewerRunTimeoutMs: 20 * 60 * 1000,
   });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.equal(summary.failed.length, 1);
-  assert.match(summary.failed[0].reason, /expires too soon/);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_too_close');
+  assert.equal(summary.failed.length, 0);
+  assert.equal(summary.refreshed[0].handoffShortfallMs, 17 * 60 * 1000);
+  assert.equal(summary.handoffSafe[0].safe, false);
+  assert.equal(summary.handoffSafe[0].reason, 'token-below-handoff-floor');
+  assert.equal(summary.handoffSafe[0].handoffShortfallMs, 17 * 60 * 1000);
 });
 
-test('rejects a cached token that clears reviewer timeout but not remediation handoff floor', async () => {
+test('installs a cached token below a fixed remediation floor and reports it unsafe', async () => {
   // A 30m cached installation token is long enough for the default reviewer
-  // floor (~22m), but too short for a detached remediation worker handoff.
+  // floor (~22m), but too short for a detached remediation worker handoff. A
+  // fixed floor is not load-scaled, so the provider cap does not lower it.
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 9_250_000;
@@ -248,15 +253,16 @@ test('rejects a cached token that clears reviewer timeout but not remediation ha
     log: silentLog,
     minTokenLifetimeMs: 50 * 60 * 1000,
   });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.equal(summary.failed.length, 1);
-  assert.match(summary.failed[0].reason, /minimum=3000000ms/);
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_reviewer_only_lifetime');
+  assert.equal(summary.failed.length, 0);
   assert.equal(summary.handoffSafe.length, 1);
   assert.equal(summary.handoffSafe[0].safe, false);
-  assert.equal(summary.handoffSafe[0].reason, 'token-expiry-unknown');
+  assert.equal(summary.handoffSafe[0].reason, 'token-below-handoff-floor');
+  assert.equal(summary.handoffSafe[0].requiredLifetimeMs, 50 * 60 * 1000);
+  assert.equal(summary.handoffSafe[0].handoffShortfallMs, 20 * 60 * 1000);
 });
 
-test('marks an aged prior token unsafe when the broker returns the same too-short cached token', async () => {
+test('marks an aged prior token unsafe when the broker re-serves the same cached token', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 9_300_000;
@@ -293,8 +299,7 @@ test('marks an aged prior token unsafe when the broker returns the same too-shor
   });
   assert.equal(calls, 2);
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_cached_installation_token');
-  assert.equal(second.failed.length, 1);
-  assert.match(second.failed[0].reason, /expires too soon/);
+  assert.equal(second.failed.length, 0);
   assert.equal(second.handoffSafe.length, 1);
   assert.deepEqual(
     {
@@ -316,91 +321,79 @@ test('marks an aged prior token unsafe when the broker returns the same too-shor
   );
 });
 
-test('backs off briefly after a too-short broker token while keeping the existing token', async () => {
+// Hold a 1h token under a 5m floor; it is next due at expiry - skew (45m),
+// while it is still outside its handoff floor.
+async function holdTokenUntilDue(env, t0, opts) {
+  await refreshReviewerBrokerTokens({
+    ...opts,
+    env,
+    now: t0,
+    fetchImpl: async () => brokerOk('github-app-claude-reviewer', 'ghs_held', {
+      expiresAt: new Date(t0 + HOUR_MS).toISOString(),
+    }),
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
+  return t0 + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1;
+}
+
+test('backs off briefly after the broker serves a token older than the held one', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 9_500_000;
+  const opts = { readFileImpl: readSecret, log: silentLog, minTokenLifetimeMs: 5 * 60 * 1000, failureRetryMs: 30_000 };
+  const due = await holdTokenUntilDue(env, t0, opts);
   let calls = 0;
   const fetchImpl = async () => {
     calls += 1;
-    const token = calls === 1 ? 'ghs_too_close' : 'ghs_long_enough';
-    const lifetimeMs = calls === 1 ? 5 * 60 * 1000 : HOUR_MS;
+    const token = calls === 1 ? 'ghs_older' : 'ghs_newer';
+    const expiresAtMs = calls === 1 ? t0 + HOUR_MS - 1 : due + HOUR_MS;
     return brokerOk('github-app-claude-reviewer', token, {
-      expiresAt: new Date(t0 + lifetimeMs).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
     });
   };
 
-  const first = await refreshReviewerBrokerTokens({
-    env,
-    now: t0,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-    failureRetryMs: 30_000,
-  });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  const first = await refreshReviewerBrokerTokens({ ...opts, env, now: due, fetchImpl });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
   assert.equal(first.failed.length, 1);
+  assert.match(first.failed[0].reason, /expires before the held GH_CLAUDE_REVIEWER_TOKEN/);
   assert.equal(calls, 1);
 
-  const skipped = await refreshReviewerBrokerTokens({
-    env,
-    now: t0 + 1_000,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-    failureRetryMs: 30_000,
-  });
+  const skipped = await refreshReviewerBrokerTokens({ ...opts, env, now: due + 1_000, fetchImpl });
   assert.equal(calls, 1);
   assert.ok(skipped.skipped.some((s) => s.reason === 'broker-refresh-backoff'));
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
 
-  await refreshReviewerBrokerTokens({
-    env,
-    now: t0 + 30_001,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-    failureRetryMs: 30_000,
-  });
+  await refreshReviewerBrokerTokens({ ...opts, env, now: due + 30_001, fetchImpl });
   assert.equal(calls, 2);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_long_enough');
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_newer');
 });
 
-test('broker config rotation bypasses too-short-token backoff', async () => {
+test('broker config rotation bypasses the stale-token backoff and the held-token comparison', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 9_700_000;
+  const opts = { readFileImpl: readSecret, log: silentLog, minTokenLifetimeMs: 5 * 60 * 1000, failureRetryMs: 60_000 };
+  const due = await holdTokenUntilDue(env, t0, opts);
   let calls = 0;
   const fetchImpl = async () => {
     calls += 1;
-    return brokerOk('github-app-claude-reviewer', `ghs_too_close_${calls}`, {
-      expiresAt: new Date(t0 + 5 * 60 * 1000).toISOString(),
+    return brokerOk('github-app-claude-reviewer', `ghs_older_${calls}`, {
+      expiresAt: new Date(t0 + HOUR_MS - 1).toISOString(),
     });
   };
 
-  await refreshReviewerBrokerTokens({
-    env,
-    now: t0,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-    failureRetryMs: 60_000,
-  });
+  await refreshReviewerBrokerTokens({ ...opts, env, now: due, fetchImpl });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
+  // The held token belongs to the old broker config, so it cannot outrank
+  // the rotated config's token.
   env.OAUTH_BROKER_URL = 'http://127.0.0.1:4199';
-  await refreshReviewerBrokerTokens({
-    env,
-    now: t0 + 1_000,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-    failureRetryMs: 60_000,
-  });
+  await refreshReviewerBrokerTokens({ ...opts, env, now: due + 1_000, fetchImpl });
 
   assert.equal(calls, 2);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_older_2');
 });
 
-test('too-short-token backoff does not defer once the known existing token is near hard expiry', async () => {
+test('stale-token backoff does not defer once the known existing token is near hard expiry', async () => {
   _resetReviewerTokenRefreshClockForTest();
   const env = makeEnv();
   const t0 = 10_000_000;
@@ -740,8 +733,8 @@ test('honors process.env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS (documented operator kn
 test('honors process.env.REVIEWER_TOKEN_POST_SLACK_MS in the min-lifetime calculation', async () => {
   _resetReviewerTokenRefreshClockForTest();
   // resolveReviewerTimeoutMs default is 20m. With a large post-slack the
-  // required lifetime exceeds a 25-min token, so it must be REJECTED; the
-  // built-in 2-min slack would have accepted it.
+  // required lifetime exceeds a 25-min token, so the handoff is unsafe; the
+  // built-in 2-min slack would have cleared it.
   const env = makeEnv({ REVIEWER_TOKEN_POST_SLACK_MS: String(10 * 60 * 1000) }); // 10m → required 30m
   const t0 = 4_000_000;
   const fetchImpl = async () =>
@@ -751,9 +744,10 @@ test('honors process.env.REVIEWER_TOKEN_POST_SLACK_MS in the min-lifetime calcul
   const summary = await refreshReviewerBrokerTokens({
     env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog, // no explicit postSlackMs → env wins
   });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // rejected: 25m < 30m
-  assert.equal(summary.failed.length, 1);
-  assert.match(summary.failed[0].reason, /expires too soon/);
+  // Still the freshest token: installed, but below the 30m floor.
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_25m');
+  assert.equal(summary.handoffSafe[0].safe, false);
+  assert.equal(summary.handoffSafe[0].requiredLifetimeMs, 30 * 60 * 1000);
 });
 
 test('an invalid env knob falls back to the built-in default (does not disable the bound)', async () => {
@@ -957,4 +951,199 @@ test('refreshWatcherGithubToken: rejects a token minted for the WRONG provider (
   });
   assert.equal(summary.refreshed, false);
   assert.equal(env.GITHUB_TOKEN, 'ghs_KEEP');
+});
+
+// REVTOKENFLOOR-01: under host load the reviewer run time scales past the
+// provider's 60-minute token lifetime. These pin the load-scaled run time via
+// reviewerRunTimeoutMs so the host's real load cannot move them.
+const MINUTE_MS = 60 * 1000;
+const HIGH_LOAD_RUN_MS = 120 * MINUTE_MS; // 6x a 20-minute reviewer timeout
+const NORMAL_LOAD_RUN_MS = 20 * MINUTE_MS;
+
+function freshHourToken(token) {
+  return (now) => brokerOk('github-app-claude-reviewer', token, {
+    expiresAt: new Date(now + HOUR_MS).toISOString(),
+  });
+}
+
+test('REVTOKENFLOOR-01: under a high load multiplier a fresh 60-minute token is installed and the shortfall recorded once', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 20_000_000;
+  const warnings = [];
+  const log = { warn: (message) => warnings.push(message) };
+  let curNow = t0;
+  let calls = 0;
+  const mint = freshHourToken('ghs_fresh_hour');
+  const fetchImpl = async () => { calls += 1; return mint(curNow); };
+  const opts = { env, fetchImpl, readFileImpl: readSecret, log, reviewerRunTimeoutMs: HIGH_LOAD_RUN_MS };
+
+  const summary = await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_fresh_hour');
+  assert.equal(summary.failed.length, 0);
+  const loadScaledLifetimeMs = HIGH_LOAD_RUN_MS + REVIEWER_TOKEN_POST_SLACK_MS;
+  assert.deepEqual(
+    {
+      requiredLifetimeMs: summary.refreshed[0].requiredLifetimeMs,
+      loadScaledLifetimeMs: summary.refreshed[0].loadScaledLifetimeMs,
+      handoffShortfallMs: summary.refreshed[0].handoffShortfallMs,
+    },
+    {
+      requiredLifetimeMs: HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS,
+      loadScaledLifetimeMs,
+      handoffShortfallMs: loadScaledLifetimeMs - HOUR_MS,
+    },
+  );
+  assert.equal(summary.handoffSafe[0].safe, true);
+  assert.equal(summary.handoffSafe[0].handoffShortfallMs, loadScaledLifetimeMs - HOUR_MS);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /installed the freshest GH_CLAUDE_REVIEWER_TOKEN/);
+  assert.doesNotMatch(warnings[0], /ghs_fresh_hour/);
+
+  // The next refresh in the same short episode does not log again.
+  curNow = t0 + REVIEWER_TOKEN_REFRESH_SKEW_MS + 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 2);
+  assert.equal(warnings.length, 1);
+  // A token that covers the run ends the episode; the next shortfall logs.
+  curNow += REVIEWER_TOKEN_REFRESH_SKEW_MS + 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow, reviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS });
+  assert.equal(calls, 3);
+  curNow += HOUR_MS;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 4);
+  assert.equal(warnings.length, 2);
+});
+
+test('REVTOKENFLOOR-01: a fetched token that expires sooner than the held one is not installed', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 21_000_000;
+  const opts = { env, readFileImpl: readSecret, log: silentLog, reviewerRunTimeoutMs: HIGH_LOAD_RUN_MS };
+  await refreshReviewerBrokerTokens({ ...opts, now: t0, fetchImpl: async () => freshHourToken('ghs_held')(t0) });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
+
+  const summary = await refreshReviewerBrokerTokens({
+    ...opts,
+    now: t0 + MINUTE_MS,
+    force: true,
+    fetchImpl: async () => brokerOk('github-app-claude-reviewer', 'ghs_older', {
+      expiresAt: new Date(t0 + HOUR_MS - MINUTE_MS).toISOString(),
+    }),
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_held');
+  assert.equal(summary.refreshed.length, 0);
+  assert.match(summary.failed[0].reason, /expires before the held GH_CLAUDE_REVIEWER_TOKEN/);
+  assert.equal(summary.handoffSafe[0].expiresAtMs, t0 + HOUR_MS);
+});
+
+test('REVTOKENFLOOR-01: a fetched token that has already expired is not installed', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 21_500_000;
+  const summary = await refreshReviewerBrokerTokens({
+    env,
+    now: t0,
+    readFileImpl: readSecret,
+    log: silentLog,
+    fetchImpl: async () => brokerOk('github-app-claude-reviewer', 'ghs_expired', {
+      expiresAt: new Date(t0).toISOString(),
+    }),
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
+  assert.match(summary.failed[0].reason, /already expired/);
+});
+
+test('REVTOKENFLOOR-01: the floor is capped below the token lifetime and the refresh is scheduled from it, not every tick', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 22_000_000;
+  let calls = 0;
+  let curNow = t0;
+  const mint = freshHourToken('ghs_fresh_hour');
+  const fetchImpl = async () => { calls += 1; return mint(curNow); };
+  const opts = { env, fetchImpl, readFileImpl: readSecret, log: silentLog, reviewerRunTimeoutMs: HIGH_LOAD_RUN_MS };
+  const cappedFloorMs = HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS;
+
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 1);
+  // Watcher ticks before expiry - capped floor: no re-fetch, handoff safe.
+  for (const offsetMs of [1, MINUTE_MS, 5 * MINUTE_MS, HOUR_MS - cappedFloorMs - 1]) {
+    curNow = t0 + offsetMs;
+    const tick = await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+    assert.deepEqual(tick.skipped[0], { role: 'claude-reviewer', reason: 'token-still-valid' });
+    assert.equal(tick.handoffSafe[0].safe, true);
+    assert.equal(tick.handoffSafe[0].requiredLifetimeMs, cappedFloorMs);
+  }
+  assert.equal(calls, 1);
+  curNow = t0 + HOUR_MS - cappedFloorMs + 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 2);
+});
+
+test('REVTOKENFLOOR-01: a re-served cached token caps its floor at its remaining lifetime', async () => {
+  // The broker keeps serving one cached token until it re-mints near expiry.
+  // Each re-fetch lowers the cap with the token's remaining lifetime, so the
+  // loop still waits between fetches instead of re-fetching every tick.
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 23_000_000;
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return brokerOk('github-app-claude-reviewer', 'ghs_cached', {
+      expiresAt: new Date(t0 + HOUR_MS).toISOString(),
+    });
+  };
+  const opts = { env, fetchImpl, readFileImpl: readSecret, log: silentLog, reviewerRunTimeoutMs: HIGH_LOAD_RUN_MS };
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 });
+  const second = await refreshReviewerBrokerTokens({ ...opts, now: t0 + REVIEWER_TOKEN_REFRESH_SKEW_MS });
+  assert.equal(calls, 2);
+  assert.equal(second.refreshed[0].requiredLifetimeMs, HOUR_MS - 2 * REVIEWER_TOKEN_REFRESH_SKEW_MS);
+  await refreshReviewerBrokerTokens({ ...opts, now: t0 + REVIEWER_TOKEN_REFRESH_SKEW_MS + 1 });
+  assert.equal(calls, 2);
+});
+
+test('REVTOKENFLOOR-01: under normal load the floor and schedule are unchanged', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 24_000_000;
+  const warnings = [];
+  let calls = 0;
+  let curNow = t0;
+  const mint = freshHourToken('ghs_fresh_hour');
+  const fetchImpl = async () => { calls += 1; return mint(curNow); };
+  const opts = {
+    env, fetchImpl, readFileImpl: readSecret, log: { warn: (m) => warnings.push(m) }, reviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS,
+  };
+  const floorMs = NORMAL_LOAD_RUN_MS + REVIEWER_TOKEN_POST_SLACK_MS;
+
+  const summary = await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(summary.refreshed[0].requiredLifetimeMs, floorMs);
+  assert.equal(summary.refreshed[0].handoffShortfallMs, 0);
+  assert.equal(summary.handoffSafe[0].safe, true);
+  curNow = t0 + HOUR_MS - floorMs - 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 1);
+  curNow = t0 + HOUR_MS - floorMs + 1;
+  await refreshReviewerBrokerTokens({ ...opts, now: curNow });
+  assert.equal(calls, 2);
+  assert.deepEqual(warnings, []);
+});
+
+test('REVTOKENFLOOR-01: at maximum real host load the configured floor is capped and a fresh token is installed', async (t) => {
+  // No injected run time: the floor goes through the load-aware reviewer
+  // timeout, as in production.
+  const { underMaxLoad } = await import('./helpers/load-time-kit.mjs');
+  const multiplier = underMaxLoad(t);
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeEnv();
+  const t0 = 25_000_000;
+  const summary = await refreshReviewerBrokerTokens({
+    env, now: t0, readFileImpl: readSecret, log: silentLog, fetchImpl: async () => freshHourToken('ghs_fresh_hour')(t0),
+  });
+  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_fresh_hour');
+  assert.equal(summary.refreshed[0].loadScaledLifetimeMs, 20 * MINUTE_MS * multiplier + REVIEWER_TOKEN_POST_SLACK_MS);
+  assert.equal(summary.refreshed[0].requiredLifetimeMs, HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS);
+  assert.equal(summary.handoffSafe[0].safe, true);
 });

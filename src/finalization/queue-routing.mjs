@@ -14,7 +14,7 @@ export function resolveLaneRoute(cfg, lane) {
   lane = resolveLaneKey(lane);
   const routes = normalizeLaneRoutes(cfg?.laneRoutes ?? []);
   return { lane, executor: resolveLaneExecutor(routes, lane), configGeneration: digest(JSON.parse(JSON.stringify({ ...cfg, laneRoutes: routes }))),
-    autonomousExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false };
+    autonomousExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false && cfg?.autonomous_merge_execution_enabled !== false };
 }
 const terminal = e => ['merged', 'closed-observed', 'returned-to-closer'].includes(e.phase);
 const proven = result => result && ['succeeded', 'not-applied'].includes(result.outcome)

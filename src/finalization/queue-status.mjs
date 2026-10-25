@@ -14,9 +14,9 @@ import { queueWaitMs } from './queue-wait.mjs';
 
 export function readRoutingConfig({ rootDir, configPath } = {}) {
   const configuredTop = configPath || process.env.AGENT_OS_CONFIG_PATH;
-  if (!existsSync(join(rootDir, 'config.yaml')) || (configuredTop && !existsSync(configuredTop))) throw new Error('routing-config-unavailable');
+  if (!existsSync(configuredTop || join(rootDir, 'config.yaml'))) throw new Error('routing-config-unavailable');
   return loadEffectiveMergeAuthorityConfig({ rootDir,
-    loadConfigImpl: options => loadConfigRuntime({ ...options, ...(configPath ? { topPath: configPath } : {}) }) });
+    loadConfigImpl: options => loadConfigRuntime({ ...options, ...(configuredTop ? { topPath: configuredTop } : {}) }) });
 }
 
 export function verifyRoutingSchema(db) {
@@ -106,7 +106,7 @@ export function renderQueueStatus(model) {
     `owner ${model.owner?.owner_id ?? 'none'}  fence ${model.owner?.generation ?? 'none'}  route generation ${model.owner?.route_generation ?? 0}  legacy writers ${model.inFlightLegacyWriterCount}`];
   if (model.transition) lines.push(`transfer ${JSON.stringify(model.transition)}`);
   if (head) lines.push(`head PR ${head.prNumber}  phase ${head.phase}  old ${head.expectedOldHead}  new ${head.candidate ?? 'pending'}  base ${head.exactBase ?? 'pending'}`,
-    `  checks ${JSON.stringify(head.checks)}  deadline ${head.patience.deadline}  reason ${head.reason ?? 'none'}`);
+    `  checks ${JSON.stringify(head.checks)}  deadline ${head.patience?.deadline ?? 'none'}  reason ${head.reason ?? 'none'}`);
   for (const e of model.waiting) lines.push(`waiting ${e.position} PR ${e.prNumber} ready-at ${e.readyAt} reason ${e.reason ?? 'none'}`);
   for (const e of model.parked) lines.push(`parked PR ${e.prNumber} ${e.reason} since ${e.parkedSince} reprobe ${e.infrastructure?.reprobeAt ?? e.infrastructure?.nextProbeAt ?? 'pending'}`);
   lines.push(`metrics ${JSON.stringify(model.metrics)}`, `unresolved ${model.unresolvedOperations.length} pending-returns ${model.pendingReturns.length}`);

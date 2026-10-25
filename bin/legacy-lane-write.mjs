@@ -20,7 +20,7 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
     stdout.write(result.stdout || ''); stderr.write(result.stderr || ''); return 0;
   } catch (error) {
     stdout.write(error.stdout || '');
-    stderr.write(error.stderr || 'legacy lane write failed; reconciliation may be required\n');
+    stderr.write(error.stderr || `${error.message || 'legacy lane write failed; reconciliation may be required'}\n`);
     return Number.isInteger(error.code) ? error.code : Number.isInteger(error.status) ? error.status : 75;
   }
 }

@@ -40,7 +40,7 @@ export function createFinalizationLaneRouting({ rootDir, readLane, admitQueue,
         const ack = acknowledgement?.ack ?? acknowledgement;
         if (!ack?.entryId || !ack?.ackId || ack.head !== revisionRef
           || ack.lane?.repository !== route.lane.repository || ack.lane?.base !== route.lane.base
-          || subject?.subjectExternalId !== `${route.lane.repository}#${ack.prNumber}`) throw new Error('queue admission acknowledgement unavailable or foreign');
+          || subject?.subjectExternalId?.toLowerCase() !== `${route.lane.repository}#${ack.prNumber}`) throw new Error('queue admission acknowledgement unavailable or foreign');
         return { ok: true, queued: true, reason: 'queue-handoff-acknowledged', acknowledgement };
       } : undefined });
   } };

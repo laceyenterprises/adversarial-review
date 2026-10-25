@@ -5695,6 +5695,11 @@ node src/finalization/queue-probe.mjs --capability routing --json
 ```
 
 The status/receipt commands also accept `--root DIR` and `--config FILE`.
+Routing reads use `--config FILE` before `AGENT_OS_CONFIG_PATH` for the top-level
+configuration. The selected override must exist and works without `DIR/config.yaml`;
+when present, that module file and domain policy retain their usual precedence.
+Without either override, the module file must exist and the normal config-loader
+top-level resolution applies. A missing patience deadline renders as `none`.
 `queue probe` is available through the main CLI; the earlier probe entry remains
 compatible. Store/schema/config failures are nonzero and visible. These commands
 open the real app DB read-only and do not migrate, claim, drain, dispatch or write.

@@ -3001,7 +3001,10 @@ execution. No production selector is changed by this implementation.
 Use `adversarial-review finalization queue status --repo example/review --base main`
 and `finalization queue receipt --repo example/review --pr 101` (both support
 `--json`). `node src/finalization/queue-probe.mjs --capability routing --json`
-remains the bounded read-only deployed capability observation. Models expose real
+remains the bounded read-only deployed capability observation.
+Configuration overrides (`--config FILE`, then `AGENT_OS_CONFIG_PATH`) work even
+when `--root DIR` has no module `config.yaml`; existing module/domain layering
+still applies. Models expose real
 route/config generation, observer and registered writer builds, owner/fence,
 head/phase/positions/reasons, parking, receipts, pending delivery and lifecycle
 metrics. Store/config failures are visible; absent organic evidence is pending.

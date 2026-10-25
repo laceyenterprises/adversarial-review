@@ -35,10 +35,16 @@ test('both routes refuse mutations under existing brake and unavailable composit
   const f = fixture(t);
   assert.equal(await run(f, {}), 'legacy');
   assert.equal((await run(f, { autonomousMergeExecutionEnabled: false })).reason, 'autonomous-merge-execution-disabled');
+  assert.equal((await run(f, { autonomousMergeExecutionEnabled: true, autonomous_merge_execution_enabled: false }, {
+    legacy: () => assert.fail('raw brake must refuse legacy execution'),
+  })).reason, 'autonomous-merge-execution-disabled');
   assert.equal((await run(f, queue)).reason, 'lane-transfer-required');
   assert.equal((await transfer(f, queue)).ok, true);
   assert.equal(await run(f, queue), 'queue-v2');
   assert.equal((await run(f, { ...queue, autonomousMergeExecutionEnabled: false })).reason, 'autonomous-merge-execution-disabled');
+  assert.equal((await run(f, { ...queue, autonomous_merge_execution_enabled: false }, {
+    queue: () => assert.fail('raw brake must refuse queue admission'),
+  })).reason, 'autonomous-merge-execution-disabled');
   assert.equal((await run(f, queue, { queue: undefined })).reason, 'queue-composition-unavailable');
   assert.equal((await run(f, {})).reason, 'lane-transfer-required');
 });
@@ -190,6 +196,12 @@ test('subject executor lane port requires a real lane and validates admission ac
     admitQueue: async () => ({ entryId: 'q-101', ackId: 'ack-101', lane, head: revisionRef, prNumber: 101 }) });
   const result = await port.run({ subject, revisionRef, legacy: () => assert.fail('legacy fallback'), deadline: '2026-10-25T00:00:02Z' });
   assert.equal(budget, 2000); assert.equal(result.queued, true);
+  assert.equal((await port.run({ subject: { ...subject, subjectExternalId: 'Example/Review#101' }, revisionRef,
+    legacy: () => assert.fail('legacy fallback') })).queued, true);
+  for (const subjectExternalId of ['other/review#101', 'example/review#102', undefined]) {
+    await assert.rejects(port.run({ subject: { ...subject, subjectExternalId }, revisionRef,
+      legacy: () => assert.fail('legacy fallback') }), /acknowledgement/);
+  }
   const bad = createFinalizationLaneRouting({ rootDir: f.rootDir, readConfig: () => queue, readLane: async () => lane, admitQueue: async () => null });
   await assert.rejects(bad.run({ subject, revisionRef, legacy: () => assert.fail() }), /acknowledgement/);
   const missingLane = createFinalizationLaneRouting({ rootDir: f.rootDir, readConfig: () => ({}), readLane: async () => null });
@@ -206,6 +218,13 @@ test('legacy shell wrapper preserves command, arguments, output and exit code wh
   assert.equal(request.command, 'fake-node'); assert.equal(request.subject.head, 'a'.repeat(40));
   assert.equal(out, 'merged'); assert.equal(err, 'notice');
   assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => { throw Object.assign(new Error('failed'), { code: 17, stdout: 'out', stderr: 'temporary failure' }); } }), 17);
+  assert.equal(out, 'mergedout'); assert.equal(err, 'noticetemporary failure');
+  err = '';
+  assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => { throw new Error('legacy writer deadline expired'); } }), 75);
+  assert.equal(err, 'legacy writer deadline expired\n');
+  err = '';
+  assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => { throw new Error(); } }), 75);
+  assert.equal(err, 'legacy lane write failed; reconciliation may be required\n');
   assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => ({ ok: false, reason: 'lane-transfer-required' }) }), 75);
 });
 

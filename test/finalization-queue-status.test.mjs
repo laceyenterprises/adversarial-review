@@ -58,6 +58,9 @@ test('status projects real route, writer build, fence, FIFO, reasons, parking an
   assert.equal(status.metrics.arrivals, 3); assert.equal(status.metrics.merges, 0);
   assert.equal(status.metrics.infrastructureParks, 1);
   assert.match(renderQueueStatus(status), /missing-required-check:integration/);
+  for (const patience of [undefined, null, {}]) {
+    assert.match(renderQueueStatus({ ...status, head: { ...status.head, patience } }), /deadline none/);
+  }
   assert.deepEqual(readFileSync(join(f.rootDir, 'data/reviews.db')), before);
   assert.deepEqual(readdirSync(join(f.rootDir, 'data'), { recursive: true }), files);
 });
@@ -113,8 +116,34 @@ test('routing probe validates real store/schema/config; never manufactures organ
 
 test('real config reader resolves current selector and fails on unreadable or malformed config', async t => {
   const f = await fixture(t), configPath = join(f.rootDir, 'top.yaml');
-  writeFileSync(join(f.rootDir, 'config.yaml'), '{}');
   writeFileSync(configPath, JSON.stringify({ version: 1, roles: { adversarial: { merge_authority: { lane_routes: cfg.laneRoutes } } } }));
+  assert.deepEqual(readRoutingConfig({ rootDir: f.rootDir, configPath }).laneRoutes, cfg.laneRoutes);
+  const envPath = process.env.AGENT_OS_CONFIG_PATH;
+  t.after(() => {
+    if (envPath === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
+    else process.env.AGENT_OS_CONFIG_PATH = envPath;
+  });
+  process.env.AGENT_OS_CONFIG_PATH = configPath;
+  assert.deepEqual(readRoutingConfig({ rootDir: f.rootDir }).laneRoutes, cfg.laneRoutes);
+  for (const options of [{ configPath }, {}]) {
+    const reader = openQueueStatus({ rootDir: f.rootDir, now, ...options });
+    try {
+      assert.equal(reader.status(lane).route.executor, 'queue-v2');
+      assert.equal(reader.receipt({ repository: lane.repository, prNumber: 101 }).route.executor, 'queue-v2');
+    } finally { reader.close(); }
+    assert.equal(probeQueueOwner({ rootDir: f.rootDir, now, ...options }).capabilities.routing.available, true);
+  }
+  process.env.AGENT_OS_CONFIG_PATH = join(f.rootDir, 'missing-env.yaml');
+  assert.deepEqual(readRoutingConfig({ rootDir: f.rootDir, configPath }).laneRoutes, cfg.laneRoutes);
+  assert.throws(() => readRoutingConfig({ rootDir: f.rootDir }), /routing-config-unavailable/);
+  delete process.env.AGENT_OS_CONFIG_PATH;
+  assert.throws(() => readRoutingConfig({ rootDir: f.rootDir }), /routing-config-unavailable/);
+  // Keep the versionless module layer out of the top-level schema parser.
+  writeFileSync(join(f.rootDir, 'config.yaml'), JSON.stringify({
+    __aliases: { 'merge_agent.worker_class': 'roles.merge_agent_worker_class' },
+    roles: { adversarial: { merge_authority: { lane_routes: cfg.laneRoutes } } },
+  }));
+  assert.deepEqual(readRoutingConfig({ rootDir: f.rootDir }).laneRoutes, cfg.laneRoutes);
   assert.deepEqual(readRoutingConfig({ rootDir: f.rootDir, configPath }).laneRoutes, cfg.laneRoutes);
   writeFileSync(configPath, 'roles: [broken');
   assert.throws(() => readRoutingConfig({ rootDir: f.rootDir, configPath }));

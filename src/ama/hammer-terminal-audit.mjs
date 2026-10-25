@@ -14,8 +14,9 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha } 
   if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) return null;
   const launchRequestId = env.HQ_LAUNCH_REQUEST_ID || null;
   const existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, identity.headSha);
-  if (launchRequestId && existing?.attempts?.some(attempt =>
-    attempt.launchRequestId === launchRequestId &&
+  if (existing?.attempts?.some(attempt =>
+    (launchRequestId ? attempt.launchRequestId === launchRequestId
+      : !attempt.launchRequestId && attempt.attemptPhase === 'hammer-early-exit') &&
     ['succeeded', 'failed-without-merge', 'superseded', 'deferred'].includes(attempt.outcome))) return existing;
   return appendAmaAuditAttempt({
     ...identity,

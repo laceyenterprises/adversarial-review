@@ -96,12 +96,34 @@ for (const helper of ['hammer-context.mjs', 'hammer-base-head.mjs']) {
   });
 }
 
-test('LVR-02: manual refusal is terminal and repeated reporting preserves the first reason', t => {
+test('LVR-02: launch-bound refusal is terminal and repeated reporting preserves the first reason', t => {
   const { env, audit } = fixture(t);
   reportHammerEarlyFailure('early-refusal', { env });
   reportHammerEarlyFailure('later-wrapper-failure', { env });
   assert.equal(audit().attempts.length, 1);
   assert.equal(audit().attempts[0].reason, 'early-refusal');
+});
+
+test('LVR-02: unkeyed manual refusals preserve the first reason without suppressing new launches', t => {
+  const { env, audit } = fixture(t);
+  delete env.HQ_LAUNCH_REQUEST_ID;
+  reportHammerEarlyFailure('early-refusal', { env });
+  reportHammerEarlyFailure('later-wrapper-failure', { env });
+  assert.equal(audit().attempts.length, 1);
+  assert.equal(audit().attempts[0].reason, 'early-refusal');
+  env.HQ_LAUNCH_REQUEST_ID = 'lrq_new';
+  reportHammerEarlyFailure('new-launch-failure', { env });
+  assert.equal(audit().attempts.length, 2);
+  assert.equal(audit().attempts[1].reason, 'new-launch-failure');
+});
+
+test('LVR-02: an earlier keyed failure does not suppress an unkeyed manual refusal', t => {
+  const { env, audit } = fixture(t);
+  reportHammerEarlyFailure('launch-failure', { env });
+  delete env.HQ_LAUNCH_REQUEST_ID;
+  reportHammerEarlyFailure('manual-refusal', { env });
+  reportHammerEarlyFailure('later-wrapper-failure', { env });
+  assert.deepEqual(audit().attempts.map(attempt => attempt.reason), ['launch-failure', 'manual-refusal']);
 });
 
 test('LVR-02: only a versioned incident comment with an id supplies the scheduling hint', () => {

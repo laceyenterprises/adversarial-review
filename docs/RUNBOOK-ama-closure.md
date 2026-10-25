@@ -5580,6 +5580,8 @@ failures and rendered phase refusals write the existing local AMA audit with
 `failed-without-merge` and a fixed reason. For a manual refusal before the first
 GitHub call, run the deployed `bin/hammer-terminal-audit.mjs early-refusal` with
 that identity exported before exiting. Audit writes need no network or lease.
+Repeated manual reports without `HQ_LAUNCH_REQUEST_ID` retain the first unkeyed
+early-exit reason per repo/PR/head; distinct launch IDs retain separate attempts.
 Do not put credential values or raw command errors into a reason.
 
 An open PR without a terminal close audit is observed as failed with
@@ -5595,6 +5597,9 @@ wake protections, then serves incident PRs before ordinary lane work. Merge
 waiters retain reservation lifetimes, ready-time rules and holder exclusivity,
 then use incident-first FIFO across roles. Old unmarked records keep FIFO order.
 The hint grants no authorization.
+The lease CLI warns and continues without the hint when `--pr-state-file` is
+unreadable or malformed. Daemon admission uses the live body first, then the
+candidate's body, prBody or nested subject body when the live body is absent.
 
 After normal deployment, the operator observes plan assertion
 `lvr-02-review-required-outcome` once; it remains pending (75) until the deployed

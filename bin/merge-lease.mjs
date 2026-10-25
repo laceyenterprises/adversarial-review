@@ -344,8 +344,15 @@ async function runAcquire(argv, deps) {
   const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const head = requireString(values, 'head');
-  const prBody = values['pr-state-file']
-    ? String(JSON.parse(readFileSync(values['pr-state-file'], 'utf8')).body || '') : undefined;
+  let prBody;
+  if (values['pr-state-file']) {
+    try {
+      prBody = String(JSON.parse(readFileSync(values['pr-state-file'], 'utf8')).body || '');
+    } catch {
+      // The snapshot supplies scheduling priority only, never merge authority.
+      deps.stderr.write('merge-lease: warning: PR state snapshot unavailable; continuing without incident priority\n');
+    }
+  }
   const ownerPid = parsePositiveInteger(values['owner-pid'], 'owner-pid');
   const ownerPgid =
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');

@@ -2967,6 +2967,11 @@ body markers prioritize review and merge queues within existing protections;
 daemon reservations and holders retain their semantics. See the
 [operational contract](docs/RUNBOOK-ama-closure.md#truthful-launch-outcomes-and-incident-scheduling-lvr-02).
 
+Repeated unkeyed early-failure reports retain the first manual reason for the
+repo/PR/head; keyed launches remain independent. Unreadable lease body snapshots
+warn and fall back to ordinary priority; nested candidate bodies retain incident
+priority when the live body is absent. Lifecycle states and smoke promises are unchanged.
+
 The existing handoff smoke verifies launch-bound failure audits and no_work_done
 classification with synthetic state. Focused offline tests in
 `test/lvr-no-op-outcomes.test.mjs` cover early exits, redaction and launch flags;

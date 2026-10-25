@@ -255,6 +255,9 @@ manual pre-call refusals and rendered phase failures append
 head until a valid current head is known, a fixed reason code and
 `attemptPhase: hammer-early-exit`. They require neither GitHub nor a merge
 lease. Repeated wrappers preserve this launch's existing terminal reason.
+Without `HQ_LAUNCH_REQUEST_ID`, repeated `hammer-early-exit` reports preserve
+the first unkeyed terminal attempt for this repo/PR/head. Keyed launches remain
+independent of manual reports and other launches.
 Optional proactive refresh failure with a usable held credential creates no
 terminal failure. Raw transport output and credentials never enter these
 records. An unavailable audit is reported as an error; sticky succeeded

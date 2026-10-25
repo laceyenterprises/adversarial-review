@@ -2,14 +2,11 @@
 
 import { fileURLToPath } from 'node:url';
 
-import {
-  collectReviewPipelineHealth,
-  renderReviewPipelinePrometheus,
-} from './review-pipeline-health.mjs';
+import { collectReviewLaneLiveness } from './lane-liveness-evidence.mjs';
 
 const USAGE = `\
 Usage:
-  node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>] [--no-terminal-reconcile]
+  node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>] [--no-terminal-reconcile] [--lane-liveness]
 `;
 
 // The tool root (parent of src/), where this package's `data/reviews.db` lives.
@@ -50,6 +47,8 @@ function parseArgs(argv) {
     } else if (arg === '--now') {
       if (!argv[i + 1]) throw new Error('--now requires an ISO timestamp');
       options.now = argv[++i];
+    } else if (arg === '--lane-liveness') {
+      options.laneLiveness = true;
     } else if (arg === '--no-terminal-reconcile') {
       options.reconcileTerminalState = false;
     } else if (arg === '--help' || arg === '-h') {
@@ -64,10 +63,13 @@ function parseArgs(argv) {
   if (options.now && Number.isNaN(Date.parse(options.now))) {
     throw new Error('--now must be an ISO timestamp');
   }
+  if (options.laneLiveness && options.format !== 'json') {
+    throw new Error('--lane-liveness supports JSON output only');
+  }
   return options;
 }
 
-function main(argv = process.argv.slice(2), io = {}) {
+async function main(argv = process.argv.slice(2), io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
   let options;
@@ -82,14 +84,18 @@ function main(argv = process.argv.slice(2), io = {}) {
     return 0;
   }
 
-  const snapshot = collectReviewPipelineHealth({
+  // The full collector imports daemon modules with a writable DB singleton.
+  // Keep that graph completely outside the local-only evidence path.
+  const health = options.laneLiveness ? null : await import('./review-pipeline-health.mjs');
+  const collector = options.laneLiveness ? collectReviewLaneLiveness : health.collectReviewPipelineHealth;
+  const snapshot = collector({
     rootDir: options.rootDir,
     ...(options.hqRoot ? { hqRoot: options.hqRoot } : {}),
     now: options.now ? () => new Date(options.now) : () => new Date(),
     reconcileTerminalState: options.reconcileTerminalState,
   });
   if (options.format === 'prometheus') {
-    stdout.write(renderReviewPipelinePrometheus(snapshot));
+    stdout.write(health.renderReviewPipelinePrometheus(snapshot));
   } else if (options.format === 'sentinel') {
     for (const finding of snapshot.findings) {
       stdout.write(`${JSON.stringify(finding)}\n`);
@@ -101,7 +107,7 @@ function main(argv = process.argv.slice(2), io = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }
 
 export { main, parseArgs };

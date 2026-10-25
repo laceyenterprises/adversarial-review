@@ -154,5 +154,6 @@
         "evidenceRequired": true
       }
     }
-  ]
+  ],
+  "laneLivenessObservation": "LVR-05: operator checks deployed local-only pipeline-health --lane-liveness output is version 1 with four available lanes or explicit unavailable evidence. Sentinel supplies pack-step status and warn-only alarms. Compare seven days of natural findings against AMA audits before separate reviewed page-code promotion. No restart, forced traffic, page, config flip, new smoke step or merge authority change."
 }

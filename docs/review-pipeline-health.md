@@ -594,3 +594,42 @@ Production listings use that fallback, so comments, labels, and other PR activit
 can delay the unowned-age alert. Missing or invalid timestamps suppress only
 that PR's age-based finding; they do not mark a successful listing unreadable
 or suppress shared conflict-path diagnostics.
+
+## Lane-liveness evidence
+
+`laneLiveness` is a version-1 read projection, not another observer. Its
+`observedAt` and `lanes.{hammer,daemon,remediation,review}` objects are also
+available through the existing CLI's `--lane-liveness` mode. That mode skips all
+GitHub/provider/host probes and terminal reconciliation; the normal health JSON
+includes the same projection. Consumers never open private review tables.
+
+Each lane reports `available`, `waiting[]` (repository/PR and demand time),
+`lastRealEvent` (nullable), `lastRuns[]` (newest first, at most five),
+`scanTruncated`, `held: null` and `labelsUnknown: true`. Unreadable inputs,
+malformed records, excess demand, or insufficient bounded history set
+`available: false` with a fixed safe error code. Exceptions, credentials,
+worker output and arbitrary metadata are never exported.
+
+Hammer work requires a succeeded AMA attempt plus a `merged: true`,
+`closer-hammer` merge-action receipt with the same repository/PR/head. Daemon
+work requires a succeeded `daemon-merge` audit. Remediation work requires a
+completed follow-up job's `completion.workerPushedHeadSha` distinct from its
+input revision; a resulting or local-only head is insufficient. Review work is
+`reviewer_post_success`, never a start, wake, exit or failed post. Historical
+successes remain visible after a PR closes. The first observed PR/job time anchors never-active lanes; retry/start bookkeeping cannot reset it. Waiting merge demand uses open
+matching-head leases/prompts and daemon parks; explicit hammer handoffs are
+excluded from daemon demand. Remediation demand is claimable pending or
+in-progress work on open PRs; review demand is pending/reviewing open work.
+Undated local hold labels cannot suppress waiting demand.
+
+Scans inspect at most 20,000 directory entries, 2,000 newest documents per
+history directory, 2 MiB per document and 2,000 open PRs. Historical SQL reads
+select only the latest success and last five outcomes; no new table or event
+writer is introduced. Demand truncation is unavailable. History truncation is
+visible and cannot prove absence when no real event is found.
+
+Sentinel adds the pack-step lane through the existing public DAG/launch status
+API, scales the 30-minute window once, and owns finding/dedupe/promotion. D8
+starts at warn: seven days with zero false dead-lane findings, checked against
+AMA audits, are required before a separate reviewed page-code promotion.
+Existing merge gates and offline smoke promises remain unchanged.

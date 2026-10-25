@@ -58,7 +58,7 @@ test('hammer shell merge runner receives the neutralized body', (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const stdoutPath = join(dir, 'merge.stdout');
   const stderrPath = join(dir, 'merge.stderr');
-  const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXIT=$?');
+  const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure') + `\n  ham_gh pr merge https://github.com/o/r/pull/7 --subject "$HAM_COMMIT_SUBJECT" --body "$HAM_COMMIT_BODY" > "$HAM_MERGE_STDOUT" 2> "$HAM_MERGE_STDERR"\n`;
   const stub = `ham_read_protective_predecessor_value() { printf -v "$2" '%s' 'Fix #7732 regression'; }
 ham_gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {

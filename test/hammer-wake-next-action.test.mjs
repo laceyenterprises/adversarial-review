@@ -44,7 +44,11 @@ for (const [name, observations, reason, requested] of [
   ['failed required check on exhausted head', { checks: { rollup: [
     { name: 'check-1', status: 'COMPLETED', conclusion: 'FAILURE' }], requiredContexts: ['check-1'] } }, 'ci-red-final', true],
   ['failure without a runner', { checks: { runnerless: [{}] }, remediation: { roundsLeft: true } }, 'ci-runnerless', true],
-  ['failed CI with a round left', { checks: { conclusion: 'FAILURE' }, remediation: { roundsLeft: true } }, 'ci-red', false],
+  ['clean failed CI with a round left', { checks: { conclusion: 'FAILURE' },
+    remediation: { roundsLeft: true } }, 'ci-red-clean-verdict', true],
+  ['failed CI with a pending remediation job', { checks: { conclusion: 'FAILURE' },
+    reviews: { ...clean, verdict: 'request-changes', blockingFindingCount: 1 },
+    remediation: { roundsLeft: true, job: { status: 'pending', headSha: HEAD } } }, 'ci-red', false],
   ['DIRTY', { pr: { headSha: HEAD, state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'DIRTY' } }, 'conflict-rebase', true],
   ['blocking final adjudication', { reviews: { ...clean, verdict: 'request-changes', blockingFindingCount: 1 } }, 'review-findings-final', true],
   ['proven suppressed push', { reviews: { ...clean, headSha: OLD },

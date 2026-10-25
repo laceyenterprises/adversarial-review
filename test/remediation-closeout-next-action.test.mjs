@@ -127,6 +127,20 @@ test('missing head and unreadable checks retain an observer without throwing', t
   assert.equal(shared.snapshot.observations.checks.provenance.readState, 'unknown');
 });
 
+test('failed CI without publish or review-head proof retains the active retry owner', t => {
+  const f = fixture(t);
+  const job = { ...f.job, revisionRef: null, reviewBody: 'Legacy review',
+    remediationPlan: { ...f.job.remediationPlan, currentRound: 1 } };
+  const shared = f.decide({ job, workerPushedHeadSha: null,
+    ciGate: { headSha: HEAD, state: 'failed' } });
+  assert.equal(shared.decision.action, 'remediate');
+  assert.equal(shared.decision.actor, 'remediator');
+  assert.equal(closeoutRereview(shared).requested, true);
+  const terminal = f.decide({ job: { ...job, status: 'completed' }, workerPushedHeadSha: null,
+    ciGate: { headSha: HEAD, state: 'failed' } });
+  assert.equal(terminal.decision.action, 'hammer', 'a terminal job cannot claim active retry ownership');
+});
+
 test('delivery contention changes no records; retry retains one successor and one wake', t => {
   const f = fixture(t);
   const path = join(f.rootDir, 'data', 'follow-up-jobs', 'completed', `${f.job.jobId}.json`);

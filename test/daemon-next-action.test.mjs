@@ -248,7 +248,7 @@ test('production adapter passes the same frozen decision and returns its live re
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const first = pair(), passSnapshot = first.snapshot;
   const result = await runDaemonCleanMergeAttempt({
-    rootDir, repoPath: 'subject-06', prNumber: 6, cfg: { autonomousMergeExecutionEnabled: true, strictMode: true },
+    rootDir, repoPath: 'fixture/subject-06', prNumber: 6, cfg: { autonomousMergeExecutionEnabled: true, strictMode: true },
     candidate: { headSha: HEAD, baseBranch: 'main', prState: 'OPEN' }, currentPrHeadSha: HEAD,
     gateSnapshot: { reviewedHeadSha: HEAD, settledReview: { verdict: 'approved' } }, reviewState: clean,
     sharedNextAction: first, passSnapshot, env: { HQ_ROOT: rootDir }, logger: quiet,
@@ -323,7 +323,7 @@ test('cancelled-check and no-CI recovery evidence select the shared CI observer'
 for (const confirmed of [false, true]) test(`coexistence terminalization requires remote confirmation=${confirmed}`, async () => {
   const shared = observeDaemonResult(pair(), { merged: true, remoteMergedConfirmed: confirmed });
   const result = await resolveMergeAgentCoexistenceForWatcher({
-    repoPath: 'subject-06', prNumber: 6, candidate: { headSha: HEAD, prState: 'OPEN' }, logger: quiet,
+    repoPath: 'fixture/subject-06', prNumber: 6, candidate: { headSha: HEAD, prState: 'OPEN' }, logger: quiet,
     maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false, skipMergeAgent: true,
       reason: 'daemon-merged', nextAction: shared.decision, daemonCleanMerge: { remoteMergedConfirmed: confirmed } }),
     recoverOrphanImpl: () => assert.fail('receipt reconciliation cannot launch ownerless recovery'),

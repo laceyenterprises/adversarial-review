@@ -607,6 +607,7 @@ esac
     const nodeStub = join(bin, 'audit-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
+  */bin/legacy-lane-write.mjs) shift 8; exec "$@" ;;
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
   */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module)
@@ -1100,10 +1101,10 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   mkdirSync(scratchDir, { mode: 0o700 });
   const { default: Database } = await import('better-sqlite3');
   // Render against an isolated root while reusing the checked-in procedures.
-  for (const name of ['bin', 'src', 'node_modules', 'domains']) {
+  for (const name of ['bin', 'src', 'node_modules', 'domains', 'migrations']) {
     symlinkSync(join(root, name), join(dir, name), 'dir');
   }
-  symlinkSync(join(root, 'config.yaml'), join(dir, 'config.yaml'), 'file');
+  for (const name of ['config.yaml', 'package-lock.json']) symlinkSync(join(root, name), join(dir, name), 'file');
   mkdirSync(join(dir, 'data'));
   const db = new Database(join(dir, 'data', 'reviews.db'));
   db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (identity TEXT, head_sha TEXT,

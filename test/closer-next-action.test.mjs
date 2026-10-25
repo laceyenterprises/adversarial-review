@@ -1,10 +1,12 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
+import { deriveNextActionSnapshot, NEXT_ACTION_DEADLINE_MS, nextAction } from '../src/pr-next-action.mjs';
 import { resolveSharedNextAction } from '../src/pr-next-action-shadow.mjs';
 import classifyRescue from '../src/merge-agent-rescue-classifier.mjs';
 import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
@@ -12,6 +14,8 @@ import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
+import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 
@@ -362,7 +366,7 @@ test('existing no-CI proof updates the shared generation before a daemon merge',
   assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
 });
 
-test('a fresh daemon red-CI snapshot routes to a remaining remediation round', async t => {
+test('a fresh daemon red-CI snapshot with a clean verdict routes to the hammer', async t => {
   const f = cleanClosureFixture(t);
   f.args.runDaemonCleanMergeAttemptImpl = async ({ onGateSnapshot }) => {
     const liveGate = { candidateHead: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE',
@@ -371,10 +375,9 @@ test('a fresh daemon red-CI snapshot routes to a remaining remediation round', a
     return { disposition: 'failed-closed', reason: 'gate-not-eligible', reasons: ['ci-not-green'], liveGate };
   };
   const result = await maybeDispatchAmaClosureFor(f.args);
-  assert.equal(result.nextAction.action, 'remediate');
-  assert.equal(result.nextAction.actor, 'remediator');
-  assert.equal(result.dispatched, false);
-  assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+  assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
+  assert.equal(result.dispatched, true);
+  assert.ok(f.effects.some(([kind]) => kind === 'closer'));
 });
 
 test('admitted daemon repair uses the common policy without waiving proof or caps', () => {
@@ -530,3 +533,116 @@ test('a recorded terminal judgment on an unchanged head retains daemon ownership
   assert.equal(result.nextAction.action, 'done');
   assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
 });
+
+
+function redCiFixture(t, { findings = true, elapsed = 60_000, jobStatus = null, jobHead = HEAD, jobRepo = identity.repo, jobCreatedAt = AT } = {}) {
+  const f = cleanClosureFixture(t);
+  const body = findings
+    ? '## Blocking issues\n- Synthetic defect\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes'
+    : '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only';
+  f.args.reviewStateRow.review_body = body;
+  f.args.fetchLatestHeadReviewBodiesImpl = async () => [body];
+  f.args.resolveReviewCycleExhaustionImpl = () => ({ reviewCycleExhausted: false });
+  f.args.now = () => Date.parse(AT) + elapsed;
+  f.args.passSnapshot = null;
+  f.args.candidate.statusCheckRollup[0].conclusion = 'FAILURE';
+  if (jobStatus) {
+    const key = jobStatus === 'in_progress' ? 'inProgress' : jobStatus;
+    const dir = getFollowUpJobDir(f.args.rootDir, key);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${followUpJobFilePrefix(jobRepo, 5)}synthetic.json`), JSON.stringify({
+      repo: jobRepo, prNumber: 5, revisionRef: jobHead, status: jobStatus, createdAt: jobCreatedAt, reviewBody: body,
+    }));
+  }
+  return f;
+}
+
+for (const findings of [false, true]) {
+  test(`red CI with ${findings ? 'expired finding admission' : 'a clean verdict'} has a hammer owner`, async t => {
+    const f = redCiFixture(t, { findings, elapsed: NEXT_ACTION_DEADLINE_MS.admission });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
+    assert.equal(result.dispatched, true);
+    assert.ok(f.effects.some(([kind]) => kind === 'closer'));
+  });
+}
+
+for (const jobStatus of ['pending', 'in_progress']) {
+  test(`current-head ${jobStatus} job truthfully owns red CI past admission expiry`, async t => {
+    const f = redCiFixture(t, { jobStatus, elapsed: NEXT_ACTION_DEADLINE_MS.admission + 1 });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.nextAction.action, 'remediate');
+    assert.equal(result.reason, 'active-remediation-job');
+    assert.equal(result.dispatched, false);
+    assert.ok(f.waits.length > 0);
+    assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+  });
+}
+
+for (const jobStatus of ['completed', 'failed', 'stopped']) {
+  test(`terminal ${jobStatus} job sends red CI to the hammer despite findings and rounds`, async t => {
+    const f = redCiFixture(t, { jobStatus });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
+    assert.equal(result.dispatched, true);
+  });
+}
+
+test('missing remediation job is named truthfully and admission expires across polls', async t => {
+  const f = redCiFixture(t);
+  const first = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(first.reason, 'remediation-job-missing');
+  assert.equal(first.nextAction.action, 'remediate');
+  assert.equal(first.nextAction.deadline.class, 'admission');
+  assert.equal(first.nextAction.deadline.at, new Date(Date.parse(AT) + NEXT_ACTION_DEADLINE_MS.admission).toISOString());
+  assert.ok(f.waits.some(wait => wait.startedAt === Date.parse(AT)));
+  f.args.now = () => Date.parse(first.nextAction.deadline.at);
+  const expired = await maybeDispatchAmaClosureFor(f.args);
+  assert.deepEqual(tuple(expired.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
+  assert.equal(expired.dispatched, true);
+});
+
+
+test('a missing queue job replaces a stale pass owner before red-CI routing', async t => {
+  const f = redCiFixture(t, { findings: false });
+  f.args.passSnapshot = base({ remediation: { roundsLeft: true, job: { status: 'in_progress', headSha: HEAD } } });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'ci-red-clean-verdict']);
+  assert.equal(result.dispatched, true);
+});
+
+for (const jobStatus of ['pending', 'in_progress']) {
+  for (const jobHead of [OLD, null]) {
+    test(`gate and closure agree on mixed-case ${jobStatus} PR ownership at ${jobHead}`, async t => {
+      const f = redCiFixture(t, { findings: false, jobStatus, jobHead, jobRepo: identity.repo.toUpperCase() });
+      const terminalDir = getFollowUpJobDir(f.args.rootDir, 'completed');
+      mkdirSync(terminalDir, { recursive: true });
+      const originalReadDir = fs.readdirSync;
+      let terminalReads = 0;
+      fs.readdirSync = function (path, ...args) {
+        if (path === terminalDir) terminalReads++;
+        return originalReadDir.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+      let result;
+      try { result = await maybeDispatchAmaClosureFor(f.args); }
+      finally { fs.readdirSync = originalReadDir; syncBuiltinESMExports(); }
+      assert.equal(result.nextAction.action, 'remediate');
+      assert.equal(result.reason, 'active-remediation-job');
+      assert.equal(result.dispatched, false);
+      assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+      assert.equal(terminalReads, 3, 'gate and ledger reads only; closure adds no terminal scan for a live owner');
+    });
+  }
+}
+
+for (const jobStatus of ['failed', 'stopped']) {
+  test(`a new same-head review waits after an older ${jobStatus} job`, async t => {
+    const f = redCiFixture(t, { jobStatus, jobCreatedAt: '2025-12-31T23:59:00.000Z' });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.nextAction.action, 'remediate', JSON.stringify(result.nextAction));
+    assert.equal(result.reason, 'remediation-job-missing');
+    assert.equal(result.dispatched, false);
+    assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
+  });
+}

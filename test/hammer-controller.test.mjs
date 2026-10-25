@@ -1017,7 +1017,7 @@ test('closing scripts take the lease and click merge only after assert-launch', 
   const body = acquire.slice(acquire.indexOf('ham_acquire_merge_lease() {'));
   assert.ok(body.indexOf('assert-launch') < body.indexOf('merge-lease.mjs acquire'));
   const merge = readFileSync(join(root, 'bin/hammer-merge.sh'), 'utf8');
-  const click = merge.indexOf('ham_gh pr merge <<PR_URL>>');
+  const click = merge.indexOf('<<ROOT_DIR>>/bin/legacy-lane-write.mjs');
   // The gate follows the last pre-click recheck, so each retried click repeats it.
   assert.ok(click > 0 && merge.lastIndexOf('assert-launch', click) > merge.lastIndexOf('stacked-base-check.mjs', click));
 });

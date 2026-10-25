@@ -1118,10 +1118,14 @@ async function buildAdversarialGateSnapshot(rootDir, {
   // Branch ownership is PR-scoped, even when a parked row or a head move has
   // made review evidence unsettled. Operator retriggers can queue a worker
   // without resetting ci-blocked; neither row status nor job recency waives it.
-  const hasActiveSamePrRemediation = ['pending', 'inProgress'].some((dir) =>
-    listFollowUpJobsInDir(rootDir, dir, { repo, prNumber, caseInsensitiveRepo: true }).some(({ job }) =>
-      String(job?.repo || '').toLowerCase() === String(repo || '').toLowerCase()
-      && Number(job?.prNumber) === Number(prNumber)));
+  let activeFollowUpJob = null;
+  for (const dir of ['pending', 'inProgress']) {
+    activeFollowUpJob = listFollowUpJobsInDir(rootDir, dir, { repo, prNumber, caseInsensitiveRepo: true })
+      .find(({ job }) => String(job?.repo || '').toLowerCase() === String(repo || '').toLowerCase()
+        && Number(job?.prNumber) === Number(prNumber))?.job || null;
+    if (activeFollowUpJob) break;
+  }
+  const hasActiveSamePrRemediation = activeFollowUpJob !== null;
   // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,
   // because a `high` finding blocks a routable PR too: a human PR that touches a
   // dependency manifest gets its normal adversarial review AND an Argus review,
@@ -1212,6 +1216,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     reviewRow: resolvedRow ? { ...resolvedRow, operator_decision_id: operatorDecisionId } : resolvedRow,
     latestJob,
     hasActiveSamePrRemediation,
+    activeFollowUpJob,
     operatorApproval,
     labels,
     headSha,

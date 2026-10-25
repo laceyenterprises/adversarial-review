@@ -1046,8 +1046,8 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
     assert.equal(wakes[0].headSha, 'H1');
     assert.equal(['hammer', 'daemon-merge'].includes(wakes[0].shared.decision.action)
       && wakes[0].shared.decision.actor !== 'closure-recovery',
-    ['green', 'pending-conflict'].includes(scenario));
-    const expectedDispatch = ['green', 'pending-conflict'].includes(scenario);
+    ['green', 'red', 'red-and-pending', 'pending-conflict'].includes(scenario));
+    const expectedDispatch = ['green', 'red', 'red-and-pending', 'pending-conflict'].includes(scenario);
     assert.equal(payloads.length, expectedDispatch ? 1 : 0);
     if (!expectedDispatch && scenario !== 'pending') {
       assert.ok(['review', 'remediate', 'wait-for-CI'].includes(result.nextAction.action));

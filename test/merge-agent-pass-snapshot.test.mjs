@@ -364,7 +364,9 @@ test('shared owner evidence remains identical after immutable collection', async
     blockingFindingState: 'known', blockingFindingCount: 0,
     nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 }, currentHead: head };
   for (const [input, owner] of [[clean, 'daemon-merge'], [{ ...clean, checks: 'PENDING' }, 'wait'],
-    [{ ...clean, checks: 'FAILURE' }, 'remediation'], [{ ...clean, mergeable: 'CONFLICTING' }, 'hammer'],
+    [{ ...clean, checks: 'FAILURE' }, 'hammer'],
+    [{ ...clean, checks: 'FAILURE', followUpJob: { status: 'pending', revisionRef: movedHead } }, 'remediation'],
+    [{ ...clean, mergeable: 'CONFLICTING' }, 'hammer'],
     [{ ...clean, reviewState: {} }, 'review'], [{ ...clean, reviewState: { verdict: 'request-changes', headSha: head } }, 'remediation']]) {
     const before = decideClosureOwner(input);
     const snapshot = await createMergeAgentSnapshotPass().collect({ subjectKey, head, sources: { candidate: source(input) } });

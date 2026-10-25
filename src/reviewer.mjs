@@ -75,7 +75,7 @@ import {
 } from './reviewed-attestation.mjs';
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
-import { fetchPRContext, pinReviewerGhIdentity } from './reviewer-context-auth.mjs';
+import { fetchPRContext, pinReviewerGhIdentity, refreshReviewerTokensForSideCalls } from './reviewer-context-auth.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -2225,6 +2225,8 @@ async function main() {
 
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
+  // REVTOKENFLOOR-01: a load-scaled run can outlive the token inherited at spawn.
+  await refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv });
   const verdictModeResolution = await fetchCurrentHeadVerdictMode({
     repo,
     prNumber,

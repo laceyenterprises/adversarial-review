@@ -64,7 +64,9 @@ function _resolvePositiveInt(value, fallback) {
   return Math.floor(parsed);
 }
 
-function resolveReviewerTimeoutMs(env = process.env, options = {}) {
+// The configured reviewer timeout before host-load scaling. The reviewer token
+// handoff floor keeps this part whole and caps only the load-scaled excess.
+function resolveNominalReviewerTimeoutMs(env = process.env, options = {}) {
   const cfgValue = loadRoleConfig({
     env,
     topPath: options.topPath,
@@ -72,7 +74,11 @@ function resolveReviewerTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.timeout_ms',
   }).get('reviewer.timeout_ms', DEFAULT_REVIEWER_TIMEOUT_MS);
-  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS), { maxMs: Infinity });
+  return _resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS);
+}
+
+function resolveReviewerTimeoutMs(env = process.env, options = {}) {
+  return loadAwareTimeoutMs(resolveNominalReviewerTimeoutMs(env, options), { maxMs: Infinity });
 }
 
 function resolveProgressTimeoutMs(env = process.env, options = {}) {
@@ -140,5 +146,6 @@ export {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveFirstOutputTimeoutMs,
+  resolveNominalReviewerTimeoutMs,
   resolveReviewerTimeoutMs,
 };

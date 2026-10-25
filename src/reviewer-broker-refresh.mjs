@@ -24,9 +24,14 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // any error (broker down, non-200, missing/invalid field, metadata mismatch)
 // we log and LEAVE process.env[botTokenEnv] untouched, so the existing token
 // keeps working until the broker recovers.
+//
+// FRESHEST WINS (REVTOKENFLOOR-01): a reviewer subprocess receives the freshest
+// valid token the broker can give. The handoff floor decides when to refresh
+// early and whether a handoff is safe. It never keeps an older held token in
+// place of a fetched one that expires later.
 
 import { readFileSync } from 'node:fs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveNominalReviewerTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const DEFAULT_OAUTH_BROKER_FALLBACK_URL = 'http://127.0.0.1:4097';
@@ -37,8 +42,8 @@ const DEFAULT_OAUTH_BROKER_FALLBACK_URL = 'http://127.0.0.1:4097';
 // tokens (`"cached": true`) that may already be partway through their ~60 min
 // life — observed 2026-06-13: a freshly-fetched token had only ~40 min left.
 // A blind TTL would happily hold such a token past its expiry. 15 min of skew
-// keeps us comfortably ahead; during the last 15 min we re-check each tick and
-// pick up the broker's re-minted token as soon as it rotates.
+// keeps us comfortably ahead; inside the refresh window a short retry interval
+// bounds how often we check for the broker's re-minted token.
 export const REVIEWER_TOKEN_REFRESH_SKEW_MS = 15 * 60 * 1000;
 
 // Fallback cadence used only when the broker response omits / malforms
@@ -58,6 +63,10 @@ export const REVIEWER_TOKEN_POST_SLACK_MS = 2 * 60 * 1000;
 // handoff, do not hammer the broker on every watcher tick while the prior token
 // remains usable. Retry soon, but bounded.
 export const REVIEWER_TOKEN_FAILURE_RETRY_MS = 60 * 1000;
+
+// GitHub App installation tokens live at most 60 minutes. The handoff floor
+// assumes a full-lifetime token when the broker omits expires_at.
+export const REVIEWER_TOKEN_PROVIDER_LIFETIME_MS = 60 * 60 * 1000;
 
 export const FOLLOW_UP_GH_TOKEN_ENV_VARS = Object.freeze(['GITHUB_TOKEN', 'GH_TOKEN']);
 export const DEFAULT_FOLLOW_UP_GH_BROKER_ROLE = 'merge-agent';
@@ -119,11 +128,15 @@ const refreshClock = new Map();
 // Roles already warned about broker-mode-disabled, so the warning is loud once
 // per process instead of once per tick.
 const warnedBrokerModeDisabled = new Set();
+// envVars whose installed token is shorter than a load-scaled reviewer run.
+// Logged once per episode; the entry clears when a token covers the run again.
+const warnedHandoffShortfall = new Set();
 export function _resetReviewerTokenRefreshClockForTest() {
   refreshClock.clear();
+  warnedHandoffShortfall.clear();
 }
 
-class ReviewerTokenTooShortError extends Error {}
+class ReviewerTokenNotFresherError extends Error {}
 class BrokerTokenFetchError extends Error {
   constructor(message, { transient = false } = {}) {
     super(message);
@@ -149,7 +162,26 @@ function brokerFetchErrorIsTransient(err) {
     .test(String(err?.message || err));
 }
 
-function reviewerTokenHandoffState({ role, envVar, env, now, requiredLifetimeMs }) {
+// REVTOKENFLOOR-01. The floor is the reviewer run time plus post slack. Under
+// host load that run time scales past anything the provider can mint: a 6x
+// multiplier on a 20 min timeout asks for a 122 min token from a 60 min
+// provider. Every fresh token then read as too short and the older held token
+// was kept until it expired. Cap the load-scaled excess at what the provider
+// delivered: the fetched token's lifetime minus the refresh skew. The nominal
+// floor is never lowered, so an idle host keeps its existing floor.
+function cappedHandoffFloorMs({ nominalMs, loadScaledMs }, observedLifetimeMs, skewMs) {
+  const deliverableMs = (observedLifetimeMs ?? REVIEWER_TOKEN_PROVIDER_LIFETIME_MS) - skewMs;
+  return Math.min(loadScaledMs, Math.max(nominalMs, deliverableMs));
+}
+
+function reviewerTokenHandoffState({
+  role,
+  envVar,
+  env,
+  now,
+  requiredLifetimeMs,
+  loadScaledLifetimeMs = requiredLifetimeMs,
+}) {
   const base = { role, envVar };
   if (!env?.[envVar]) {
     return { ...base, safe: false, reason: 'token-missing' };
@@ -163,24 +195,19 @@ function reviewerTokenHandoffState({ role, envVar, env, now, requiredLifetimeMs 
     return { ...base, safe: false, reason: 'token-expiry-unknown' };
   }
   const remainingMs = expiresAtMs - now;
-  if (remainingMs > requiredLifetimeMs) {
-    return {
-      ...base,
-      safe: true,
-      reason: 'token-handoff-safe',
-      expiresAtMs,
-      remainingMs,
-      requiredLifetimeMs,
-    };
-  }
-  return {
-    ...base,
-    safe: false,
-    reason: 'token-below-handoff-floor',
+  const lifetimes = {
     expiresAtMs,
     remainingMs,
     requiredLifetimeMs,
+    loadScaledLifetimeMs,
+    // How far a load-scaled reviewer run may outlive this token. The reviewer
+    // re-resolves its token from the broker before its GitHub side calls.
+    handoffShortfallMs: Math.max(0, loadScaledLifetimeMs - remainingMs),
   };
+  if (remainingMs > requiredLifetimeMs) {
+    return { ...base, safe: true, reason: 'token-handoff-safe', ...lifetimes };
+  }
+  return { ...base, safe: false, reason: 'token-below-handoff-floor', ...lifetimes };
 }
 
 function recordReviewerTokenHandoffState(summary, opts) {
@@ -394,6 +421,8 @@ export async function refreshReviewerBrokerTokens({
   timeoutMs = null,
   postSlackMs = null,
   minTokenLifetimeMs = null,
+  reviewerRunTimeoutMs = null,
+  nominalReviewerRunTimeoutMs = null,
   failureRetryMs = null,
   force = false,
 } = {}) {
@@ -438,10 +467,15 @@ export async function refreshReviewerBrokerTokens({
       }
       continue;
     }
-    let requiredLifetimeMs;
+    // An explicit minTokenLifetimeMs is a fixed floor with no load scaling.
+    let handoffLifetimes;
     try {
-      requiredLifetimeMs =
-        minTokenLifetimeMs ?? resolveReviewerTimeoutMs(env) + effectivePostSlackMs;
+      handoffLifetimes = minTokenLifetimeMs != null
+        ? { nominalMs: minTokenLifetimeMs, loadScaledMs: minTokenLifetimeMs }
+        : {
+          nominalMs: (nominalReviewerRunTimeoutMs ?? resolveNominalReviewerTimeoutMs(env)) + effectivePostSlackMs,
+          loadScaledMs: (reviewerRunTimeoutMs ?? resolveReviewerTimeoutMs(env)) + effectivePostSlackMs,
+        };
     } catch (err) {
       summary.failed.push({ role, reason: err?.message || String(err) });
       summary.handoffSafe.push({
@@ -455,12 +489,16 @@ export async function refreshReviewerBrokerTokens({
       );
       continue;
     }
+    const loadScaledLifetimeMs = handoffLifetimes.loadScaledMs;
     // Skip only while the token WE last fetched is still comfortably valid.
     // `nextRefreshAtMs` is derived from the broker's expires_at (minus skew),
     // or a fallback TTL when expires_at is absent. The startup token's expiry
     // is unknown to us (no record), so the first sight of a role always
     // re-fetches even though env already holds a value.
     const scheduled = refreshClock.get(envVar);
+    // The held token's floor, capped by the lifetime it had when fetched.
+    const heldLifetimeMs = cappedHandoffFloorMs(handoffLifetimes, scheduled?.observedLifetimeMs, skewMs);
+    const heldHandoff = { role, envVar, env, now, requiredLifetimeMs: heldLifetimeMs, loadScaledLifetimeMs };
     if (
       !force
       && scheduled !== undefined
@@ -468,15 +506,15 @@ export async function refreshReviewerBrokerTokens({
     ) {
       if (scheduled.failureRetryUntilMs != null && now < scheduled.failureRetryUntilMs) {
         const existingExpiresAtMs = scheduled.expiresAtMs ?? null;
-        if (existingExpiresAtMs == null || existingExpiresAtMs - now > requiredLifetimeMs) {
+        if (existingExpiresAtMs == null || existingExpiresAtMs - now > heldLifetimeMs) {
           summary.skipped.push({ role, reason: 'broker-refresh-backoff' });
-          recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
+          recordReviewerTokenHandoffState(summary, heldHandoff);
           continue;
         }
       }
       if (now < scheduled.nextRefreshAtMs) {
         summary.skipped.push({ role, reason: 'token-still-valid' });
-        recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
+        recordReviewerTokenHandoffState(summary, heldHandoff);
         continue;
       }
     }
@@ -488,12 +526,26 @@ export async function refreshReviewerBrokerTokens({
         readFileImpl,
         timeoutMs: effectiveTimeoutMs,
       });
-      if (expiresAtMs != null && expiresAtMs - now <= requiredLifetimeMs) {
-        throw new ReviewerTokenTooShortError(
-          `broker token expires too soon for subprocess handoff: remaining=${expiresAtMs - now}ms minimum=${requiredLifetimeMs}ms`
+      // Only a held token from the current broker config, still in env, can be
+      // compared. Its expiry is unknown at startup and after a config rotation.
+      const heldExpiresAtMs = scheduled?.configFingerprint === configFingerprint && env[envVar]
+        ? scheduled.expiresAtMs ?? null
+        : null;
+      if (expiresAtMs != null && expiresAtMs <= now) {
+        throw new ReviewerTokenNotFresherError(
+          `broker token already expired: expires_at=${new Date(expiresAtMs).toISOString()}`
         );
       }
+      if (expiresAtMs != null && heldExpiresAtMs != null && expiresAtMs < heldExpiresAtMs) {
+        throw new ReviewerTokenNotFresherError(
+          `broker token expires before the held ${envVar}: remaining=${expiresAtMs - now}ms held=${heldExpiresAtMs - now}ms`
+        );
+      }
+      // Freshest wins, even below the handoff floor: the alternative is a held
+      // token that expires sooner still.
       env[envVar] = token;
+      const observedLifetimeMs = expiresAtMs != null ? expiresAtMs - now : null;
+      const requiredLifetimeMs = cappedHandoffFloorMs(handoffLifetimes, observedLifetimeMs, skewMs);
       // Re-fetch before the token crosses EITHER the refresh skew OR the
       // subprocess-handoff minimum lifetime — whichever comes first. Using only
       // (expiry - skew) left a window where now < expiry - skew (treated as
@@ -501,40 +553,68 @@ export async function refreshReviewerBrokerTokens({
       // a newly-spawned reviewer could inherit a token too short to survive its
       // run and post — the very HTTP 401 this module prevents. With the defaults
       // (skew 15m, required ~22m) the required-lifetime bound is the earlier one.
-      // Clamp to > now so we always make forward progress.
+      // A cached or short-lived token can already be inside this window. Keep
+      // the freshest token, but wait the bounded retry interval before asking
+      // again; a 1ms schedule would fetch on every daemon tick.
       const refreshLeadMs = Math.max(skewMs, requiredLifetimeMs);
       const byExpiry = expiresAtMs != null ? expiresAtMs - refreshLeadMs : null;
       const byFallback = now + fallbackTtlMs;
-      const next = byExpiry != null ? Math.max(byExpiry, now + 1) : byFallback;
+      const next = byExpiry == null ? byFallback
+        : byExpiry <= now ? now + effectiveFailureRetryMs : byExpiry;
       refreshClock.set(envVar, {
         nextRefreshAtMs: next,
         configFingerprint,
         expiresAtMs: expiresAtMs ?? null,
+        observedLifetimeMs,
       });
-      summary.refreshed.push({ role, envVar, expiresAtMs: expiresAtMs ?? null, brokerUrl });
-      recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
+      const handoffShortfallMs = observedLifetimeMs != null
+        ? Math.max(0, loadScaledLifetimeMs - observedLifetimeMs)
+        : 0;
+      summary.refreshed.push({
+        role,
+        envVar,
+        expiresAtMs: expiresAtMs ?? null,
+        brokerUrl,
+        requiredLifetimeMs,
+        loadScaledLifetimeMs,
+        handoffShortfallMs,
+      });
+      if (handoffShortfallMs === 0) {
+        warnedHandoffShortfall.delete(envVar);
+      } else if (!warnedHandoffShortfall.has(envVar)) {
+        warnedHandoffShortfall.add(envVar);
+        log?.warn?.(
+          `[reviewer-broker-refresh] installed the freshest ${envVar} for ${role}; a load-scaled reviewer run `
+          + `plus post slack (${loadScaledLifetimeMs}ms) can outlive it by ${handoffShortfallMs}ms. `
+          + 'Reviewers re-resolve the token from the broker before their GitHub side calls.'
+        );
+      }
+      recordReviewerTokenHandoffState(summary, {
+        role, envVar, env, now, requiredLifetimeMs, loadScaledLifetimeMs,
+      });
     } catch (err) {
       // Fail-safe: keep whatever token env already holds. Do NOT clear it, and
-      // only apply a short backoff for too-short broker tokens while the prior
-      // token remains outside the hard handoff floor. Other broker failures
-      // still retry next tick.
-      if (err instanceof ReviewerTokenTooShortError) {
+      // only apply a short backoff for a stale broker token while the held
+      // token remains outside its handoff floor. Other broker failures still
+      // retry next tick.
+      if (err instanceof ReviewerTokenNotFresherError) {
         const current = refreshClock.get(envVar);
         const currentExpiresAtMs = current?.expiresAtMs ?? null;
         const currentTooClose =
-          currentExpiresAtMs != null && currentExpiresAtMs - now <= requiredLifetimeMs;
+          currentExpiresAtMs != null && currentExpiresAtMs - now <= heldLifetimeMs;
         if (!force && !currentTooClose) {
           const retryAt = now + effectiveFailureRetryMs;
           refreshClock.set(envVar, {
             nextRefreshAtMs: retryAt,
             configFingerprint,
             expiresAtMs: currentExpiresAtMs,
+            observedLifetimeMs: current?.observedLifetimeMs ?? null,
             failureRetryUntilMs: retryAt,
           });
         }
       }
       summary.failed.push({ role, reason: err?.message || String(err) });
-      recordReviewerTokenHandoffState(summary, { role, envVar, env, now, requiredLifetimeMs });
+      recordReviewerTokenHandoffState(summary, heldHandoff);
       log?.warn?.(
         `[reviewer-broker-refresh] keeping existing ${envVar}; broker refresh for ${role} failed: ${err?.message || err}`
       );

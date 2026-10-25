@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { __test__ } from '../src/reviewer.mjs';
-import { fetchPRContext } from '../src/reviewer-context-auth.mjs';
+import { fetchPRContext, refreshReviewerTokensForSideCalls } from '../src/reviewer-context-auth.mjs';
 import { BROKER_REVIEWER_ROLES } from '../src/reviewer-broker-refresh.mjs';
 import { GithubAuthOutageError } from '../src/gh-cli.mjs';
 
@@ -281,4 +281,125 @@ test('401 on a later context page restarts capture; partial first-pass context i
   assert.equal(context.body, 'required context');
   assert.deepEqual(calls.reads, ['fixture-rejected', 'fixture-rejected', 'fixture-replacement']);
   assert.equal(calls.mints.length, 1);
+});
+
+// REVTOKENFLOOR-01: a load-scaled reviewer run can outlive the token it
+// inherited at spawn. Its GitHub side calls must run on a refreshed token.
+function sideCallEnv(overrides = {}) {
+  return {
+    CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_URL: 'http://broker.fixture',
+    OAUTH_BROKER_URL_FALLBACK: 'http://broker.fixture',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/fixture/secret',
+    GH_CODEX_REVIEWER_TOKEN: 'fixture-first-token',
+    GH_TOKEN: 'fixture-first-token',
+    GITHUB_TOKEN: 'fixture-first-token',
+    ...overrides,
+  };
+}
+
+function sideCallBroker(nowMs, { token = 'fixture-second-token', expiresAtMs = nowMs + 3600_000 } = {}) {
+  const urls = [];
+  return {
+    urls,
+    readFileImpl: () => 'fixture-broker-secret',
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return { ok: true, json: async () => ({
+        access_token: token,
+        provider: 'github-app-codex-reviewer',
+        expires_at: new Date(expiresAtMs).toISOString(),
+        metadata: {},
+      }) };
+    },
+  };
+}
+
+test('REVTOKENFLOOR-01: a reviewer side call that outlives its first token uses a refreshed token', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  const env = sideCallEnv();
+  const broker = sideCallBroker(nowMs);
+  const seen = [];
+  // A synthetic side call: GitHub accepts only the second token, as it would
+  // once the first token has expired mid-run.
+  const sideCall = async () => {
+    seen.push(env.GH_TOKEN);
+    if (env.GH_TOKEN !== 'fixture-second-token') throw rejected();
+    return 'ok';
+  };
+  const logs = [];
+  const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN', 'GH_CODEX_REVIEWER_TOKEN'], {
+    pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs, log: { log: (m) => logs.push(m), warn: (m) => logs.push(m) },
+    ...broker,
+  });
+  assert.deepEqual(result.adopted, ['GH_CODEX_REVIEWER_TOKEN']);
+  assert.equal(await sideCall(), 'ok');
+  assert.deepEqual(seen, ['fixture-second-token']);
+  assert.equal(env.GH_CODEX_REVIEWER_TOKEN, 'fixture-second-token');
+  assert.equal(env.GITHUB_TOKEN, 'fixture-second-token');
+  // A plain read of the broker's current token, never a forced mint.
+  assert.deepEqual(broker.urls, ['http://broker.fixture/token?provider=github-app-codex-reviewer']);
+  assert.ok(logs.every((m) => !m.includes('fixture-second-token')));
+});
+
+test('REVTOKENFLOOR-01: side-call refresh keeps the inherited token on broker failure, expiry or disabled broker mode', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  const quiet = { log() {}, warn() {} };
+  const cases = [
+    { env: sideCallEnv(), broker: { readFileImpl: () => 'fixture-broker-secret', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } } },
+    { env: sideCallEnv(), broker: sideCallBroker(nowMs, { expiresAtMs: nowMs }) },
+    { env: sideCallEnv({ CODEX_REVIEWER_AUTH_VIA_BROKER: 'false' }), broker: sideCallBroker(nowMs) },
+  ];
+  for (const { env, broker } of cases) {
+    const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN'], {
+      pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs, log: quiet, ...broker,
+    });
+    assert.deepEqual(result.adopted, []);
+    assert.equal(env.GH_CODEX_REVIEWER_TOKEN, 'fixture-first-token');
+    assert.equal(env.GH_TOKEN, 'fixture-first-token');
+  }
+});
+
+test('REVTOKENFLOOR-01: an unchanged broker token repairs missing or incorrect GitHub identity pins', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  for (const pinnedToken of [undefined, 'fixture-other-identity']) {
+    const env = sideCallEnv({ GH_TOKEN: pinnedToken, GITHUB_TOKEN: pinnedToken });
+    const broker = sideCallBroker(nowMs, { token: env.GH_CODEX_REVIEWER_TOKEN });
+    const result = await refreshReviewerTokensForSideCalls(['GH_CODEX_REVIEWER_TOKEN'], {
+      pinBotTokenEnv: 'GH_CODEX_REVIEWER_TOKEN', env, now: () => nowMs,
+      log: { log() {}, warn() {} }, ...broker,
+    });
+    assert.deepEqual(result.adopted, [], 're-pinning does not report a new token adoption');
+    assert.equal(env.GH_TOKEN, env.GH_CODEX_REVIEWER_TOKEN);
+    assert.equal(env.GITHUB_TOKEN, env.GH_CODEX_REVIEWER_TOKEN);
+    assert.equal(broker.urls.length, 1);
+  }
+});
+
+test('REVTOKENFLOOR-01: routed side calls use the effective reviewer after refreshing both roles', async () => {
+  const nowMs = Date.parse('2026-09-28T12:00:00Z');
+  // Exercise both route directions and both changed and unchanged tokens.
+  for (const roles of [BROKER_REVIEWER_ROLES.slice(0, 2), BROKER_REVIEWER_ROLES.slice(0, 2).reverse()]) {
+    for (const unchanged of [false, true]) {
+      const [original, effective] = roles;
+      const env = sideCallEnv({ [original.flag]: 'true', [effective.flag]: 'true',
+        [effective.envVar]: unchanged ? `fixture-${effective.role}` : 'fixture-expired' });
+      const result = await refreshReviewerTokensForSideCalls([original.envVar, effective.envVar], {
+        pinBotTokenEnv: effective.envVar, env, now: () => nowMs, log: { log() {}, warn() {} },
+        readFileImpl: () => 'fixture-broker-secret',
+        fetchImpl: async (url) => {
+          const provider = new URL(url).searchParams.get('provider');
+          return { ok: true, json: async () => ({
+            access_token: `fixture-${provider.replace('github-app-', '')}`, provider,
+            expires_at: new Date(nowMs + 3600_000).toISOString(), metadata: {},
+          }) };
+        },
+      });
+      assert.equal(env[original.envVar], `fixture-${original.role}`);
+      assert.equal(env[effective.envVar], `fixture-${effective.role}`);
+      assert.equal(env.GH_TOKEN, `fixture-${effective.role}`);
+      assert.equal(env.GITHUB_TOKEN, `fixture-${effective.role}`);
+      assert.equal(result.adopted.includes(effective.envVar), !unchanged);
+    }
+  }
 });

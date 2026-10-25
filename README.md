@@ -2849,3 +2849,35 @@ publications and live-adapter/routing composition remain pending. The probe
 checks the real schema and Git executable and never creates a workspace or
 mutates a lane. See the [operator procedure](docs/finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
 and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).
+
+### V2 candidate checks and parking (MGQ-05)
+
+The unwired v2 finalization waiter resolves and versions the complete existing
+required set, enumerates all exact-candidate check-run and legacy-status pages,
+and uses the shared CI classifier. Latest reruns win, with numeric REST IDs or
+GraphQL database IDs breaking timestamp ties. REST runs use start/completion
+timestamps; undated queued runs remain pending evidence. Missing, pending,
+stale, partial, unreadable and inconclusive
+evidence never authorizes finalization. Existing explicit no-CI policy still
+requires a fresh candidate proof. Original local validation stays at its source
+SHA in the immutable receipt.
+
+The lifecycle is waiting-checks → finalizing for green, returned-to-closer for
+completed red, or parked-infrastructure on expiry. The entry retains its original
+30-minute nominal infrastructure patience, scaled once with a 60-minute hard
+ceiling across polls, restart and base churn. Infrastructure parking releases the
+lane and journals one stable cause page through existing Sentinel delivery;
+outages never dispatch or charge remediation. Bounded recovery revalidates the
+candidate/base, derivation, holds and existing admission policy before tail
+readmission. An expired entry gets no new CI wait. Readmission grants no merge
+rights; final eligibility remains the executor's responsibility.
+
+No production route, new config, CI check or smoke step is installed. Source
+fixtures are `finalization-queue-checks.test.mjs`,
+`finalization-queue-check-transport.test.mjs`, `finalization-queue-check-race.test.mjs`,
+`checks-summary.test.mjs`,
+`hammer-token.test.mjs` and `alert-delivery.test.mjs`. The runtime owner separately
+runs `node src/finalization/queue-probe.mjs --capability checks --json` from the
+deployed checkout with a bounded load-aware supervisor. See the
+[store contract](docs/data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
+and [deployment observation procedure](docs/finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).

@@ -11,6 +11,7 @@ export function ensureFinalizationQueueSchema(db) {
   db.exec(readFileSync(migration, 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
 }
 
 export function assertQueueStoreOwner(rootDir) {
@@ -109,7 +110,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
     progress({ fence, entryId, phase, patch = {}, at, readmit = false, recoveryObservation, expectedEntry }) {
       at = queueTime(at);
       if (!QUEUE_PHASES.includes(phase)) throw new TypeError('invalid queue phase');
-      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission', 'rebase'];
+      const allowed = ['candidate', 'expectedOldHead', 'exactBase', 'reason', 'proof', 'checks', 'decision', 'delivery', 'admission', 'rebase', 'infrastructure'];
       if (Object.keys(patch).some(key => !allowed.includes(key))) throw new TypeError('immutable queue entry field');
       return tx(() => {
         assertFence(fence, at);

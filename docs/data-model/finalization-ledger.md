@@ -444,3 +444,92 @@ or deadline refusals before transport invocation settle `not-applied` with
 results or drain reconciliation. Ambient author/committer environment variables
 and `EMAIL` are removed from local Git execution so replay retains the source
 author and uses the synthetic committer.
+
+### Candidate checks and infrastructure parking (MGQ-05)
+
+`migrations/20261026_finalization_queue_checks.sql` adds
+`finalization_queue_check_page(cause_key PRIMARY KEY, entry_id, payload_json,
+receipt_json)`. The payload is an immutable infrastructure incident identity
+(entry, dependency, candidate, exact base and reason); a null receipt means the
+existing alert bus has not acknowledged enqueue. Parking and page intent commit
+in one app-store transaction. The lane is released before enqueue; delivery
+retries use the same cause key in `finalization.queue.infrastructure`, including
+a crash after enqueue but before saving its receipt. The existing bus owns
+transport, Sentinel escalation, retry/dead-letter and delivered deduplication.
+The table is an enqueue receipt journal, not a second pager transport. Retain it
+with the entry audit; do not erase it to retry delivery.
+
+The entry JSON gains `infrastructure`: dependency/head/base/reason/causeKey,
+parkedAt, nextProbeAt, probeDeadline, recovered and recoveredAt. `checks` records
+candidate head and base, requiredSet (normalized contexts, source and SHA-256
+version), complete paginated API source references, latest run/status IDs, URLs,
+normalized recency/start/completion timestamps and results. REST check-run
+`createdAt` uses `started_at`, then `completed_at`; both can be null for an
+unstarted run. An undated run is retained without deduplication, so a queued run
+cannot disappear behind a completed success. Legacy statuses require
+`created_at`. A failed final read preserves
+the last snapshot as diagnostic evidence with `complete: false`; it is not green
+authority. Local validation and original signatures remain in the immutable
+admission receipt at their actual source SHAs.
+
+The read-only check reader unions the existing configured required names with a
+complete, versioned policy/rules observation supplied by composition. It reads
+all check-run pages with `filter=all`, verifies the advertised total, and reads
+all legacy status pages. Duplicate/malformed IDs, partial pages, a changing
+required set, wrong check-run SHA and unavailable policy refuse certification.
+Latest available creation/start/completion timestamp selects reruns within each
+check producer or legacy status context; numeric REST IDs or GraphQL
+`databaseId` values break ties even when GraphQL `id` is opaque.
+A green status or another App cannot
+replace a failed check-run producer that uses the same name. Legacy status
+SHA provenance comes from the immutable commit endpoint. The shared
+`classifyCheckRollup` remains the only CI classifier. Completed red returns to
+the closer; empty/missing/pending/unreadable/unknown results remain waits. Only an
+existing explicit per-repository no-CI policy with a fresh exact-head proof can
+substitute for empty CI; an empty API result alone cannot.
+
+The entitled GET transport accepts either SHA hex casing and combines repeated
+Link header lines. A next link must retain the GitHub origin, exact candidate,
+endpoint kind, page size and filter; canonical `/repositories/<id>/commits/...`
+paths may supply the page number. Subsequent reads still use the original named
+repository path. Malformed links and duplicate next relationships refuse the
+observation.
+
+`createQueueChecksService` consumes the acknowledgement's persisted 1,800,000ms
+nominal patience, sampled/scaled once and capped at 3,600,000ms. Polls, restarts
+and base changes retain its original absolute deadline. Initial SQLite reads and post-expiry bookkeeping use nonblocking locks. Every
+new read/SQLite wait has a finite ceiling and clips to the remaining budget; `readQueueEvidence`
+applies `timerDelayMs` to effective timers without scaling again. Owner expiry
+and the fixed 60-second reprobe cadence are independent policies. Infrastructure
+expiry parks outside FIFO and releases the lane, with no remediation dispatch
+or budget charge. Base movement before expiry invalidates checks and returns to
+rebase; an author push returns to the closer. Authoritative terminal observations
+reconcile without dispatch.
+
+Recovery persists one bounded read-only reprobe window before I/O. It cannot
+reset entry patience. It requires green checks at the retained published
+candidate/base, the immutable receipt, recomputation of every derivation, then
+fresh lifecycle/holds/identity/permissions/structural eligibility. A no-op
+candidate retains the ordinary final current-head review read; it cannot borrow
+the rewritten-head derivation exception. Terminal observations after proof
+reconcile without assigning readiness. A successful
+reprobe rejoins readiness at the tail. Once first, it resumes the already
+published candidate without rebase/push and gets one bounded observation; an
+expired original deadline permits no new CI wait. Any unavailable dependency
+parks immediately again. A changed base after expiry remains parked rather than
+obtaining another rebase budget. Final merge authority and immediate live reads
+belong to the subsequent executor slice.
+
+`createEntitledQueueCheckRequest` uses the existing broker export/parser and
+held-token behavior around each operation. An optional early-refresh failure
+retains the entitled credential; rejected/absent credentials require successful
+refresh. Refresh subprocess timeouts and API timeouts consume the same remaining
+operation budget. Ambient login credentials cannot substitute. Credentials,
+broker output and unredacted diagnostics never enter persisted observations.
+
+`resolveQueueChecksAdapter` is a read-only deployed store projection. The checks
+probe verifies the shipped schema, resolves this adapter and hashes actual
+runtime modules. It reports bounded stored observations and enqueue counts;
+missing organic evidence stays pending. Live policy, credential, pager and owner
+composition and per-lane routing remain explicit later integration work. No
+production route, CI check, new config setting or smoke step is installed.

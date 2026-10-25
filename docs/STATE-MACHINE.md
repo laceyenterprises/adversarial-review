@@ -2125,3 +2125,18 @@ Live ownership, stop controls and retry limits retain priority; a handoff to
 review invalidates the terminal proof for successor selection.
 Offline handoff smoke verifies the adapter matrix; organic rollout is separate
 operator/SRE acceptance. Source rollback is revision `4d06237c`.
+
+## V2 queue candidate checks (MGQ-05, unwired)
+
+The candidate waiter advances waiting-checks → finalizing only from a complete,
+versioned required set and current runs/statuses at the exact published head.
+Completed red returns to the closer; infrastructure expiry parks outside FIFO,
+releases the lane and journals one deduplicated dependency/head/base cause page
+through the existing Sentinel delivery path. No remediation budget is charged.
+The original once-scaled 30-minute nominal patience (60-minute ceiling) survives
+polls, restarts and base churn. Bounded recovery verifies candidate/base, source
+receipt and derivation, then fresh holds/identity/permission/structural admission
+before tail readiness. Expired patience never becomes another CI wait.
+Readmission is ordering, not merge authority. See the
+[durable contract](data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
+and [read-only deployed probe](finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).

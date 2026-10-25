@@ -32,12 +32,21 @@ function checkTimestampMs(item) {
   return latest;
 }
 
+function numericCheckId(item) {
+  return [item?.id, item?.databaseId].find(id => /^\d+$/.test(String(id))) ?? null;
+}
+
 function latestCheckRollupItems(items) {
   if (!Array.isArray(items)) return [];
   const latestByIdentity = new Map();
   const result = [];
   for (const item of items) {
-    const identity = checkIdentity(item);
+    const name = checkIdentity(item);
+    // Status contexts and check-run producers are independent required evidence.
+    // A newer green legacy status cannot hide a failed check with the same name.
+    const kind = item?.__typename ?? (item?.context ? 'StatusContext' : 'CheckRun');
+    const producer = kind === 'CheckRun' ? item?.app?.databaseId ?? item?.app?.id ?? item?.app?.slug ?? null : null;
+    const identity = name && JSON.stringify([kind, producer, name]);
     const timestampMs = checkTimestampMs(item);
     if (!identity || timestampMs === null) {
       result.push(item);
@@ -49,7 +58,13 @@ function latestCheckRollupItems(items) {
       result.push(item);
       continue;
     }
-    if (timestampMs >= prior.timestampMs) {
+    const priorId = numericCheckId(result[prior.index]);
+    const nextId = numericCheckId(item);
+    // GitHub timestamps can tie at second precision. Numeric REST/GraphQL IDs order
+    // reruns/status updates without allowing an older page item to win a tie.
+    const orderedIds = /^\d+$/.test(String(priorId)) && /^\d+$/.test(String(nextId));
+    if (timestampMs > prior.timestampMs || (timestampMs === prior.timestampMs
+      && (!orderedIds || BigInt(nextId) >= BigInt(priorId)))) {
       result[prior.index] = item;
       prior.timestampMs = timestampMs;
     }

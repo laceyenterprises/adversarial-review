@@ -655,6 +655,12 @@ function alertPresentationForDoc(doc) {
     };
   }
 
+  if (event === 'finalization.queue.infrastructure') {
+    return { severity: 'SEV1', headline: 'Merge queue infrastructure patience expired',
+      body: String(doc.text || ''), action: 'Restore the named dependency; preserve exact-head checks and existing merge gates.',
+      detail: `PR: ${payload.repo}#${payload.pr}; dependency: ${payload.dependency}; head: ${payload.head}; base: ${payload.base}; reason: ${payload.reason}` };
+  }
+
   if (event === 'ama.closure_lag.slo_breach') {
     const waits = [...(payload.blockers || []), ...(payload.completed || [])];
     if (payload.reason) waits.push({ pr: payload.pr, reason: payload.reason, lag_ms: payload.lag_ms });
@@ -726,6 +732,7 @@ const FIXED_RECOVERY_EVENTS = Object.freeze([
   'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain',
   'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS,
   'ama_closer.pre_receipt_inspection_required',
+  'finalization.queue.infrastructure',
 ]);
 
 function sanitizeAlertIdPrefix(prefix) {
@@ -1549,7 +1556,9 @@ async function deliverAlert(text, {
         return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
       }
     }
-    if (event === 'ama_closer.pre_receipt_inspection_required') {
+    if (event === 'finalization.queue.infrastructure') {
+      doc.id = fixedAlertId('queue-infrastructure', crypto.createHash('sha256').update(String(payload?.causeKey)).digest('hex'));
+    } else if (event === 'ama_closer.pre_receipt_inspection_required') {
       // Same attempt, including a crash after enqueue but before alertedAt.
       doc.id = fixedAlertId(event, crypto.createHash('sha256').update(JSON.stringify([
         payload?.repo, payload?.prNumber, payload?.headSha,

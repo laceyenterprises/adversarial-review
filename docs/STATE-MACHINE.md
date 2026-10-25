@@ -805,6 +805,18 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+CIREDOWNER-01: red CI with remediation rounds left belongs to the remediator
+only while a pending/in-progress job exists for the current head, or a posted
+current-head review has findings awaiting job creation. That admission wait
+expires at the existing five-minute deadline, using the closure-wait durable
+anchor. Clean verdicts, terminal jobs and expired missing-job waits select the
+hammer with `ci-red-clean-verdict`. Wait reports use `active-remediation-job`
+only for a live current-head job; otherwise they use `remediation-job-missing`.
+The hammer still re-proves findings remediation, exact-head review, green checks
+and lease ownership before merge. After normal deployment, observe the next
+naturally clean-reviewed red-CI head selecting hammer; offline fixtures alone
+do not establish production recovery. Existing smoke promises are unchanged.
+
 LAC-2101 adds evidence within the shared primary-change gate: literal secondary
 finding locations, boundary-preserving generated-block proof, and an optional
 owner-registered exact-head fixed npm-pack receipt for legacy author heads.

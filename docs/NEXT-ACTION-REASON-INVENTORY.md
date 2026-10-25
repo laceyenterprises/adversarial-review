@@ -66,7 +66,7 @@ the ownership reconciliation (`R04`). Unknown evidence is never treated as absen
 | R06 | merge receipt for this head while the PR is observed open | daemon-merge\|hammer / closure-recovery / `merge-receipt-unconfirmed` | recovery 5 min |
 | R07 | deterministic automatic stop fingerprint; automation-applied hold label; retry cap exhausted on this head; lifetime cap; hammer's final no-merge on this head | hammer / closure-recovery / `automated-stop`, `retry-exhausted`, `lifetime-exhausted`, `hammer-final-no-merge` | recovery 5 min |
 | R08 | terminal no-merge (including exit zero) with retry remaining | hammer / hammer / `retry-no-merge` (attempt + 1) | admission 5 min |
-| R09 | failed CI (any non-success terminal state) or runner-less failure | remediate / remediator / `ci-red` (round); hammer / hammer / `ci-red-final`, `ci-runnerless`; refresh `rounds-unknown` | admission |
+| R09 | failed CI (any non-success terminal state) or runner-less failure | remediate / remediator / `ci-red` (round with a live current-head job or posted findings awaiting job creation before admission expiry); hammer / hammer / `ci-red-clean-verdict` (clean verdict, terminal job or expired missing-job wait), `ci-red-final`, `ci-runnerless`; refresh `rounds-unknown` | admission |
 | R10 | mergeable CONFLICTING or mergeStateStatus DIRTY | hammer / hammer / `conflict-rebase` | admission |
 | R11 | checks pending (an empty rollup fails closed as pending) or mergeability UNKNOWN | wait-for-CI / ci / `checks-pending`, `mergeability-unknown` | observer (pending-gate bound), anchored at the latest check transition |
 | R12 | proven suppressed final-round push at this head | hammer / hammer / `suppressed-final-push` | admission |

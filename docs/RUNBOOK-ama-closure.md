@@ -483,6 +483,18 @@ change or new check is required.
 
 ## Shared next action shadow (NXA-02)
 
+CIREDOWNER-01: red CI with remediation rounds left belongs to the remediator
+only while a pending/in-progress job exists for the current head, or a posted
+current-head review has findings awaiting job creation. That admission wait
+expires at the existing five-minute deadline, using the closure-wait durable
+anchor. Clean verdicts, terminal jobs and expired missing-job waits select the
+hammer with `ci-red-clean-verdict`. Wait reports use `active-remediation-job`
+only for a live current-head job; otherwise they use `remediation-job-missing`.
+The hammer still re-proves findings remediation, exact-head review, green checks
+and lease ownership before merge. After normal deployment, observe the next
+naturally clean-reviewed red-CI head selecting hammer; offline fixtures alone
+do not establish production recovery. Existing smoke promises are unchanged.
+
 `nextAction(snapshot)` (`src/pr-next-action.mjs`) is the single successor
 policy for "who acts next on this open PR". It is pure and total. It reads one
 NXA-01 pass snapshot and returns one `{action, actor, reason, deadline, head,

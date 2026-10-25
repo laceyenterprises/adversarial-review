@@ -154,7 +154,10 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
     reviews: input.reviewState ? { ...pick(input.reviewState, REVIEW_KEYS), verdict: input.reviewState.verdict ?? null } : undefined,
     remediation: { roundsLeft: typeof input.roundsLeft === 'boolean' ? input.roundsLeft : null,
       ...(input.finalPush ? { finalPush: input.finalPush } : {}),
-      ...(input.followUpJob ? { job: pick(input.followUpJob, ['status', 'clean', 'headSha']) } : {}) },
+      ...(input.followUpJob !== undefined ? { job: input.followUpJob ? {
+        ...pick(input.followUpJob, ['status', 'clean', 'headSha']),
+        headSha: input.followUpJob.headSha || input.followUpJob.revisionRef || null,
+      } : null } : {}) },
     leases: input.lease === undefined ? undefined : { closer: lease },
     // A readable receipt proves a launch reference even when its lease is gone.
     // Until the ledger resolves it, descendant liveness is explicitly unknown.

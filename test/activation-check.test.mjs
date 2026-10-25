@@ -101,6 +101,7 @@ test('helpers import with a nonexistent synthetic argv path without executing th
 test('HAMTOKEN-05 whitespace-rejecting parser fails on exactly the same export fixture', async t => {
   const env = fixture(t, exportsOutput());
   const source = readFileSync(new URL('../src/hammer-token.mjs', import.meta.url), 'utf8')
+    .replace("'./ama/hammer-terminal-audit.mjs'", JSON.stringify(new URL('../src/ama/hammer-terminal-audit.mjs', import.meta.url).href))
     .replace("'./load-aware-timeout.mjs'", JSON.stringify(new URL('../src/load-aware-timeout.mjs', import.meta.url).href))
     .replace('const text = output.trim();', 'const text = output.trim(); if (/\\s/.test(text)) return null;');
   const legacy = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);

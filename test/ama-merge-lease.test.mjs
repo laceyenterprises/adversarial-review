@@ -1794,3 +1794,29 @@ test('an explicitly parked head refuses behind a live holder without charging or
   assert.equal(refused.reason, 'repeated-no-merge-release');
   assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
 });
+
+test('LVR-02 incident waiters lead FIFO across roles, preserving reservations and holders', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const held = acquire(rootDir);
+  const at = seconds => new Date(Date.parse('2026-06-20T18:00:00Z') + seconds * 1000).toISOString();
+  const queue = (id, seconds, extra = {}) => acquire(rootDir, {
+    holderPr: 100 + seconds, holderHead: 'b'.repeat(40), registerWaiter: true,
+    waiterId: id, now: at(seconds), pidAliveFn: () => true, ...extra,
+  });
+  queue('ordinary-first', 1);
+  queue('ordinary-second', 2);
+  queue('incident-first', 3, { prBody: '<!-- deploy-incident:v1 id=incident-1 -->' });
+  queue('incident-second', 4, { prBody: '<!-- deploy-incident:v1 id=incident-2 -->' });
+  queue('daemon-first', 5, { waiterPriority: 'daemon' });
+  queue('daemon-incident', 6, { waiterPriority: 'daemon', prBody: '<!-- deploy-incident:v1 id=incident-3 -->' });
+  assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).lease.leaseId, held.lease.leaseId);
+  const ids = () => readMergeLeaseWaiters(rootDir, IDENTITY).map(w => w.waiterId);
+  assert.deepEqual(ids(), ['incident-first', 'incident-second', 'daemon-incident', 'ordinary-first', 'ordinary-second', 'daemon-first']);
+  // Renewal retains arrival and marker when no new body snapshot is supplied.
+  queue('incident-first', 7);
+  assert.deepEqual(ids(), ['incident-first', 'incident-second', 'daemon-incident', 'ordinary-first', 'ordinary-second', 'daemon-first']);
+  releaseMergeLease({ rootDir, ...held.lease, now: at(8) });
+  assert.equal(queue('daemon-incident', 9, { waiterPriority: 'daemon' }).acquired, false);
+  assert.equal(queue('incident-first', 10).acquired, true);
+});

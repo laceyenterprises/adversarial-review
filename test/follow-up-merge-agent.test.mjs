@@ -2944,10 +2944,11 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   assert.equal(listMergeAgentDispatches(rootDir).length, 1);
   assert.equal(listMergeAgentDispatches(rootDir)[0].priority, 'normal');
   assert.equal(hqCalls[0].cmd, 'hq');
-  assert.deepEqual(hqCalls[0].args.slice(0, 17), [
+  assert.deepEqual(hqCalls[0].args.slice(0, 19), [
     'dispatch',
     '--worker-class', 'merge-agent',
     '--task-kind', 'merge',
+    '--required-outcome', 'terminal-audit',
     '--priority', 'normal',
     '--repo', 'agent-os',
     '--pr', '401',
@@ -4827,7 +4828,9 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes("MERGE_REPO='laceyenterprises/agent-os'"));
   assert.ok(prompt.includes("MERGE_BASE='main'"));
   assert.ok(prompt.includes("MERGE_PR='401'"));
-  assert.ok(prompt.includes('MERGE_HEAD_REF=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName --jq \'.headRefName\')'));
+  assert.ok(prompt.includes('gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"'));
+  assert.ok(prompt.includes('MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")'));
+  assert.ok(prompt.includes('--pr-state-file "$MERGE_PR_STATE_JSON"'));
   assert.ok(prompt.includes('POST_REMEDIATION_SHA=$(git rev-parse HEAD)'));
   assert.ok(prompt.includes('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"'));
   assert.ok(prompt.includes('MERGE_REVALIDATION_JSON=$(mktemp)'));

@@ -125,7 +125,8 @@ function runInitOrAppend(subcommand, argv) {
     }
   }
   const attemptBase = loadAttemptJson(values['attempt-json']);
-  const attempt = { ...attemptBase, outcome: values.outcome };
+  const attempt = { ...attemptBase, outcome: values.outcome,
+    ...(process.env.HQ_LAUNCH_REQUEST_ID ? { launchRequestId: process.env.HQ_LAUNCH_REQUEST_ID } : {}) };
   const metadata = Object.fromEntries([
     ['closureAuthority', values['closure-authority']],
     ['reviewer', values.reviewer],

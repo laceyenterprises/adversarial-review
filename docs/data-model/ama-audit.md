@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `bin/hammer-publish.sh`, `bin/hammer-pending-attestation.mjs`, `src/ama/hammer-pending-attestation.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `bin/hammer-verify-head.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
+**Runtime surface:** `bin/ama-audit.mjs`, `bin/hammer-terminal-audit.mjs`, `src/ama/hammer-terminal-audit.mjs`, `bin/hammer-publish.sh`, `bin/hammer-pending-attestation.mjs`, `src/ama/hammer-pending-attestation.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `bin/hammer-verify-head.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
 
 ## Purpose
 
@@ -240,3 +240,25 @@ merge-queue-v2` metadata on a newly created record and attempt fields
 `rebasedOntoBase`, `mergeMethod`, `mergeCommitSha`, `mergedAt`, `mergedBy`,
 `receiptDigest` and `queueEntryId`. Attempts without a delivery key keep their
 existing append semantics.
+
+## Launch outcome evidence (LVR-02)
+
+`attempts[].launchRequestId` is the producing `HQ_LAUNCH_REQUEST_ID` when
+available. The CLI overwrites any stale identity from an attempt input file.
+LVR-01 checks this attempt-local identity and outcome, rather than inheriting a
+sticky document status from another launch. Manual callers without a launch
+identity retain the existing audit format.
+
+Credential refresh failures that prevent a call, missing starting PR state,
+manual pre-call refusals and rendered phase failures append
+`failed-without-merge` before returning. Early audits use the dispatch target
+head until a valid current head is known, a fixed reason code and
+`attemptPhase: hammer-early-exit`. They require neither GitHub nor a merge
+lease. Repeated wrappers preserve this launch's existing terminal reason.
+Without `HQ_LAUNCH_REQUEST_ID`, repeated `hammer-early-exit` reports preserve
+the first unkeyed terminal attempt for this repo/PR/head. Keyed launches remain
+independent of manual reports and other launches.
+Optional proactive refresh failure with a usable held credential creates no
+terminal failure. Raw transport output and credentials never enter these
+records. An unavailable audit is reported as an error; sticky succeeded
+protection still applies.

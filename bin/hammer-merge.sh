@@ -11,6 +11,7 @@ HAM_CLOSING_KEYWORD_REWRITES='[]'
 HAM_OWN_MERGE_EXECUTED=0
 HAM_MERGE_EXIT=1
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
+  HAM_PHASE_OUTCOME=merge-lease-not-held
   echo "AMG-04 hard-blocker: no hammer merge without holding the merge lease" >&2
   return 1
 fi

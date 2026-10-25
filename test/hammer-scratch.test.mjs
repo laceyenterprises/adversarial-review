@@ -384,7 +384,7 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const prompt = readFileSync(result.promptPath, 'utf8');
   assert.doesNotMatch(prompt, /hammer-procedure\.mjs|--render|\/tmp\/ham-/);
   assert.doesNotMatch(prompt, /(?:^|[\s`'"])bin\/(?:hammer-|run-bounded)/m);
-  assert.match(prompt, /Fresh shells reset exports, variables, functions and cwd/);
+  assert.match(prompt, /Fresh shells reset state and cwd/);
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     const path = join(record.scratchDir, `${phase}.sh`);
     assert.ok(prompt.includes(`source "${path}"`), phase);
@@ -401,11 +401,10 @@ test('HAMTMP-02: copied renderer refuses outside the real dispatch root; deploye
   const foreign = join(root, 'foreign');
   mkdirSync(foreign);
   cpSync(realpathSync(join(repoRoot, 'bin')), join(foreign, 'bin'), { recursive: true });
-  // Reusable implementation, if present, is part of the synthetic foreign checkout.
-  if (existsSync(join(repoRoot, 'src/hammer-procedure.mjs'))) {
-    mkdirSync(join(foreign, 'src'));
-    cpSync(join(repoRoot, 'src/hammer-procedure.mjs'), join(foreign, 'src/hammer-procedure.mjs'));
-  }
+  // Include the renderer's dependencies so refusal exercises the root guard,
+  // rather than failing module resolution before the guard can run.
+  cpSync(realpathSync(join(repoRoot, 'src')), join(foreign, 'src'), { recursive: true });
+  symlinkSync(realpathSync(join(repoRoot, 'node_modules')), join(foreign, 'node_modules'), 'dir');
   const env = Object.fromEntries([...readFileSync(join(repoRoot, 'bin/hammer-verify-head.sh'), 'utf8')
     .matchAll(/<<([A-Z_]+)>>/g)].map(m => [`HAM_${m[1]}`, 'synthetic']));
   Object.assign(env, { HAM_ROOT_DIR: resolve(realpathSync(join(repoRoot, 'bin/hammer-procedure.mjs')), '..', '..'), HAM_RUN_DIR: root });

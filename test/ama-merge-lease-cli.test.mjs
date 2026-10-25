@@ -1476,3 +1476,37 @@ for (const releaseEventName of [null, 'merge-leases', 'holder-buffer']) {
     assert.equal(closed, true);
   });
 }
+
+test('LVR-02 merge lease CLI carries the incident body snapshot into waiter registration', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const snapshot = join(rootDir, 'pr-state.json');
+  const body = '<!-- deploy-incident:v1 id=incident-1 -->';
+  writeFileSync(snapshot, JSON.stringify({ body }));
+  let observed;
+  const { code } = await runCli(rootDir, [
+    'acquire', '--repo', REPO, '--base', BASE, '--pr', '42', '--head', 'a'.repeat(40),
+    '--owner-pid', '8123', '--wait', '0', '--pr-state-file', snapshot,
+  ], { acquireMergeLease: args => { observed = args; return acquireMergeLease(args); } });
+  assert.equal(code, 0);
+  assert.equal(observed.prBody, body);
+  assert.equal(observed.registerWaiter, true);
+});
+
+for (const content of [undefined, '', '{"body":', 'not JSON', 'null']) {
+  test(`LVR-02 merge lease CLI tolerates unavailable snapshot (${String(content)})`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const snapshot = join(rootDir, 'pr-state.json');
+    if (content !== undefined) writeFileSync(snapshot, content);
+    let observed;
+    const { code, io } = await runCli(rootDir, [
+      'acquire', '--repo', REPO, '--base', BASE, '--pr', '42', '--head', 'a'.repeat(40),
+      '--owner-pid', '8123', '--wait', '0', '--pr-state-file', snapshot,
+    ], { acquireMergeLease: args => { observed = args; return acquireMergeLease(args); } });
+    assert.equal(code, 0, io.stderrText);
+    assert.equal(observed.prBody, undefined);
+    assert.equal(jsonOutput(io).acquired, true);
+    assert.match(io.stderrText, /warning: PR state snapshot unavailable/);
+  });
+}

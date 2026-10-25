@@ -8,6 +8,30 @@ export function renderHammerProcedure(phase, values) {
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
   let source = readFileSync(path, 'utf8');
+  // Run unconditionally: placing a shell function in `if` disables errexit in
+  // every nested function. Record handled refusals after return, and fatal
+  // errexit failures through ERR without replacing the lease's EXIT trap.
+  source = source.replace(/^(#![^\n]*\n)?/, `$1export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
+export HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
+ham_record_phase_failure() {
+  "\${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-terminal-audit.mjs "\${HAM_PHASE_OUTCOME:-${phase}-failed}" "\${POST_REMEDIATION_SHA:-<<TARGET_REMEDIATION_SHA>>}" || echo 'HAM terminal failure audit unavailable' >&2
+}
+ham_run_rendered_phase() {
+`) + `
+}
+ham_phase_previous_err_trap=$(trap -p ERR)
+ham_phase_previous_errtrace=0
+[[ $- == *E* ]] && ham_phase_previous_errtrace=1
+set -E
+trap 'ham_phase_error=$?; if [[ $- == *e* ]]; then ham_record_phase_failure; fi' ERR
+ham_run_rendered_phase "$@"
+ham_phase_exit=$?
+trap - ERR
+eval "$ham_phase_previous_err_trap"
+if [ "$ham_phase_previous_errtrace" -eq 0 ]; then set +E; fi
+if [ "$ham_phase_exit" -ne 0 ]; then ham_record_phase_failure; fi
+return "$ham_phase_exit"
+`;
   // These defaults belong to the versioned procedure, never the renderer's
   // caller environment. Embed each floor at the assignment's original site.
   source = source.replace(
@@ -40,6 +64,7 @@ ham_procedure_floor() {
   source = shebang
     ? `${shebang}${procedureFloor}${source.slice(shebang.length)}`
     : `${procedureFloor}${source}`;
+  values = { ...values, TARGET_REMEDIATION_SHA: values.TARGET_REMEDIATION_SHA || values.REVIEWED_SHA };
   const missing = new Set();
   source = source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
     const value = values[key];

@@ -8243,6 +8243,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(dispatchRequest.body.worker_class, result.job.remediationWorker.model);
       assert.equal(dispatchRequest.body.task_kind, 'coding');
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+      assert.equal(dispatchRequest.body.required_outcome, 'push');
       assert.equal(dispatchRequest.body.repo, 'clio');
       assert.equal(dispatchRequest.body.pr_number, 71);
       assert.equal(dispatchRequest.body.prompt, path.join(rootDir, result.job.remediationWorker.promptPath));
@@ -8627,6 +8628,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
       assert.equal(dispatchRequest.body.worker_class, 'gemini');
       assert.equal(dispatchRequest.body.request_id, result.job.jobId);
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+      assert.equal(dispatchRequest.body.required_outcome, 'push');
       assert.equal(dispatchRequest.body.hq_root, hqRoot);
       // The prompt carries the gemini provenance trailer so the worker-pool
       // worker stamps gemini-remediation, not codex-remediation.
@@ -9638,6 +9640,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       assert.ok(dispatchRequest, 'expected app-sdk dispatch request');
       assert.equal(dispatchRequest.body.request_id, result.job.jobId);
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+      assert.equal(dispatchRequest.body.required_outcome, 'push');
     }));
   });
 });
@@ -10265,6 +10268,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
       assert.ok(dispatchCommand, 'expected legacy native override to call hq dispatch');
       assert.ok(dispatchCommand.includes('--completion-shape'));
       assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--required-outcome') + 1], 'push');
       assert.ok(dispatchCommand.includes('--repo'));
       assert.equal(dispatchCommand[dispatchCommand.indexOf('--repo') + 1], 'clio');
       assert.ok(dispatchCommand.includes('--branch'));

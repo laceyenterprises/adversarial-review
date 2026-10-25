@@ -71,6 +71,7 @@ function buildLegacyHqRemediationDispatchArgs({
     '--worker-class', workerClass,
     '--prompt', promptPath,
     '--completion-shape', 'branch-push',
+    '--required-outcome', 'push',
     '--parent-session', parentSession,
     '--project', project,
     '--task-kind', 'coding',

@@ -631,3 +631,18 @@ reason, head, anchored deadline, decision key and queue intent. Diagnostic reaso
 text is not an eligibility registry. Automatic stops and unreadable evidence
 retain recovery ownership; only explicit hold/draft/disabled intent selects the
 operator. Existing durable attempt, lease, request and terminal fences remain.
+
+## Truthful no-op observations (LVR-02)
+
+A terminal hammer with a confirmed open PR and no current-head terminal audit
+records `lastObservedStatus: failed`, `failure: no_work_done`, and a fixed
+`failureReason`. `outcome` and `lastError` retain
+`hammer-exited-without-close` for compatibility. A truthful no-merge audit also
+records failed, with `failure: failed-without-merge` and its outcome as the
+reason. Unreadable live state or audit evidence remains unconfirmed. Existing
+settle grace, auto-merge hold, bounded no-close retry refund and the final-hammer
+charge policy remain in force. A producer-reported `no_work_done` failure enters
+the same live-evidence/refund path; it does not obtain extra retries.
+
+Hammer and closer dispatch argv require `terminal-audit`; remediation argv
+requires `push`. An exit code alone cannot satisfy these launch contracts.

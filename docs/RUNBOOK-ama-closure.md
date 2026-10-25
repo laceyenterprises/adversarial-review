@@ -5569,3 +5569,45 @@ records a new organic worker's loaded revision, launch-bound registration,
 readiness, exact-head validation result and full-group drain/generation-fenced
 lease release. Existing `smv-handoff` smoke is unchanged. No restart, enrollment,
 live fault injection or production acceptance action is authorized by this fix.
+
+## Truthful launch outcomes and incident scheduling (LVR-02)
+
+Hammer and closer launches pass `hq dispatch --required-outcome terminal-audit`;
+remediators pass `--required-outcome push`. Normal terminal audit writes bind
+`HQ_LAUNCH_REQUEST_ID`. Before any read, the hammer exports the trusted dispatch
+identity from its prompt. Context/base-head failures, fatal credential refresh
+failures and rendered phase refusals write the existing local AMA audit with
+`failed-without-merge` and a fixed reason. For a manual refusal before the first
+GitHub call, run the deployed `bin/hammer-terminal-audit.mjs early-refusal` with
+that identity exported before exiting. Audit writes need no network or lease.
+Repeated manual reports without `HQ_LAUNCH_REQUEST_ID` retain the first unkeyed
+early-exit reason per repo/PR/head; distinct launch IDs retain separate attempts.
+Do not put credential values or raw command errors into a reason.
+
+An open PR without a terminal close audit is observed as failed with
+`failure: no_work_done`; the compatibility outcome remains
+`hammer-exited-without-close`. The existing bounded retry refund is unchanged.
+A confirmed no-merge audit records failure too. Unknown PR or audit evidence
+retains ownership for the existing bounded observation path. This changes no
+merge authority and never requests another review of a hammer head.
+
+A PR body carrying `<!-- deploy-incident:v1 id=incident-1 -->` supplies a
+scheduling hint. Review admission honors its existing timeout, aged-wait and
+wake protections, then serves incident PRs before ordinary lane work. Merge
+waiters retain reservation lifetimes, ready-time rules and holder exclusivity,
+then use incident-first FIFO across roles. Old unmarked records keep FIFO order.
+The hint grants no authorization.
+The lease CLI warns and continues without the hint when `--pr-state-file` is
+unreadable or malformed. Daemon admission uses the live body first, then the
+candidate's body, prBody or nested subject body when the live body is absent.
+
+After normal deployment, the operator observes plan assertion
+`lvr-02-review-required-outcome` once; it remains pending (75) until the deployed
+closer includes the required-outcome contract. No config flip, host restart or
+manual live dispatch is part of this change.
+
+LVR-02 deployment order: the companion App Contract endpoint must forward
+`required_outcome` before deploying the review-service SDK consumer. Both SDK
+and direct remediator transports then require push evidence. This uses the
+existing endpoint and worker-pool outcome judgement; no new dispatcher or store
+is introduced. Source changes authorize no service restart.

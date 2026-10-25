@@ -2545,6 +2545,28 @@ test('LEASEFAIR-01 production daemon wiring registers a stable priority reservat
   }
 });
 
+test('LVR-02 daemon lease receives incident markers from nested candidate subjects', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = realRollupHelpers({ rootDir, prNumber: 700, head: 'clean-head' });
+  const body = '<!-- deploy-incident:v1 id=incident-nested -->';
+  const optionsSeen = [];
+  const result = await runDaemonCleanMergeAttempt({
+    ...args,
+    candidate: { ...args.candidate, subject: { body } },
+    fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'clean-head', labels: [],
+      checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+    acquireMergeLeaseImpl: options => {
+      optionsSeen.push(options);
+      return { acquired: false, queuePosition: 2, existingLease: { holderPr: 99 } };
+    },
+    execFileImpl: () => assert.fail('no merge without the lease'),
+  });
+  assert.equal(result.reason, 'lease-contended');
+  assert.ok(optionsSeen.length > 0);
+  assert.ok(optionsSeen.every(options => options.prBody === body));
+});
+
 test('DCA-01: a check that goes RED between pre-lease and the in-loop re-fetch parks (never merges) with ci-not-green + surfaced reasons', async () => {
   const rootDir = tempRoot();
   let mergeCalls = 0;

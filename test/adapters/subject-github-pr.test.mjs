@@ -1273,3 +1273,11 @@ test('github-pr subject draft state survives REST and adapter snapshots', () => 
   }
   assert.equal(stateFromSnapshot(normalizePRSnapshot(fixture.repo, fixture.pulls[0])).isDraft, undefined);
 });
+
+test('LVR-02 subject state preserves the incident marker for review admission', () => {
+  const body = '<!-- deploy-incident:v1 id=incident-1 -->';
+  const snapshot = normalizePRSnapshot('owner/repo', { number: 42, title: '[codex] Synthetic repair',
+    state: 'open', head: { sha: 'a'.repeat(40) }, body });
+  assert.equal(stateFromSnapshot(snapshot).body, body);
+  assert.equal(stateFromSnapshot(normalizePRSnapshot('owner/repo', { number: 43 })).body, '');
+});

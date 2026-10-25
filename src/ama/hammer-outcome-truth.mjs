@@ -56,14 +56,14 @@ export function hasHamNoMergeAuditCommentForHead(comments, { marker, headSha } =
 }
 
 /**
- * Classify a hammer whose LRQ ended `succeeded`.
+ * Classify a terminal hammer, including a producer-reported no_work_done failure.
  *
  * @param {object} args
  * @param {string|null} args.livePrState  `gh pr view` state; null when the probe failed.
  * @param {boolean|null} args.noMergeAuditForCurrentHead  null when the PR's
  *   comments could not be read: an honest no-merge report cannot be ruled out.
  * @param {boolean=} args.concurrentWriter  The LRQ reported a lost push race.
- * @returns {{ closed: boolean, outcome: string }}
+ * @returns {{ closed: boolean, outcome: string, failure?: string, reason?: string }}
  */
 export function classifySucceededHammerOutcome({
   livePrState,
@@ -77,7 +77,8 @@ export function classifySucceededHammerOutcome({
   if (concurrentWriter) return { closed: false, outcome: 'no-merge:concurrent-writer' };
   if (noMergeAuditForCurrentHead === null) return { closed: false, outcome: HAMMER_OUTCOME_UNCONFIRMED };
   if (noMergeAuditForCurrentHead) return { closed: true, outcome: 'failed-without-merge' };
-  return { closed: false, outcome: HAMMER_EXITED_WITHOUT_CLOSE };
+  return { closed: false, outcome: HAMMER_EXITED_WITHOUT_CLOSE, failure: 'no_work_done',
+    reason: 'hammer exited with an open PR and no terminal audit for the current head' };
 }
 
 function parseTimeMs(value) {

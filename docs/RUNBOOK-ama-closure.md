@@ -492,7 +492,9 @@ the latest review cannot suppress that review's job-creation wait. That wait
 expires at the existing five-minute deadline, using the closure-wait durable
 anchor. NXA-04 also preserves admission for a completed non-final round at its
 pushed head with a review of the prior head: watcher CI admission requeues red
-CI for the remaining round. Otherwise clean verdicts, terminal jobs and expired
+CI for the remaining round. An active non-final job without a proven publish
+retains its existing failed-CI retry owner even when its review head is missing.
+Otherwise clean verdicts, terminal jobs and expired
 missing-job waits select the hammer with `ci-red-clean-verdict`. Wait reports
 use `active-remediation-job` only for a live PR job; otherwise they use
 `remediation-job-missing`.

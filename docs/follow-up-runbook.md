@@ -10,6 +10,10 @@ that pushed head with a prior-head review retains this admission intent while
 rounds remain. Final pushed heads keep their existing hammer handoff and
 re-review suppression.
 
+When publication is unproven and CI has failed, an active non-final job retains
+its existing retry ownership, including legacy jobs without a review head.
+Reconciliation requeues that job instead of completing its owner prematurely.
+
 Before claiming a remediation job, the daemon checks for a live AMA closer
 lease for the same PR at any head, including a rekeyed hammer head. An active
 closer dispatch record continues to defer claims after the lease's 30-minute

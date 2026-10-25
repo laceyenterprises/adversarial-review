@@ -62,7 +62,7 @@ export function checkMap(map, readSource, graphHash) {
 export function diagrams(map) {
   return map.objects.map(object => {
     const alias = new Map(object.states.map((s, i) => [s.name, `s${i}`])); alias.set('[*]', '[*]');
-    return `\n### ${object.id}\n\n\`\`\`mermaid\nstateDiagram-v2\n`
+    return `\n### ${object.id}\n\n${object.description ? `${object.description}\n\n` : ""}\`\`\`mermaid\nstateDiagram-v2\n`
       + object.states.map(s => `    state "${s.name}" as ${alias.get(s.name)}`).join('\n') + '\n'
       + object.transitions.map(e => `    ${alias.get(e.from)} --> ${alias.get(e.to)}: ${e.id} ${e.trigger}`).join('\n') + '\n'
       + object.states.filter(s => s.terminal).map(s => `    ${alias.get(s.name)} --> [*]`).join('\n') + '\n```\n';

@@ -878,7 +878,9 @@ The 2026-10-24 LAC-2093 recurrence adds a private controller registration lifecy
 only after durable registration of the exact launch/shell generation. Dispatched
 HAM acquisition requires that registration. Validators stay in the shell group;
 timeout requests stop over a private inherited pipe. Signals or terminal,
-parked, unreadable or mismatched exact-launch evidence stop the round. The
+parked or mismatched exact-launch evidence stop the round; failed launch reads
+stop it only after a bounded grace window with no permitted read, and lease
+acquisition and merge proceed only on a fresh permitted read (HAMCTLPOLL-01). The
 controller never adopts a live retry to justify an old process. Cancellation
 defers the shell release trap until group drain; fallback release retains the
 existing lease ID/PR/head/acquisition-time fence plus local host/PID ownership.

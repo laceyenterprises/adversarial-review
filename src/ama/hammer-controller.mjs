@@ -6,11 +6,27 @@ import { join } from 'node:path';
 import { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
 import { nativeControllerIdentity } from '../controller-process-census.mjs';
+
+// A slow or failed ledger read is not a cancellation. Only a readable terminal,
+// parked or foreign row stops a round at once; reads that fail stop it only
+// after the grace window passes with no permitted read. The cadence is fixed;
+// only each read's timeout scales with host load.
+export const LAUNCH_POLL_MS = 10_000;
+export const LAUNCH_UNREADABLE_GRACE_MS = 120_000;
+// Reads a start, lease or merge step takes before it refuses on unreadable.
+export const LAUNCH_READ_ATTEMPTS = 3;
+// Lease and merge steps wait this long for the controller's fresh-read answer.
+export const LAUNCH_GATE_WAIT_MS = 60_000;
+// The session-ledger adapter's nominal psql timeout, scaled once per read.
+const LAUNCH_READ_NOMINAL_MS = 30_000;
+
+export function launchReadTimeoutMs() { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS); }
 
 // Registration belongs to this invocation, never the shared PR or LRQ name.
 export function controllerLaunchId(env) {
@@ -40,25 +56,35 @@ export function assertHammerController(env = process.env, { readGroupImpl = curr
   return record;
 }
 
-export function confirmControllerValidation() {
-  // The controller probes from outside the test group. Do not accept a test
-  // while background descendants remain, even if they closed both output pipes.
+function controllerHandshake(request, timeoutMs) {
   return new Promise(resolve => {
     let pipe;
     try { pipe = new Socket({ fd: 4, readable: true, writable: true }); }
     catch { resolve(false); return; }
     let done = false, received = '';
     const finish = ok => { if (done) return; done = true; pipe.destroy(); resolve(ok); };
-    // Allow one poll, bounded HQ read and bounded process census to complete.
-    pipe.setTimeout(10_000, () => finish(false));
+    pipe.setTimeout(timeoutMs, () => finish(false));
     pipe.on('error', () => finish(false));
     pipe.on('close', () => finish(false));
     pipe.on('data', chunk => {
       received += chunk;
       if (received.includes('\n')) finish(received === 'clear\n');
     });
-    pipe.write(`complete:${process.pid}\n`);
+    pipe.write(request);
   });
+}
+
+export function confirmControllerValidation() {
+  // The controller probes from outside the test group. Do not accept a test
+  // while background descendants remain, even if they closed both output pipes.
+  // Allow one poll and bounded process census to complete.
+  return controllerHandshake(`complete:${process.pid}\n`, 10_000);
+}
+
+// Lease acquisition and merge proceed only on a fresh permitted launch read.
+// The controller answers within its gate wait; the slack covers one census pass.
+export function confirmControllerLaunch() {
+  return controllerHandshake(`launch:${process.pid}\n`, LAUNCH_GATE_WAIT_MS + 10_000);
 }
 
 // No environment/command census: retain only identities in our owned group.
@@ -122,8 +148,11 @@ export function releaseControllerLease({ env, shellPid, startedAt, drained,
 
 export async function runHammerController(script, args = [], {
   env = process.env, pollMs = 1000, graceMs = 2000, drainMs = 1000,
-  timeoutMs = 7_200_000,
+  timeoutMs = 7_200_000, launchPollMs = LAUNCH_POLL_MS,
+  unreadableGraceMs = LAUNCH_UNREADABLE_GRACE_MS, gateWaitMs = LAUNCH_GATE_WAIT_MS,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
+  readTimeoutImpl = launchReadTimeoutMs,
+  nowImpl = () => performance.now(), delayImpl = delay,
   snapshotImpl = controllerGroupSnapshot,
   releaseImpl = releaseControllerLease,
   spawnImpl = spawn,
@@ -134,14 +163,44 @@ export async function runHammerController(script, args = [], {
   if (!env.HAM_RUN_DIR || !env.HAM_ROOT_DIR || !env.HAM_REPO || !/^[1-9]\d*$/.test(env.HAM_PR_NUMBER || '')) {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
-  const readLaunch = () => readLaunchImpl({ launchRequestId, env, rootDir: env.HAM_ROOT_DIR,
-    hqRoot: env.HAM_HQ_ROOT, timeoutMs: 2000, signal: AbortSignal.timeout(2000) });
-  function permitted(probe) {
-    const meaning = launchRequestMeaning(probe?.row);
-    return probe?.ok === true && probe.row?.launch_request_id === launchRequestId
-      && meaning.status && !meaning.terminal && !meaning.parked;
+  // Reads abandoned at exit must not hold the process open until they time out.
+  const closing = new AbortController();
+  const launchReads = { failures: 0, firstFailureAt: null, lastError: null };
+  let lastPermitted, latestReadTimeoutMs;
+  // Returns permitted, ended (a readable row that forbids continuing) or unreadable.
+  async function readLaunch() {
+    const startedRead = nowImpl(), readTimeoutMs = readTimeoutImpl();
+    latestReadTimeoutMs = readTimeoutMs;
+    let outcome, error;
+    try {
+      const probe = await readLaunchImpl({ launchRequestId, env, rootDir: env.HAM_ROOT_DIR,
+        hqRoot: env.HAM_HQ_ROOT, timeoutMs: readTimeoutMs,
+        signal: AbortSignal.any([AbortSignal.timeout(readTimeoutMs), closing.signal]) });
+      const meaning = launchRequestMeaning(probe?.row);
+      if (probe?.ok !== true) { outcome = 'unreadable'; error = probe?.reason || probe?.code || 'not-ok'; }
+      else outcome = probe.row?.launch_request_id === launchRequestId
+        && meaning.status && !meaning.terminal && !meaning.parked ? 'permitted' : 'ended';
+    } catch (thrown) { outcome = 'unreadable'; error = thrown?.code || thrown?.name || 'unknown'; }
+    if (outcome === 'permitted') lastPermitted = { at: startedRead, readTimeoutMs };
+    if (outcome === 'unreadable') {
+      launchReads.failures += 1;
+      launchReads.firstFailureAt ??= new Date().toISOString();
+      launchReads.lastError = String(error).slice(0, 120);
+    }
+    return outcome;
   }
-  if (!permitted(await readLaunch())) throw new Error('HQ launch is terminal, parked or unreadable; refusing controller start');
+  const startBegun = nowImpl();
+  let startRead;
+  for (let attempt = 1; attempt <= LAUNCH_READ_ATTEMPTS; attempt += 1) {
+    startRead = await readLaunch();
+    if (startRead !== 'unreadable' || attempt === LAUNCH_READ_ATTEMPTS
+        || nowImpl() - startBegun >= unreadableGraceMs) break;
+    await delayImpl(1000 * attempt);
+  }
+  if (startRead !== 'permitted') {
+    closing.abort();
+    throw new Error('HQ launch is terminal, parked or unreadable; refusing controller start');
+  }
   const token = randomUUID();
   const recordPath = join(env.HAM_RUN_DIR, `controller-${token}.json`);
   const startedAt = new Date().toISOString();
@@ -164,10 +223,13 @@ export async function runHammerController(script, args = [], {
   child.on('exit', (code, signal) => { exited = true; status = code ?? (signal ? 128 + constants.signals[signal] : 127); });
   const record = { schemaVersion: 1, token, launchRequestId, controllerPid: process.pid,
     shellPid: child.pid, startedAt, state: 'running' };
-  const persist = () => writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  // A no-merge audit separates a transient read from a real cancellation.
+  const withReads = () => Object.assign(record, { launchReadFailures: launchReads.failures,
+    launchReadFirstFailureAt: launchReads.firstFailureAt, launchReadLastError: launchReads.lastError });
+  const persist = () => writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600 });
   const witnessed = new Map();
   let reason, stopAt, termSent = false, killSent = false, drained = false;
-  const stop = why => { if (!reason) { reason = why; stopAt = performance.now(); } };
+  const stop = why => { if (!reason) { reason = why; stopAt = nowImpl(); } };
   const handlers = ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGALRM'].map(signal => {
     const handler = () => stop(`signal:${signal}`);
     process.on(signal, handler);
@@ -175,7 +237,7 @@ export async function runHammerController(script, args = [], {
   });
   // A validator shares the controller group. Its timeout requests cancellation
   // of the entire round, including grandchildren that close their stdio.
-  let controlInput = '', pendingValidator;
+  let controlInput = '', pendingValidator, pendingGate;
   child.stdio[4].on('data', chunk => {
     controlInput += chunk;
     if (controlInput.length > 1024) { stop('invalid-validation-message'); return; }
@@ -183,14 +245,26 @@ export async function runHammerController(script, args = [], {
       const end = controlInput.indexOf('\n');
       const line = controlInput.slice(0, end); controlInput = controlInput.slice(end + 1);
       if (/^complete:[1-9]\d*$/.test(line)) pendingValidator = Number(line.slice(9));
+      else if (/^launch:[1-9]\d*$/.test(line)) pendingGate ??= { deadline: nowImpl() + gateWaitMs, reads: 0 };
       else stop('validation-stopped');
     }
   });
   child.stdio[4].on('error', () => stop('control-pipe-error'));
-  const begun = performance.now();
-  let nextRead = begun;
+  const begun = nowImpl();
+  let nextRead = lastPermitted.at + launchPollMs, reading;
+  // Never start a read while one is in flight. A readable row that forbids
+  // continuing stops at once; a failure is recorded and the round continues.
+  const beginRead = () => {
+    nextRead = nowImpl() + launchPollMs;
+    reading = readLaunch().then(outcome => {
+      reading = undefined;
+      if (outcome === 'ended') stop('launch-ended');
+    });
+  };
+  // Two full reads always fit, even when load stretches each read's timeout.
+  const unreadableAfter = () => Math.max(unreadableGraceMs, launchPollMs + 2 * latestReadTimeoutMs);
   try {
-    writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, overwrite: false });
+    writeFileAtomic(recordPath, `${JSON.stringify(withReads(), null, 2)}\n`, { mode: 0o600, overwrite: false });
     child.stdin.on('error', () => stop('bootstrap-failed'));
     // Check introspection before permitting any script/lease side effects.
     const initialMembers = snapshotImpl(child.pid);
@@ -198,13 +272,10 @@ export async function runHammerController(script, args = [], {
     for (const member of initialMembers) witnessed.set(member.pid, member.birth);
     child.stdin.end('ready\n');
     while (true) {
-      const now = performance.now();
+      const now = nowImpl();
       if (spawnError) { stop('spawn-failed'); drained = true; break; }
-      if (!reason && now >= nextRead) {
-        try { if (!permitted(await readLaunch())) stop('launch-ended-or-unreadable'); }
-        catch { stop('launch-unreadable'); }
-        nextRead = performance.now() + pollMs;
-      }
+      if (!reason && !reading && now >= nextRead) beginRead();
+      if (!reason && now - lastPermitted.at >= unreadableAfter()) stop('launch-unreadable');
       if (now - begun >= timeoutMs) stop('controller-timeout');
       if (exited) stop('shell-exited');
       let members;
@@ -226,10 +297,20 @@ export async function runHammerController(script, args = [], {
         child.stdio[4].write(clear ? 'clear\n' : 'blocked\n');
         pendingValidator = undefined;
       }
+      if (pendingGate) {
+        // Fresh: started no longer ago than one poll interval plus its timeout.
+        const fresh = nowImpl() - lastPermitted.at <= launchPollMs + lastPermitted.readTimeoutMs;
+        if (!reason && fresh) { child.stdio[4].write('clear\n'); pendingGate = undefined; }
+        else if (reason || nowImpl() >= pendingGate.deadline
+            || (!reading && pendingGate.reads >= LAUNCH_READ_ATTEMPTS)) {
+          // An unreadable launch blocks this step; only the grace window ends the round.
+          child.stdio[4].write('blocked\n'); pendingGate = undefined;
+        } else if (!reading) { pendingGate.reads += 1; beginRead(); }
+      }
       if (reason) {
         if (record.state !== 'stopping') { record.state = 'stopping'; persist(); }
         if (owned) {
-          const signal = performance.now() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
+          const signal = nowImpl() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
           if ((signal === 'SIGTERM' && !termSent) || (signal === 'SIGKILL' && !killSent)) {
             try {
               signalGroupImpl(-child.pid, signal);
@@ -240,13 +321,13 @@ export async function runHammerController(script, args = [], {
         if ((!members || (owned && record.signalError)) && !exited) {
           // An unreadable census cannot authorize a group signal. Stop only
           // our still-live direct child; retain unknown descendant/lease state.
-          const signal = performance.now() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
+          const signal = nowImpl() - stopAt < graceMs ? 'SIGTERM' : 'SIGKILL';
           const key = signal === 'SIGTERM' ? 'directTermSent' : 'directKillSent';
           if (!record[key]) record[key] = child.kill(signal);
         }
-        if (performance.now() - stopAt >= graceMs + drainMs) break;
+        if (nowImpl() - stopAt >= graceMs + drainMs) break;
       }
-      await delay(reason ? Math.min(pollMs, 100) : pollMs);
+      await delayImpl(reason ? Math.min(pollMs, 100) : pollMs);
     }
     record.state = drained ? 'quiescent' : 'cleanup-unconfirmed';
     record.reason = reason;
@@ -272,6 +353,7 @@ export async function runHammerController(script, args = [], {
     try { persist(); } catch { /* Keep the original registration if disk failed. */ }
     return 125;
   } finally {
+    closing.abort();
     for (const [signal, handler] of handlers) process.off(signal, handler);
     child.stdio[4].destroy();
     // On unknown drain retain the private receipt and canonical HQ markers.

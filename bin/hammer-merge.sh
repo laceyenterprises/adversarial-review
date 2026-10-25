@@ -1054,6 +1054,15 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 20
   fi
+  # A canceled or parked launch never merges. The controller clears this click
+  # only on a fresh permitted launch read, taking one first when its newest is stale.
+  if [ -n "${HQ_LAUNCH_REQUEST_ID:-${AGENT_OS_WORKER_LRQ_ID:-${LAUNCH_REQUEST_ID:-}}}" ] \
+    && ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch; then
+    ham_append_terminal_audit failed-without-merge launch-read-unconfirmed || true
+    ham_mark_merge_lease_retryable_abort launch-read-unconfirmed
+    ham_release_merge_lease
+    return 1
+  fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   ham_gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \

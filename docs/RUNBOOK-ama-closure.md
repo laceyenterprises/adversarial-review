@@ -4128,10 +4128,34 @@ LAC-2091 (agent-os#9186): the controller hands its inherited env and
 is Postgres, a SQLite-era `.hq/config.json` `ledgerDbPath` is ignored, as in
 Python `session_ledger.db_path.resolve_ledger_target`; it no longer refuses
 bootstrap as `legacy-hq-config` / `postgres-configured-but-sqlite-resolved`.
-An explicit `ledgerTarget`/`AGENT_OS_SESSION_LEDGER_TARGET` still wins.
+For generic adapter reads, an explicit
+`ledgerTarget`/`AGENT_OS_SESSION_LEDGER_TARGET` still wins.
 `--ledger-db`, `AGENT_OS_SESSION_LEDGER_DB_PATH` and `SESSION_LEDGER_DB_PATH`
 SQLite paths still fail closed under Postgres. A stale explicit target returns
 `missing-launch-request-row`; that is a correct refusal, not a routing defect.
+
+Inside a worker, when the configured `session_ledger.backend` is `postgres`,
+the controller's startup, poll and fresh-read gates pass an explicit Postgres
+`ledgerTarget` built by `controllerLedgerTarget(env)` from non-empty
+`AGENT_OS_SESSION_LEDGER_CANONICAL_DSN`. This controller-only target outranks
+`AGENT_OS_SESSION_LEDGER_TARGET`; the registration's `launchReadSource` names
+the latest read's resolved source without retaining its DSN or path (null when
+unavailable). With SQLite, the default backend, the canonical DSN is ignored
+and the existing SQLite resolution applies, including during rollback.
+The ordinary
+`AGENT_OS_SESSION_LEDGER_DSN` is the worker's disposable test ledger and must
+not supply live launch truth. Without the canonical DSN, resolution follows
+the existing adapter rules above. Generic implicit reads retain their existing
+precedence, including the test DSN; no global canonical override is applied.
+
+The canonical DSN must be fully qualified with runtime host, port, database
+and user, for example `postgresql://ledger-user@runtime.example:5432/ledger`;
+do not use an abbreviated DSN such as `postgresql:///ledger`. The `psql`
+child inherits the worker process's libpq `PG*` environment. Provision the DSN
+and worker environment together: remove disposable-ledger connection settings
+(including `PGHOSTADDR` and `PGSERVICE`) and supply runtime authentication and
+transport settings explicitly. A fully qualified DSN must not depend on test
+`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` or credentials to fill missing values.
 
 During cancellation the shell defers its trap release. Only after confirmed
 group drain may fallback cleanup release the exact acquisition receipt's local

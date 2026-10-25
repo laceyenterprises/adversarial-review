@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renam
 import { tmpdir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, groupStillOwned, releaseControllerLease, runHammerController,
+import { assertHammerController, controllerGroupSnapshot, controllerLaunchId, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS } from '../src/ama/hammer-controller.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -120,6 +120,31 @@ test('launch identity refuses missing, conflicting and non-LRQ owners', () => {
   for (const env of [{}, { HQ_LAUNCH_REQUEST_ID: 'wrong' },
     { HQ_LAUNCH_REQUEST_ID: 'lrq_one', AGENT_OS_WORKER_LRQ_ID: 'lrq_other' }]) {
     assert.throws(() => controllerLaunchId(env), /unambiguous/);
+  }
+});
+
+test('controller canonical target requires a non-empty DSN and the configured postgres backend', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ham-controller-config-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const config = join(dir, 'config.yaml');
+  writeFileSync(config, 'version: 1\nsession_ledger:\n  backend: postgres\n');
+  const env = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+    AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger' };
+  for (const canonical of [undefined, '', '   ']) {
+    assert.equal(controllerLedgerTarget({ ...env, AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical }), undefined);
+  }
+  for (const base of [env, { AGENT_OS_CONFIG_PATH: config },
+    { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on' }]) {
+    assert.deepEqual(controllerLedgerTarget({ ...base,
+      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: ' postgres://runtime.example/ledger ' }),
+    { backend: 'postgres', dsn: 'postgres://runtime.example/ledger', source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' });
+  }
+  for (const base of [{ AGENT_OS_CONFIG_PATH: '/dev/null' },
+    { ...env, AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+    { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off' },
+    { ...env, AGENT_OS_SESSION_LEDGER_BACKEND: 'invalid' }]) {
+    assert.equal(controllerLedgerTarget({ ...base,
+      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgres://runtime.example/ledger' }), undefined);
   }
 });
 
@@ -597,8 +622,10 @@ test('missing native execution capability refuses readiness before any lease or 
 
 // HAMCTLPOLL-01: a fake clock drives the controller loop; the fake shell
 // leaves only after the scenario says so, or on the controller's TERM.
-function simulate(t, { reads, onTick = () => {}, ...options }) {
+function simulate(t, { reads, onTick = () => {}, env = {}, ...options }) {
   const f = fixture(t, 'exit 0');
+  const simulatedEnv = { ...f.env, ...env };
+  for (const key of Object.keys(simulatedEnv)) if (simulatedEnv[key] === undefined) delete simulatedEnv[key];
   let clock = 0, exited = false;
   const answers = [], readCalls = [], signals = [];
   const control = new Duplex({ read() {}, write(chunk, _encoding, done) { answers.push(String(chunk)); done(); } });
@@ -612,9 +639,9 @@ function simulate(t, { reads, onTick = () => {}, ...options }) {
       exited = true; child.emit('exit', code, signal);
     } };
   const run = runHammerController('/fixture', [], {
-    env: f.env, timeoutMs: 3_600_000, readTimeoutImpl: () => 30_000, nowImpl: () => clock,
+    env: simulatedEnv, timeoutMs: 3_600_000, readTimeoutImpl: () => 30_000, nowImpl: () => clock,
     delayImpl: ms => { clock += ms; onTick(sim); return new Promise(resolve => setImmediate(resolve)); },
-    readLaunchImpl: async args => { readCalls.push({ ...args, at: clock }); return reads(readCalls.length, sim); },
+    readLaunchImpl: async args => { readCalls.push({ ...args, at: clock }); return reads(readCalls.length, sim, args); },
     spawnImpl: () => child,
     snapshotImpl: () => (exited ? [] : [{ pid: 4242, birth: 'fixture-birth' }]),
     signalGroupImpl(pid, signal) {
@@ -631,6 +658,52 @@ const unreadable = () => ({ ok: false, reason: 'fixture-read-timeout' });
 const gateToken = '11111111-1111-4111-8111-111111111111';
 const gateRequest = `launch:123:${gateToken}\n`;
 const gateReplies = sim => sim.answers.filter(answer => !answer.startsWith('wait:'));
+
+for (const [backend, canonical] of [
+  ['postgres', undefined], ['postgres', ''], ['postgres', 'postgres://runtime.example/ledger'],
+  ['sqlite', 'postgres://runtime.example/ledger'], [undefined, 'postgres://runtime.example/ledger'],
+]) {
+  test(`controller startup and polling respect backend=${backend} and canonical=${Boolean(canonical)}`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-controller-ledger-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const sqlite = join(dir, 'ledger.db');
+    const db = new Database(sqlite);
+    t.after(() => db.close());
+    db.exec(`CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT);
+      INSERT INTO launch_requests VALUES ('lrq_controller-test', 'running', NULL, NULL, NULL)`);
+    const useCanonical = backend === 'postgres' && Boolean(canonical);
+    const sim = simulate(t, {
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_BACKEND: backend,
+        AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: undefined,
+        AGENT_OS_SESSION_LEDGER_TARGET: backend === 'postgres' ? 'postgres://override.example/ledger' : undefined,
+        AGENT_OS_SESSION_LEDGER_DB_PATH: backend === 'postgres' ? undefined : sqlite,
+        SESSION_LEDGER_DB_PATH: undefined, AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger',
+        AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical },
+      reads: async (n, _sim, args) => {
+        if (n > 1) db.exec("UPDATE launch_requests SET status = 'canceled'");
+        return readLaunchRequestStatusFromLedgerAsync({ ...args, spawnAsyncImpl: async (_command, argv) => {
+          assert.equal(backend, 'postgres', 'SQLite routing must never spawn psql');
+          assert.ok(argv.includes(useCanonical ? canonical : 'postgres://override.example/ledger'));
+          return { status: 0, stderr: '', stdout: JSON.stringify(launch(n === 1 ? 'running' : 'canceled').row) };
+        } });
+      },
+    });
+    const { status, receipt } = await sim.done;
+    assert.equal(status, 143);
+    assert.equal(receipt.reason, 'launch-ended');
+    assert.ok(sim.readCalls.length >= 2);
+    for (const read of sim.readCalls) {
+      assert.deepEqual(read.ledgerTarget, useCanonical ? { backend: 'postgres', dsn: canonical,
+        source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' } : undefined);
+      assert.equal(read.env.AGENT_OS_SESSION_LEDGER_DSN, 'postgres://test.example/ledger');
+    }
+    assert.equal(receipt.launchReadSource, useCanonical ? 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN'
+      : backend === 'postgres' ? 'explicit-ledger-target' : 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
+    for (const secret of ['runtime.example', 'test.example', 'override.example', sqlite]) {
+      assert.ok(!JSON.stringify(receipt).includes(secret), 'registration must not retain connection details');
+    }
+  });
+}
 
 test('one failed launch read mid-run does not stop the round', async t => {
   const sim = simulate(t, { reads: n => (n === 3 ? unreadable() : launch('running')),

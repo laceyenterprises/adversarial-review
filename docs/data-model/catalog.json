@@ -7,6 +7,7 @@
       "path": "docs/data-model/hammer-controllers.md",
       "store": "<HAM_RUN_DIR>/controller-<uuid>.json",
       "schemaSurface": "src/ama/hammer-controller.mjs",
+      "launchReadSource": "Latest adapter target source or null when unavailable; older v1 receipts omit it. Canonical DSN overrides worker target/DSN only under configured Postgres. No DSN, credentials or path is stored.",
       "relatedSchemaSurfaces": ["src/controller-process-census.mjs", "src/controller_process_census.py", "bin/hammer-controller.mjs", "bin/hammer-verify-head.sh", "bin/hammer-merge.sh", "src/ama/bounded-command.mjs", "src/merge-agent-prompt.mjs"],
       "owner": "versioned closer controller"
     },

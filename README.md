@@ -3008,3 +3008,7 @@ metrics. Store/config failures are visible; absent organic evidence is pending.
 Existing smoke promises are unchanged; this observation does not add a check or
 promotion gate. See [the routing runbook](docs/RUNBOOK-ama-closure.md#per-lane-finalization-routing-mgq-08)
 for runtime-owner composition, registered service restart, transfer and rollback.
+
+The v2 subject merge executor also requires the shared lane port when the cached
+selector is empty. Missing lane composition refuses merge; an empty cached policy
+cannot bypass a durable queue owner. Other domain finalizers are unchanged.

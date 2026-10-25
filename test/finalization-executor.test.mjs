@@ -9,7 +9,13 @@ import Database from 'better-sqlite3';
 
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
 import { openFinalizationExecutorLeaseStore } from '../src/finalization/executor-lease-store.mjs';
-import { createFinalizationExecutor } from '../src/finalization/executor.mjs';
+import { createFinalizationExecutor as createExecutor } from '../src/finalization/executor.mjs';
+
+// Unit fixtures explicitly select legacy execution; runtime never infers that
+// authority from an omitted/cached selector or bypasses the lane port.
+const createFinalizationExecutor = options => createExecutor({
+  laneRouting: { run: ({ legacy }) => legacy() }, ...options,
+});
 import { fold } from '../src/finalization/ledger-fold.mjs';
 import { eligible } from '../src/finalization/eligibility.mjs';
 import {
@@ -337,15 +343,16 @@ test('lane admission never records a finalized subject or invokes the legacy mer
   db.close();
 });
 
-test('configured lane routes without a composed executor boundary cannot fall back to merging', async () => {
+test('an omitted/cached selector or selected queue cannot bypass the required v2 lane port', async () => {
   const { db, ledgerStore, leaseStore } = harness();
   makeEligible(ledgerStore);
   const merge = recordingMergeSurface();
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
-    policy: { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] } });
-  const result = await exec.tick(REF, { observedAt: t(10) });
-  assert.equal(result.reason, 'lane-routing-adapter-unavailable');
-  assert.equal(merge.calls.length, 0);
-  assert.equal(fold(ledgerStore.read(REF)).finalized, null);
+  for (const policy of [{}, { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] }]) {
+    const exec = createExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true, policy });
+    const result = await exec.tick(REF, { observedAt: t(10) });
+    assert.equal(result.reason, 'lane-routing-adapter-unavailable');
+    assert.equal(merge.calls.length, 0);
+    assert.equal(fold(ledgerStore.read(REF)).finalized, null);
+  }
   db.close();
 });

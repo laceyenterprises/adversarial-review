@@ -5715,3 +5715,7 @@ proof/check/decision/publication/merge evidence and pending delivery keys. Missi
 organic records remain null/pending. No synthetic entry or live page is created
 for activation evidence. The owner records real post-deploy observations; source
 validation alone does not establish deployment or canary success.
+
+The v2 subject merge executor also requires the shared lane port when the cached
+selector is empty. Missing lane composition refuses merge; an empty cached policy
+cannot bypass a durable queue owner. Other domain finalizers are unchanged.

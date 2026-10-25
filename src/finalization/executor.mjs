@@ -91,6 +91,7 @@ export function createFinalizationExecutor({
   remediationSurface = null,
   closeSurface = null,
   mergeMethod = 'squash',
+  // Required for merge execution, including legacy-default cached config.
   laneRouting = null,
   holder,
   leaseTtlMs = loadAwareTimeoutMs(DEFAULT_LEASE_TTL_MS, { maxMs: Infinity }),
@@ -164,8 +165,7 @@ export function createFinalizationExecutor({
             subjectKey, subjectExternalId: subjectKey.subjectExternalId, revisionRef: rev, mergeMethod,
           });
           if (laneRouting) result = await laneRouting.run({ subject: subjectKey, revisionRef: rev, legacy });
-          else if (policy?.laneRoutes?.length) result = { ok: false, reason: 'lane-routing-adapter-unavailable' };
-          else result = await legacy();
+          else result = { ok: false, reason: 'lane-routing-adapter-unavailable' };
         } catch (err) {
           return outcome(subjectKey, decision, {
             status: 'failed', action: 'merge', observedAt, reason: 'merge surface threw', detail: err?.message || String(err),

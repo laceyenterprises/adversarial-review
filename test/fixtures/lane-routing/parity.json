@@ -1,0 +1,273 @@
+[
+  {
+    "name": "omitted",
+    "valid": true
+  },
+  {
+    "name": "empty",
+    "routes": [],
+    "valid": true
+  },
+  {
+    "name": "selected",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "name": "repository-case",
+    "routes": [
+      {
+        "repository": "Example/Review",
+        "base": "main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "name": "other-base",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "Main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "name": "explicit-legacy",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "legacy"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "name": "null",
+    "routes": null,
+    "valid": false
+  },
+  {
+    "name": "mapping",
+    "routes": {},
+    "valid": false
+  },
+  {
+    "name": "scalar",
+    "routes": "queue-v2",
+    "valid": false
+  },
+  {
+    "name": "unknown",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "queue-v2",
+        "enabled": true
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "missing-base",
+    "routes": [
+      {
+        "repository": "example/review",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "missing-executor",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-executor",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "shadow"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "duplicate",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "queue-v2"
+      },
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "case-duplicate",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "main",
+        "executor": "queue-v2"
+      },
+      {
+        "repository": "Example/Review",
+        "base": "main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "repository-short",
+    "routes": [
+      {
+        "repository": "review",
+        "base": "main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "null-record",
+    "routes": [
+      null
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-refs/heads/main",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "refs/heads/main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-x..y",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "x..y",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-x//y",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "x//y",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-.main",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": ".main",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-x.lock",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "x.lock",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-bad ref",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "bad ref",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-@",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "@",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-x@{a}",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "x@{a}",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": "",
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "name": "bad-ref-True",
+    "routes": [
+      {
+        "repository": "example/review",
+        "base": true,
+        "executor": "queue-v2"
+      }
+    ],
+    "valid": false
+  }
+]

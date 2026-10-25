@@ -77,6 +77,8 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
         let at = queueTime(now());
         if (Date.parse(expiresAt) <= Date.parse(at)) throw new TypeError('owner expiry must be in the future');
         store.tx(() => store.ensureLane(lane));
+        const route = db.prepare('SELECT executor,transition_json FROM finalization_queue_route WHERE repository=? AND base=?').get(...args(lane));
+        if (!route || route.executor !== 'queue-v2' || route.transition_json !== null) return { ok: false, reason: 'queue-route-not-owned' };
         const prior = store.readOwner(lane);
         if (prior.route_generation !== routeGeneration) return { ok: false, reason: 'route-generation-mismatch' };
         if (prior.owner_state === 'active' && Date.parse(prior.expires_at) > Date.parse(at)) return { ok: false, reason: 'held' };

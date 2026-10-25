@@ -7,7 +7,7 @@ import { fork, execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import Database from 'better-sqlite3';
-import { openFinalizationQueueStore } from '../src/finalization/ledger-store.mjs';
+import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
 import { createQueueOwner } from '../src/finalization/executor-lease-store.mjs';
 import { foldQueue, reconcileQueuePublication } from '../src/finalization/ledger-fold.mjs';
 import { QUEUE_ACTIONABLE_PHASES, resolveLaneKey } from '../src/finalization/ledger-events.mjs';

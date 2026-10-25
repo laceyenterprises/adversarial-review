@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { openFinalizationQueueStore } from '../../src/finalization/ledger-store.mjs';
+import { openFinalizationQueueStore } from './queue-fixture-store.mjs';
 import { createQueueOwner } from '../../src/finalization/executor-lease-store.mjs';
 os.loadavg = () => [0, 0, 0];
 const data = JSON.parse(process.argv[2]);

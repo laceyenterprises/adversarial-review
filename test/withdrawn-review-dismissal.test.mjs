@@ -97,7 +97,7 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
     const f = await fixture(t);
     const dir = f.rootDir, bin = join(dir, 'fixture-bin'); mkdirSync(bin);
     // The CI harness preserves symlinks; bin imports resolve through this fixture.
-    for (const entry of ['bin', 'src', 'node_modules']) symlinkSync(join(root, entry), join(dir, entry));
+    for (const entry of ['bin', 'src', 'node_modules', 'domains', 'migrations', 'config.yaml', 'package.json', 'package-lock.json']) symlinkSync(join(root, entry), join(dir, entry));
     const stateFile = join(dir, 'github.json');
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
     writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, events: [] }));
@@ -131,6 +131,7 @@ if (result) console.log(JSON.stringify(result));
     const nodeStub = join(bin, 'fixture-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
+  */bin/legacy-lane-write.mjs) shift 8; exec "$@" ;;
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
   */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module) cat >/dev/null; echo '{"ok":true,"state":"OPEN","headMatches":true,"checksConclusion":"SUCCESS"}' ;;

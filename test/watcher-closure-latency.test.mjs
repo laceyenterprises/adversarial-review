@@ -554,6 +554,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   const admissionMigrationChecks = closure.database.migrationChecks['20261025_finalization_queue_admission.sql'];
   const checksMigrationChecks = closure.database.migrationChecks['20261026_finalization_queue_checks.sql'];
   const mergeMigrationChecks = closure.database.migrationChecks['20261027_finalization_queue_merge.sql'];
+  const routingMigrationChecks = closure.database.migrationChecks['20261029_finalization_queue_routing.sql'];
   const shadowMigrationChecks = closure.database.migrationChecks['20261028_finalization_queue_shadow.sql'];
   const simplicityMigrationChecks = closure.database.migrationChecks['20261024_simplicity_batch.sql'];
   const noteLifecycleMigrationChecks = closure.database.migrationChecks['20261024_simplicity_batch_lifecycle.sql'];
@@ -565,10 +566,11 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(checksMigrationChecks, 6);
   assert.equal(mergeMigrationChecks, 6);
   assert.equal(shadowMigrationChecks, 6);
+  assert.equal(routingMigrationChecks, 6);
   assert.equal(simplicityMigrationChecks, 6);
   assert.equal(noteLifecycleMigrationChecks, 6);
   assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks
-    - admissionMigrationChecks - checksMigrationChecks - mergeMigrationChecks - shadowMigrationChecks
+    - admissionMigrationChecks - checksMigrationChecks - mergeMigrationChecks - shadowMigrationChecks - routingMigrationChecks
     - simplicityMigrationChecks - noteLifecycleMigrationChecks, 114,
     'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);

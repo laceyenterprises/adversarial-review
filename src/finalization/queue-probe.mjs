@@ -1,6 +1,5 @@
 // Read-only post-deploy observation. Never converges schema or claims a lane.
 import Database from 'better-sqlite3';
-import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,31 +11,18 @@ import { resolveQueueChecksAdapter } from './queue-checks.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
 import { resolveQueueMergeAdapter } from './queue-merge.mjs';
 import { QUEUE_DELIVERY_KINDS } from './queue-delivery.mjs';
+import { readRoutingConfig, verifyRoutingSchema } from './queue-status.mjs';
+import { resolveQueueRoutingStore, resolveLaneRoute } from './queue-routing.mjs';
 import { resolveQueueShadowAdapter } from './queue-shadow.mjs';
 
-const moduleDir = dirname(fileURLToPath(import.meta.url));
-export function queueRuntimeBuild() {
-  const hash = createHash('sha256');
-  for (const file of ['queue-probe.mjs', 'queue-owner.mjs', 'queue-store.mjs', 'queue-wait.mjs', 'ledger-events.mjs', 'ledger-fold.mjs',
-    'queue-handoff.mjs', 'queue-handoff-store.mjs', '../ama/closer-queue-handoff.mjs',
-    'queue-admission.mjs', 'queue-clean-review.mjs', 'queue-read.mjs', '../ama/merge-eligibility.mjs', '../operator-hold-labels.mjs',
-    'queue-checks.mjs', 'queue-check-reader.mjs', 'queue-check-transport.mjs', '../hammer-token.mjs', '../checks-summary.mjs', '../ama/required-check-contexts.mjs', '../alert-delivery.mjs',
-    'queue-rebase.mjs', 'queue-git.mjs', 'queue-rebase-proof.mjs', '../ama/reviewed-rebase.mjs', '../load-aware-timeout.mjs',
-    '../../migrations/20261023_finalization_queue.sql', '../../migrations/20261024_finalization_queue_handoff.sql',
-    '../../migrations/20261025_finalization_queue_admission.sql', '../../migrations/20261026_finalization_queue_checks.sql',
-    'queue-merge.mjs', 'queue-delivery.mjs', 'execution-surfaces.mjs', '../github-adapter-client.mjs', '../ama/merge-action-receipt.mjs',
-    '../ama/audit.mjs', 'ledger-store.mjs', '../../migrations/20261027_finalization_queue_merge.sql',
-    'queue-shadow.mjs', 'queue-shadow-metrics.mjs', 'shadow-recorder.mjs', 'shadow-store.mjs', 'shadow-report.mjs',
-    'divergence-classifier.mjs', 'shadow-actions.mjs', 'eligibility.mjs',
-    '../../migrations/20260718_finalization_shadow.sql', '../../migrations/20261028_finalization_queue_shadow.sql']) {
-    hash.update(file).update(readFileSync(join(moduleDir, file)));
-  }
-  return 'sha256:' + hash.digest('hex');
-}
+import { queueRuntimeBuild } from './queue-build.mjs';
+export { queueRuntimeBuild } from './queue-build.mjs';
 
-export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false } }, runtime: {
-    build: queueRuntimeBuild(), pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+
+export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load, configPath, readConfig = readRoutingConfig } = {}) {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false } }, runtime: {
+    build: queueRuntimeBuild(), role: 'read-only-observer', pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
   let reference;
@@ -180,6 +166,19 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
         composition: 'explicit-consumer-required; no production routing installed' };
       result.capabilities.shadow = { available: true, adapter: adapter.name, schema: '20261028_finalization_queue_shadow' };
     } catch { result.capabilities.shadow.reason = 'shadow-store-or-read-adapter-unavailable'; }
+    try {
+      if (!result.capabilities.merge.available) throw new Error('merge unavailable');
+      verifyRoutingSchema(db);
+      const config = readConfig({ rootDir, configPath });
+      // Validation/defaults are exercised even before the first organic lane.
+      resolveLaneRoute(config, { repository: 'example/review', base: 'main' });
+      const adapter = resolveQueueRoutingStore({ db });
+      result.observations.routing = { lanes: lanes.map(lane => ({ ...resolveLaneRoute(config, lane), ...adapter.read(lane) })),
+        organicRoutingObserved: lanes.some(lane => adapter.read(lane).route?.runtime != null),
+        composition: 'queue admission/execution adapters must be composed before promotion; uncomposed routes refuse execution' };
+      result.capabilities.routing = { available: true, adapter: adapter.name, schema: '20261029_finalization_queue_routing',
+        selector: 'roles.adversarial.merge_authority.lane_routes', defaultExecutor: 'legacy' };
+    } catch { result.capabilities.routing.reason = 'routing-store-config-or-adapter-unavailable'; }
   } catch (error) {
     // Error codes are sufficient for operators; do not echo raw DB paths or
     // arbitrary adapter/auth diagnostics into this public read surface.
@@ -190,26 +189,29 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     result.capabilities.checks.reason = result.capabilities.owner.reason;
     result.capabilities.merge.reason = result.capabilities.owner.reason;
     result.capabilities.shadow.reason = result.capabilities.owner.reason;
+    result.capabilities.routing.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
 
-export function queueProbeMain(argv = process.argv.slice(2)) {
+export function queueProbeMain(argv = process.argv.slice(2), { stdout = process.stdout, probe = probeQueueOwner } = {}) {
   let rootDir;
   let capability;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow --json [--root DIR]';
+  let configPath;
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow|routing --json [--root DIR] [--config FILE]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow', 'routing'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }
     else if (argv[i] === '--json') continue;
+    else if (argv[i] === '--config' && argv[i + 1]) configPath = argv[++i];
     else if (argv[i] === '--root' && argv[i + 1]) rootDir = argv[++i];
     else throw new Error(usage);
   }
   if (!capability) throw new Error(usage);
-  const result = probeQueueOwner({ rootDir });
-  process.stdout.write(JSON.stringify(result) + '\n');
+  const result = probe({ rootDir, configPath });
+  stdout.write(JSON.stringify(result) + '\n');
   return result.capabilities[capability].available ? 0 : 1;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

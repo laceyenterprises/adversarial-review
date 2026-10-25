@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
+import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
 import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
 import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
 import { createCleanReviewService } from '../src/finalization/queue-clean-review.mjs';

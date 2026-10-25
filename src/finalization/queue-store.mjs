@@ -13,6 +13,7 @@ export function ensureFinalizationQueueSchema(db) {
   db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261029_finalization_queue_routing.sql', import.meta.url), 'utf8'));
 }
 
 export function assertQueueStoreOwner(rootDir) {
@@ -60,6 +61,8 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
   const readEntry = id => parse(database.prepare('SELECT payload_json FROM finalization_queue_entry WHERE entry_id=?').get(queueId(id)));
   const entries = lane => database.prepare('SELECT payload_json FROM finalization_queue_entry WHERE repository=? AND base=? ORDER BY readiness_seq,entry_id').all(...laneArgs(lane)).map(parse);
   const assertFence = (fence, now) => {
+    const route = database.prepare('SELECT executor,transition_json FROM finalization_queue_route WHERE repository=? AND base=?').get(...laneArgs(fence.lane));
+    if (!route || route.executor !== 'queue-v2' || route.transition_json !== null) throw new Error('queue route is not owned');
     const row = readOwner(fence.lane);
     if (!row || row.owner_state !== 'active' || row.owner_id !== fence.ownerId
       || row.generation !== fence.generation || row.route_generation !== fence.routeGeneration

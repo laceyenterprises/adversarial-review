@@ -30,6 +30,11 @@ const fs = require('node:fs');
 const dir = process.env.TMPDIR;
 const args = process.argv.slice(2);
 const log = value => fs.appendFileSync(dir + '/events', JSON.stringify(value) + '\\n');
+if (args[0].endsWith('/bin/legacy-lane-write.mjs')) {
+  const {spawnSync} = require('node:child_process');
+  const child = spawnSync(args[8], args.slice(9), {stdio:'inherit'});
+  process.exit(child.status ?? 1);
+}
 if (args[0] === '--input-type=module') {
   const code = fs.readFileSync(0, 'utf8');
   if (code.includes('const rollup = await fetchHammerPr')) {

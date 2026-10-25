@@ -2194,3 +2194,18 @@ audit evidence resolves it. Existing refund bounds and final-hammer charging
 are unchanged. Early helper failures append launch-bound failed-without-merge
 AMA attempts. Incident body markers affect scheduling only; daemon reservation
 precedence and holder exclusivity remain intact.
+
+## V2 per-lane routing (MGQ-08)
+
+The one selector `roles.adversarial.merge_authority.lane_routes` defaults to
+legacy per absent lane. It is independent of the existing execution brake.
+The v2 routing port records effective `legacy`/`queue-v2` ownership. Transfer
+moves through a durable pending state: acquire issuance lock, increment route
+fence/park owner, prove all prior writers/requests drained, reconcile outcomes,
+then record the successor. Unknown drain/outcome holds both routes. Rollback
+additionally acknowledges stable-key returns for unfinished/parked entries
+before handing ownership back. A stale cached selector or owner fence refuses
+mutation; other lanes remain independent. Queue admission requires composed
+adapters, without a fallback merge writer. Read-only status/receipt/probe reports
+pending transfers, original entry phases and actual runtime evidence; it never
+advances this state. The closure runbook owns the deployment procedure.

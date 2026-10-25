@@ -157,3 +157,6 @@ export { createEntitledQueueCheckRequest } from './queue-check-transport.mjs';
 export { createQueueChecksService, resolveQueueChecksAdapter, createQueueInfrastructurePageAdapter } from './queue-checks.mjs';
 export { createQueueMergeService, observeQueueMergeOperation, reconcileQueueMergeObservation, resolveQueueMergeAdapter } from './queue-merge.mjs';
 export { QUEUE_DELIVERY_KINDS, createQueueClosureAuditDelivery, createQueueMergeActionDelivery, queueDeliveryPayloads } from './queue-delivery.mjs';
+export { resolveLaneRoute, resolveQueueRoutingStore, createLaneRoutingController } from './queue-routing.mjs';
+export { routeFinalizationWriter, createFinalizationLaneRouting } from './queue-routing-boundary.mjs';
+export { openQueueStatus, readRoutingConfig, renderQueueStatus } from './queue-status.mjs';

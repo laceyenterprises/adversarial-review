@@ -1,0 +1,84 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+export function queueRuntimeBuild() {
+  const hash = createHash('sha256');
+  for (const file of [
+    'queue-build.mjs',
+    '../../package.json',
+    '../../package-lock.json',
+    'queue-probe.mjs',
+    'queue-routing.mjs',
+    'queue-routing-boundary.mjs',
+    'legacy-lane-write.mjs',
+    '../../bin/legacy-lane-write.mjs',
+    '../../bin/hammer-merge.sh',
+    '../ama/dispatch-closer.mjs',
+    '../daemon-clean-merge.mjs',
+    '../ama/daemon-merge.mjs',
+    'queue-status.mjs',
+    'executor.mjs',
+    '../config-lane-routes.mjs',
+    '../config-loader.mjs',
+    '../ama/effective-policy.mjs',
+    '../domain-policy.mjs',
+    '../domain-config.mjs',
+    '../finalization-cli.mjs',
+    'queue-owner.mjs',
+    'queue-store.mjs',
+    'queue-wait.mjs',
+    'ledger-events.mjs',
+    'ledger-fold.mjs',
+    'queue-handoff.mjs',
+    'queue-handoff-store.mjs',
+    '../ama/closer-queue-handoff.mjs',
+    'queue-admission.mjs',
+    'queue-clean-review.mjs',
+    'queue-read.mjs',
+    '../ama/merge-eligibility.mjs',
+    '../operator-hold-labels.mjs',
+    'queue-checks.mjs',
+    'queue-check-reader.mjs',
+    'queue-check-transport.mjs',
+    '../hammer-token.mjs',
+    '../checks-summary.mjs',
+    '../ama/required-check-contexts.mjs',
+    '../alert-delivery.mjs',
+    'queue-rebase.mjs',
+    'queue-git.mjs',
+    'queue-rebase-proof.mjs',
+    '../ama/reviewed-rebase.mjs',
+    '../load-aware-timeout.mjs',
+    '../../migrations/20261023_finalization_queue.sql',
+    '../../migrations/20261024_finalization_queue_handoff.sql',
+    '../../migrations/20261025_finalization_queue_admission.sql',
+    '../../migrations/20261026_finalization_queue_checks.sql',
+    'queue-merge.mjs',
+    'queue-delivery.mjs',
+    'execution-surfaces.mjs',
+    '../github-adapter-client.mjs',
+    '../ama/merge-action-receipt.mjs',
+    '../ama/audit.mjs',
+    'ledger-store.mjs',
+    '../../migrations/20261027_finalization_queue_merge.sql',
+    'queue-shadow.mjs',
+    'queue-shadow-metrics.mjs',
+    'shadow-recorder.mjs',
+    'shadow-store.mjs',
+    'shadow-report.mjs',
+    'divergence-classifier.mjs',
+    'shadow-actions.mjs',
+    'eligibility.mjs',
+    '../../migrations/20260718_finalization_shadow.sql',
+    '../../migrations/20261028_finalization_queue_shadow.sql',
+    '../../migrations/20261029_finalization_queue_routing.sql',
+  ]) {
+    hash.update(file).update(readFileSync(join(moduleDir, file)));
+  }
+  return 'sha256:' + hash.digest('hex');
+}
+
+// Captured once by the loaded process, never refreshed from a later checkout.
+export const QUEUE_RUNNING_BUILD = queueRuntimeBuild();

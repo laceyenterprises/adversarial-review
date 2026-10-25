@@ -488,3 +488,15 @@ be reviewed immediately; its implementation starts in Phase 3.
   registry stores only worker-class *names*, validated against
   `hq`-published class lists at config load; it never duplicates class
   attributes.
+
+### Finalization lane boundary
+
+The fifth-axis finalization port now owns the shared per-lane execution selector,
+`roles.adversarial.merge_authority.lane_routes`, with strict records and a legacy
+default. Clean and remediated writer boundaries use one resolver and the same
+issuance lock/fence as queue operations. A runtime-owner transfer port requires
+proved drain, authoritative reconciliation and durable rollback handoffs; config
+alone cannot confer mutation ownership. Live evidence/admission/execution adapters
+remain explicit composition dependencies; unavailable composition refuses writes.
+Read-only CLI projections distinguish the observer build from registered writer
+builds and pending organic evidence. No kernel contract or merge policy changes.

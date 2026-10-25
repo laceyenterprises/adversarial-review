@@ -178,3 +178,17 @@ Policy inputs, all explicit and versioned in config:
 3. **Ledger location**: the FinalizationLedger lives in the app store
    (`reviews.db`) per the OS-optional principle. Mirror to the session ledger
    once GAP-2 (app notes API) exists, or keep app-local permanently?
+
+## Per-lane execution routing implementation
+
+The finalization port's selector is
+`roles.adversarial.merge_authority.lane_routes` (default `[]`), strict records
+`{repository, base, executor: legacy|queue-v2}`. Absent lanes resolve legacy.
+`src/finalization/queue-routing.mjs` owns resolution, durable transfer and rollback;
+frozen-v1 invocation sites contain thin boundary calls only. Existing eligibility
+and emergency execution brake remain authoritative. Transfer requires complete
+writer drain and authoritative operation reconciliation under the existing
+issuance lock; rollback retains receipts and returns pending entries idempotently.
+`finalization queue status|receipt|probe` exposes real read models. Availability
+of routing/schema does not claim a composed/running queue consumer or authorize
+production promotion. See `RUNBOOK-ama-closure.md` for the operator contract.

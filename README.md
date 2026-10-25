@@ -2985,3 +2985,26 @@ LVR-02 deployment order: the companion App Contract endpoint must forward
 and direct remediator transports then require push evidence. This uses the
 existing endpoint and worker-pool outcome judgement; no new dispatcher or store
 is introduced. Source changes authorize no service restart.
+
+### Per-lane finalization routing and observation
+
+`roles.adversarial.merge_authority.lane_routes` defaults to `[]` (legacy for every
+absent repository/base). Strict records contain only `repository`, `base` and
+`executor: legacy|queue-v2`; repositories fold case, short base refs preserve it,
+and duplicate lanes fail. The existing autonomous execution brake stays separate.
+The shared v2 resolver/issuance boundary covers clean-daemon, certified closer
+inline merge and rendered hammer merge commands. A selector change cannot
+transfer ownership without proved drain/reconciliation; rollback returns pending
+entries once through durable handoff keys. Missing live queue composition refuses
+execution. No production selector is changed by this implementation.
+
+Use `adversarial-review finalization queue status --repo example/review --base main`
+and `finalization queue receipt --repo example/review --pr 101` (both support
+`--json`). `node src/finalization/queue-probe.mjs --capability routing --json`
+remains the bounded read-only deployed capability observation. Models expose real
+route/config generation, observer and registered writer builds, owner/fence,
+head/phase/positions/reasons, parking, receipts, pending delivery and lifecycle
+metrics. Store/config failures are visible; absent organic evidence is pending.
+Existing smoke promises are unchanged; this observation does not add a check or
+promotion gate. See [the routing runbook](docs/RUNBOOK-ama-closure.md#per-lane-finalization-routing-mgq-08)
+for runtime-owner composition, registered service restart, transfer and rollback.

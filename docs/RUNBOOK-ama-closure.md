@@ -5611,3 +5611,107 @@ LVR-02 deployment order: the companion App Contract endpoint must forward
 and direct remediator transports then require push evidence. This uses the
 existing endpoint and worker-pool outcome judgement; no new dispatcher or store
 is introduced. Source changes authorize no service restart.
+
+## Per-lane finalization routing (MGQ-08)
+
+The sole selector is `roles.adversarial.merge_authority.lane_routes`, default
+`[]`. Each record requires exactly `repository`, `base`, and `executor`:
+
+```yaml
+roles:
+  adversarial:
+    merge_authority:
+      lane_routes:
+        - repository: example/review
+          base: main
+          executor: queue-v2
+```
+
+This is an example, not a production configuration change. Repositories are
+case-insensitive full names; short Git branch refs preserve case. Duplicates
+(including differently cased repository names), invalid refs, missing fields,
+unknown fields and executors other than `legacy`/`queue-v2` fail validation.
+An absent lane uses `legacy`; another base or repository is unaffected. Python,
+Node and the shell's delegated Python loader enforce the same contract. The
+existing `autonomous_merge_execution_enabled` brake remains independent; routing
+never waives eligibility, current-head review, holds, complete checks or identity.
+
+`resolveLaneRoute` is the shared resolver. `routeFinalizationWriter` protects the
+clean daemon and the closer's certified-head inline writer. The rendered hammer
+merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
+metered transport, arguments and output. Queue admission callbacks are injected
+at the composition boundary; a missing callback returns
+`queue-composition-unavailable`, with no legacy fallback. This slice does not
+start a queue pump, install live evidence/identity/delivery adapters or alter
+closer remediation prompts. Those explicit composition requirements must be
+satisfied and observed before an operator promotes a lane. Capability availability
+is not an assertion that such a consumer is running.
+
+All registered writer invocations and queue mutations share the existing
+single-host issuance flock. A configured route alone never transfers durable
+ownership. `createLaneRoutingController.transfer` is the runtime-owner port:
+it requires the observed `expectedGeneration`, the desired resolved config, and
+a trusted drain/reconciliation adapter. A transfer increments the durable route
+generation and parks the owner **before** waiting. The adapter must inventory
+older/external writers as well as registered writers, prove their process trees
+and requests drained, and supply authoritative results for every unresolved
+intent. Successful queue operations require materialized publication evidence or
+an exact-candidate merge receipt before settlement. Unknown evidence leaves the
+transition pending and both routes fenced. There is no automatic expiry escape.
+The adapter receives a finite, scaled-once timeout clipped to the deadline.
+
+Promotion and rollback are operator work:
+
+1. Deploy both reviewed repositories without changing production routes. Confirm
+   the actual runtime owner and system-service entries in Agent OS
+   `scripts/os-restart.sh`; use its registered restart path. Do not edit plists.
+2. Stop/drain the old lane's writers, including independently running closers and
+   writers from older builds. Retain the source refs for process/request inventory
+   and authoritative GitHub outcomes. A registered count of zero alone is not
+   complete inventory evidence. Reconcile successful merges and pending actions.
+3. Invoke the transfer port under the runtime owner using the observed generation
+   and trusted adapters. It takes the same issuance lock as mutations. Missing
+   quiescence or ambiguous push/merge outcomes refuse transfer; keep the lane
+   parked and use the existing operator recovery route.
+4. After proven transfer, apply the reviewed single-lane selector change and
+   restart the registered watcher/follow-up services. The temporary mismatch
+   between cached config and durable owner refuses writes. Prove the loaded
+   writer build/config generation, owner fence and effective route before relying
+   on organic traffic. Other lanes retain their own ownership.
+5. For rollback, fence and drain queue execution first. Reconcile every intent,
+   retain receipts/outbox deliveries, and return every unfinished or parked entry
+   through the existing legacy handoff adapter. `finalization_queue_route_return`
+   persists stable `route-return:<entryId>` keys; the adapter must acknowledge
+   durably and idempotently. A lost acknowledgement retries the same key.
+   Only after all acknowledgements does the port transfer to legacy. Then reverse
+   the selector change and restart/verify through the same registered path.
+
+Read-only observations, run from the deployed service checkout under its owner:
+
+```sh
+node src/cli.mjs finalization queue status --repo example/review --base main --json
+node src/cli.mjs finalization queue receipt --repo example/review --pr 101 --json
+node src/finalization/queue-probe.mjs --capability routing --json
+```
+
+The status/receipt commands also accept `--root DIR` and `--config FILE`.
+`queue probe` is available through the main CLI; the earlier probe entry remains
+compatible. Store/schema/config failures are nonzero and visible. These commands
+open the real app DB read-only and do not migrate, claim, drain, dispatch or write.
+The probe uses the existing finite load-aware DB/Git waits. The activation
+observation is `.capabilities.routing.available == true` and a non-null
+`.runtime.build`; it proves deployed schema, strict config/resolver and routing
+read adapter availability. It is not a check or promotion gate.
+
+`runtime.build` identifies this observer. Status `running` and each probe lane's
+`route.runtime` identify a build captured once by an actual registered writer;
+null means pending, not the observer's build. Config generations fingerprint the
+resolved effective policy; route generations are monotonic ownership fences and
+change only on transfer. Status includes configured/effective routes, transfer,
+owner/fence, legacy unresolved count, head/phase, old/new/base, complete stored
+check snapshot/deadline, FIFO positions/reasons, parked reprobes, terminal work,
+returns and lifecycle metrics. Receipt includes original signed admission,
+proof/check/decision/publication/merge evidence and pending delivery keys. Missing
+organic records remain null/pending. No synthetic entry or live page is created
+for activation evidence. The owner records real post-deploy observations; source
+validation alone does not establish deployment or canary success.

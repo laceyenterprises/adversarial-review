@@ -91,6 +91,7 @@ export function createFinalizationExecutor({
   remediationSurface = null,
   closeSurface = null,
   mergeMethod = 'squash',
+  laneRouting = null,
   holder,
   leaseTtlMs = loadAwareTimeoutMs(DEFAULT_LEASE_TTL_MS, { maxMs: Infinity }),
   generateLeaseId = randomUUID,
@@ -159,14 +160,20 @@ export function createFinalizationExecutor({
         }
         let result;
         try {
-          result = await mergeSurface.merge({
+          const legacy = () => mergeSurface.merge({
             subjectKey, subjectExternalId: subjectKey.subjectExternalId, revisionRef: rev, mergeMethod,
           });
+          if (laneRouting) result = await laneRouting.run({ subject: subjectKey, revisionRef: rev, legacy });
+          else if (policy?.laneRoutes?.length) result = { ok: false, reason: 'lane-routing-adapter-unavailable' };
+          else result = await legacy();
         } catch (err) {
           return outcome(subjectKey, decision, {
             status: 'failed', action: 'merge', observedAt, reason: 'merge surface threw', detail: err?.message || String(err),
           });
         }
+        if (result?.queued === true) return outcome(subjectKey, decision, {
+          status: 'deferred', action: 'wait', observedAt, reason: result.reason || 'queue-handoff-acknowledged',
+        });
         if (!result?.ok) {
           if (result?.reason === 'adapter-unavailable') {
             const reason = 'no merge surface available (fail-closed)';

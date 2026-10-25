@@ -321,3 +321,31 @@ test('merge surface failure fails closed: no finalized mark, retried next tick',
   assert.equal(second.status, 'executed');
   assert.equal(fold(ledgerStore.read(REF)).finalized?.kind, 'finalized');
 });
+
+test('lane admission never records a finalized subject or invokes the legacy merge surface', async () => {
+  const { db, ledgerStore, leaseStore } = harness();
+  makeEligible(ledgerStore);
+  const merge = recordingMergeSurface();
+  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
+    policy: { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] },
+    laneRouting: { run: async () => ({ ok: true, queued: true, reason: 'queue-handoff-acknowledged' }) } });
+  const result = await exec.tick(REF, { observedAt: t(10) });
+  assert.equal(result.status, 'deferred');
+  assert.equal(result.action, 'wait');
+  assert.equal(merge.calls.length, 0);
+  assert.equal(fold(ledgerStore.read(REF)).finalized, null);
+  db.close();
+});
+
+test('configured lane routes without a composed executor boundary cannot fall back to merging', async () => {
+  const { db, ledgerStore, leaseStore } = harness();
+  makeEligible(ledgerStore);
+  const merge = recordingMergeSurface();
+  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true,
+    policy: { laneRoutes: [{ repository: 'owner/repo', base: 'main', executor: 'queue-v2' }] } });
+  const result = await exec.tick(REF, { observedAt: t(10) });
+  assert.equal(result.reason, 'lane-routing-adapter-unavailable');
+  assert.equal(merge.calls.length, 0);
+  assert.equal(fold(ledgerStore.read(REF)).finalized, null);
+  db.close();
+});

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { openFinalizationQueueStore } from '../../src/finalization/queue-store.mjs';
+import { openFinalizationQueueStore } from './queue-fixture-store.mjs';
 import { createQueueOwner } from '../../src/finalization/queue-owner.mjs';
 import { createCleanReviewService } from '../../src/finalization/queue-clean-review.mjs';
 import { createQueueHandoffService } from '../../src/finalization/queue-handoff-store.mjs';

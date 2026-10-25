@@ -30,6 +30,7 @@ import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
+import { normalizeLaneRoutes } from './config-lane-routes.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 
@@ -2077,6 +2078,12 @@ function schemaV1() {
                 __type: TYPE_DICT,
                 __strict: true,
                 __keys: {
+                  lane_routes: { __type: TYPE_LIST, __default: [], __laneRoutes: true,
+                    __item: { __type: TYPE_DICT, __strict: true, __keys: {
+                      repository: { __type: TYPE_STRING }, base: { __type: TYPE_STRING },
+                      executor: { __type: TYPE_STRING, __enum: ['legacy', 'queue-v2'] },
+                    } },
+                  },
                   enabled: { __type: TYPE_BOOL, __default: false },
                   worker_class: {
                     __type: TYPE_STRING,
@@ -4922,6 +4929,10 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
         { key: keyPath, expected: 'list', got: value, source },
       );
     }
+    if (schema.__laneRoutes) {
+      try { return normalizeLaneRoutes(value); }
+      catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
+    }
     const itemSchema = schema.__item || {};
     return value.map((item, index) => checkLeaf(item, itemSchema, `${keyPath}[${index}]`, source, tolerateUnknown));
   }
@@ -5942,6 +5953,7 @@ export class AgentOSConfig {
     );
     const noCiRepositories = this.get('roles.adversarial.merge_authority.no_ci_repositories', []);
     return {
+      laneRoutes: normalizeLaneRoutes(this.get('roles.adversarial.merge_authority.lane_routes', [])),
       noCiRepositories: Array.isArray(noCiRepositories) ? [...noCiRepositories] : [],
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       operatorLogins: [...this.get(

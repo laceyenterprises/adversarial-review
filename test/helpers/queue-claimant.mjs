@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { openFinalizationQueueStore } from '../../src/finalization/ledger-store.mjs';
+import { openFinalizationQueueStore } from './queue-fixture-store.mjs';
 import { createQueueOwner } from '../../src/finalization/executor-lease-store.mjs';
 // Independent processes exercise native SQLite/flock contention; fs-ext is not
 // context-aware and cannot safely be loaded concurrently in Worker threads.

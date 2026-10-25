@@ -7,6 +7,8 @@
 // The window and the "now" the report ages against are the CLI's only clock
 // reads; the model builder (`shadow-report.mjs`) is pure and takes both as data.
 
+import { openQueueStatus, renderQueueStatus } from './finalization/queue-status.mjs';
+import { queueProbeMain } from './finalization/queue-probe.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { openReadOnlyFinalizationShadowStore } from './finalization/shadow-store.mjs';
@@ -15,6 +17,9 @@ import { buildShadowReport, renderShadowReport } from './finalization/shadow-rep
 const USAGE = `\
 Usage:
   adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
+  adversarial-review finalization queue status --repo OWNER/REPO --base REF [--root DIR] [--config FILE] [--json]
+  adversarial-review finalization queue receipt --repo OWNER/REPO --pr N [--base REF] [--root DIR] [--config FILE] [--json]
+  adversarial-review finalization queue probe --capability routing --json [--root DIR] [--config FILE]
 `;
 
 function parseArgs(argv) {
@@ -48,6 +53,8 @@ function finalizationMain(argv, io = {}) {
   const now = io.now || new Date().toISOString();
   const openStore = io.openStore || openReadOnlyFinalizationShadowStore;
   const [subcommand, ...rest] = argv;
+
+  if (subcommand === 'queue') return queueMain(rest, io);
 
   if (subcommand === '--help' || subcommand === '-h' || subcommand === undefined) {
     stdout.write(USAGE);
@@ -102,3 +109,33 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 export { finalizationMain };
+
+export function queueMain(argv, io = {}) {
+  const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr;
+  const [command, ...rest] = argv;
+  if (command === 'probe') {
+    try { return queueProbeMain(rest, { stdout, probe: io.probe }); }
+    catch { stderr.write('invalid queue probe arguments\n'); return 2; }
+  }
+  if (!['status', 'receipt'].includes(command)) { stderr.write(USAGE); return 2; }
+  const options = { rootDir: process.cwd(), json: false };
+  const names = { '--repo': 'repository', '--base': 'base', '--pr': 'prNumber', '--root': 'rootDir', '--config': 'configPath' };
+  try {
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--json') options.json = true;
+      else if (names[rest[i]] && rest[i + 1] && !rest[i + 1].startsWith('--')) options[names[rest[i]]] = rest[++i];
+      else throw new Error('invalid argument');
+    }
+    if (!options.repository || (command === 'status' && (!options.base || options.prNumber))
+      || (command === 'receipt' && !/^[1-9][0-9]*$/.test(options.prNumber ?? ''))) throw new Error('missing lane/PR');
+    if (options.prNumber) options.prNumber = Number(options.prNumber);
+  } catch { stderr.write(USAGE); return 2; }
+  let store;
+  try {
+    store = (io.openQueueStatus || openQueueStatus)({ ...options, now: io.now });
+    const model = command === 'status' ? store.status(options) : store.receipt(options);
+    stdout.write(options.json || command === 'receipt' ? JSON.stringify(model, null, 2) + '\n' : renderQueueStatus(model) + '\n');
+    return 0;
+  } catch { stderr.write('queue store/config/receipt read failed\n'); return 1; }
+  finally { store?.close(); }
+}

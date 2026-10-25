@@ -6416,7 +6416,7 @@ test('AMA merge_authority accepts hammer-claude as closer worker class in Node l
 
 test('AMA merge_authority public docs list the Node loader worker_class enum', () => {
   const source = readFileSync(join(REPO_ROOT, 'src/config-loader.mjs'), 'utf8');
-  const enumMatch = source.match(/worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
+  const enumMatch = source.match(/merge_authority:\s*\{[\s\S]*?worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
   assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
   const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
   assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini']);

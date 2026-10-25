@@ -1,3 +1,4 @@
+import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
@@ -5807,7 +5808,9 @@ async function maybeDispatchAmaCloserAttempt({
         } else {
           sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
-          }, () => attemptDaemonCleanMergeImpl({
+          }, () => routeFinalizationWriter({ rootDir, cfg,
+            lane: { repository: repo, base: baseBranch }, kind: 'closer', subject: { prNumber, head: mergeHead },
+            queue: dispatchContext.queueAdmission, legacy: () => attemptDaemonCleanMergeImpl({
             receiptProducerClass: 'closer-hammer',
             getNextAction: () => sharedNextAction.decision,
             repo,
@@ -5956,7 +5959,7 @@ async function maybeDispatchAmaCloserAttempt({
             },
             now: () => dispatchContext.dispatchedAt || new Date().toISOString(),
             logger,
-          }));
+          }) }));
           sameHeadHamMergeReason = sameHeadHamMerge?.reason || null;
         }
         if (sameHeadHamMerge?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {

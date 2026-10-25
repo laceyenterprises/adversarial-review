@@ -624,3 +624,37 @@ and pending delivery keys with attempts and last
 error. Live identity, merge surface, delivery and owner recovery composition and
 per-lane routing remain later integration work; an entry recovered after its
 original deadline cannot merge because the owner refuses issuance past it.
+
+### Lane routing and transfer journal (MGQ-08)
+
+`20261029_finalization_queue_routing.sql` adds three app-owned tables, without
+selecting any lane. `finalization_queue_route(repository,base,executor,
+config_generation,runtime_json,transition_json,updated_at)` records the effective
+executor and a pending transfer. The existing lane's `route_generation` fences
+ownership; transfer increments it before awaiting drain and reconciles under the
+same persistent issuance flock as queue mutations. A transition blocks both
+routes. Owner parking/release events preserve ledger replay. Config generation
+is a canonical effective-policy SHA-256 fingerprint, separate from that counter.
+
+`finalization_queue_legacy_writer(writer_id,repository,base,route_generation,kind,
+intent_json,result_json)` journals registered daemon/closer invocation before
+its callback. A normal drained return settles it; exceptions and uncertain
+attempt outcomes retain ambiguity. Legacy retains its existing lease/retry
+semantics; unresolved legacy evidence blocks ownership transfer. Older/external
+writers still require trusted complete drain inventory, regardless of this count.
+
+`finalization_queue_route_return(entry_id,delivery_key,payload_json,receipt_json)`
+retains rollback handoffs with stable `route-return:<entryId>` keys. After proven
+drain and operation reconciliation, the legacy adapter durably acknowledges each
+unfinished/parked entry. Acknowledgement and `returned-to-closer` progress commit
+together; a crash/lost acknowledgement reuses the same key. Receipts, immutable
+admissions, existing delivery outbox and original patience remain retained.
+
+The read-only routing/status adapters prepare actual deployed statements and
+compare shipped routing table/index definitions. Status/receipt use one DB read
+transaction, resolve effective config through the existing domain/config cascade,
+and project original admission/check/proof/decision/merge/delivery data. Lifecycle
+metrics reuse the existing durable-event metric builder. Runtime observer build
+and last registered writer build are distinct; a never-observed writer is null.
+No read path converges schema or transfers ownership. See the closure runbook's
+per-lane routing section for operator transfer, rollback and pending composition.

@@ -6,7 +6,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
+import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
 import { createQueueHandoffService, resolveQueueHandoffStore } from '../src/finalization/queue-handoff-store.mjs';
 import { handoffDigest, handoffJson } from '../src/finalization/queue-handoff.mjs';
 import { createCloserQueueHandoffBoundary } from '../src/ama/closer-queue-handoff.mjs';

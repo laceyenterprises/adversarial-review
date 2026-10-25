@@ -1065,7 +1065,9 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     return 1
   fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  ham_gh pr merge <<PR_URL>> \
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
+    --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" -- \
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
     --subject "$HAM_COMMIT_SUBJECT" \

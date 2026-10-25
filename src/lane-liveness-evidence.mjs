@@ -1,5 +1,6 @@
 import { openReviewStateReadOnlyDb } from './pipeline-health-db.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
+import { parseAmaAuditDocument } from './ama/audit.mjs';
 /** Read-only, bounded projection for Sentinel. No launch exit is real work. */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,11 +28,11 @@ function files(directory, suffix = '.json') {
   }).filter(Boolean).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 }
 
-function documents(directory) {
+function documents(directory, parse = JSON.parse) {
   const entries = files(directory);
   const records = entries.slice(0, MAX_DOCUMENTS).map((entry) => {
     if (entry.stat.size > MAX_BYTES) throw new Error('document-limit');
-    try { return { ...entry, value: JSON.parse(readFileSync(entry.path, 'utf8')) }; }
+    try { return { ...entry, value: parse(readFileSync(entry.path, 'utf8')) }; }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }).filter(Boolean);
   return { records, truncated: entries.length > MAX_DOCUMENTS };
@@ -106,6 +107,7 @@ export function collectLaneLivenessEvidence({ db, rootDir, hqRoot, nowMs = Date.
     let truncated = false;
     for (const state of ['pending', 'in-progress', 'completed', 'failed', 'stopped']) {
       const scan = documents(join(rootDir, 'data', 'follow-up-jobs', state));
+      if (['pending', 'in-progress'].includes(state) && scan.truncated) throw new Error('demand-truncated');
       truncated ||= scan.truncated;
       for (const { value: job } of scan.records) {
         if (['pending', 'in-progress'].includes(state) && current(job)) {
@@ -134,7 +136,7 @@ export function collectLaneLivenessEvidence({ db, rootDir, hqRoot, nowMs = Date.
     const receipts = documents(join(hqRoot, 'dispatch', 'audit', 'automation-merge-actions'));
     const merged = new Map(receipts.records.filter(({ value }) => value.merged === true && value.producerClass === 'closer-hammer')
       .map(({ value }) => [`${identity(value)}@${value.headSha}`, value]));
-    const audits = documents(join(hqRoot, 'dispatch', 'audit', 'adversarial-merge-authority'));
+    const audits = documents(join(hqRoot, 'dispatch', 'audit', 'adversarial-merge-authority'), parseAmaAuditDocument);
     for (const { value: audit } of audits.records) {
       for (const attempt of audit.attempts || []) {
         const name = attempt.path === 'daemon-merge' || attempt.attemptPhase === 'daemon-merged' ? 'daemon'
@@ -162,7 +164,7 @@ export function collectLaneLivenessEvidence({ db, rootDir, hqRoot, nowMs = Date.
       }
     }
     for (const entry of files(join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts'), '.md')) {
-      const match = /^(.*)-pr-(\d+)-([a-f0-9]{7,64})\.md$/i.exec(entry.name);
+      const match = /^(.*)-pr-(\d+)-([a-f0-9]{7,64})(?:-hammer-scratch-[a-z0-9]+)?\.md$/i.exec(entry.name);
       if (!match) continue;
       for (const row of open.values()) {
         if (row.repo.replaceAll('/', '-') === match[1] && Number(row.pr_number) === Number(match[2])

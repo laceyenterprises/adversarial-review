@@ -72,6 +72,23 @@ test('real hammer and daemon merges remain distinct from eligible/no-work audits
   assert(hammer.lastRuns.some((run) => run.outcome === 'failed' && run.reason === 'no_work_done'));
 });
 
+test('AMA audits with appended hammer records preserve both merge lanes', (t) => {
+  const f = fixture(t);
+  for (const [number, name] of [[1, 'hammer'], [2, 'daemon']]) {
+    const path = f.write(`dispatch/audit/adversarial-merge-authority/${number}.json`, audit('succeeded', name, number));
+    writeFileSync(path, `${JSON.stringify(audit('succeeded', name, number), null, 2)}\n${JSON.stringify({ outcome: 'no_work_done' })}\n`);
+  }
+  f.write(RECEIPT, { repo: REPO, prNumber: 1, headSha: HEAD, merged: true, producerClass: 'closer-hammer', executedAt: OLD });
+  const { hammer, daemon } = f.collect().lanes;
+  for (const [name, result, number] of [['hammer', hammer, 1], ['daemon', daemon, 2]]) {
+    assert.equal(result.available, true);
+    assert.equal(result.lastRealEvent.kind, `${name}_merge`);
+    assert.equal(result.lastRealEvent.prNumber, number);
+    assert.equal(result.lastRuns.length, 1);
+    assert.equal(result.lastRuns[0].outcome, 'succeeded');
+  }
+});
+
 test('waiting demand excludes terminal PRs, stale heads and handoffs; includes unknown holds', (t) => {
   const f = fixture(t);
   f.pr(1); f.pr(2, 'merged'); f.pr(3, 'closed'); f.pr(4); f.pr(5);
@@ -87,15 +104,17 @@ test('waiting demand excludes terminal PRs, stale heads and handoffs; includes u
   assert.equal(hammer.labelsUnknown, true);
 });
 
-test('old closer prompt stays demand only for open matching head, without reading prompt content', (t) => {
-  const f = fixture(t);
-  f.pr(1); f.pr(2, 'merged');
-  for (const number of [1, 2]) {
-    const path = f.write(`data/follow-up-jobs/ama-closer-prompts/sample-project-pr-${number}-${HEAD}.md`, 'synthetic');
-    utimesSync(path, new Date(OLD), new Date(OLD));
-  }
-  assert.deepEqual(f.collect().lanes.hammer.waiting.map((row) => row.prNumber), [1]);
-});
+for (const suffix of ['', '-hammer-scratch-aB12cd']) {
+  test(`closer prompt ${suffix || 'legacy'} stays demand only for open matching head, without reading content`, (t) => {
+    const f = fixture(t);
+    f.pr(1); f.pr(2, 'merged'); f.pr(3, 'closed'); f.pr(4, 'open', 'settled', NEXT);
+    for (const number of [1, 2, 3, 4]) {
+      const path = f.write(`data/follow-up-jobs/ama-closer-prompts/sample-project-pr-${number}-${HEAD}${suffix}.md`, 'synthetic');
+      utimesSync(path, new Date(OLD), new Date(OLD));
+    }
+    assert.deepEqual(f.collect().lanes.hammer.waiting.map((row) => row.prNumber), [1]);
+  });
+}
 
 test('remediation needs completed published commit proof; unchanged/local commits are not pushes', (t) => {
   const f = fixture(t);
@@ -112,6 +131,24 @@ test('remediation needs completed published commit proof; unchanged/local commit
   assert.equal(result.lastRuns.filter((run) => run.outcome === 'succeeded').length, 1);
   assert.deepEqual(result.waiting.map((row) => row.prNumber), [1]);
 });
+
+for (const state of ['pending', 'in-progress']) {
+  test(`remediation ${state} demand overflow is unavailable despite complete successful history`, (t) => {
+    const f = fixture(t);
+    f.pr(1);
+    for (let i = 0; i < 2001; i++) {
+      f.write(`${JOB}${state}/${i}.json`, { repo: REPO, prNumber: 1, createdAt: OLD });
+    }
+    for (let i = 0; i < 5; i++) {
+      f.write(`${JOB}completed/${i}.json`, { repo: REPO, prNumber: 1, revisionRef: HEAD, completedAt: OLD,
+        completion: { workerPushedHeadSha: NEXT } });
+    }
+    const result = f.collect().lanes.remediation;
+    assert.equal(result.available, false);
+    assert.equal(result.error, 'evidence-unavailable');
+    assert.equal(f.collect().lanes.review.available, true);
+  });
+}
 
 test('review posts only count reviewer_post_success, never starts or exits', (t) => {
   const f = fixture(t);

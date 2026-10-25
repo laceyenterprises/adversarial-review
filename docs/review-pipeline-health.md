@@ -622,11 +622,19 @@ excluded from daemon demand. Remediation demand is claimable pending or
 in-progress work on open PRs; review demand is pending/reviewing open work.
 Undated local hold labels cannot suppress waiting demand.
 
+AMA audits use the canonical `parseAmaAuditDocument` reader, accepting the
+leading document with NOOWNER-01 appended hammer records; appended records do
+not themselves establish merge work. Prompt demand accepts both legacy
+`<repo>-pr-<number>-<head>.md` names and the closer producer's
+`<repo>-pr-<number>-<head>-hammer-scratch-<id>.md` names, without reading content.
+
 Scans inspect at most 20,000 directory entries, 2,000 newest documents per
 history directory, 2 MiB per document and 2,000 open PRs. Historical SQL reads
 select only the latest success and last five outcomes; no new table or event
-writer is introduced. Demand truncation is unavailable. History truncation is
-visible and cannot prove absence when no real event is found.
+writer is introduced. Demand truncation is unavailable, including overflow of
+either pending or in-progress remediation jobs even with successful completed
+history. History truncation is visible and cannot prove absence when no real
+event is found.
 
 Sentinel adds the pack-step lane through the existing public DAG/launch status
 API, scales the 30-minute window once, and owns finding/dedupe/promotion. D8

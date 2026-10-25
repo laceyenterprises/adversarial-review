@@ -1980,6 +1980,19 @@ promise to reclaim uncertain ownership. Corrupt timestamps or unavailable
 liveness evidence can still prevent reclamation; proposed operator bound is
 1800 seconds with enforcement missing for those invalid-record cases.
 
+### Pending closer lease recovery
+
+CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
+launch-less pending leases with a confirmed absent/reused same-host watcher PID
+or an elapsed dispatch timeout. Startup sweeps log releases; closure resumes
+normal next-action admission that pass. Uncertain probes cannot refresh the
+deadline. Existing submission fences, current-process leases, review handoffs,
+launch ownership and operator holds remain. Offline coverage is in the closer
+lease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke
+promises are unchanged. After normal deployment, observe natural abandonment
+and next-owner admission read-only; no restart or manual recovery is part of
+this change.
+
 <!-- smv:diagrams:start -->
 
 ### review-row
@@ -2105,17 +2118,6 @@ stateDiagram-v2
 ```
 
 ### closer-lease
-
-CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
-launch-less pending leases with a confirmed absent/reused same-host watcher PID
-or an elapsed dispatch timeout. Startup sweeps log releases; closure resumes
-normal next-action admission that pass. Uncertain probes cannot refresh the
-deadline. Existing submission fences, current-process leases, review handoffs,
-launch ownership and operator holds remain. Offline coverage is in the closer
-lease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke
-promises are unchanged. After normal deployment, observe natural abandonment
-and next-owner admission read-only; no restart or manual recovery is part of
-this change.
 
 ```mermaid
 stateDiagram-v2

@@ -176,7 +176,8 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
     ...(input.hammerStop ? { controls: {
       stop: { deterministic: true, fingerprint: input.hammerStop.stopKey || input.hammerStop.predicate,
-        headSha: input.hammerStop.headSha || head, recordedAt: input.hammerStop.recordedAt ?? null },
+        headSha: input.hammerStop.headSha || head,
+        recordedAt: input.hammerStop.recordedAt ?? input.hammerStop.recorded_at ?? null },
       ...(input.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: input.hammerStop.predicate,
       } } : {}),

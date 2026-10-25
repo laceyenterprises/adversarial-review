@@ -41,9 +41,14 @@ function root(t) {
   return value;
 }
 
-test('STOPSTALE-01: closure projects the recorded stop time and routes newer exact-head evidence to daemon', async () => {
+for (const [name, timestamps] of [
+  ['camelCase', { recordedAt: AT }],
+  ['snake_case', { recorded_at: AT }],
+  ['null camelCase fallback', { recordedAt: null, recorded_at: AT }],
+  ['camelCase precedence', { recordedAt: AT, recorded_at: '2026-01-01T00:01:00.000Z' }],
+]) test(`STOPSTALE-01: closure projects the ${name} stop time and routes newer exact-head evidence to daemon`, async () => {
   const later = '2026-01-01T00:00:30.000Z';
-  const hammerStop = { headSha: HEAD, recordedAt: AT, stopKey: `${HEAD}:2:${AT}`, predicate: 'synthetic-unattested-head' };
+  const hammerStop = { headSha: HEAD, ...timestamps, stopKey: `${HEAD}:2:${AT}`, predicate: 'synthetic-unattested-head' };
   const input = { currentHead: HEAD, reviewState: { ...clean, verdict: 'comment-only',
     nonBlockingFindingCount: 2, postedAt: later }, strictMode: false, hammerStop,
     lease: null, roundsLeft: false, checks: 'SUCCESS', lifetimeExhausted: true, retryExhausted: true };

@@ -522,7 +522,9 @@ A handed-to-review lease cannot reuse that terminal proof.
 STOPSTALE-01: a deterministic automated stop may be superseded by a review
 posted strictly after its recorded time on the same exact head, when
 `isDaemonMergeReviewAllowed` accepts the findings under the current strict-mode
-policy and the settled verdict reaches the ordinary daemon-merge rows. The
+policy and the settled verdict reaches the ordinary daemon-merge rows. Closure
+input and result adapters accept stop timestamps as `recordedAt` or
+`recorded_at`, preferring a non-null `recordedAt` when both are supplied. The
 decision retains the stop fingerprint and records
 `stop-superseded-by-exact-head-review` in `evidenceRefs`. Missing timestamps,
 blocking or unknown findings, foreign-head reviews and reviews rejected by

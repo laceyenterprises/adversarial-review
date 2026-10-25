@@ -198,7 +198,7 @@ export function observeClosureResult(shared, result, passSnapshot = null) {
     controls: { ...shared.snapshot.observations.controls?.value,
       stop: { deterministic: true, fingerprint: result.hammerStop.stopKey || result.hammerStop.predicate,
         headSha: result.hammerStop.headSha || shared.decision.head,
-        recordedAt: result.hammerStop.recordedAt ?? null },
+        recordedAt: result.hammerStop.recordedAt ?? result.hammerStop.recorded_at ?? null },
       ...(result.hammerStop.refusal ? { safetyRefusal: {
         deterministic: true, reason: result.hammerStop.predicate,
       } } : {}) },

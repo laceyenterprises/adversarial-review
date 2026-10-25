@@ -41,7 +41,8 @@ their output pipes. Missing acknowledgement fails closed.
 The standalone bounded runner retains its original isolated-group behavior.
 The controller signals only its witnessed group; after leader exit a member's
 PID and provider birth must still match before another group signal. Darwin
-uses exact libproc seconds/microseconds; other hosts retain `ps lstart`.
+uses exact kernel seconds/microseconds from the `kern.proc.pgrp` sysctl (the
+start time `ps lstart` prints to the second); other hosts retain `ps lstart`.
 The provider remains fixed for an invocation; no denied probe becomes an empty
 census or a weaker identity match. A fresh
 group census must confirm no live members (zombies excluded) before `quiescent`.

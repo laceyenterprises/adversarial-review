@@ -1,7 +1,7 @@
 // A real test-file process, also selected by the runner integration test.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { realpathSync, writeFileSync } from 'node:fs';
+import { realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import test from 'node:test';
@@ -74,7 +74,10 @@ test('runner quota probe cannot see an inherited exhausted Gemini status', async
   if (process.env.HQ_ROOT_FIXTURE_FAIL === '1') assert.fail('synthetic fixture failure');
   if (process.env.HQ_ROOT_FIXTURE_FAIL === 'kill') process.kill(process.pid, 'SIGKILL');
   if (process.env.HQ_ROOT_FIXTURE_HOLD) {
-    writeFileSync(process.env.HQ_ROOT_FIXTURE_HOLD, JSON.stringify({ pid: process.pid }));
+    // File existence is the parent's readiness signal; publish complete JSON.
+    const ready = process.env.HQ_ROOT_FIXTURE_HOLD;
+    writeFileSync(`${ready}.tmp`, JSON.stringify({ pid: process.pid }));
+    renameSync(`${ready}.tmp`, ready);
     await new Promise((resolve) => setTimeout(resolve, 60_000));
   }
 });

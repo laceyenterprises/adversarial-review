@@ -1179,9 +1179,12 @@ offline `hammer-controller` tests extend source acceptance; the existing
 next-contender progress remain separate runtime-owner acceptance.
 
 LAC-2108 restores the controller's required read-only census inside the macOS
-worker boundary: the packaged stdlib Python helper uses libproc's kernel-filtered
-group enumeration and exact PID/PGID/birth reads, while owner assertion uses
-`getpgid`. Python resolves through the existing `HQ_PYTHON3` / `AGENT_OS_PY` /
+worker boundary: the packaged stdlib Python helper reads one kernel-filtered
+`kern.proc.pgrp` sysctl snapshot of exact PID/PGID/birth records (the records
+`ps` reads, with no same-user restriction on setuid members), while owner
+assertion uses `getpgid`. Darwin never executes setuid `/bin/ps`; a refusal
+names the helper and states that no operator process-introspection change is
+needed. Python resolves through the existing `HQ_PYTHON3` / `AGENT_OS_PY` /
 `python3` convention with isolated imports. Both operations retain a two-second
 bound; denied, incomplete or inconsistent evidence fails closed. Other hosts
 retain `ps`. No sandbox or ledger policy changes. Actual-provider offline tests

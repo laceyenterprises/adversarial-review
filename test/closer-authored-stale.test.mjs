@@ -2,7 +2,7 @@ import './helpers/load-aware-timeout-fixture.mjs';
 // STALECLOSER-03: one eligibility rule for closer-authored stale heads.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -50,6 +50,89 @@ function graphStubs(graph) {
 }
 
 const CLEAN = { verdict: 'settled-success', blockingFindingState: 'known', blockingFindingCount: 0 };
+
+function remediationFixture(t, jobOverrides = {}, roundOverrides = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-round-chain-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'fixture__repo-pr-42-round.json');
+  writeFileSync(path, JSON.stringify({ repo: 'fixture/repo', prNumber: 42, status: 'completed',
+    remediationPlan: { rounds: [{ state: 'completed', startHeadSha: R, resultingHeadSha: M, ...roundOverrides }] },
+    ...jobOverrides }));
+  const comments = [[M, C1], [C1, C2], [C2, W]].map(([base, head]) => ({
+    author: 'hammer-worker', body: `HAM-Base-Head: ${base}\nHAM-Pushed-Head: ${head}`,
+  }));
+  return { path, options: { rootDir, repoPath: 'fixture/repo', prNumber: 42,
+    reviewedHead: R, currentHead: W, comments } };
+}
+
+async function decideRound(options) {
+  const headProof = await proveCloserAuthoredStaleHead(options);
+  return { headProof, eligibility: closerAuthoredStaleEligible({ headProof, ...CLEAN,
+    checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE' }) };
+}
+
+test('HAMROUNDEDGE-01 reviewed -> remediated -> three hammer pushes is eligible', async t => {
+  const { path, options } = remediationFixture(t);
+  const { headProof, eligibility } = await decideRound(options);
+  assert.equal(headProof.proven, true);
+  assert.equal(headProof.anchorHead, R);
+  assert.deepEqual(headProof.closerCommits, [W, C2, C1, M]);
+  assert.equal(eligibility.decision, 'eligible');
+  assert.equal(eligibility.carryForward, true);
+  rmSync(path);
+  const missing = await decideRound(options);
+  assert.equal(missing.headProof.reason, 'hammer-app-attestation-missing');
+  assert.equal(missing.eligibility.decision, 'rereview-exact-head');
+});
+
+for (const [name, job, round] of [
+  ['incomplete round', {}, { state: 'spawned' }],
+  ['missing resulting head', {}, { resultingHeadSha: null }],
+  ['unconnected round', {}, { startHeadSha: P }],
+  ['different PR', { prNumber: 43 }, {}],
+  ['different repo', { repo: 'fixture/other' }, {}],
+  ['incomplete job', { status: 'running' }, {}],
+]) {
+  test(`HAMROUNDEDGE-01 ${name} cannot bridge to the hammer base`, async t => {
+    const { options } = remediationFixture(t, job, round);
+    const { headProof, eligibility } = await decideRound(options);
+    assert.equal(headProof.proven, false);
+    assert.equal(eligibility.decision, 'rereview-exact-head');
+  });
+}
+
+test('HAMROUNDEDGE-01 completed rounds cannot authorize a round-only or builder-authored tip', async t => {
+  const { options } = remediationFixture(t);
+  for (const overrides of [
+    { currentHead: M, comments: [] },
+    { currentHead: M }, // Unrelated later hammer edges confer no authority on M.
+    { comments: options.comments.map(comment => ({ ...comment, author: 'builder-worker' })) },
+    { comments: options.comments.map(comment => ({ ...comment, author: 'remediator-worker' })) },
+  ]) {
+    const { eligibility } = await decideRound({ ...options, ...overrides });
+    assert.equal(eligibility.decision, 'rereview-exact-head');
+  }
+});
+
+test('HAMROUNDEDGE-01 mixed edges retain the chain-length limit and eligibility gates', async t => {
+  const { options } = remediationFixture(t);
+  assert.equal((await decideRound({ ...options, maxCommits: 4 })).eligibility.decision, 'eligible');
+  assert.equal((await decideRound({ ...options, maxCommits: 3 })).headProof.reason, 'closer-chain-too-long');
+  const { headProof } = await decideRound(options);
+  for (const [overrides, decision] of [
+    [{ checksConclusion: 'PENDING' }, 'retry'],
+    [{ checksConclusion: 'FAILURE' }, 'not-eligible'],
+    [{ mergeability: 'UNKNOWN' }, 'retry'],
+    [{ mergeability: 'CONFLICTING' }, 'not-eligible'],
+    [{ blockingFindingState: 'present', blockingFindingCount: 1 }, 'not-eligible'],
+    [{ verdict: 'request-changes' }, 'not-eligible'],
+  ]) {
+    assert.equal(closerAuthoredStaleEligible({ headProof, ...CLEAN,
+      checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE', ...overrides }).decision, decision);
+  }
+});
 
 async function decide(graph, { currentHead, anchorHeads = [], checksConclusion = 'SUCCESS', mergeability = 'MERGEABLE', review = CLEAN } = {}) {
   const headProof = await proveCloserAuthoredStaleHead({ reviewedHead: R, currentHead, anchorHeads, ...graphStubs(graph) });

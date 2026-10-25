@@ -51,10 +51,15 @@ export function hammerProvenanceEdge(comment) {
   return { base: bases[0], head, validated: validated.length === 1 };
 }
 
-export function hammerAttestationChain(comments, reviewedHead, currentHead) {
+// Round inputs must come from daemon-owned records, never PR text. They may
+// bridge to a hammer base; the exact current head still needs a hammer edge.
+export function hammerAttestationChain(comments, reviewedHead, currentHead, remediationRounds = []) {
   if (!reviewedHead || !currentHead || currentHead === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
   const edges = (Array.isArray(comments) ? comments : []).map(hammerProvenanceEdge).filter(Boolean);
+  edges.push(...(Array.isArray(remediationRounds) ? remediationRounds : []).filter(round => round.state === 'completed'
+    && round.startHeadSha && round.resultingHeadSha && round.resultingHeadSha !== currentHead)
+    .map(round => ({ base: round.startHeadSha, head: round.resultingHeadSha })));
   for (let pass = 0; pass < edges.length; pass++) {
     let changed = false;
     for (const edge of edges) {

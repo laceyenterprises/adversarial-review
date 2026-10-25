@@ -2,7 +2,8 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // STALECLOSER-03: ONE eligibility rule for a closer-authored stale head.
 //
 // A head is closer-authored-stale when the PR head moved past the reviewed head
-// only through authenticated hammer App pushed or validated edges. The
+// only through daemon-owned completed remediation rounds and authenticated
+// hammer App pushed or validated edges, ending with a hammer edge. The
 // reviewed verdict may then be carried forward to the closer head -- but only
 // through `closerAuthoredStaleEligible`, which the AMA closer, the hammer wake,
 // the orphan watchdog and agent-os `merge-agent rescue` all call. Rescue can no
@@ -12,7 +13,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // watcher fixtures stub (`fixture:head-closer-commit-suppression`).
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
+import { hammerAttestationChain, readCompletedRemediationRounds } from './ama/hammer-head-validation.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -32,9 +33,10 @@ function sha(value) {
 }
 
 /**
- * Provenance half of the shared rule. Only authenticated hammer App comments
- * can connect the exact current SHA back to the reviewed SHA. Commit trailers,
- * author fields and builder/remediator anchor heads confer no merge authority.
+ * Provenance half of the shared rule. Daemon-owned completed remediation rounds
+ * can bridge the reviewed SHA to an authenticated hammer App chain. The exact
+ * current SHA must end with a hammer edge. Commit trailers, author fields and
+ * builder/remediator anchor heads confer no merge authority.
  * Read failures propagate for bounded recovery; tests supply comment fixtures.
  */
 export async function proveCloserAuthoredStaleHead({
@@ -61,7 +63,8 @@ export async function proveCloserAuthoredStaleHead({
       if (batch.length < 100) break;
     }
   }
-  const chain = hammerAttestationChain(comments, reviewed, current);
+  const rounds = await readCompletedRemediationRounds(options.rootDir, options.repoPath, options.prNumber);
+  const chain = hammerAttestationChain(comments, reviewed, current, rounds);
   if (!chain) return { ...base, reason: 'hammer-app-attestation-missing' };
   if (chain.length > maxCommits) return { ...base, reason: 'closer-chain-too-long' };
   return { ...base, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),

@@ -404,6 +404,7 @@ test('HAMTMP-02: copied renderer refuses outside the real dispatch root; deploye
   // Include the renderer's dependencies so refusal exercises the root guard,
   // rather than failing module resolution before the guard can run.
   cpSync(realpathSync(join(repoRoot, 'src')), join(foreign, 'src'), { recursive: true });
+  symlinkSync(realpathSync(join(repoRoot, 'node_modules')), join(foreign, 'node_modules'), 'dir');
   const env = Object.fromEntries([...readFileSync(join(repoRoot, 'bin/hammer-verify-head.sh'), 'utf8')
     .matchAll(/<<([A-Z_]+)>>/g)].map(m => [`HAM_${m[1]}`, 'synthetic']));
   Object.assign(env, { HAM_ROOT_DIR: resolve(realpathSync(join(repoRoot, 'bin/hammer-procedure.mjs')), '..', '..'), HAM_RUN_DIR: root });

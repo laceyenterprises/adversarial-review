@@ -12,6 +12,15 @@ const psTimestamp = value => timestamp(`${value} UTC`);
 const execFileAsync = promisify(execFile);
 const psEnvironment = env => ({ ...process.env, ...env, LC_ALL: 'C', TZ: 'UTC' });
 
+export function captureCloserProcessSync(pid, options = {}) {
+  if (!validPid(pid)) return null;
+  try {
+    const stdout = (options.processExecFileSyncImpl || execFileSync)('ps', ['-o', 'lstart=', '-p', String(pid)],
+      { ...psOptions, env: psEnvironment(options.env) });
+    return { pid, startedAt: psTimestamp(String(stdout).trim()) };
+  } catch { return { pid, startedAt: null }; }
+}
+
 // Best effort at spawn time. Missing identity never authorizes early recovery.
 export async function captureCloserProcess(pid, options = {}) {
   if (!validPid(pid)) return null;

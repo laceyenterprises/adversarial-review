@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
+import { captureCloserProcessSync } from './dispatch-submitter.mjs';
 /**
  * AMA-07 — durable closer lease keyed by `(repo, prNumber, headSha)`.
  *
@@ -66,6 +67,8 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'pr-closed-externally',
   'no-merge:concurrent-writer',
   'no-merge:pr-merged-externally',
+  'abandoned-holder-dead',
+  'abandoned-timeout',
 ]);
 
 // These attempts spent no closure authority. Retry admission remains owned by
@@ -73,6 +76,7 @@ const VALID_TERMINAL_OUTCOMES = new Set([
 export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
   'failed-without-merge', 'deferred', 'superseded',
   'pr-closed-externally', 'no-merge:concurrent-writer',
+  'abandoned-holder-dead', 'abandoned-timeout',
 ]);
 
 // Shared with dispatch-closer so retry/poll changes also update the reclaim
@@ -102,12 +106,45 @@ export function isAmaCloserPidAlive(pid, processKillImpl = process.kill) {
   }
 }
 
+// Only positive local identity evidence permits early abandonment. An unreadable
+// process table remains uncertain, but cannot move the persisted deadline.
+export function abandonedAmaCloserLeaseOutcome(lease, {
+  now = Date.now(), host = hostname(), livePid = process.pid,
+  isProcessAlive = isAmaCloserPidAlive, captureProcessImpl = captureCloserProcessSync,
+} = {}) {
+  if (lease?.status !== PENDING || lease.lrqId) return null;
+  const local = lease.holderHost === host;
+  if ((!lease.holderHost || local) && Number(lease.watcherPid) === Number(livePid)) return null;
+  const acquiredAt = Date.parse(lease.acquiredAt);
+  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const timeout = Number(lease.dispatchTimeoutMs);
+  if (Number.isFinite(acquiredAt) && Number.isFinite(nowMs) && timeout > 0
+    && Number.isFinite(timeout) && nowMs > acquiredAt + timeout) return 'abandoned-timeout';
+  const pid = Number(lease.watcherPid);
+  if (local && Number.isInteger(pid) && pid > 0) {
+    try {
+      const alive = isProcessAlive(pid);
+      if (alive === false) return 'abandoned-holder-dead';
+      if (alive === true && Number.isFinite(acquiredAt)) {
+        const startedAt = Date.parse(captureProcessImpl(pid)?.startedAt);
+        if (Number.isFinite(startedAt) && startedAt > acquiredAt) return 'abandoned-holder-dead';
+      }
+    } catch { /* Uncertain evidence retains ownership until the deadline. */ }
+  }
+  return null;
+}
+
 export function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
-  if (lease?.status !== PENDING) return false;
+  if (lease?.status !== PENDING || lease.lrqId) return false;
+  let observedPidAlive;
+  if (abandonedAmaCloserLeaseOutcome(lease, { now: now ?? Date.now(),
+    isProcessAlive: pid => (observedPidAlive = isAmaCloserPidAlive(pid, processKillImpl)) })) return true;
+  if ((!lease.holderHost || lease.holderHost === hostname()) && lease.watcherPid === process.pid) return false;
+  if (Number.isFinite(Number(lease.dispatchTimeoutMs)) && Number(lease.dispatchTimeoutMs) > 0) return false;
 
   // A foreign host's PID cannot be checked against this process table.
   const isLocalHost = !lease.holderHost || lease.holderHost === hostname();
-  const pidAlive = isLocalHost ? isAmaCloserPidAlive(lease.watcherPid, processKillImpl) : null;
+  const pidAlive = isLocalHost ? observedPidAlive ?? isAmaCloserPidAlive(lease.watcherPid, processKillImpl) : null;
   if (pidAlive === false) return true;
 
   const acquiredAtMs = Date.parse(String(lease.acquiredAt || ''));
@@ -177,7 +214,8 @@ export function isCurrentAmaCloserLease(rootDir, lease) {
 // Positive ledger liveness (including retries) always wins over an older record.
 export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord } = {}) {
   if (lease?.status !== TERMINAL
-    || !['superseded', 'failed-without-merge', 'deferred'].includes(lease.terminalOutcome)) return false;
+    || !['superseded', 'failed-without-merge', 'deferred',
+      'abandoned-holder-dead', 'abandoned-timeout'].includes(lease.terminalOutcome)) return false;
   if (launchRequestParked(launchStatusProbe)) return false;
   const inFlight = launchRequestInFlight(launchStatusProbe);
   if (inFlight === true || launchStatusProbe?.retryChainUnreadable) return false;
@@ -342,6 +380,9 @@ export function isHeldAmaCloserLease(rootDir, identity, {
   if (lease.status === DISPATCHED) return !isReclaimableDispatchedAmaCloserLease(lease, {
     ...livenessOptions, rootDir, now, fallbackAgeMs: dispatchedExpiryMs,
   });
+  if (lease.status === PENDING && Number(lease.dispatchTimeoutMs) > 0) {
+    return !isReclaimablePendingAmaCloserLease(lease, { ...livenessOptions, now });
+  }
   const age = Date.parse(now) - Date.parse(lease.updatedAt || lease.acquiredAt);
   const expiry = lease.status === PENDING
     ? (lease.dispatchTimeoutMs ? amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs) : pendingExpiryMs)

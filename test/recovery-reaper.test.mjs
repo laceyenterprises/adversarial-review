@@ -1133,11 +1133,10 @@ test('reapStaleCloserLeases: dead same-host holder is reclaimed at 45m, live hol
   });
 
   assert.equal(result.released, 1);
-  assert.equal(existsSync(deadHolder), false, 'dead holder -> closer re-dispatch unblocked at 45m');
+  assert.equal(JSON.parse(readFileSync(deadHolder, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
   assert.equal(existsSync(liveHolder), true, 'live holder -> lease is load-bearing, keep it');
 
-  // Without a liveness probe the short tier cannot fire at all: same lease, no
-  // isProcessAlive, and the 6h floor is the only gate.
+  // An uncertain process probe cannot authorize early abandonment.
   const noProbeRoot = tempRoot();
   t.after(() => rmSync(noProbeRoot, { recursive: true, force: true }));
   const unproven = writeLease(noProbeRoot, {
@@ -1147,7 +1146,7 @@ test('reapStaleCloserLeases: dead same-host holder is reclaimed at 45m, live hol
     watcherPid: DEAD_PID, holderHost: THIS_HOST,
   });
   const unprovenResult = await reapStaleCloserLeases({
-    rootDir: noProbeRoot, now: NOW, logger: { warn() {}, error() {}, log() {} },
+    rootDir: noProbeRoot, now: NOW, isProcessAlive: () => null, logger: { warn() {}, error() {}, log() {} },
   });
   assert.equal(unprovenResult.released, 0);
   assert.equal(existsSync(unproven), true);
@@ -1203,7 +1202,7 @@ test('createStaleStateReaperTicker reclaims a lease orphaned AFTER startup, on a
   const swept = await ticker.tick({ nowMs: sweepMs });
   assert.equal(swept.ran, true, 'reclamation runs from the poll loop, not just at startup');
   assert.equal(swept.result.closerLeases.released, 1);
-  assert.equal(existsSync(orphaned), false, 'closer re-dispatch unblocked without a watcher restart');
+  assert.equal(JSON.parse(readFileSync(orphaned, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
 });
 
 test('createStaleStateReaperTicker prunes finished leases on a poll tick', async (t) => {
@@ -1348,7 +1347,38 @@ test('startWatcherStaleStateReaper runs the startup sweep AND returns a poll-loo
     rootDir, db: null, env: {}, logger: { warn() {}, error() {}, log() {} },
     isProcessAlive: pidIsDead,
   });
-  assert.equal(existsSync(startupOrphan), false, 'startup still sweeps');
+  assert.equal(JSON.parse(readFileSync(startupOrphan, 'utf8')).terminalOutcome, 'abandoned-holder-dead');
   assert.equal(typeof ticker.tick, 'function', 'and hands back the poll-loop trigger');
   assert.equal(ticker.intervalMs, DEFAULT_STALE_STATE_REAPER_INTERVAL_MS);
 });
+
+
+for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff', 'intent']) {
+  test(`CLOSERLEASEDEAD-01 startup sweep ${scenario}`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const logs = [];
+    const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
+      status: scenario === 'handoff' ? 'handed-to-review' : 'pending',
+      lrqId: scenario === 'launch' ? 'lrq_fixture' : null,
+      acquiredAt: minutesAgo(1), updatedAt: NOW, dispatchTimeoutMs: scenario === 'timeout' ? 30_000 : 120_000,
+      holderHost: THIS_HOST, watcherPid: scenario === 'current' ? process.pid : DEAD_PID, terminalOutcome: null };
+    const path = writeLease(rootDir, lease);
+    if (scenario === 'intent') {
+      const recordPath = amaCloserDispatchFilePath(rootDir, lease);
+      mkdirSync(dirname(recordPath), { recursive: true });
+      writeFileSync(recordPath, JSON.stringify({ ...lease, state: 'dispatching' }));
+    }
+    const result = await runStartupStaleStateReaper({ rootDir, now: NOW, env: {},
+      isProcessAlive: () => scenario === 'live' || scenario === 'launch' ? true : scenario === 'timeout' ? null : false,
+      logger: { warn: text => logs.push(text), log: text => logs.push(text), error: text => logs.push(text) } });
+    const released = ['dead', 'timeout'].includes(scenario);
+    assert.equal(result.closerLeases.released, released ? 1 : 0);
+    const after = JSON.parse(readFileSync(path, 'utf8'));
+    if (released) {
+      assert.equal(after.status, 'terminal');
+      assert.equal(after.terminalOutcome, scenario === 'dead' ? 'abandoned-holder-dead' : 'abandoned-timeout');
+      assert.ok(logs.some(text => text.includes('startup stale-state sweep:') && text.includes('released 1 closer lease')));
+    } else assert.deepEqual(after, lease);
+  });
+}

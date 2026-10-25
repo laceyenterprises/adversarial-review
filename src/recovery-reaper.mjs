@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
+import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
 /**
  * Startup + periodic stale-state reaper — offline-period & quota-outage
  * resilience for the adversarial-review pipeline.
@@ -71,6 +72,7 @@ import {
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   isReclaimableDispatchedAmaCloserLease,
   isCurrentAmaCloserLease,
+  abandonedAmaCloserLeaseOutcome,
 } from './ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
 
@@ -287,7 +289,7 @@ export function selectReleasableCloserLeases(leases, {
       const mtimeMs = Number(lease.mtimeMs);
       return Number.isFinite(mtimeMs) && nowMs - mtimeMs >= Number(thresholdMs);
     }
-    if (String(lease.status || '') === 'terminal') return false;
+    if (['terminal', 'handed-to-review'].includes(lease.status)) return false;
     if (lease.terminalOutcome != null) return false;
     if (
       livePid != null
@@ -297,6 +299,10 @@ export function selectReleasableCloserLeases(leases, {
     if (lease.status === 'dispatched') return isReclaimableDispatchedAmaCloserLease(lease, {
       now: nowMs, launchStatusProbe: launchStatusProbes.get(lease.lrqId) ?? null, fallbackAgeMs: thresholdMs,
     });
+    // Modern launch-less leases are handled by the shared abandonment rule in
+    // the driver, including terminal evidence and mutation fencing.
+    if (lease.status === 'pending' && !lease.lrqId && Number(lease.dispatchTimeoutMs) > 0
+      && Number.isFinite(Date.parse(lease.acquiredAt))) return false;
     const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
     if (stampMs == null) return false;
     const ageMs = nowMs - stampMs;
@@ -733,6 +739,7 @@ export async function reapStaleCloserLeases({
   statImpl = fsPromises.stat,
   logger = console,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
+  captureProcessImpl,
 } = {}) {
   if (!rootDir) {
     return {
@@ -774,7 +781,21 @@ export async function reapStaleCloserLeases({
     }
     if (record?.state === 'dispatching') unresolvedIntentLeasePaths.add(lease._path);
   }
-  const releasable = selectReleasableCloserLeases(discovery.records.filter(lease => !unresolvedIntentLeasePaths.has(lease._path)), {
+  const abandonmentOptions = { now, host: host ?? hostname(), livePid,
+    ...(isProcessAlive ? { isProcessAlive } : {}),
+    ...(captureProcessImpl ? { captureProcessImpl } : {}), logger };
+  const abandonedPaths = new Set();
+  const abandonedLeases = [];
+  for (const lease of discovery.records) {
+    if (unresolvedIntentLeasePaths.has(lease._path)
+      || !abandonedAmaCloserLeaseOutcome(lease, abandonmentOptions)) continue;
+    // Never let the legacy age tiers delete a raced or unfenced observation.
+    abandonedPaths.add(lease._path);
+    const abandoned = abandonAmaCloserLease(rootDir, lease, abandonmentOptions);
+    if (abandoned) abandonedLeases.push(abandoned);
+  }
+  const releasable = selectReleasableCloserLeases(discovery.records.filter(lease =>
+    !unresolvedIntentLeasePaths.has(lease._path) && !abandonedPaths.has(lease._path)), {
     now,
     thresholdMs,
     livePid,
@@ -783,7 +804,7 @@ export async function reapStaleCloserLeases({
     host,
     launchStatusProbes,
   });
-  let released = 0;
+  let released = abandonedLeases.length;
   let budgetsReset = 0;
   let interruptedDispatchesReclaimed = 0;
   for (const lease of releasable) {
@@ -860,7 +881,7 @@ export async function reapStaleCloserLeases({
     released,
     pruned,
     budgetsReset,
-    leases: releasable,
+    leases: [...abandonedLeases, ...releasable],
     prunedLeases,
     scannedEntries: discovery.scannedEntries,
     skippedEntries: discovery.skippedEntries,

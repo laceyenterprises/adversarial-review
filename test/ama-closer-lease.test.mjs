@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { abandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import { join } from 'node:path';
 
 import {
   AMA_CLOSER_LEASE_STATUS,
+  abandonedAmaCloserLeaseOutcome,
   acquireAmaCloserLease,
   amaCloserLeaseFilePath,
   readAmaCloserLease,
@@ -400,4 +402,50 @@ test('acquire accepts an explicit holder host so cross-host tests stay determini
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+
+test('CLOSERLEASEDEAD-01 bounds uncertain ownership and checks holder identity', () => {
+  const acquiredAt = '2026-01-01T00:00:00Z';
+  const lease = { status: 'pending', lrqId: null, holderHost: 'fixture-host',
+    watcherPid: 4242, acquiredAt, dispatchTimeoutMs: 60_000 };
+  const opts = { host: 'fixture-host', livePid: 4343, now: Date.parse(acquiredAt) + 30_000,
+    isProcessAlive: () => true,
+    captureProcessImpl: () => ({ startedAt: '2025-12-31T23:59:00Z' }) };
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, opts), null);
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive: () => false }), 'abandoned-holder-dead');
+  assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts,
+    captureProcessImpl: () => ({ startedAt: '2026-01-01T00:00:01Z' }) }), 'abandoned-holder-dead');
+  for (const isProcessAlive of [() => null, () => { throw Error('unreadable'); }]) {
+    assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive }), null);
+    assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive,
+      now: Date.parse(acquiredAt) + 60_000 }), null);
+    assert.equal(abandonedAmaCloserLeaseOutcome(lease, { ...opts, isProcessAlive,
+      now: Date.parse(acquiredAt) + 60_001 }), 'abandoned-timeout');
+  }
+  const expired = { ...opts, now: Date.parse(acquiredAt) + 60_001,
+    isProcessAlive: () => assert.fail('no process probe required') };
+  for (const changed of [{ status: 'handed-to-review' }, { status: 'dispatched', lrqId: 'lrq_live' },
+    { lrqId: 'lrq_live' }, { watcherPid: opts.livePid }]) {
+    assert.equal(abandonedAmaCloserLeaseOutcome({ ...lease, ...changed }, expired), null);
+  }
+  assert.equal(abandonedAmaCloserLeaseOutcome({ ...lease, holderHost: 'remote-fixture' }, expired), 'abandoned-timeout');
+});
+
+
+test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity probe is preserved', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = '2026-01-01T00:00:00Z';
+  const identity = { rootDir, repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40) };
+  const lease = acquireAmaCloserLease({ ...identity, now, host: 'fixture-host', watcherPid: 4242,
+    dispatchTimeoutMs: 120_000 }).lease;
+  const abandoned = abandonAmaCloserLease(rootDir, lease, { now, host: 'fixture-host', livePid: 4343,
+    isProcessAlive: () => true, captureProcessImpl: () => {
+      updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_replacement', now });
+      return { startedAt: '2026-01-01T00:00:01Z' };
+    } });
+  assert.equal(abandoned, null);
+  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_replacement');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
 });

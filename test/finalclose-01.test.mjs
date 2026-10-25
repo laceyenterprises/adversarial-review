@@ -2,11 +2,11 @@ import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord, amaCloserDispatchFilePath, _resetHammerRetryCapAlertDebounceForTests } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
-import { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
@@ -864,3 +864,40 @@ test('HAMNOREREVIEW-01 a legacy handoff stop releases before SQLite review recon
   assert.equal(holds[1].action, 'release', 'a later pass observes the reconciled receipt');
   assert.deepEqual(holds[1].changed, ['hammer-responsibility']);
 });
+
+
+for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'hold', 'probe-timeout']) {
+  test(`CLOSERLEASEDEAD-01 closure routing ${scenario}`, async t => {
+    const f = await backgroundFinalRound(t);
+    f.finish({ dispatched: false, reason: 'fixture-unused' });
+    const now = f.launchAt;
+    const lease = acquireAmaCloserLease({ ...f.identity, host: hostname(),
+      watcherPid: scenario === 'current' ? process.pid : 4242,
+      now: new Date(now - 60_000).toISOString(), dispatchTimeoutMs: scenario === 'timeout' ? 30_000 : 120_000 }).lease;
+    if (scenario === 'launch') updateAmaCloserLease({ ...f.identity, status: 'dispatched', lrqId: 'lrq_live' });
+    let dispatches = 0;
+    const result = await maybeDispatchAmaClosureFor({ ...f.args,
+      labelNames: scenario === 'hold' ? ['no-merge-hold'] : [],
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      closerLeaseLivenessOptions: { isProcessAlive: () => ['live', 'probe-timeout'].includes(scenario),
+        captureProcessImpl: () => ({ startedAt: new Date(now - 120_000).toISOString() }) },
+      probeClosureOwnershipImpl: async () => {
+        if (scenario === 'probe-timeout') f.advance(60_001);
+        return { owned: scenario === 'launch', uncertain: scenario !== 'launch',
+          launchIds: scenario === 'launch' ? ['lrq_live'] : [] };
+      },
+      maybeDispatchAmaCloserImpl: async () => {
+        dispatches++;
+        const after = readAmaCloserLease(f.identity.rootDir, f.identity);
+        assert.equal(after.status, 'terminal');
+        assert.equal(after.terminalOutcome, scenario === 'dead' ? 'abandoned-holder-dead' : 'abandoned-timeout');
+        return { dispatched: true, reason: 'fixture-dispatched' };
+      },
+    });
+    const released = ['dead', 'timeout', 'probe-timeout'].includes(scenario);
+    assert.equal(dispatches, released ? 1 : 0);
+    if (released) assert.equal(result.dispatched, true);
+    else if (scenario !== 'hold') assert.match(result.reason, /^in-flight:/);
+    else assert.deepEqual(readAmaCloserLease(f.identity.rootDir, f.identity), lease);
+  });
+}

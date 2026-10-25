@@ -805,6 +805,16 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
+`abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID, or
+`abandoned-timeout` strictly after its recorded dispatch timeout. Startup and
+periodic sweeps record the outcome and released count; closure re-evaluates the
+next action that pass, including after an uncertain ownership probe crosses the
+deadline. Intent and lease mutation fences preserve unresolved submissions and
+replacement owners. Current-process leases, review handoffs, launch ownership,
+operator holds and all current-head merge gates retain their handling. See the
+[lease contract](data-model/ama-closer-leases.md#abandoned-pending-holders-closerleasedead-01).
+
 CIREDOWNER-01: red CI with remediation rounds left belongs to the remediator
 while a pending/in-progress job exists for the PR, regardless of revision and
 repository-name case, or a posted current-head review has findings awaiting job

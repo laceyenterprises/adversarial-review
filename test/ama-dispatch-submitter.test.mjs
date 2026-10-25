@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureCloserProcess, probeCloserSubmitter } from '../src/ama/dispatch-submitter.mjs';
+import { captureCloserProcessSync, captureCloserProcess, probeCloserSubmitter } from '../src/ama/dispatch-submitter.mjs';
 
 const stamp = 'Thu Oct 22 10:18:18 2026';
 const startedAt = '2026-10-22T10:18:18.000Z';
@@ -73,4 +73,18 @@ test('capture yields to the event loop and fails closed on an asynchronous probe
   assert.deepEqual(await capture, { pid: 12346, startedAt: null });
   assert.equal(ticked, true);
   assert.equal(await captureCloserProcess(0), null);
+});
+
+
+test('CLOSERLEASEDEAD-01 synchronous process identity uses normalized bounded ps evidence', () => {
+  assert.deepEqual(captureCloserProcessSync(4242, { processExecFileSyncImpl: (command, args, options) => {
+    assert.equal(command, 'ps');
+    assert.deepEqual(args, ['-o', 'lstart=', '-p', '4242']);
+    assert.equal(options.timeout, 1000);
+    assert.equal(options.env.TZ, 'UTC');
+    return stamp;
+  } }), { pid: 4242, startedAt });
+  for (const processExecFileSyncImpl of [() => '', () => 'malformed', () => { throw Error('unreadable'); }]) {
+    assert.deepEqual(captureCloserProcessSync(4242, { processExecFileSyncImpl }), { pid: 4242, startedAt: null });
+  }
 });

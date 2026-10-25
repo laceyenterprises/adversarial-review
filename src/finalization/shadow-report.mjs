@@ -12,6 +12,7 @@
 // an observation (recorded in the store) supersedes the classifier's proposal —
 // the bidirectional discipline: the classifier proposes, a human disposes.
 
+import { buildQueueShadowMetrics } from './queue-shadow-metrics.mjs';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
@@ -21,7 +22,10 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** The disposition in force: a human override supersedes the classifier proposal. */
 export function effectiveDisposition(observation) {
-  return observation?.dispositionOverride?.disposition ?? observation?.classification?.disposition ?? 'open';
+  const override = observation?.dispositionOverride?.disposition;
+  if (['resolved', 'open'].includes(override)) return override;
+  if (!['agree', 'diverge'].includes(observation?.classification?.relation)) return 'open';
+  return observation?.classification?.disposition === 'resolved' ? 'resolved' : 'open';
 }
 
 function subjectLabel(subjectExternalId) {
@@ -41,7 +45,8 @@ function compactV2(decision) {
 }
 
 function dispositionTag(observation) {
-  const cls = observation.classification ?? {};
+  const cls = { ...observation.classification, ...(observation.dispositionOverride?.direction
+    ? { direction: observation.dispositionOverride.direction } : {}) };
   const overridden = observation.dispositionOverride != null;
   const eff = effectiveDisposition(observation);
   let base;
@@ -74,7 +79,7 @@ function dispositionTag(observation) {
  * }} args
  * @returns {ShadowReportModel}
  */
-export function buildShadowReport({ observations, now, windowDays = 7, coverage = null }) {
+export function buildShadowReport({ observations, now, windowDays = 7, coverage = null, queueHistory = null }) {
   const nowMs = Date.parse(now);
   if (!Number.isFinite(nowMs)) throw new TypeError('buildShadowReport requires a valid `now` ISO timestamp');
   const days = Number(windowDays) > 0 ? Number(windowDays) : 7;
@@ -89,6 +94,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   if (!coverage) {
     let earliestMsFallback = Infinity;
     for (const o of all) {
+      if (o.queue && o.queue.source !== 'organic') continue;
       const t = Date.parse(o.observedAt);
       if (Number.isFinite(t) && t < earliestMsFallback) earliestMsFallback = t;
       if (o.sawHeadMove) organicHeadMoves += 1;
@@ -113,7 +119,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   let diverge = 0;
   const divergences = [];
   for (const o of windowed) {
-    if (o.classification?.relation === 'diverge') {
+    if (o.classification?.relation !== 'agree') {
       diverge += 1;
       const eff = effectiveDisposition(o);
       divergences.push({
@@ -125,13 +131,15 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
         v1Detail: o.v1Action?.detail ?? null,
         v2: o.v2Decision?.kind ?? 'unknown',
         v2Compact: compactV2(o.v2Decision),
-        direction: o.classification?.direction ?? 'open',
+        direction: o.dispositionOverride?.direction ?? o.classification?.direction ?? 'open',
         class: o.classification?.class ?? null,
         ref: o.classification?.ref ?? null,
         reason: o.classification?.reason ?? '',
         disposition: eff,
         overridden: o.dispositionOverride != null,
         tag: dispositionTag(o),
+        evidence: { v1SourceRef: o.v1Action?.sourceRef ?? null, queue: o.queue ?? null,
+          disposition: o.dispositionOverride ?? null },
       });
     } else {
       agree += 1;
@@ -141,7 +149,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   const openDivergences = divergences.filter((d) => d.disposition === 'open').length;
 
   const blockers = [];
-  if (windowed.length === 0) blockers.push('no shadowed finalizations in window');
+  if (!windowed.some(o => !o.queue || o.queue.source === 'organic')) blockers.push('no shadowed finalizations in window');
   if (!enoughDays) blockers.push(`insufficient shadow coverage (${coverageDays}d < ${days}d)`);
   if (openDivergences > 0) {
     blockers.push(`${openDivergences} open divergence${openDivergences === 1 ? '' : 's'}`);
@@ -164,6 +172,8 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
     openDivergences,
     promotable,
     blockers,
+    queue: { organic: buildQueueShadowMetrics(queueHistory ?? all, { from: fromIso, to: now, source: 'organic' }),
+      synthetic: buildQueueShadowMetrics(queueHistory ?? all, { from: fromIso, to: now, source: 'synthetic' }) },
   };
 }
 
@@ -175,6 +185,9 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
 export function renderShadowReport(model) {
   const lines = [];
   lines.push(`shadowed finalizations: ${model.shadowed}   agree: ${model.agree}   diverge: ${model.diverge}`);
+  for (const sample of Object.values(model.queue ?? {})) {
+    for (const lane of sample.lanes) lines.push(`queue ${lane.lane.repository}/${lane.lane.base} (${sample.source}): entries=${lane.entries} service_samples=${lane.serviceTimeSamples} service_total_ms=${lane.totalServiceTimeMs} service_mean_ms=${lane.serviceTimeMeanMs ?? 'unknown'} oldest_ready_ms=${lane.oldestReadyAgeMs ?? 'none'} arrivals/hour=${lane.arrivalsPerHour.toFixed(2)} merges/hour=${lane.mergesPerHour.toFixed(2)} returns/hour=${lane.returnsToRemediationPerHour.toFixed(2)} infrastructure_wait_ms=${lane.infrastructureWaitMs} infrastructure_park_ms=${lane.infrastructureParkMs} window_hours=${sample.window.hours}`);
+  }
 
   if (model.divergences.length > 0) {
     const labelW = Math.max(...model.divergences.map((d) => d.label.length));

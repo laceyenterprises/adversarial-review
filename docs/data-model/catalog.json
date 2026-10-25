@@ -425,7 +425,8 @@
       "path": "docs/data-model/finalization-shadow.md",
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260718_finalization_shadow.sql",
-      "owner": "ARC-16 Merge Authority v2 shadow mode"
+      "owner": "ARC-16 Merge Authority v2 shadow mode",
+      "queueExtension": "migrations/20261028_finalization_queue_shadow.sql; optional payload dedupeKey and queue evidence; atomic unique pairs, bidirectional operator dispositions and lifecycle metric denominators"
     },
     {
       "id": "finalization-executor-lease",

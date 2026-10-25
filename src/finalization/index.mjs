@@ -94,7 +94,12 @@ export {
   replayV1Trace,
   shadowObserve,
   shadowObserveFromStore,
+  shadowObserveQueue,
+  recordQueueShadow,
 } from './shadow-recorder.mjs';
+
+export { predictQueueShadow, resolveQueueShadowAdapter } from './queue-shadow.mjs';
+export { buildQueueShadowMetrics } from './queue-shadow-metrics.mjs';
 
 export {
   ensureFinalizationShadowSchema,

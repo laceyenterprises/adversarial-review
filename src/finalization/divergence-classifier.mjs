@@ -137,9 +137,19 @@ const V1_DEFECT_SIGNATURES = [
  *   state?: LedgerState | null, foldError?: boolean }} pair
  * @returns {DivergenceClassification}
  */
-export function classifyDivergence({ v1Action, v2Decision, state = null, foldError = false }) {
+export function classifyDivergence({ v1Action, v2Decision, state = null, foldError = false, queue = null }) {
   const v1Bucket = v1ActionBucket(v1Action?.kind);
   const v2Bucket = v2DecisionBucket(v2Decision?.kind);
+
+  // Queue stage differences have no documented automatic defect attribution.
+  // Even familiar reason words cannot resolve a queue prediction as a v1 bug.
+  if (queue && foldError) return classification('diverge', { direction: 'open', class: 'queue-observation-unavailable',
+    ref: null, reason: 'queue observation failed; neither decision is approved' });
+  if (queue) return classification(v1Bucket && v1Bucket === v2Bucket ? 'agree' : 'diverge', {
+    direction: v1Bucket && v1Bucket === v2Bucket ? 'benign' : 'open',
+    class: v1Bucket && v1Bucket === v2Bucket ? 'queue-concur' : 'queue-decision-difference', ref: null,
+    reason: `observed queue proposal ${v2Decision?.kind} versus v1 ${v1Action?.kind}; inspect lane order and decision evidence`,
+  });
 
   // A fold error / ledger-unavailable tick already forced v2 to the fail-closed
   // `escalate` (never a guess). If v1 also stopped, the two concur on "do not

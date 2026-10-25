@@ -12,6 +12,7 @@ import { resolveQueueChecksAdapter } from './queue-checks.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
 import { resolveQueueMergeAdapter } from './queue-merge.mjs';
 import { QUEUE_DELIVERY_KINDS } from './queue-delivery.mjs';
+import { resolveQueueShadowAdapter } from './queue-shadow.mjs';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 export function queueRuntimeBuild() {
@@ -24,14 +25,17 @@ export function queueRuntimeBuild() {
     '../../migrations/20261023_finalization_queue.sql', '../../migrations/20261024_finalization_queue_handoff.sql',
     '../../migrations/20261025_finalization_queue_admission.sql', '../../migrations/20261026_finalization_queue_checks.sql',
     'queue-merge.mjs', 'queue-delivery.mjs', 'execution-surfaces.mjs', '../github-adapter-client.mjs', '../ama/merge-action-receipt.mjs',
-    '../ama/audit.mjs', 'ledger-store.mjs', '../../migrations/20261027_finalization_queue_merge.sql']) {
+    '../ama/audit.mjs', 'ledger-store.mjs', '../../migrations/20261027_finalization_queue_merge.sql',
+    'queue-shadow.mjs', 'queue-shadow-metrics.mjs', 'shadow-recorder.mjs', 'shadow-store.mjs', 'shadow-report.mjs',
+    'divergence-classifier.mjs', 'shadow-actions.mjs', 'eligibility.mjs',
+    '../../migrations/20260718_finalization_shadow.sql', '../../migrations/20261028_finalization_queue_shadow.sql']) {
     hash.update(file).update(readFileSync(join(moduleDir, file)));
   }
   return 'sha256:' + hash.digest('hex');
 }
 
 export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false } }, runtime: {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false } }, runtime: {
     build: queueRuntimeBuild(), pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
@@ -149,6 +153,33 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
         mergeSurface: 'guarded-squash-merge-v1', deliveryKinds: [...QUEUE_DELIVERY_KINDS],
         liveIdentityMergeAndDeliveryAdapters: 'composition-required', routing: 'not-installed-by-this-capability' };
     } catch { result.capabilities.merge.reason = 'merge-store-or-receipt-adapter-unavailable'; }
+    try {
+      if (!result.capabilities.admission.available) throw new Error('admission unavailable');
+      for (const migration of ['20260718_finalization_shadow', '20261028_finalization_queue_shadow']) {
+        reference.exec(readFileSync(new URL(`../../migrations/${migration}.sql`, import.meta.url), 'utf8'));
+      }
+      // The original writable shadow store predates migration-based convergence;
+      // its CREATE TABLE whitespace/comments differ from the migration bytes.
+      const indexes = database => database.prepare("SELECT name,sql FROM sqlite_master WHERE tbl_name='finalization_shadow' AND type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .all().map(row => ({ name: row.name, sql: row.sql.replace(/\s+/g, '') }));
+      if (JSON.stringify(db.pragma('table_info(finalization_shadow)')) !== JSON.stringify(reference.pragma('table_info(finalization_shadow)'))
+        || JSON.stringify(indexes(db)) !== JSON.stringify(indexes(reference))) throw new Error('shadow schema unavailable');
+      const adapter = resolveQueueShadowAdapter({ db });
+      const latest = db.prepare(`SELECT observed_at,payload_json FROM finalization_shadow
+        WHERE json_extract(payload_json,'$.queue.source')='organic' AND observed_at <= ?
+        ORDER BY observed_at DESC,id DESC LIMIT 1`).get(now);
+      const queue = latest ? JSON.parse(latest.payload_json).queue : null;
+      if (queue && (queue.mode !== adapter.mode || !queue.consumer?.id || !queue.consumer?.build)) throw new Error('shadow consumer evidence unavailable');
+      const counts = db.prepare(`SELECT COUNT(*) AS observations,
+        COALESCE(SUM(json_extract(payload_json,'$.queue.source')='organic'),0) AS organic,
+        COALESCE(SUM(fold_error=1),0) AS unknown
+        FROM finalization_shadow WHERE json_extract(payload_json,'$.queue') IS NOT NULL`).get();
+      result.shadow = { mode: queue?.mode ?? adapter.mode, consumer: queue?.consumer ?? null,
+        lastObservationAt: latest?.observed_at ?? null, lastObservationUnknown: queue?.error != null,
+        noMutation: true, ...counts, organicEvidence: latest ? 'observed' : 'pending',
+        composition: 'explicit-consumer-required; no production routing installed' };
+      result.capabilities.shadow = { available: true, adapter: adapter.name, schema: '20261028_finalization_queue_shadow' };
+    } catch { result.capabilities.shadow.reason = 'shadow-store-or-read-adapter-unavailable'; }
   } catch (error) {
     // Error codes are sufficient for operators; do not echo raw DB paths or
     // arbitrary adapter/auth diagnostics into this public read surface.
@@ -158,6 +189,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     result.capabilities.rebase.reason = result.capabilities.owner.reason;
     result.capabilities.checks.reason = result.capabilities.owner.reason;
     result.capabilities.merge.reason = result.capabilities.owner.reason;
+    result.capabilities.shadow.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
@@ -165,9 +197,9 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
 export function queueProbeMain(argv = process.argv.slice(2)) {
   let rootDir;
   let capability;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge --json [--root DIR]';
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow --json [--root DIR]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }

@@ -81,6 +81,29 @@ test('a fully-dispositioned window with organic coverage is promotable (exact sn
   ].join('\n'));
 });
 
+test('queue CLI rates use two decimal places while JSON model retains numeric precision', () => {
+  const lane = { repository: 'owner/repo', base: 'main' };
+  const lifecycle = ['merged', 'returned-to-closer'].flatMap((phase, index) => {
+    const entryId = `entry-${index}`;
+    return [
+      { type: 'acknowledged', lane, at: daysAgo(2), entry: { entryId, phase: 'ready', readinessSeq: index + 1 } },
+      { type: 'progress', lane, at: daysAgo(1), entryId, patch: { phase } },
+    ];
+  });
+  const model = buildShadowReport({ now: NOW, windowDays: 7, observations: [{
+    observedAt: daysAgo(1), queue: { source: 'organic', lifecycle },
+  }] });
+  const rates = model.queue.organic.lanes[0];
+  assert.equal(rates.arrivalsPerHour, 2 / 168);
+  assert.equal(rates.mergesPerHour, 1 / 168);
+  assert.equal(rates.returnsToRemediationPerHour, 1 / 168);
+  assert.match(renderShadowReport(model), /arrivals\/hour=0\.01 merges\/hour=0\.01 returns\/hour=0\.01 /);
+  const empty = buildShadowReport({ now: NOW, windowDays: 7, observations: [{
+    observedAt: daysAgo(1), queue: { source: 'synthetic', lifecycle: lifecycle.slice(0, 1) },
+  }] });
+  assert.match(renderShadowReport(empty), /merges\/hour=0\.00 returns\/hour=0\.00 /);
+});
+
 test('the promotion gate blocks on missing organic observations and thin coverage', () => {
   // One recent divergence-free agreement, no head-move, no exhaustion, <7 days.
   const observations = [

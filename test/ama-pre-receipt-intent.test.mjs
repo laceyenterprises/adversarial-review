@@ -1,3 +1,4 @@
+import './helpers/dispatch-read-fixture.mjs';
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -209,20 +210,12 @@ test('dry-run changes no intent, lease or budget bytes', async t => {
   assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
 });
 
-test('Postgres receipt lookup uses read-only parameterized bounded SQL', async () => {
-  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote", timeoutMs: 240_000,
-    ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
-    spawnSyncImpl(command, args, options) {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes("intent_key=key'quote"));
-      assert.equal(options.timeout, 240_000);
-      assert.match(options.input, /BEGIN READ ONLY/);
-      assert.match(options.input, /idempotency_key = :'intent_key' LIMIT 2/);
-      assert.match(options.input, /cardinality\(identity.tickets\) = 1 THEN identity.tickets\[1\] END AS ticket_ref/);
-      assert.match(options.input, /identity_ambiguous/);
-      assert.doesNotMatch(options.input, /key'quote/);
-      return { status: 0, stdout: JSON.stringify(receipt) + '\n' };
-    } });
+test('receipt recovery passes the exact idempotency key through the SDK', async () => {
+  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote",
+    dispatchSession: { dispatchLookup: async selector => {
+      assert.deepEqual(selector, {idempotency_key: "key'quote"});
+      return {schema_version:1,status:'found',complete:true,roots:[receipt.launch_request_id],items:[receipt],retry_edges:[]};
+    } } });
   assert.equal(r.ok, true);
   assert.equal(r.rows[0].launch_request_id, receipt.launch_request_id);
 });
@@ -339,7 +332,7 @@ for (const lease of [true, false]) test(`legacy empty ticket/time query settles 
   assert.deepEqual(f.read().preReceiptReconciliation.query, {
     kind: 'launch-requests-for-ticket-since', ticketRef: 'AMA-PR-8',
     requestedAtOrAfter: started, limit: 1, ok: true, rowCount: 0,
-    backend: 'sqlite', source: 'deprecated-ledger-db-path', reason: null, detail: null,
+    backend: 'app-contract', source: 'app-sdk', reason: null, detail: null,
     timeoutMs: f.read().preReceiptReconciliation.query.timeoutMs,
     attempts: [{ ok: true, reason: null, detail: null }], launchRequestIds: [],
   });
@@ -494,21 +487,12 @@ test('audit failure prevents operator settlement', async t => {
   assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
 });
 
-test('legacy Postgres query is read-only, bounded and parameterized across the whole ticket', async () => {
-  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started, timeoutMs: 240_000,
-    ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
-    spawnSyncImpl(command, args, options) {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes("ticket_ref=AMA-PR-8'fixture"));
-      assert.equal(options.timeout, 240_000);
-      assert.ok(args.includes('since=2026-10-22T10:18:18.000Z'));
-      assert.match(options.input, /BEGIN READ ONLY/);
-      assert.match(options.input, /:'ticket_ref' = ANY\(identity.tickets\)/);
-      assert.match(options.input, /request.requested_at >= :'since'::timestamptz/);
-      assert.match(options.input, /LIMIT 1/);
-      assert.doesNotMatch(options.input, /AMA-PR-8|target_repo =|head_sha =/);
-      return { status: 0, stdout: '' };
-    } });
+test('legacy intent passes the whole ticket window through the SDK', async () => {
+  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started,
+    dispatchSession: { dispatchLookup: async selector => {
+      assert.deepEqual(selector, {ticket_ref: "AMA-PR-8'fixture", requested_at_or_after: started});
+      return {schema_version:1,status:'not_found',complete:true,roots:[],items:[],retry_edges:[]};
+    } } });
   assert.equal(r.ok, true);
   assert.deepEqual(r.rows, []);
 });

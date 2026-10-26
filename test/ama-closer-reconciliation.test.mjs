@@ -1,3 +1,4 @@
+import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
@@ -135,6 +136,7 @@ test('default ledger reader merges worker PID and process status into fleet capa
     }
   `);
   execFileSync(process.execPath, ['--input-type=module', '--eval', `
+    import ${JSON.stringify(new URL('./helpers/dispatch-read-fixture.mjs', import.meta.url).href)};
     import { register } from 'node:module';
     import assert from 'node:assert/strict';
     register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);

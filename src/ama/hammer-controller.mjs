@@ -5,7 +5,7 @@ import { constants, hostname } from 'node:os';
 import { join } from 'node:path';
 import { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { configuredSessionLedgerBackend, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
@@ -23,18 +23,13 @@ export const LAUNCH_UNREADABLE_GRACE_MS = 120_000;
 export const LAUNCH_READ_ATTEMPTS = 3;
 // Minimum budget for the controller's fresh-read answer; widened under load.
 export const LAUNCH_GATE_WAIT_MS = 60_000;
-// The session-ledger adapter's nominal psql timeout, scaled once per read.
+// The public launch reader's nominal timeout, scaled once per read.
 const LAUNCH_READ_NOMINAL_MS = 30_000;
 
 export function launchReadTimeoutMs() { return loadAwareTimeoutMs(LAUNCH_READ_NOMINAL_MS); }
 
-// Worker tests keep the ordinary DSN; this controller reads live launch truth.
-// The configured backend still gates Postgres, including during rollback.
-export function controllerLedgerTarget(env = process.env) {
-  const dsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
-  return dsn && configuredSessionLedgerBackend({ env }) === 'postgres'
-    ? { backend: 'postgres', dsn, source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' } : undefined;
-}
+// Compatibility shim: launch transport no longer interprets database settings.
+export function controllerLedgerTarget() { return undefined; }
 
 // Registration belongs to this invocation, never the shared PR or LRQ name.
 export function controllerLaunchId(env) {
@@ -196,7 +191,7 @@ export async function runHammerController(script, args = [], {
     let outcome, error;
     try {
       const probe = await readLaunchImpl({ launchRequestId, env, rootDir: env.HAM_ROOT_DIR,
-        hqRoot: env.HAM_HQ_ROOT, ledgerTarget: controllerLedgerTarget(env), timeoutMs: readTimeoutMs,
+        hqRoot: env.HAM_HQ_ROOT, timeoutMs: readTimeoutMs,
         signal: AbortSignal.any([AbortSignal.timeout(readTimeoutMs), closing.signal]) });
       launchReads.source = probe?.target?.source || null;
       const meaning = launchRequestMeaning(probe?.row);

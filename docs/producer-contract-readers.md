@@ -346,3 +346,32 @@ smoke promise changes; no service restart or configuration flip is performed.
 
 The [weekly evidence validation record](validation/weekly-evidence-policy.md)
 lists the complete helper-consumer commands, results and baseline limitations.
+
+## Dispatch lookup
+
+The pinned `vendor/agent-os-app-sdk-0.8.0.tgz` supplies `dispatchLookup` and the
+bounded `readDispatchLookupSync` compatibility reader. `dispatch-read-client.mjs`
+adapts the producer's `schema_version: 1`, `roots`, ordered `items`, `retry_edges`
+and completeness evidence. The historical launch-reader export names remain
+compatibility aliases; they contain no launch SQL or backend resolution.
+The controller also stops interpreting canonical/standby database settings.
+
+Operator-provisioned app grants must explicitly name each project and
+owner-qualified repository observed by CLI-origin review/closer launches.
+Activate the producer and grants before this consumer. Endpoint outage or
+incomplete traversal means unavailable, never absence or permission to retry.
+Successful reads carry `app-contract` / `app-sdk` transport provenance, without
+connection details. Settlement deadlines, lease mutation fences, parked work,
+rearm, cancellation and current-head merge authority remain caller policy.
+
+Consumer fixtures use synthetic transport replies. The committed
+`test/fixtures/dispatch-lookup-v1.json` is an actual producer serialization over
+synthetic disposable inputs, including an ordered cyclic retry tree and a
+blocked decision. Negative identity mutations are labelled in tests. Backend
+schema, claims, scope, malformed metadata and native index-plan regressions now
+run at the OS producer; clients need neither database tools nor OS source.
+
+The contained controller uses SDK `readHcpDispatchLookup` with its provisioned
+worker token to observe exactly its own LRQ. The watcher keeps app-scoped lookup
+for retries, leases and receipt recovery. Route selection occurs before the
+read; a transport failure never switches routes or opens local state.

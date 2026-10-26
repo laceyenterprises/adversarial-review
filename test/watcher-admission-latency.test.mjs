@@ -110,7 +110,6 @@ test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executo
   t.after(() => monitor.stop());
   const cases = [
     ['readLatestWorkerRunStatusFromLedger', { launchRequestId: 'lrq_synthetic' }],
-    ['readLaunchRequestStatusFromLedger', { launchRequestId: 'lrq_synthetic' }],
     ['readBuildCompletionSignalForPr', { repo: 'example/review-fixture', prNumber: 1, signalKind: 'merged' }],
     ['readBuildCompletionProducerEvidence', { repo: 'example/review-fixture', signalKind: 'merged' }],
     ['readActiveDagRunsForPlan', { planId: 'synthetic-plan' }],

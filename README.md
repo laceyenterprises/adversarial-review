@@ -3252,3 +3252,13 @@ and rejects conflicting alias/canonical values within one file. For example,
 These loader-contract details also belong in the parent Agent OS
 `projects/cfg/LOADER-CONTRACT.md`; that superproject document is outside this
 repository's remediation diff.
+
+### Public launch observations
+
+Launch status, retry descendants, capacity snapshots, exact idempotency receipts
+and legacy ticket-window observations use the pinned SDK 0.8.0 dispatch lookup.
+The OS authorizes every row using app receipts or explicit operator-owned
+project/repository grants. Unavailable reads retain ownership holds; they never
+fall back to SQLite, psql or OS files. Existing blocked-decision, cancellation,
+rearm and authoritative merged/closed policy remains in the app.
+See [the reader contract](docs/producer-contract-readers.md#dispatch-lookup).

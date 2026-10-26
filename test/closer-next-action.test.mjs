@@ -300,6 +300,43 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+for (const prState of ['open', 'OPEN']) test(`COMPANIONFLOAT-01 orchestration normalizes ${prState} and fences clean daemon and hammer routes before cap/owner selection`, async t => {
+  const f = closureFixture(t);
+  f.args.candidate.prState = prState;
+  const hammerStop = { predicate: 'companion-submodule-pr-unmerged', headSha: HEAD,
+    owner: 'closure-recovery', companionWait: { repo: 'example/component', prNumber: 7, submodulePath: 'tools/component' } };
+  f.args.readHammerStopForHeadImpl = () => hammerStop;
+  let probes = 0;
+  f.args.evaluateHammerStopHoldImpl = async args => {
+    probes++;
+    assert.equal(args.headSha, HEAD);
+    assert.equal(args.prMetadata.isOpen, true);
+    return { action: 'hold', hammerStop };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(probes, 1);
+  assert.equal(result.reason, 'hammer-stop-awaiting-companion');
+  assert.equal(result.hammerStop.owner, 'closure-recovery');
+  assert.equal(result.dispatched, false);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(f.waits, [], 'the companion deadline owns escalation rather than the shorter final-round timer');
+});
+
+test('COMPANIONFLOAT-01 orchestration forwards the injected companion escalation deliverer', async t => {
+  const f = closureFixture(t);
+  const alerts = [];
+  f.args.deliverAlertImpl = async (...args) => alerts.push(args);
+  f.args.readHammerStopForHeadImpl = () => ({ predicate: 'companion-float-pending' });
+  f.args.evaluateHammerStopHoldImpl = async args => {
+    assert.equal(args.deliverAlertImpl, f.args.deliverAlertImpl);
+    await args.deliverAlertImpl('companion timeout', { event: 'ama_closer.hammer_stop_hold' });
+    return { action: 'hold' };
+  };
+  assert.equal((await maybeDispatchAmaClosureFor(f.args)).reason, 'hammer-stop-awaiting-companion');
+  assert.deepEqual(alerts, [['companion timeout', { event: 'ama_closer.hammer_stop_hold' }]]);
+  assert.deepEqual(f.effects, []);
+});
+
 test('orchestration routes one shared hammer decision despite overdue reports', async t => {
   const f = closureFixture(t);
   const result = await maybeDispatchAmaClosureFor(f.args);

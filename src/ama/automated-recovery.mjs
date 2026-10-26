@@ -73,6 +73,9 @@ async function recoverAmaAutomationLocked({
   state.nextAction = selected;
   if (selected.action === 'done') return { outcome: 'pr-terminal', terminalReason: selected.reason, amaClosureResult: result };
   if (selected.action === 'operator-hold') return { outcome: 'await-operator', amaClosureResult: result };
+  // The companion hold owns its event polling and once-only escalation. Do
+  // not start the generic stalled-recovery timer or spend a recovery attempt.
+  if (result?.reason === 'hammer-stop-awaiting-companion') return waiting('companion');
   const ordinaryWait = value => Boolean(value?.nextAction && (value.nextAction.queue?.intent !== 'dispatch'
     || value.nextAction.queue?.deferredBy));
   async function exhausted() {

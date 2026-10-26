@@ -1,4 +1,5 @@
 import { withPostedReviewReadCache, closePostedReviewReadCache } from './posted-review-read-cache.mjs';
+import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createMergeAgentSnapshotPass, fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { fromLegacyNoProgressLane, fromLegacyPostedReviewOutcome, noteNextActionLegacyLater,
@@ -1141,10 +1142,10 @@ export function createNoProgressLaneGate({
         reviewedSha,
         logger,
       });
-      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
+      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate) || companionOnlyStop(stop)) {
         const hold = readHammerStopHoldForHead({ rootDir, ...identity,
           headSha: handler.headSha, stopKey: stop.stopKey });
-        if (!hold?.releasedAt && !hold?.pagedAt) {
+        if (!hold?.releasedAt && (!hold?.pagedAt || companionOnlyStop(stop))) {
           const lastRunAt = ledger?.lastRunAt !== undefined ? ledger.lastRunAt : ledger?.updatedAt;
           const lastRunMs = ledger?.headSha === handler.headSha
             ? Date.parse(lastRunAt ?? '') : NaN;

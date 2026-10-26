@@ -1,5 +1,20 @@
 # Data Model - Hammer Retry Cap Ledger
 
+## Companion wait credits (COMPANIONFLOAT-01)
+
+`src/ama/companion-stop-wait.mjs` credits only exactly matched dispatch charges
+whose terminal audit names solely a companion dependency wait. Matching requires
+the launch ID, audit job key and target head. A genuine blocker for the same
+launch prevents credit. Unmatched legacy or unreadable accounting stays charged.
+Each `dispatchCharges[key]` may add `companionWaitRefund: { stopKey, refundedAt }`.
+Existing `refundedBudgets` tracks PR, current head/epoch and lifetime credits;
+series changes cannot credit unrelated counters. Refunded launches join
+`unexecutedLaunchRequestIds` to prevent sibling consumers crediting them again.
+Repeated polls leave counters unchanged. The dispatch-record retry bound
+subtracts companion credits for its head without resetting monotonic
+`retryCount`. Ordinary caps still block genuine failures after float, and
+ordinary lease admission retains single-flight dispatch.
+
 
 ## Actions infrastructure refunds (CIBLOCKINFRA-01)
 

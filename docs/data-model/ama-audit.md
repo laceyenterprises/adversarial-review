@@ -1,5 +1,15 @@
 # Data Model - AMA Closure Audit
 
+COMPANIONFLOAT-01: a pure companion dependency terminal attempt records
+`companionWait: { repo, prNumber, submodulePath, mergeCommit }`, with a null
+merge commit until known. The stop reader preserves this object and extracts
+legacy PR URL evidence from closing status/next without truncation. Its retry
+candidates preserve target head, launch ID, audit job key and pure-companion
+classification for exact-charge accounting. Closing status names automated
+closure recovery and the companion-merge/base-gitlink event. Mixed blockers
+retain their actual reason and ordinary accounting. See the
+[companion hold contract](hammer-stop-hold.md#companion-dependency-waits-companionfloat-01).
+
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`

@@ -5,6 +5,7 @@ import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
+import { companionOnlyStop, evaluateCompanionWait } from './companion-stop-wait.mjs';
 // CLOSERSTOPTRANSIENT-01: the historical input-change rule below applies only
 // to explicitly listed deterministic refusals. Other no-merge stops use a
 // durable five-minute backoff; ordinary retry and lifetime caps still apply.
@@ -311,6 +312,8 @@ export function readHammerStopForHead({
     // hold-only runs without handing back any genuine code-work attempt.
     refundStops: terminal.filter(item => STOP_OUTCOMES.has(item.outcome)).map(item => ({
       auditHead: item.fileHead,
+      headSha: attemptHead(item.attempt, item.fileHead),
+      companionOnly: companionOnlyStop(item.attempt),
       ciInfrastructureOnly: isInfrastructureStop(item.attempt) && infrastructureOnlyFailures(recordedCiFailures(item.attempt)),
       launchRequestId: item.launchRequestId,
       noExecution: item.attempt?.noExecution === true || item.attempt?.workerState === 'never-spawned'
@@ -320,6 +323,8 @@ export function readHammerStopForHead({
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || ''}`,
     })),
     failedChecks: recordedCiFailures(attempt),
+    companionWait: attempt?.companionWait || attempt?.githubGate?.companionWait || null,
+    companionEvidence: [attempt?.closingStatus, attempt?.next].filter(Boolean).join('\n'),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     reasons: stopReasons(attempt),
     refusal,
@@ -467,6 +472,11 @@ export async function evaluateHammerStopHold({
     stop = readStop();
   }
   const prior = state.heads[headSha];
+  // External dependency events own this wait, before legacy transient upgrade,
+  // changed-input, conflict and timer releases can widen closer admission.
+  if (companionOnlyStop(stop)) return evaluateCompanionWait({ rootDir, repo, prNumber, headSha,
+    prMetadata, stop, prior, execFileImpl, deliverAlertImpl, logger, now, persist,
+    pageEvent: HAMMER_STOP_HOLD_PAGE_EVENT, pagedInProcess: PAGED_IN_PROCESS });
   // CIBLOCKINFRA-01: zero-step CI is not a deterministic refusal. Retain the
   // audit while blocked; green current-head evidence retires the old stop and
   // credits only its infrastructure charges, once.

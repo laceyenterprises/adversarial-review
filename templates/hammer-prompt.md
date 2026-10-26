@@ -404,19 +404,19 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    cannot open that subrepo PR, stop and report the precise owed
    repo/path/change and the failed check instead of leaving the superproject PR
    red without explanation.
-2bb. **Submodule PR sequencing and main-catchup auto-float.** When the PR you
-   are closing is blocked by a fix that belongs inside a submodule, land the
-   submodule PR first. After that PR merges and the submodule's main advances,
-   main-catchup automatically floats the superproject `tools/<submodule>`
-   gitlink to the new submodule main on its next cycle. Never create a separate
-   superproject pointer-bump PR whose only diff is `Subproject commit ...`; it is
-   dangling/redundant, races the auto-float, and can point at an orphaned
-   pre-squash commit if the submodule PR squash-merges. The correct sequence is:
-   submodule fix PR merged, main-catchup floats the gitlink, the superproject PR
-   rebases or otherwise validates against the floated current main, checks rerun
-   green, then the superproject PR may merge. Do not merge the superproject PR
-   while the submodule fix is unmerged, and do not fabricate a pointer bump to
-   force it.
+2bb. **Submodule PR sequencing and main-catchup auto-float.** Merge the
+   submodule fix PR first. Main-catchup then floats `tools/<submodule>` to
+   submodule main. Rebase or validate the superproject against floated main,
+   rerun checks green, then merge. Never merge with the fix unmerged or create
+   a pointer-bump PR: it races auto-float and may pin an orphaned pre-squash SHA.
+   For pure dependency stops, audit `companion-submodule-pr-unmerged` (or
+   `companion-float-pending` after merge) with actual
+   `companionWait: { repo, prNumber, submodulePath, mergeCommit }`; set
+   `mergeCommit` null until merged, then GitHub's merge commit, never PR head.
+   Closing status names `closure-recovery` polling companion merge and base
+   gitlink ancestry; normal submodule float owns the gitlink update. State the
+   awaited event. Never call this operator follow-through or terminal no-owner.
+   Keep genuine remediation failures out of companion-only stops.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches any

@@ -1101,7 +1101,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   mkdirSync(scratchDir, { mode: 0o700 });
   const { default: Database } = await import('better-sqlite3');
   // Render against an isolated root while reusing the checked-in procedures.
-  for (const name of ['bin', 'src', 'node_modules', 'domains', 'migrations']) {
+  for (const name of ['bin', 'src', 'node_modules', 'domains', 'migrations', 'templates']) {
     symlinkSync(join(root, name), join(dir, name), 'dir');
   }
   for (const name of ['config.yaml', 'package-lock.json']) symlinkSync(join(root, name), join(dir, name), 'file');

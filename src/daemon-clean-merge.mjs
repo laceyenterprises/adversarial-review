@@ -1,3 +1,4 @@
+import { queueAdmissionCallback } from './finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from './finalization/queue-routing-boundary.mjs';
 import { captureReadyFindings } from './findings-backlog.mjs';
 import { observeDaemonGate, observeDaemonResult } from './ama/closure-next-action.mjs';
@@ -373,7 +374,8 @@ export function runDaemonCleanMergeAttempt(args = {}) {
   return routeFinalizationWriter({ rootDir: args.rootDir || ROOT, cfg: args.cfg,
     lane: { repository: args.repoPath, base: args.candidate?.baseBranch }, kind: 'daemon',
     subject: { prNumber: args.prNumber, head: args.currentPrHeadSha || args.candidate?.headSha || null },
-    queue: args.queueAdmission, legacy: () => runLegacyDaemonCleanMergeAttempt(args) });
+    queue: queueAdmissionCallback({ rootDir: args.rootDir || ROOT, prNumber: args.prNumber,
+      head: args.currentPrHeadSha || args.candidate?.headSha, admit: args.queueAdmission }), legacy: () => runLegacyDaemonCleanMergeAttempt(args) });
 }
 
 function runLegacyDaemonCleanMergeAttempt(args = {}) {

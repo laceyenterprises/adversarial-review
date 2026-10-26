@@ -5702,8 +5702,8 @@ merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
 metered transport, arguments and output. Queue admission callbacks are injected
 at the composition boundary; a missing callback returns
 `queue-composition-unavailable`, with no legacy fallback. This slice does not
-start a queue pump, install live evidence/identity/delivery adapters or alter
-closer remediation prompts. Those explicit composition requirements must be
+start a queue pump or install live evidence/identity/delivery adapters. MGQ-10
+adds the route-scoped closer prompt described below. Those explicit composition requirements must be
 satisfied and observed before an operator promotes a lane. Capability availability
 is not an assertion that such a consumer is running.
 
@@ -5795,3 +5795,19 @@ isolated fault results and reversible rollback/reactivation. The runtime-owner
 joins existing store/schema/adapters with private operator evidence; it never
 activates a lane. Missing evidence remains pending, and explicit operator
 approval after merge is separate from source publication or JSON availability.
+
+## Migrated-lane closer retirement and expansion (MGQ-10)
+
+The [expansion walkthrough](finalization-queue-expansion-runbook.md) documents
+route-scoped remediation/publication/handoff/exit, enqueue-only daemon and
+certified closer recovery, explicit trusted handoff/resource-release composition,
+exclusive writer inventory and the bounded read-only `--capability cutover`
+probe. Durable complete ack precedes mandatory idempotent closer/worker release;
+only the queue waits CI/rebases/merges. Legacy and rollback retain existing paths
+and incident fixtures for one release cycle. No lane is activated by this source
+change. Missing composed adapters or organic release/receipt evidence is pending.
+After prior canary approval, the named operator transfers one privately supplied
+whole lane, changes one reviewed selector, bounces/verifies registered system
+services, observes exact-head receipts and slot release before CI, rehearses
+rollback/reactivation and records explicit approval. Worker publication and PR
+merge do not complete operator approval. No new smoke/check or merge authority.

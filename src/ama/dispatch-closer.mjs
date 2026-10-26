@@ -1,3 +1,4 @@
+import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
@@ -4360,6 +4361,16 @@ export async function maybeDispatchAmaCloser(args) {
     if (args.cfg?.enabled && terminalPr) {
       return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
     }
+    if (args.cfg?.enabled) {
+      const prepared = await prepareQueueCloserDispatch({
+        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT, cfg: args.cfg,
+        lane: { repository: targetRepo, base: dispatchContext?.baseBranch || args.prMetadata?.baseBranch
+          || args.prMetadata?.baseRefName || args.prMetadata?.baseRef?.name },
+        prNumber: Number(targetPrNumber), head: targetHead, composition: dispatchContext?.queueCloser,
+      });
+      if (prepared?.ok === false || prepared?.queued) return noAmaDispatch(prepared);
+      if (dispatchContext) dispatchContext.queueCloserPrepared = prepared?.executor === 'queue-v2' ? prepared : null;
+    }
     const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber,
       headSha: args.prMetadata?.headSha || args.reviewState?.headSha || dispatchContext?.reviewedSha || args.headSha };
     const deferred = dispatchContext?.rootDir && targetRepo && drainIdentity.headSha
@@ -4951,21 +4962,22 @@ async function maybeDispatchAmaCloserAttempt({
     // follow-up ledger before it honors any waiver.
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   };
-  let prompt = composeCloserPrompt(promptInputs);
+  const queueCloser = dispatchContext.queueCloserPrepared;
+  let prompt = queueCloser ? renderQueueCloserPrompt(closerTemplateValues(promptInputs), queueCloser) : composeCloserPrompt(promptInputs);
   if (reviewState?.operatorLabelFindings?.gated?.length) {
     prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
   }
 
   const hammerOwnerRoute = hammerOwnerRouteOf(dispatchContext);
-  if (hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
+  if (!queueCloser && hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
     prompt += composeReviewCycleCapHammerPrompt({ reviewedSha, targetRemediationSha,
       cap: dispatchContext.reviewCycleCap, history: dispatchContext.reviewCycleHistory });
   }
-  if (hammerOwnerRoute === 'ci-blocked' && useHammerTerminalRemediationPrompt) {
+  if (!queueCloser && hammerOwnerRoute === 'ci-blocked' && useHammerTerminalRemediationPrompt) {
     prompt += composeCiBlockedHammerPrompt({ reviewedSha, targetRemediationSha,
       failedChecks: dispatchContext.ciFailedChecks });
   }
-  if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
+  if (!queueCloser && orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
@@ -5806,11 +5818,12 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
-          sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
+          const reserve = queueCloser ? (_request, invoke) => invoke() : withDaemonMergeReservation;
+          sameHeadHamMerge = await reserve({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => routeFinalizationWriter({ rootDir, cfg,
             lane: { repository: repo, base: baseBranch }, kind: 'closer', subject: { prNumber, head: mergeHead },
-            queue: dispatchContext.queueAdmission, legacy: () => attemptDaemonCleanMergeImpl({
+            queue: queueAdmissionCallback({ rootDir, prNumber, head: mergeHead, admit: dispatchContext.queueAdmission }), legacy: () => attemptDaemonCleanMergeImpl({
             receiptProducerClass: 'closer-hammer',
             getNextAction: () => sharedNextAction.decision,
             repo,
@@ -6893,7 +6906,7 @@ async function maybeDispatchAmaCloserAttempt({
     repo,
     prNumber,
     workerClass,
-    completionShape: 'decision-only',
+    completionShape: queueCloser ? 'branch-push' : 'decision-only',
   });
   if (mergeDispatchRoute !== 'hq-dispatch') {
     throw new Error(
@@ -6969,6 +6982,17 @@ async function maybeDispatchAmaCloserAttempt({
   if (!releaseIntentLock) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     inFlight: true, reason: 'ama-closer-launch-in-progress' });
   const dispatchIdempotencyKey = `ama-closer-${randomUUID()}`;
+  if (queueCloser) {
+    // Re-read after asynchronous eligibility/status work and under the existing
+    // per-PR dispatch single-flight. A late committed handoff cannot relaunch.
+    const prepared = await prepareQueueCloserDispatch({ rootDir, cfg,
+      lane: { repository: repo, base: baseBranch }, prNumber, head: targetRemediationSha,
+      composition: dispatchContext.queueCloser });
+    if (prepared?.ok === false || prepared?.queued) return noAmaDispatch(prepared);
+    if (prepared?.executor !== 'queue-v2' || prepared.route.routeGeneration !== queueCloser.route.routeGeneration) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'lane-transfer-required' });
+    }
+  }
   let leaseResult = acquireAmaCloserLease({
     rootDir,
     fromReviewHandoff: reviewHandoffFindings,
@@ -7062,7 +7086,7 @@ async function maybeDispatchAmaCloserAttempt({
   scratchDir = createHammerScratchDir(promptDir);
   promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
   const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
-  for (const phase of HAMMER_PHASES) {
+  for (const phase of queueCloser ? [] : HAMMER_PHASES) {
     writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   }
@@ -7306,7 +7330,9 @@ async function maybeDispatchAmaCloserAttempt({
   //     (`dispatchWorkerClass`) to a fallback when the configured provider is
   //     quota-grounded; the logical `workerClass` still drives the prompt/audit.
   //   - `--task-kind merge` matches merge-agent.
-  //   - `--completion-shape decision-only` because the hammer worker
+  //   - Migrated closers use the existing branch-push/push completion contract;
+  //     their mandatory durable ack/resource release is enforced by composition.
+  //   - Legacy `--completion-shape decision-only` because the hammer worker
   //     writes the audit JSON artifact; it does NOT open a PR. This
   //     prevents the dispatcher from injecting the default `pr`
   //     close-out (CLAUDE.md §"_apply_prompt_closeouts").
@@ -7319,8 +7345,8 @@ async function maybeDispatchAmaCloserAttempt({
     '--idempotency-key', dispatchIdempotencyKey,
     '--worker-class', dispatchWorkerClass,
     '--task-kind', 'merge',
-    '--completion-shape', 'decision-only',
-    '--required-outcome', 'terminal-audit',
+    '--completion-shape', queueCloser ? 'branch-push' : 'decision-only',
+    '--required-outcome', queueCloser ? 'push' : 'terminal-audit',
     '--project', hqProject,
     '--repo', repoBasename,
     '--pr', String(prNumber),

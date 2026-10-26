@@ -89,3 +89,8 @@ ready preflight, at least 20 organic entries, both admission types, no rejected
 observations and no pending return acknowledgements. Otherwise `status: pending`
 lists the missing evidence. Every result remains observation only; explicit
 operator approval is separate and is never recorded by this reader or a worker.
+
+The separate [cutover observation contract](finalization-queue-cutover.md) reuses
+these shapes for second-lane expansion and adds prior canary approval, running
+queue-owner and per-closer release evidence. Only an explicit cutover request
+reads that artifact; canary evidence remains separate.

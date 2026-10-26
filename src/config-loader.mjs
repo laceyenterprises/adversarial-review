@@ -1430,7 +1430,15 @@ function schemaV1() {
               capability_vocabulary: {
                 __type: TYPE_LIST,
                 __item: { __type: TYPE_STRING },
-                __default: [],
+                __default: ["comms.read", "comms.write", "dispatch.read", "dispatch.write", "finch.read", "fs.read", "fs.write", "github.read", "gmail.read", "gmail.send", "hammer.status", "linear.read", "linear.write", "session-ledger.read", "search.brave", "search.exa", "search.firecrawl", "search.parallel", "search.perplexity", "search.tavily", "talk"],
+              },
+              capability_enforcement: {
+                __type: TYPE_DICT, __strict: false,
+                __keys: Object.fromEntries([
+                  ...['autok', 'comms', 'email', 'hcp', 'linear'].map(server => [server, { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] }]),
+                  ...['memory', ...Object.keys(SEARCH_OPERATIONS).map(p => `search-${p}`)].map(server => [server, { __type: TYPE_STRING, __default: 'off', __enum: ['off', 'shadow', 'enforce'] }]),
+                ]),
+                __extra_keys_schema: { __type: TYPE_STRING, __default: 'off', __enum: ['off', 'shadow', 'enforce'] },
               },
               bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
               audit_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },

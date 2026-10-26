@@ -6,6 +6,26 @@ import { join } from 'node:path';
 import { AgentOSConfigError, loadConfig, loadConfigRuntime, validateSchema } from '../src/config-loader.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/search-config-cases.json', import.meta.url)));
+
+test('SPE search capability vocabulary overrides and modes cover each provider independently', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'search-capabilities-'));
+  const topPath = join(dir, 'config.yaml');
+  try {
+    writeFileSync(topPath, 'version: 1\n');
+    const defaults = loadConfig({ topPath, env: {} });
+    for (const provider of Object.keys(fixture.configured.providers)) {
+      const server = `search-${provider}`;
+      const capability = `search.${provider}`;
+      assert.equal(defaults.get(`services.hcp.capability_enforcement.${server}`), 'off');
+      assert.ok(defaults.get('services.hcp.capability_vocabulary').includes(capability));
+      writeFileSync(topPath, JSON.stringify({ version: 1, services: { hcp: { capability_vocabulary: [capability], capability_enforcement: { [server]: 'enforce' } } } }));
+      const cfg = loadConfig({ topPath, env: {} });
+      assert.deepEqual(cfg.get('services.hcp.capability_vocabulary'), [capability]);
+      assert.equal(cfg.get(`services.hcp.capability_enforcement.${server}`), 'enforce');
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 function expand(item) {
   const search = structuredClone(item.base ? fixture[item.base] : item.search);
   for (const patch of item.patches ?? []) {

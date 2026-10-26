@@ -78,6 +78,7 @@ echo $((value + increment)) > "$FIXTURE_DIR/clock"
 case "$1" in
   */metered-gh.mjs) shift 2; exec gh "$@" ;;
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
+  */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$FIXTURE_HELPER" legacy "$@" ;;
   */merge-lease.mjs)
     case "$2" in
       acquire)

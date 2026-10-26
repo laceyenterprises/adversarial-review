@@ -7,6 +7,8 @@ import { classifyCheckRollup } from '../../src/checks-summary.mjs';
 import { evaluateMergeEligibility } from '../../src/ama/merge-eligibility.mjs';
 import { publishPushedHammerAttestation } from '../../src/ama/hammer-pushed-attestation.mjs';
 import { hammerRangeMatches } from '../../src/ama/hammer-head-validation.mjs';
+import { legacyLaneWriteMain } from '../../bin/legacy-lane-write.mjs';
+import { runLegacyLaneWrite } from '../../src/finalization/legacy-lane-write.mjs';
 
 const dir = process.env.FIXTURE_DIR;
 const path = join(dir, 'state.json');
@@ -18,7 +20,14 @@ const localHead = () => git('rev-parse', 'HEAD');
 const args = process.argv.slice(2);
 const retryScenario = process.env.SCENARIO.startsWith('ci-');
 
-if (args[0] === 'pushed') {
+if (args[0] === 'legacy') {
+  // The rendered shell and real lane writer must share the advancing fixture
+  // clock; mixing the synthetic shell deadline with wall time expires it.
+  process.exitCode = await legacyLaneWriteMain(args.slice(1), {
+    run: options => runLegacyLaneWrite({ ...options,
+      now: () => new Date(Number(readFileSync(join(dir, 'clock'), 'utf8')) * 1000).toISOString() }),
+  });
+} else if (args[0] === 'pushed') {
   const [baseHead, pushedHead] = args.slice(-2);
   assert.equal(pushedHead, state.head);
   await publishPushedHammerAttestation({ repo: 'fixture/repo', prNumber: 42, baseHead, pushedHead,

@@ -230,6 +230,10 @@ test('legacy shell wrapper preserves command, arguments, output and exit code wh
   assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => ({ ok: false,
     reason: 'owner-operation-in-flight', outcome: 'lane-busy', waitedMs: 1234 }) }), 75);
   assert.equal(err, 'legacy lane write refused: owner-operation-in-flight; lane-busy; waited 1234ms\n');
+  err = '';
+  assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => ({ ok: false,
+    reason: 'owner-operation-in-flight' }) }), 75);
+  assert.equal(err, 'legacy lane write refused: owner-operation-in-flight\n');
   assert.equal(await legacyLaneWriteMain(['--deadline-ms', 'invalid', ...args], streams), 64);
   await legacyLaneWriteMain(['--deadline-ms', '1792886400000', ...args], {
     ...streams, run: async r => { assert.equal(r.deadline, at); return {}; },

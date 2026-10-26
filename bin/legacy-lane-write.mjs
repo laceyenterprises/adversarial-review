@@ -22,7 +22,7 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
     const result = await run({ ...options, subject: { target: commandArgs.find(arg => /^https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(arg)) ?? null,
       head: headIndex >= 0 ? commandArgs[headIndex + 1] ?? null : null }, command: argv[i + 1], argv: argv.slice(i + 2) });
     if (result?.ok === false) {
-      stderr.write(`legacy lane write refused: ${result.reason}${result.reason === 'owner-operation-in-flight' ? `; lane-busy; waited ${result.waitedMs ?? 0}ms` : ''}\n`);
+      stderr.write(`legacy lane write refused: ${result.reason}${result.reason === 'owner-operation-in-flight' && result.outcome === 'lane-busy' ? `; lane-busy; waited ${result.waitedMs ?? 0}ms` : ''}\n`);
       return 75;
     }
     stdout.write(result.stdout || ''); stderr.write(result.stderr || ''); return 0;

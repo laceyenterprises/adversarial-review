@@ -1124,7 +1124,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
     HAM_AUDIT_REMEDIATED_TOTAL: '0', HAM_AUDIT_REMEDIATED_BLOCKING: '0', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
     HAM_DOC_CURRENCY: 'not applicable', HAM_DOC_CURRENCY_REASON: 'synthetic no-diff close',
     HAM_FAILING_TESTS_FIXED: 'fixture CI green', HAM_AMA_TRAILERS: 'Worker-Class: hammer\nTicket: GHBUDGET-01',
-    REAL_NODE: process.execPath, HAM_NODE_BIN: join(dir, 'node-stub'),
+    REAL_NODE: process.execPath, REAL_LEGACY_CLI: join(root, 'bin/legacy-lane-write.mjs'), HAM_NODE_BIN: join(dir, 'node-stub'),
     PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
   };
@@ -1140,6 +1140,9 @@ fs.writeFileSync(file, String(Number(fs.readFileSync(file)) + Number(process.arg
   writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$*" in 'rev-parse HEAD') echo '${head}' ;; 'diff --name-only '*) exit 0 ;; *) echo '${base}' ;; esac\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'node-stub'), `#!/bin/sh
 case "$1" in
+  # Resolve the entrypoint: the fixture's symlinked bin directory otherwise
+  # makes the CLI's direct-execution check skip the real lane writer.
+  */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$REAL_LEGACY_CLI" "$@" ;;
   */merge-lease.mjs)
     if [ "$2" = acquire ]; then echo '{"leaseId":"fixture-lease"}';
     elif [ "$2" = needs-revalidation ]; then echo '{"needsRevalidation":false}';

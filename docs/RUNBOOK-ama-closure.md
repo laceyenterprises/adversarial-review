@@ -5732,6 +5732,9 @@ Failed delivery retries on the next pass. A new parked head or review series
 starts a new count. This limits launch cadence and signals persistent contention
 without converting contention into a final-no-merge. A bare queue-route
 `owner-operation-in-flight` refusal retains its terminal classification.
+The CLI emits the `; lane-busy; waited Nms` suffix only when the routing result
+explicitly carries `outcome: 'lane-busy'`; the reason alone does not establish a
+legacy lock-wait timeout.
 Uncertified recovery rewrites only `succeeded`/`failed` launches for ordinary
 repair; other launch statuses retain their existing semantics. Audit-read errors
 warn for both certified and uncertified attempts; certified attempts retain

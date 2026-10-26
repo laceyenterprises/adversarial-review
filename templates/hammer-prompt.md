@@ -417,6 +417,18 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    green, then the superproject PR may merge. Do not merge the superproject PR
    while the submodule fix is unmerged, and do not fabricate a pointer bump to
    force it.
+   If stopping only for this dependency, use `companion-submodule-pr-unmerged`
+   (or `companion-float-pending` after merge) in the terminal audit and record
+   `companionWait: { repo: "example/component", prNumber: 7,
+   submodulePath: "tools/component", mergeCommit: null }` on the attempt.
+   Replace the synthetic values with the actual dependency; once merged,
+   record its GitHub merge commit rather than its pre-merge head. The closing
+   status names the automated owner: closure-recovery polls the companion and
+   the superproject base gitlink; normal submodule float owns the gitlink update.
+   State the awaited event (companion merge or base gitlink containing that
+   merge commit). Never call this an operator follow-through or terminal
+   no-owner decision. Do not mix a genuine remediation failure into a
+   companion-only stop; record the actual blocker as usual.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches any

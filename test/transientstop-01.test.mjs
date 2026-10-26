@@ -66,7 +66,8 @@ function stopAudit(rootDir, predicate) {
 }
 
 test('TRANSIENTSTOP-01: evidence stops become due at five minutes despite a slow lane and no review event', async t => {
-  for (const predicate of ['history-read-failed', 'primary-change-unknown', 'primary-change-read-failed', 'ci-not-green']) {
+  for (const predicate of ['history-read-failed', 'primary-change-unknown', 'primary-change-read-failed',
+    'companion-submodule-pr-unmerged', 'companion-float-pending', 'ci-not-green']) {
     const { args } = fixture(t, predicate);
     stopAudit(args.rootDir, predicate);
     const identity = { repo, prNumber: 1 };

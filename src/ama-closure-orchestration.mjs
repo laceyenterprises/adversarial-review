@@ -49,6 +49,8 @@ import {
   isDaemonMergeReviewAllowed,
 } from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
+import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { resolveHammerAdjudication } from './ama/hammer-adjudication.mjs';
@@ -810,6 +812,7 @@ async function maybeDispatchAmaClosureForInner({
       } } : {}) };
   }
   if (finalRoundSink.value
+    && result?.reason !== 'hammer-stop-awaiting-companion'
     && !(result?.boundedWait && ['review', 'remediate', 'wait-for-CI'].includes(result.nextAction?.action))
     && !result?.daemonCleanMerge?.reason?.startsWith('fleet-stop-')
     && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
@@ -923,6 +926,7 @@ async function dispatchAmaClosureFor({
   preReceiptIntentOptions = {},
   observeClosureWaitImpl = observeClosureWait,
   readHammerStopForHeadImpl = readHammerStopForHead,
+  evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   recoverInfrastructureChecksImpl = recoverInfrastructureChecks,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
   mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
@@ -1611,6 +1615,14 @@ async function dispatchAmaClosureFor({
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
+  if (autonomousMergeExecutionEnabled && prMetadata.isOpen && companionOnlyStop(recordedStop)) {
+    const wait = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
+      logger, deliverAlertImpl: deliverAlert, now: new Date(now()).toISOString() });
+    if (wait.action === 'hold') return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, reason: 'hammer-stop-awaiting-companion', hammerStop: wait.hammerStop }, { amaEnabled: true });
+    if (wait.action === 'release') recordedStop = null;
+  }
   if (isInfrastructureStop(recordedStop)) {
     const evaluatedStop = await evaluateHammerStopHold({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,

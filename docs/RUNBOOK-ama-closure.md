@@ -2579,6 +2579,16 @@ Per-head, series and lifetime caps and terminal-PR guards still apply; no
 executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
 for the vocabulary audit and migration shape.
 
+COMPANIONFLOAT-01 gives pure companion stops a separate event wait. Closure
+recovery polls the companion PR and base submodule gitlink every five minutes;
+normal submodule float owns the update. Merge re-evaluates the wait; only a
+base gitlink containing the authoritative merge commit allows ordinary closer
+admission. Unrelated base movement and transient timers cannot dispatch it.
+Exact pure-wait charges are credited once, while genuine blockers retain their
+caps. Closed-unmerged companions or a missing float after the 24-hour backstop
+plus one-hour margin escalate once, naming the dependency and automated owner.
+See the hold-store companion contract for fields, migration and offline fixtures.
+
 - **Hammer stop hold** (`src/ama/hammer-stop-hold.mjs`). When the hammer's
   latest terminal audit for the live head is `failed-without-merge` with an
   explicitly deterministic refusal, the closer

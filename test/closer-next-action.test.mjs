@@ -300,6 +300,26 @@ function closureFixture(t, overrides = {}) {
   return { args, effects, waits };
 }
 
+test('COMPANIONFLOAT-01 orchestration fences clean daemon and hammer routes before cap/owner selection', async t => {
+  const f = closureFixture(t);
+  const hammerStop = { predicate: 'companion-submodule-pr-unmerged', headSha: HEAD,
+    owner: 'closure-recovery', companionWait: { repo: 'example/component', prNumber: 7, submodulePath: 'tools/component' } };
+  f.args.readHammerStopForHeadImpl = () => hammerStop;
+  let probes = 0;
+  f.args.evaluateHammerStopHoldImpl = async args => {
+    probes++;
+    assert.equal(args.headSha, HEAD);
+    return { action: 'hold', hammerStop };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(probes, 1);
+  assert.equal(result.reason, 'hammer-stop-awaiting-companion');
+  assert.equal(result.hammerStop.owner, 'closure-recovery');
+  assert.equal(result.dispatched, false);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(f.waits, [], 'the companion deadline owns escalation rather than the shorter final-round timer');
+});
+
 test('orchestration routes one shared hammer decision despite overdue reports', async t => {
   const f = closureFixture(t);
   const result = await maybeDispatchAmaClosureFor(f.args);

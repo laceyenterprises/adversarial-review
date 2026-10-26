@@ -727,6 +727,7 @@
     },
     {
       "id": "hammer-retry-cap",
+      "companionWaitCredits": "dispatchCharges may carry companionWaitRefund stopKey/refundedAt; exact pure-wait launch credits share refundedBudgets and unexecutedLaunchRequestIds.",
       "ciInfrastructureRefund": "dispatchCharges[key].ciInfrastructureRefund = { reason: checks-executed-again, stopKey, refundedAt }; exact-charge per-budget credits survive series resets",
       "title": "Hammer Retry Cap Ledger",
       "path": "docs/data-model/hammer-retry-cap.md",
@@ -734,7 +735,8 @@
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
       "receiptChargeFields": ["chargedDispatchKeys", "dispatchCharges", "targetChargeEpoch", "pendingTransientCharge", "noWorkRefunds"],
       "receiptChargeSemantics": "LAC-2081/RCV-08: exact native attempt key and LRQ charge once across receipt interruptions and head resets; schema 3 retains per-budget partial credits and permanent canonical no-work refund receipts under one PR-scoped flock; new charge timestamps default to current ISO-8601 time when omitted; recovery preserves suppression",
-      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
+      "relatedSchemaSurfaces": [
+        "src/ama/companion-stop-wait.mjs","src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps",
       "headContextFields": { "observedHeadSha": "optional string or null" },
       "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],
@@ -825,12 +827,14 @@
     },
     {
       "id": "hammer-stop-hold",
+      "companionRecovery": "mode companion records companion identity/merge commit/path, phase events, deadline, owner and once-only escalation. Only base gitlink ancestry releases ordinary admission; pure-wait charges are credited once.",
       "ciInfrastructureRelease": "All recorded CI failures require shared zero-step or billing/quota evidence; fresh open/current-head successful replacements release with ci-infrastructure-recovered and credit exact infrastructure dispatch charges once. Real/mixed failures remain held.",
       "title": "Hammer Stop Hold",
       "path": "docs/data-model/hammer-stop-hold.md",
       "store": "data/follow-up-jobs/hammer-stop-hold/<repo-slug>-pr-<number>.json",
       "schemaSurface": "src/ama/hammer-stop-hold.mjs",
       "relatedSchemaSurfaces": [
+        "src/ama/companion-stop-wait.mjs",
         "src/ama/dispatch-closer.mjs",
         "src/ama/audit.mjs",
         "src/checks-summary.mjs",

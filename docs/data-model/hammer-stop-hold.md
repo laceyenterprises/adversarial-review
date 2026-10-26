@@ -32,6 +32,48 @@ unchanged.
 **Source of truth:** `src/ama/hammer-stop-hold.mjs`
 **Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`, `src/posted-review-row.mjs`
 
+## Companion dependency waits (COMPANIONFLOAT-01)
+
+Pure `companion-submodule-pr-unmerged`, `companion-float-pending` and
+`companion-submodule-float-pending` stops use `mode: companion` before transient
+upgrade, input-change, conflict or timed releases. Mixed blockers retain ordinary
+handling. The hammer records `companionWait: { repo, prNumber, submodulePath,
+mergeCommit }` on its terminal audit. Older notes can recover only a unique PR
+URL mapped through the base `.gitmodules`; ambiguous evidence stays held.
+
+The hold adds `owner: closure-recovery`, `awaitedEvent`, `waitUntil`,
+`companionWait`, `events` and optional `probeError`. The dependency records its
+repository, PR and path, authoritative `state`, `mergeCommit`, `mergedAt`,
+observed `baseSha`, `gitlinkSha` and `containsMerge`. Failed ancestry reads retain
+known merge evidence and fail closed. Status and escalation name the automated
+owner and awaited event, replacing historical operator follow-through prose.
+
+The posted-review lane probes unreleased waits every five minutes, including
+paged waits. Unrelated base/check/review movement cannot release an open
+companion. Merge records `events.companionMergedAt` and a `companion-merged`
+release audit, then immediately re-evaluates the float wait without launching a
+closer. The base contents API must identify the expected submodule repository;
+its gitlink must equal or descend from the authoritative merge commit (compare
+API merge-base proof). Containment records `events.companionFloatedAt`,
+`releasedAt` and `releasedBy: [companion-floated]`. Ordinary gates, exact-head
+validation, leases and remaining caps then decide one dispatch. Each admission
+reads fresh dependency evidence; a stale release cannot authorize a regressed
+base. Release events are logged once per dependency/head.
+
+Closure orchestration applies this fence before owner/cap selection and daemon
+merge. Generic final-round and automated-recovery timers defer to its deadline.
+Normal submodule float owns the gitlink update. A closed-unmerged companion
+escalates immediately; a missing float escalates 24 hours plus a one-hour
+scheduling margin after merge. Unmerged/unreadable waits have the same bound
+from first observation. `pagedAt` and process debounce make the existing
+`ama_closer.hammer_stop_hold` escalation once-only per dependency/head, naming
+the companion and owner. Failed delivery retries. No config or float changes.
+
+Only exact recorded dispatch charges with pure companion terminal evidence are
+credited once per launch through the existing PR-scoped ledger lock. Mixed and
+genuine failures remain charged. The per-head dispatch bound subtracts these
+credits too; see [retry-cap accounting](hammer-retry-cap.md#companion-wait-credits-companionfloat-01).
+
 ## Purpose
 
 After a hammer stops without merging, explicitly deterministic refusals wait
@@ -56,7 +98,7 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].refusalGeneration` | integer | Page generation for this hold. Persisted page receipts survive restart. A different refusal or a new stop after input release receives a new generation. |
 | `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify the latest observed stop. Legacy stops use this identity; structured deterministic refusals use `refusal.key` across attempts. |
 | `heads[sha].predicate` | string | Recorded stop reason, normalized to one line and capped at 120 characters, or `reason-not-recorded`. |
-| `heads[sha].mode` | optional `transient` | Timed recovery instead of an input-change refusal. Deterministic entries retain their existing shape. |
+| `heads[sha].mode` | optional `transient` or `companion` | Timed recovery instead of an input-change refusal. Deterministic entries retain their existing shape. |
 | `heads[sha].reasons` | optional string array | Sorted transient stop predicates, retained for recovery audit. |
 | `heads[sha].retryAfter` | optional ISO timestamp | Five minutes after first observation of a new transient stop; durable across restart. Upgrade release uses the upgrade observation time. |
 | `heads[sha].firstObservedAt` | ISO timestamp | First closer observation of this stop. |

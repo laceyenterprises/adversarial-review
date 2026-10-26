@@ -145,6 +145,78 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
 
 const hqLaunches = (deps) => deps.execCalls.filter((call) => call.args[0] === 'dispatch' && call.args[1] !== 'status');
 
+test('COMPANIONFLOAT-01 generic recovery does not spend or separately escalate companion waits', async t => {
+  const rootDir = tmpRoot(t, 'companion-recovery-');
+  for (const now of [0, 30 * 60 * 60_000]) {
+    const result = await recoverAmaAutomation({ rootDir, repo: 'example/project', prNumber: 3,
+      headSha: 'a'.repeat(40), result: { dispatched: false, recoveryWait: true, reason: 'hammer-stop-awaiting-companion' },
+      now: () => now, logger: SILENT,
+      requestRereviewImpl: async () => assert.fail('companion wait must not request review'),
+      dispatchHammer: async () => assert.fail('companion wait must not dispatch'),
+      pageImpl: async () => assert.fail('companion hold owns the only escalation') });
+    assert.equal(result.recovery.action, 'companion');
+    assert.equal(result.recovery.attempts, 0);
+  }
+});
+
+for (const genuineAttempts of [0, 2]) test(`COMPANIONFLOAT-01 float admits one launch after waits while retaining ${genuineAttempts} genuine failure charges`, async t => {
+  const rootDir = tmpRoot(t, 'companion-closer-');
+  const identity = { repo: 'example/project', prNumber: 3, headSha: 'a'.repeat(40) };
+  const at = '2026-01-01T00:00:00Z';
+  const merge = 'c'.repeat(40);
+  const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
+    prMetadata: { baseSha: 'b'.repeat(40) }, dispatchContext: { dispatchedAt: at } });
+  for (let i = 0; i < genuineAttempts; i++) {
+    const launchRequestId = `real-${i}`;
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: identity.headSha, headSha: identity.headSha,
+      launchRequestId, now: at });
+    writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, now: at,
+      attempt: { outcome: 'failed-without-merge', reason: 'ci-not-green', path: 'hammer', head: identity.headSha, launchRequestId } });
+  }
+  for (const launchRequestId of ['wait-a', 'wait-b', 'wait-c']) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: identity.headSha, headSha: identity.headSha,
+      launchRequestId, now: at });
+    writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, now: at,
+      attempt: { outcome: 'failed-without-merge', reason: 'companion-submodule-pr-unmerged',
+        path: 'hammer', head: identity.headSha, launchRequestId,
+        companionWait: { repo: 'example/component', prNumber: 7, submodulePath: 'tools/component' } } });
+  }
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatch-failed', retryCount: 3 + genuineAttempts }));
+  const deps = closerDeps();
+  const ordinaryExec = deps.execFileImpl;
+  let merged = false, floated = false;
+  deps.execFileImpl = async (cmd, argv, options) => {
+    if (cmd !== 'gh' || argv[0] !== 'api') return ordinaryExec(cmd, argv, options);
+    if (argv[1] === 'repos/example/component/pulls/7') return { stdout: JSON.stringify({ state: merged ? 'closed' : 'open',
+      merged_at: merged ? at : null, merge_commit_sha: merged ? merge : null }) };
+    if (argv[1].includes('/contents/tools/component')) return { stdout: JSON.stringify({ sha: floated ? merge : 'b'.repeat(40),
+      submodule_git_url: 'https://github.com/example/component.git' }) };
+    if (argv[1].includes('/compare/')) return { stdout: JSON.stringify({ status: 'behind' }) };
+    return ordinaryExec(cmd, argv, options);
+  };
+  assert.equal((await maybeDispatchAmaCloser({ ...args, ...deps })).reason, 'hammer-stop-awaiting-companion');
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, genuineAttempts);
+  args.prMetadata.baseSha = 'd'.repeat(40);
+  assert.equal((await maybeDispatchAmaCloser({ ...args, ...deps })).dispatched, false);
+  merged = true;
+  assert.equal((await maybeDispatchAmaCloser({ ...args, ...deps })).reason, 'hammer-stop-awaiting-companion');
+  assert.equal(hqLaunches(deps).length, 0);
+  floated = true;
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+  if (genuineAttempts) {
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'dispatch-retry-exhausted');
+    assert.equal(hqLaunches(deps).length, 0);
+    return;
+  }
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
+  await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(hqLaunches(deps).length, 1);
+  assert.equal(deps.alerts.length, 0);
+});
+
 const INFRA_REASONS = ['missing-dispatch-phase-scripts', 'unrendered-dispatch-phase-scripts',
   'unrendered-dispatch-phase-script-placeholders'];
 

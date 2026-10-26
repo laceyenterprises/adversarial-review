@@ -51,6 +51,7 @@
     "lifecycleChange": "No new persisted lifecycle states or transitions"
   },
   "hammerStopGuard": {
+    "companionRecovery": "COMPANIONFLOAT-01: mode companion owns companion merge then base-gitlink ancestry events. Five-minute polling ignores unrelated input movement. Exact pure-wait launch charges are credited once before cap selection; ordinary gates and leases decide dispatch after float. Closed-unmerged or a 24h float backstop plus 1h margin escalates once with dependency and automated owner. Generic recovery timers defer to this deadline.",
     "source": "src/ama/hammer-stop-hold.mjs",
     "consumer": "src/ama/dispatch-closer.mjs",
     "authority": "Packaging stops and deferrals retain earlier deterministic refusals until success. Packaging-only audit history reasserts an unreleased persisted refusal before every route, including ownerless recovery, without state writes or another page when inputs are unchanged; changed inputs release and record the new baseline.",

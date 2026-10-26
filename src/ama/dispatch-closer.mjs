@@ -14,6 +14,7 @@ import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from '
 import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
+import { companionWaitRefundCount } from './companion-stop-wait.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
@@ -4675,7 +4676,8 @@ async function maybeDispatchAmaCloserAttempt({
       });
       sharedNextAction = selectShared(evidenceStopHold.nextActionShared || sharedNextAction);
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
-        skipMergeAgent: true, recoveryWait: true, reason: evidenceStopHold.hammerStop.deterministic === false
+        skipMergeAgent: true, recoveryWait: true, reason: evidenceStopHold.hammerStop.companionWait || evidenceStopHold.hammerStop.owner === 'closure-recovery'
+          ? 'hammer-stop-awaiting-companion' : evidenceStopHold.hammerStop.deterministic === false
           ? HAMMER_TRANSIENT_STOP_HOLD_REASON : HAMMER_STOP_HOLD_REASON,
         hammerStop: evidenceStopHold.hammerStop, nextActionShared: sharedNextAction });
       if (evidenceStopHold.action === 'release') {
@@ -6602,7 +6604,8 @@ async function maybeDispatchAmaCloserAttempt({
     // `due`: fall through to one slow-cadence dispatch attempt.
   } else if (
     existingRecord
-    && Number(existingRecord.retryCount || 0) - Number(existingRecord.unexecutedRefundCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+    && Number(existingRecord.retryCount || 0) - Number(existingRecord.unexecutedRefundCount || 0)
+      - companionWaitRefundCount(rootDir, { repo, prNumber }, existingRecord.headSha) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
     && !existingRecordIsBranchHolderBlocked
     && !existingRecordIsRevalidatableBranchMissing

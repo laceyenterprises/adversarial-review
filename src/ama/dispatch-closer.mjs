@@ -4335,9 +4335,12 @@ export async function maybeDispatchAmaCloser(args) {
     const targetHead = args.prMetadata?.headSha || args.reviewState?.headSha
       || dispatchContext?.headSha || dispatchContext?.reviewedSha || args.headSha;
     if (args.cfg?.enabled && dispatchContext?.rootDir && targetRepo && targetPrNumber) {
+      const currentLease = targetHead && readAmaCloserLease(dispatchContext.rootDir,
+        { repo: targetRepo, prNumber: targetPrNumber, headSha: targetHead });
       for (const intent of readAmaCloserDispatchRecordsForPR(dispatchContext.rootDir,
         { repo: targetRepo, prNumber: targetPrNumber }).filter(record => isPreReceiptIntent(record)
-          && (terminalPr || !targetHead || record.headSha === targetHead))) {
+          && (terminalPr || !targetHead || record.headSha === targetHead
+            || record.headSha === currentLease?.rekeyedFromHeadSha))) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
           processExecFileSyncImpl: args.processExecFileSyncImpl,
@@ -4346,6 +4349,7 @@ export async function maybeDispatchAmaCloser(args) {
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
           deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
           readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
+          ...(intent.headSha === currentLease?.rekeyedFromHeadSha ? { leaseHeadSha: currentLease.headSha } : {}),
         });
         if (!terminalPr && recovery.status === 'pr-terminal') return noAmaDispatch({
           dispatched: false, reason: 'pr-not-mergeable',

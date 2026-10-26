@@ -1,3 +1,4 @@
+import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -3032,3 +3033,18 @@ for (const finalHammer of [false, true]) {
     assert.equal(ledger.attemptCount, finalHammer ? 2 : 1);
   });
 }
+
+test('CLOSERINTENTRECON-01 admission fences the pre-rebase intent named by the current lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'intent-admission-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const f = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) }, { rekeyedHead: 'b'.repeat(40), scenario: 'unreadable' });
+  const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    dispatchContext: { rootDir, ...f.currentIdentity, dispatchedAt: intentExpired },
+    prMetadata: { isOpen: true, headSha: f.currentIdentity.headSha }, ...f.options,
+    execFileImpl: () => assert.fail('unresolved old-head intent must stop downstream dispatch'),
+    logger: { warn() {} } });
+  assert.equal(result.reason, 'existing-dispatch-unknown');
+  assert.equal(f.reads(), 1);
+  assert.equal(f.record().state, 'dispatching');
+  assert.equal(f.lease().status, 'pending');
+});

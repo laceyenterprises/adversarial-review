@@ -2091,6 +2091,18 @@ attempt results, adapter reason and detail, backend/source, row count and launch
 IDs. Failure diagnostics log when the evidence changes. Census and builder
 routing retain ledger failure details and suppress unchanged repeated failures.
 
+CLOSERINTENTRECON-01 makes closure orchestration and the recovery reaper invoke
+that same fenced reconciliation before deferring to an unresolved intent, at
+most once per named intent per pass and only for a dead/expired lease holder or
+an elapsed intent deadline. The intent is located at
+`lease.rekeyedFromHeadSha || lease.headSha`; per-PR admission also includes that
+pre-rebase head. Reconciliation validates the current rekeyed lease and compares
+its full snapshot across yielded reads before mutating it under the existing
+lease lock. Proven absence defers the current lease on that pass; a canonical
+receipt promotes it; unreadable or ambiguous evidence preserves the wait.
+Live submitters within the deadline retain ownership. Query budgets, absence
+rules, operator settlement and retry charging are unchanged.
+
 After the persisted dispatch deadline, a successful empty idempotency-key query
 settles a fenced keyed intent as `no-dispatch`, reason `keyed-no-launch-proven`.
 CLOSERPENDINGDEAD-01 permits earlier settlement of a `submitting` intent only

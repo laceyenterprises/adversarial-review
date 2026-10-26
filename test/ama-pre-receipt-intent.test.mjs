@@ -1,3 +1,4 @@
+import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -1085,4 +1086,23 @@ for (const replacement of ['intent', 'lease']) test(`CLOSERPENDINGDEAD-01: proce
 test('closer receipt repository identity follows GitHub case insensitivity', () => {
   assert.equal(closerLaunchMatches({ repo: 'laceyenterprises/agent-os', prNumber: 8, headSha: 'a'.repeat(40) },
     { ticket_ref: 'AMA-PR-8', target_repo: 'LaceyEnterprises/Agent-OS', head_sha: 'a'.repeat(40) }), true);
+});
+
+for (const scenario of ['absent', 'receipt']) test(`CLOSERINTENTRECON-01 rekeyed ${scenario} preserves a raced lease`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'intent-rekey-race-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const f = seedCloserIntent(rootDir, identity, { rekeyedHead: 'b'.repeat(40), scenario });
+  const before = f.lease();
+  const result = await reconcilePreReceiptIntent(rootDir, identity, { ...f.options,
+    now: intentExpired, leaseHeadSha: f.currentIdentity.headSha,
+    readIntentReceiptImpl: async args => {
+      const response = await f.options.readIntentReceiptImpl(args);
+      writeFileSync(amaCloserLeaseFilePath(rootDir, f.currentIdentity), JSON.stringify({ ...before, watcherPid: 434343 }));
+      return response;
+    } });
+  assert.equal(result.reason, 'intent-or-lease-changed');
+  assert.equal(f.record().state, 'dispatching');
+  assert.equal(f.record().retryCount, 2);
+  assert.equal(f.lease().watcherPid, 434343);
+  assert.equal(f.lease().status, 'pending');
 });

@@ -1,5 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
-import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
+import { reconcileAmaCloserLeaseIntent, tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
 import { abandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
 /**
  * Startup + periodic stale-state reaper — offline-period & quota-outage
@@ -75,6 +75,7 @@ import {
   abandonedAmaCloserLeaseOutcome,
 } from './ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
+import { amaCloserDispatchFilePath } from './ama/dispatch-record-read.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
 // Generic stale-state defaults; dispatched closer leases also require the
@@ -740,6 +741,8 @@ export async function reapStaleCloserLeases({
   logger = console,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerAsync,
   captureProcessImpl,
+  preReceiptIntentOptions = {},
+  env = process.env,
 } = {}) {
   if (!rootDir) {
     return {
@@ -770,16 +773,31 @@ export async function reapStaleCloserLeases({
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }
   }
   const unresolvedIntentLeasePaths = new Set();
+  const reconciledLeases = [];
+  const reconciledIntents = new Set();
   for (const lease of discovery.records) {
     if (!lease?._path || lease._isCorrupt === true) continue;
-    const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
+    const identity = { repo: lease.repo, prNumber: lease.prNumber,
+      headSha: lease.rekeyedFromHeadSha || lease.headSha };
     let record = null;
     try {
       record = readAmaCloserDispatchRecord(rootDir, identity);
     } catch {
       record = null;
     }
-    if (record?.state === 'dispatching') unresolvedIntentLeasePaths.add(lease._path);
+    if (record?.state !== 'dispatching') continue;
+    // Keep this observation out of the age-only tiers even if proof recovers a
+    // receipt or yields to a replacement owner. The next pass sees fresh state.
+    unresolvedIntentLeasePaths.add(lease._path);
+    const intentKey = amaCloserDispatchFilePath(rootDir, identity);
+    if (reconciledIntents.has(intentKey)) continue;
+    reconciledIntents.add(intentKey);
+    const recovery = await reconcileAmaCloserLeaseIntent(rootDir, lease, {
+      ...preReceiptIntentOptions, now, env, logger, host: host ?? hostname(), livePid,
+      ...(isProcessAlive ? { isProcessAlive } : {}),
+      ...(captureProcessImpl ? { captureProcessImpl } : {}),
+    });
+    if (recovery.status === 'no-launch') reconciledLeases.push(lease);
   }
   const abandonmentOptions = { now, host: host ?? hostname(), livePid,
     ...(isProcessAlive ? { isProcessAlive } : {}),
@@ -804,7 +822,7 @@ export async function reapStaleCloserLeases({
     host,
     launchStatusProbes,
   });
-  let released = abandonedLeases.length;
+  let released = abandonedLeases.length + reconciledLeases.length;
   let budgetsReset = 0;
   let interruptedDispatchesReclaimed = 0;
   for (const lease of releasable) {
@@ -881,7 +899,7 @@ export async function reapStaleCloserLeases({
     released,
     pruned,
     budgetsReset,
-    leases: [...abandonedLeases, ...releasable],
+    leases: [...reconciledLeases, ...abandonedLeases, ...releasable],
     prunedLeases,
     scannedEntries: discovery.scannedEntries,
     skippedEntries: discovery.skippedEntries,
@@ -913,6 +931,7 @@ export async function runStaleStateReaper({
   logger = console,
   isProcessAlive = null,
   captureProcessImpl,
+  preReceiptIntentOptions = {},
   phase = 'periodic',
 } = {}) {
   const out = {
@@ -942,6 +961,8 @@ export async function runStaleStateReaper({
       pruneAfterMs: resolveTerminalCloserLeasePruneMs(env),
       isProcessAlive,
       captureProcessImpl,
+      preReceiptIntentOptions,
+      env,
       entryScanLimit: resolveCloserLeaseEntryScanLimit(env),
       readLimit: resolveCloserLeaseReadLimit(env),
       logger,

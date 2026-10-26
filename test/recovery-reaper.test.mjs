@@ -1,3 +1,4 @@
+import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, promises as fsPromises, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
@@ -1402,6 +1403,9 @@ for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff
     }
     const result = await runStartupStaleStateReaper({ rootDir, now: NOW, env: {},
       isProcessAlive: () => scenario === 'live' || scenario === 'launch' ? true : scenario === 'timeout' ? null : false,
+      preReceiptIntentOptions: { readPullRequestStateImpl: async () => ({}),
+        readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
+        processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
       logger: { warn: text => logs.push(text), log: text => logs.push(text), error: text => logs.push(text) } });
     const released = ['dead', 'timeout'].includes(scenario);
     assert.equal(result.closerLeases.released, released ? 1 : 0);
@@ -1412,4 +1416,28 @@ for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff
       assert.ok(logs.some(text => text.includes('startup stale-state sweep:') && text.includes('released 1 closer lease')));
     } else assert.deepEqual(after, lease);
   });
+}
+
+for (const rekeyed of [false, true]) {
+  for (const scenario of ['absent', 'receipt', 'unreadable', 'ambiguous', 'live', 'unknown-process', 'early-absent', 'live-child']) {
+    test(`CLOSERINTENTRECON-01 reaper ${scenario}, rekeyed=${rekeyed}`, async t => {
+      const rootDir = tempRoot();
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const f = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) },
+        { scenario, rekeyedHead: rekeyed ? 'b'.repeat(40) : null });
+      const result = await reapStaleCloserLeases({ rootDir,
+        now: ['live', 'unknown-process', 'early-absent', 'live-child'].includes(scenario) ? intentEarly : intentExpired,
+        isProcessAlive: () => scenario === 'live' ? true : false,
+        preReceiptIntentOptions: f.options, logger: { warn() {}, error() {}, log() {} } });
+      assert.equal(result.released, ['absent', 'early-absent'].includes(scenario) ? 1 : 0);
+      assert.equal(result.budgetsReset, 0);
+      assert.equal(f.record().state, ['absent', 'early-absent'].includes(scenario) ? 'no-dispatch'
+        : scenario === 'receipt' ? 'dispatched' : 'dispatching');
+      assert.equal(f.lease().status, ['absent', 'early-absent'].includes(scenario) ? 'terminal'
+        : scenario === 'receipt' ? 'dispatched' : 'pending');
+      assert.equal(f.record().retryCount, ['absent', 'early-absent'].includes(scenario) ? 1 : 2);
+      if (scenario === 'receipt') assert.equal(f.lease().lrqId, f.receipt.launch_request_id);
+      assert.equal(f.reads(), scenario === 'live' ? 0 : 1);
+    });
+  }
 }

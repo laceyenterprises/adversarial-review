@@ -250,15 +250,18 @@ no PR, push, or publication launch.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
-publication), and reads its branch from `hq dispatch status --json`. It looks for
-PRs on that branch across all states before inspecting the remote ref. One
+publication), and reads its branch from `hq dispatch status --json`. Before any
+GitHub publication read, its `branch_pushed` milestone must be `done`; otherwise
+the collector records `batch-push-evidence-missing` locally and retains the batch
+fence. It looks for PRs on that branch across all states before inspecting the
+remote ref, preserving branch slashes and percent-encoding each path segment. One
 same-repository PR with the exact marker is bound through ordinary settlement;
 an unmerged close stays unresolved and never starts another publisher. Foreign,
 unmarked, or ambiguous PR evidence retains the batch fence. This also recovers a
 PR opened before its worker could rewrite the outcome artifact, even after its
 branch was deleted or normal review rebased the head.
 
-With no existing PR, a completed push milestone and a matching remote branch SHA
+With no existing PR, a matching remote branch SHA
 permit one follow-up `--completion-shape pr --branch <existing-branch>` launch.
 Both phases retain the batch ID, ticket and `findings-batch-<batch-id>` idempotency
 key; the dispatcher contract is unchanged. A PR-shaped launch without PR evidence

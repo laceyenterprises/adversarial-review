@@ -654,6 +654,38 @@ test('FINDINGSSHAPE-01 decline-only outcomes finish without PR, push, status pro
   assert.equal(f.dispatches.length, 1);
 });
 
+test('FINDINGSSHAPE-01 missing push milestone fails locally before publication reads', async t => {
+  for (const status of [undefined, 'pending', 'failed']) await t.test(`push=${status}`, async t => {
+    const f = await publicationFixture(t);
+    f.status.milestones = status ? { branch_pushed: { status } } : {};
+    let reads = 0;
+    await f.run({ fetchPublication: async () => { reads++; throw Error('unexpected publication read'); } });
+    assert.equal(reads, 0);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-push-evidence-missing');
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(f.dispatches.length, 1);
+  });
+});
+
+test('FINDINGSSHAPE-01 valid unmerged publication clears stale errors without settling outcomes', async t => {
+  for (const state of ['OPEN', 'CLOSED']) await t.test(state, async t => {
+    const f = await publicationFixture(t);
+    f.db.prepare('UPDATE finding_batches SET error=?').run('batch-publish-receipt-unavailable');
+    f.publication.prs = [{ ...f.pr, state, body: 'unrelated' }];
+    await f.run();
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-pr-evidence-mismatch');
+    f.publication.prs = [{ ...f.pr, state }];
+    await f.run();
+    const stored = f.db.prepare('SELECT * FROM finding_batches').get();
+    assert.equal(stored.error, null);
+    assert.equal(stored.completed_at, null);
+    assert.equal(stored.result_json, null);
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(f.dispatches.length, 1);
+  });
+});
+
 test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispatch a second publisher', async t => {
   for (const enqueued of [false, true]) await t.test(`enqueued=${enqueued}`, async t => {
     const f = await publicationFixture(t);
@@ -733,7 +765,9 @@ test('FINDINGSSHAPE-01 default publication reader uses stubbed commands and reco
     assert.equal(bin, 'gh');
     assert.equal(opts.timeout, 15_000);
     ghCalls.push(args);
-    return { stdout: JSON.stringify(args[0] === 'pr' ? f.publication.prs : { object: { sha: head } }) };
+    if (args[0] === 'pr') return { stdout: JSON.stringify(f.publication.prs) };
+    assert.deepEqual(args, ['api', `repos/${repo}/git/ref/heads/fixture/findings`]);
+    return { stdout: JSON.stringify({ object: { sha: head } }) };
   };
   // Omit the injected reader to exercise the production transport with stubs.
   const { runFindingBatches } = await import('../src/findings-batch.mjs');
@@ -743,7 +777,7 @@ test('FINDINGSSHAPE-01 default publication reader uses stubbed commands and reco
   assert.deepEqual(ghCalls, [
     ['pr', 'list', '--repo', repo, '--head', f.status.branch, '--state', 'all', '--limit', '100',
       '--json', 'number,state,mergedAt,body,headRefOid,headRefName,isCrossRepository'],
-    ['api', `repos/${repo}/git/ref/heads/fixture%2Ffindings`],
+    ['api', `repos/${repo}/git/ref/heads/fixture/findings`],
   ]);
   for (const state of ['CLOSED', 'MERGED']) {
     f.publication.prs = [{ ...f.pr, state }];
@@ -768,6 +802,24 @@ test('FINDINGSSHAPE-01 hourly collection publishes a prepared batch without a ne
   assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batches').get().n, 1);
   await ticker.tick(now + 7200000);
   assert.equal(f.dispatches.length, 2);
+});
+
+test('FINDINGSSHAPE-01 ref reader encodes reserved characters within branch segments', async t => {
+  const f = await publicationFixture(t);
+  f.status.branch = 'fixture/topic#1+fix';
+  const ghCalls = [];
+  await f.run({ fetchPublication: undefined, execFileImpl: async (bin, args, opts) => {
+    if (bin === 'hq') return f.options.execFileImpl(bin, args, opts);
+    assert.equal(bin, 'gh');
+    ghCalls.push(args);
+    if (args[0] === 'pr') return { stdout: '[]' };
+    return { stdout: JSON.stringify({ object: { sha: head } }) };
+  } });
+  assert.equal(ghCalls[0][ghCalls[0].indexOf('--head') + 1], 'fixture/topic#1+fix');
+  assert.deepEqual(ghCalls[1], ['api', `repos/${repo}/git/ref/heads/fixture/topic%231%2Bfix`]);
+  assert.equal(ghCalls.length, 2);
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
 });
 
 test('FINDINGSSHAPE-01 unreadable command or ledger evidence preserves unresolved outcomes', async t => {

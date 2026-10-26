@@ -1103,6 +1103,10 @@ re-checks current main and pushes tested fixes. FINDINGSSHAPE-01 leaves all-decl
 batches complete without a PR; provisional applied outcomes trigger one PR-shaped
 publication follow-up on the same pushed branch, batch ID and idempotency key.
 The publisher opens one normal-review PR through `hq pr open --spec-ref none`.
+Before GitHub publication reads, the collector requires the terminal preparation
+launch's `branch_pushed` milestone to be `done`; missing or failed push evidence
+records `batch-push-evidence-missing` locally without a GitHub request. Ref queries
+preserve branch path slashes while encoding each segment.
 Existing marked PRs, including terminal PRs, are recovered before dispatch; the
 launch ledger, a per-batch lock and durable submission intent fence duplicate
 publishers after restarts or lost receipts. Uncertain/failed publication retains

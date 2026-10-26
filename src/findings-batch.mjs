@@ -164,7 +164,8 @@ async function fetchFindingBatchPublication(repo, branch, { execFileImpl, env, l
     '--json', 'number,state,mergedAt,body,headRefOid,headRefName,isCrossRepository']);
   // A deleted branch is normal after merge; PR recovery must precede ref lookup.
   if (prs.length) return { prs };
-  const ref = await run(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`]);
+  const refPath = branch.split('/').map(encodeURIComponent).join('/');
+  const ref = await run(['api', `repos/${repo}/git/ref/heads/${refPath}`]);
   return { prs, headSha: ref.object?.sha };
 }
 
@@ -199,6 +200,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (!readDispatchStatus(status).terminal) return;
     const branch = status.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
+    if (status.milestones?.branch_pushed?.status !== 'done') throw Error('batch-push-evidence-missing');
     const publication = await fetchPublication(batch.repo, branch, { execFileImpl, env, logger });
     if (!Array.isArray(publication.prs)) throw Error('batch-publication-evidence-invalid');
     if (publication.prs.length) {
@@ -211,7 +213,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       settleFindingBatch(db, batch, { ...result, prNumber: pr.number, headSha: pr.headRefOid }, pr);
       return;
     }
-    if (status.milestones?.branch_pushed?.status !== 'done' || publication.headSha !== result.headSha) {
+    if (publication.headSha !== result.headSha) {
       throw Error('batch-push-evidence-mismatch');
     }
     const key = `findings-batch-${batch.batch_id}`;

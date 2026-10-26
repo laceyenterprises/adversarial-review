@@ -997,7 +997,7 @@ test('selectReleasableCloserLeases: a dead pid on another host still waits the f
   assert.deepEqual(
     selectReleasableCloserLeases([{ ...base, updatedAt: minutesAgo(45) }], opts),
     [],
-    'a pre-CLR-02 lease with no holderHost gets the floor, not the short tier',
+    'the age-only selector requires the floor for hostless leases; driver abandonment runs first',
   );
   assert.equal(
     selectReleasableCloserLeases([{ ...base, updatedAt: hoursAgo(30), holderHost: 'some-other-host' }], opts).length,
@@ -1026,7 +1026,7 @@ test('selectReleasableCloserLeases: livePid guard is scoped to local or legacy l
   assert.deepEqual(
     selectReleasableCloserLeases([{ ...base, _path: 'legacy-live' }], opts),
     [],
-    'hostless pre-CLR-02 livePid leases stay protected because their host is ambiguous',
+    'hostless pre-CLR-02 livePid leases stay protected as local current-process owners',
   );
   assert.deepEqual(
     selectReleasableCloserLeases([{ ...base, holderHost: 'some-other-host', _path: 'remote-collision' }], opts)
@@ -1386,40 +1386,86 @@ for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
 }
 
 for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
-  for (const scenario of ['dead', 'live', 'current', 'launch', 'intent']) {
-    test(`CLAIMPIDSTALE-01 ${runSweep.name} hostless holder ${scenario}`, async t => {
-      const rootDir = tempRoot();
-      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-      const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
-        status: scenario === 'launch' ? 'dispatched' : 'pending',
-        lrqId: scenario === 'launch' ? 'lrq_fixture' : null, terminalOutcome: null,
-        acquiredAt: minutesAgo(1), updatedAt: minutesAgo(1), dispatchTimeoutMs: 120_000,
-        watcherPid: scenario === 'current' ? process.pid : DEAD_PID };
-      const path = writeLease(rootDir, lease);
-      if (scenario === 'intent') {
-        const recordPath = amaCloserDispatchFilePath(rootDir, lease);
-        mkdirSync(dirname(recordPath), { recursive: true });
-        writeFileSync(recordPath, JSON.stringify({ ...lease, state: 'dispatching' }));
-      }
-      const logs = [];
-      const result = await runSweep({ rootDir, now: NOW, env: {},
-        isProcessAlive: () => scenario === 'live',
-        captureProcessImpl: () => ({ startedAt: minutesAgo(2) }),
-        preReceiptIntentOptions: { readPullRequestStateImpl: async () => ({}),
-          readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
-          processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
-        logger: { warn: text => logs.push(text), log() {}, error() {} } });
-      const after = JSON.parse(readFileSync(path, 'utf8'));
-      assert.equal(result.closerLeases.released, scenario === 'dead' ? 1 : 0);
-      if (scenario === 'dead') {
-        assert.equal(after.status, 'terminal');
-        assert.equal(after.terminalOutcome, 'abandoned-holder-dead');
-        assert.equal(after.watcherPid, lease.watcherPid, 'receipt retains the abandoned owner');
-        assert.equal(after.acquiredAt, lease.acquiredAt);
-        assert.ok(logs.some(text => text.includes('outcome=abandoned-holder-dead')));
-      } else assert.deepEqual(after, lease);
-    });
+  for (const dispatchTimeoutMs of [120_000, null, undefined]) {
+    for (const scenario of ['dead', 'live', 'uncertain', 'current', 'launch', 'intent']) {
+      test(`CLAIMPIDSTALE-01 ${runSweep.name} hostless holder ${scenario}, timeout=${dispatchTimeoutMs}`, async t => {
+        const rootDir = tempRoot();
+        t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+        const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
+          status: scenario === 'launch' ? 'dispatched' : 'pending',
+          lrqId: scenario === 'launch' ? 'lrq_fixture' : null, terminalOutcome: null,
+          acquiredAt: minutesAgo(1), updatedAt: minutesAgo(1),
+          ...(dispatchTimeoutMs === undefined ? {} : { dispatchTimeoutMs }),
+          watcherPid: scenario === 'current' ? process.pid : DEAD_PID };
+        const path = writeLease(rootDir, lease);
+        if (scenario === 'intent') {
+          const recordPath = amaCloserDispatchFilePath(rootDir, lease);
+          mkdirSync(dirname(recordPath), { recursive: true });
+          writeFileSync(recordPath, JSON.stringify({ ...lease, state: 'dispatching' }));
+        }
+        const logs = [];
+        const result = await runSweep({ rootDir, now: NOW, env: {},
+          isProcessAlive: () => scenario === 'uncertain' ? null : scenario === 'live',
+          captureProcessImpl: () => ({ startedAt: minutesAgo(2) }),
+          preReceiptIntentOptions: { readPullRequestStateImpl: async () => ({}),
+            readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
+            processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
+          logger: { warn: text => logs.push(text), log() {}, error() {} } });
+        const after = JSON.parse(readFileSync(path, 'utf8'));
+        assert.equal(result.closerLeases.released, scenario === 'dead' ? 1 : 0);
+        if (scenario === 'dead') {
+          assert.equal(after.status, 'terminal');
+          assert.equal(after.terminalOutcome, 'abandoned-holder-dead');
+          assert.equal(after.watcherPid, lease.watcherPid, 'receipt retains the abandoned owner');
+          assert.equal(after.acquiredAt, lease.acquiredAt);
+          assert.ok(logs.some(text => text.includes('outcome=abandoned-holder-dead')));
+        } else assert.deepEqual(after, lease);
+      });
+    }
   }
+}
+
+for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
+  test(`CLAIMPIDSTALE-01 ${runSweep.name} reconciles a hostless legacy intent before its deadline`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
+      status: 'pending', lrqId: null, terminalOutcome: null, watcherPid: DEAD_PID,
+      acquiredAt: minutesAgo(1), updatedAt: minutesAgo(1) };
+    const path = writeLease(rootDir, lease);
+    const recordPath = amaCloserDispatchFilePath(rootDir, lease);
+    mkdirSync(dirname(recordPath), { recursive: true });
+    const record = { ...lease, state: 'dispatching', lastAttemptedAt: lease.acquiredAt,
+      dispatchTimeoutMs: 120_000, retryCount: 2 };
+    writeFileSync(recordPath, JSON.stringify(record));
+    assert.ok(Date.parse(NOW) < Date.parse(record.lastAttemptedAt) + record.dispatchTimeoutMs);
+    const queries = [];
+    const result = await runSweep({ rootDir, now: NOW, env: {},
+      isProcessAlive: () => false,
+      preReceiptIntentOptions: {
+        readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
+        processKillImpl: () => { throw Object.assign(Error('synthetic absent PID'), { code: 'ESRCH' }); },
+        readLegacyIntentLaunchesImpl: async query => {
+          queries.push(query);
+          return { ok: true, rows: [] };
+        },
+      },
+      logger: { warn() {}, log() {}, error() {} } });
+    assert.equal(queries.length, 1, 'dead hostless watcher enters reconciliation before the intent deadline');
+    assert.equal(queries[0].ticketRef, 'AMA-PR-7');
+    assert.equal(queries[0].requestedAtOrAfter, lease.acquiredAt);
+    assert.equal(result.closerLeases.released, 1);
+    const after = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(after.status, 'terminal');
+    assert.equal(after.terminalOutcome, 'deferred', 'ledger absence proof settles the intent instead of abandonment');
+    assert.equal(after.watcherPid, lease.watcherPid);
+    const settled = JSON.parse(readFileSync(recordPath, 'utf8'));
+    assert.equal(settled.state, 'no-dispatch');
+    assert.equal(settled.reason, 'legacy-no-launch-proven');
+    assert.equal(settled.retryCount, 1);
+    assert.equal(settled.preReceiptReconciliation.query.ok, true);
+    assert.equal(settled.preReceiptReconciliation.query.rowCount, 0);
+  });
 }
 
 for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff', 'intent']) {

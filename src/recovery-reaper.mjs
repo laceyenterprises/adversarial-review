@@ -86,9 +86,10 @@ export const DEFAULT_STALE_CLOSER_LEASE_MS = 6 * HOUR_MS;
 // Pending dead-holder tier. Deliberately equal to the health surface's
 // `amaCloserLeaseMaxAgeMs` (30m) and to `AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS`
 // in ama/dispatch-closer.mjs, so detection and remediation stop disagreeing by
-// 12x. It applies ONLY when the lease names this host in `holderHost` AND the
-// recorded pid is dead here — strictly more evidence than the dispatch path
-// already acts on at the same age, and never a substitute for the 6h floor.
+// 12x. Within the age-based fallback it applies only when `holderHost` names
+// this host and the recorded pid is dead here. The driver first applies shared
+// CLAIMPIDSTALE-01 abandonment to launch-less pending leases, including legacy
+// hostless owners; the age tiers apply only to leases that rule leaves behind.
 export const DEFAULT_DEAD_HOLDER_CLOSER_LEASE_MS = 30 * 60 * 1000;
 // Terminal-lease retirement. 7d is the smallest age that restores full-coverage
 // scanning on the observed host directory: 575 leases, 560 of them terminal with
@@ -220,12 +221,14 @@ export function selectStaleRunningReviewerPasses(rows, { now, thresholdMs } = {}
  * Pure — is this lease's holder provably dead *on this host*?
  *
  * Three things must all hold, and any one of them being unknown answers `false`
- * (keep the lease). This is the only reason the reaper is allowed to act before
- * the multi-hour floor, so it fails closed on every ambiguity:
+ * (keep the lease in this age-based tier). The driver first applies shared
+ * CLAIMPIDSTALE-01 abandonment to launch-less pending leases, including legacy
+ * hostless owners. These age tiers apply only to what that rule leaves behind:
  *
  *   1. The lease names a host and it is this host. A pid read here says nothing
- *      about a process on another host, and pid namespaces collide — which is
- *      why leases written before CLR-02 (no `holderHost`) get the 6h floor.
+ *      about a process on another host, and pid namespaces collide. Hostless
+ *      leases cannot use this short age tier; shared abandonment handles their
+ *      dead owners before this fallback.
  *   2. `watcherPid` is a usable pid.
  *   3. `isProcessAlive(pid)` returns exactly `false`. A throw, or any non-false
  *      answer, is read as "still alive".
@@ -258,6 +261,9 @@ function holderIsProvablyDeadHere(lease, { isProcessAlive, host }) {
  *
  * Pending two-tier ageing (CLR-02). `thresholdMs` is the floor for a lease whose holder
  * we cannot prove dead — unknown host, unknown pid, or a pid that answers alive.
+ * The driver first reconciles unresolved intents and terminalizes abandoned
+ * launch-less pending leases, including hostless dead/reused owners without a
+ * dispatch timeout. This selector only handles the remaining unfenced leases.
  * When `deadHolderThresholdMs` is supplied AND the lease is provably dead here
  * (see `holderIsProvablyDeadHere`), the shorter threshold applies instead. The
  * floor is never bypassed on a guess; it is bypassed only on positive evidence

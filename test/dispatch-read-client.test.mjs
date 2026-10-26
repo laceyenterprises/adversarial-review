@@ -234,3 +234,61 @@ test('an actual SDK 0.4.0 deployment loads the dispatch module and fails unavail
     assert.equal(result.reason, 'dispatch-read-unavailable');
   `], { cwd: root, timeout: 5000 });
 });
+
+// Negative mutations of the LAC-2120 additive producer envelope. These are
+// synthetic corruption tests; end-to-end captures come from the producer suite.
+function authorizedAbsence(selector) {
+  return { ...absent, scope_complete: true, absence_proof: {
+    version: 1, kind: 'canonical-exact-selector-absence', selector,
+    grant_id: 'incident-exact-attempt', observed_at: '2026-10-26T20:02:47Z',
+  } };
+}
+test('only exact selector-bound producer absence passes sync and async compatibility readers', async () => {
+  for (const selector of [{ idempotency_key: 'key' },
+    { ticket_ref: 'AMA-PR-8', requested_at_or_after: '2026-01-01T00:00:00.000Z' }]) {
+    const result = authorizedAbsence(selector);
+    const async = await readDispatchLaunches(selector, options(result));
+    assert.equal(async.ok, true);
+    assert.deepEqual(async.absenceProof, result.absence_proof);
+    assert.deepEqual(readDispatchLaunchesSync(selector, options(result)), async);
+  }
+});
+for (const mutation of [
+  value => { delete value.scope_complete; },
+  value => { value.scope_complete = false; },
+  value => { value.scope_complete = 'true'; },
+  value => { delete value.absence_proof; },
+  value => { value.absence_proof.version = 2; },
+  value => { value.absence_proof.kind = 'grant-filtered-empty'; },
+  value => { value.absence_proof.selector.idempotency_key = 'foreign-key'; },
+  value => { value.absence_proof.selector.extra = 'broader'; },
+  value => { value.absence_proof.grant_id = ''; },
+  value => { value.absence_proof.grant_id = ' \t\n '; },
+  value => { value.absence_proof.observed_at = 'invalid'; },
+  value => { value.complete = false; },
+]) test('partial, unbound or malformed absence never releases the consumer hold', async () => {
+  const selector = { idempotency_key: 'key' };
+  const result = authorizedAbsence({ ...selector });
+  mutation(result);
+  assert.equal((await readDispatchLaunches(selector, options(result))).ok, false);
+  assert.equal(readDispatchLaunchesSync(selector, options(result)).ok, false);
+});
+test('undefined selectors and missing own proof keys never certify absence', async () => {
+  for (const [selector, proofSelector] of [
+    [{ idempotency_key: undefined }, { other_key: 'val' }],
+    [{ idempotency_key: undefined }, { idempotency_key: undefined }],
+    [{ ticket_ref: undefined, requested_at_or_after: '2026-01-01T00:00:00.000Z' },
+      { other_key: 'val', requested_at_or_after: '2026-01-01T00:00:00.000Z' }],
+    [{ idempotency_key: 'key' }, Object.assign(Object.create({ idempotency_key: 'key' }), { other_key: 'val' })],
+  ]) {
+    const args = options(authorizedAbsence(proofSelector));
+    assert.equal((await readDispatchLaunches(selector, args)).ok, false);
+    assert.equal(readDispatchLaunchesSync(selector, args).ok, false);
+  }
+});
+test('exact absence proof cannot authorize launch ID or retry-chain absence', async () => {
+  for (const selector of [{ launch_request_ids: ['missing'] },
+    { idempotency_key: 'key', include_retry_chain: true }]) {
+    assert.equal((await readDispatchLaunches(selector, options(authorizedAbsence(selector)))).ok, false);
+  }
+});

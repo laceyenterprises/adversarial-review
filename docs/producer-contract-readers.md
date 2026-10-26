@@ -404,7 +404,7 @@ The SDK release is pinned to merged producer revision
 SDK 0.8.0 `not_found` is scoped to authenticated grants, and its envelope
 has no authorization completeness field. The consumer therefore maps empty
 lookups and missing rows within positive snapshots to `dispatch-read-unavailable`
-with `dispatch absence scope unproven`. They never prove absence for terminal
+with `dispatch absence scope unproven`. Without the LAC-2120 exact-selector proof they never prove absence for terminal
 lease reclamation, missing-launch capacity settlement or pre-receipt settlement.
 Positive authorized launch/retry observations remain available. Even a genuinely
 missing launch retains its hold until a coordinated producer contract can prove
@@ -422,3 +422,11 @@ and lookup. SDK 0.8.0 does not accept an abort signal: its outstanding HTTP work
 can outlive caller cancellation and follows SDK transport timeout handling. Full
 transport cancellation requires a producer SDK update. Sync compatibility reads
 are included in watcher latency summaries under `node`.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

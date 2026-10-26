@@ -6029,3 +6029,11 @@ rescue fixtures. After normal deployment, observe a naturally occurring closer
 exit after publication: the next eligible poll should retain closure ownership
 and dispatch a successor or report its bounded wait/escalation. Source validation
 performs no live rescue, restart, ledger operation or PR mutation.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

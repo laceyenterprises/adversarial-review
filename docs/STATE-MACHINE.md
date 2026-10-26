@@ -2339,3 +2339,11 @@ return it to ordinary closure evaluation with two-minute exponential backoff
 capped at thirty minutes. The third same-head launch pages through the existing
 closure-wait receipt without final-no-merge or automated-stop credit. Real refusals retain their terminal behavior, including an earlier
 deterministic stop. Queue-v2 and migrated closer transitions are unchanged.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

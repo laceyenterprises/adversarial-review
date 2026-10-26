@@ -90,20 +90,32 @@ async function fixture(t, { bridge = false, background = false } = {}) {
     counts: () => ({ requests, dispatches }) };
 }
 
-test('HAMATTEST-03 settles: a recorded pushed edge without a reviewed-head bridge queues review next poll', async t => {
+test('HAMATTEST-03 settles: a recorded pushed edge without a reviewed-head bridge retains Hammer ownership', async t => {
   const f = await fixture(t);
   assert.match(f.comments[0].body, /HAM-CI-Validated: false/);
   const result = await f.tick();
-  assert.equal(result.amaClosureResult.closerAuthoredStale.decision, 'rereview-exact-head');
-  assert.deepEqual(result.amaClosureResult.closerAuthoredStale.reasons, ['hammer-app-attestation-missing']);
-  assert.equal(f.row().review_status, 'pending');
-  assert.equal(isOrphanHeadReviewRequested(f.row(), published), true);
-  assert.equal(result.amaClosureResult.closureOwner.owner, 'review');
-  assert.equal(result.amaClosureResult.reason, 'exact-head-review-queued');
-  assert.equal(result.amaClosureResult.boundedWait.reason, 'required-checks-pending');
+  assert.equal(result.amaClosureResult.closerAuthoredStale.decision, 'hammer-resume');
+  assert.deepEqual(result.amaClosureResult.closerAuthoredStale.reasons, ['hammer-owned-head']);
+  assert.equal(f.row().review_status, 'posted');
+  assert.equal(isOrphanHeadReviewRequested(f.row(), published), false);
+  assert.equal(result.amaClosureResult.closureOwner.owner, 'hammer');
+  assert.equal(result.amaClosureResult.reason, 'not-eligible');
+  assert.equal(result.amaClosureResult.nextAction.action, 'hammer');
+  assert.equal(f.counts().dispatches, 1);
 });
 
-test('HAMATTEST-03 no early re-review: running launch suppresses review until its terminal poll', async t => {
+test('failed Hammer ownership lookup grants no ownership or verdict certification', async t => {
+  const f = await fixture(t);
+  const result = await f.tick({}, {
+    resolveHeadCloserCommitSuppressionImpl: async () => { throw new Error('fixture ownership lookup unavailable'); },
+  });
+  assert.equal(result.amaClosureResult.closerAuthoredStale.carryForward, false);
+  assert.equal(result.amaClosureResult.nextAction.action, 'review');
+  assert.equal(f.counts().dispatches, 0);
+  assert.equal(f.counts().requests, 1);
+});
+
+test('HAMATTEST-03 no early re-review: running and terminal launches both preserve Hammer recovery ownership', async t => {
   const f = await fixture(t);
   f.setStatus('running');
   const waiting = await f.tick();
@@ -113,26 +125,25 @@ test('HAMATTEST-03 no early re-review: running launch suppresses review until it
   assert.equal(f.row().review_status, 'posted');
   f.setStatus('succeeded');
   await f.tick();
-  assert.equal(f.counts().requests, 1);
+  assert.equal(f.counts().requests, 0);
 });
 
-test('HAMATTEST-03 executed once: repeated terminal observations preserve one durable request for the head', async t => {
+test('HAMATTEST-03 repeated terminal observations never enqueue review for the owned head', async t => {
   const f = await fixture(t);
   await f.tick();
-  const requestedAt = f.row().rereview_requested_at;
   await f.tick();
   await f.tick();
-  assert.equal(f.counts().requests, 1);
-  assert.ok(requestedAt);
-  assert.equal(f.row().rereview_requested_at, requestedAt);
+  assert.equal(f.counts().requests, 0);
+  assert.equal(isOrphanHeadReviewRequested(f.row(), published), false);
+  assert.equal(f.row().review_status, 'posted');
 });
 
-test('HAMATTEST-03 consumes a real background refusal and queues review on the same poll', async t => {
+test('HAMATTEST-03 consumes a real background refusal without transferring ownership to review', async t => {
   const f = await fixture(t, { background: true });
   const result = await f.tick();
-  assert.equal(f.counts().requests, 1);
+  assert.equal(f.counts().requests, 0);
   assert.equal(f.counts().dispatches, 0, 'apply the settled outcome without another dispatch');
-  assert.equal(result.amaClosureResult.reason, 'exact-head-review-queued');
+  assert.equal(result.amaClosureResult.reason, 'not-eligible');
 });
 
 for (const stop of ['uncertain', 'held', 'foreign-head', 'operator']) {
@@ -169,14 +180,14 @@ test('HAMATTEST-03 a complete authenticated bridge preserves the reviewed verdic
   assert.equal(merges, 1);
 });
 
-for (const exhausted of [false, true]) test(`HAMATTEST-03 a recorded bridge with unsettled evidence executes the shared review owner, exhausted=${exhausted}`, async t => {
+for (const exhausted of [false, true]) test(`HAMATTEST-03 a recorded bridge with unsettled evidence retains the shared Hammer owner, exhausted=${exhausted}`, async t => {
   const f = await fixture(t, { bridge: true });
   const result = await f.tick({}, { fetchLatestHeadReviewBodiesImpl: async () => [],
     resolveReviewCycleExhaustionImpl: () => ({ reviewCycleExhausted: exhausted,
       commentOnlyFinalRoundRevisionRefs: exhausted ? [reviewed] : [] }) });
   assert.equal(result.amaClosureResult.closerAuthoredStale.carryForward, false);
   assert.ok(result.amaClosureResult.closerAuthoredStale.reasons.includes('verdict-not-settled-success'));
-  assert.equal(f.counts().requests, 1);
+  assert.equal(f.counts().requests, 0);
 });
 
 test('exact-head review admission requires the shared dispatch decision', () => {
@@ -197,16 +208,13 @@ test('exact-head review admission requires the shared dispatch decision', () => 
 });
 
 for (const bridge of [false, true]) {
-  for (const ownership of ['live', 'uncertain', 'queue-refused']) {
+  for (const ownership of ['live', 'uncertain', 'absent']) {
     for (const exhausted of [false, true]) {
       test(`bounded owner remains truthful: bridge=${bridge}, ownership=${ownership}, exhausted=${exhausted}`, async t => {
         const f = await fixture(t, { bridge });
         const result = await f.tick({ orphanOptions: {
           hasOwnerImpl: async () => ({ owned: ownership === 'live', uncertain: ownership === 'uncertain' }),
-          requestRereviewImpl: async () => {
-            assert.equal(ownership, 'queue-refused');
-            return { triggered: false, reason: 'queue-refused' };
-          },
+          requestRereviewImpl: async () => assert.fail('Hammer ownership cannot enqueue review'),
           pageImpl: () => assert.fail('fixture must not page'),
         } }, {
           fetchLatestHeadReviewBodiesImpl: async () => [],
@@ -214,8 +222,8 @@ for (const bridge of [false, true]) {
             boundedMs: 60000, retryAfterMs: 30000 }),
         });
         const selected = result.amaClosureResult.nextAction;
-        assert.equal(selected.action, ownership === 'queue-refused' ? 'review' : 'hammer');
-        assert.equal(selected.actor, ownership === 'queue-refused' ? 'reviewer' : 'closure-recovery');
+        assert.equal(selected.action, 'hammer');
+        assert.equal(selected.actor, ownership === 'absent' ? 'hammer' : 'closure-recovery');
         assert.equal(result.amaClosureResult.closureOwner.actor, selected.actor);
         assert.notEqual(selected.action, 'operator-hold', 'overdue reporting cannot erase recovery ownership');
         assert.equal(f.row().review_status, 'posted');

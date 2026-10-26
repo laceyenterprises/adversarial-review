@@ -1392,9 +1392,15 @@ async function dispatchAmaClosureFor({
   if (recordedTerminalReview) {
     ownedHeadSuppression = { suppressed: true, reason: 'hammer-validated-head', headSha: currentPrHeadSha };
   } else if (originalReviewedHead && originalReviewedHead !== currentPrHeadSha) {
-    ownedHeadSuppression = await runCoexistenceOperation('hammer-head-ownership',
-      () => cachedSuppression({ repoPath, prNumber, headSha: currentPrHeadSha, logger }),
-      { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    try {
+      ownedHeadSuppression = await runCoexistenceOperation('hammer-head-ownership',
+        () => cachedSuppression({ repoPath, prNumber, headSha: currentPrHeadSha, logger }),
+        { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
+      logger?.warn?.(`Hammer head ownership proof failed: ${error.message || error}`);
+    }
   }
   const hammerHead = !closerHeadHasLiveReview && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
     && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))

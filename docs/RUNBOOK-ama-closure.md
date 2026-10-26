@@ -5977,7 +5977,9 @@ before any merge. A worker crash does not reset attempt or remediation budgets.
 Existing live-owner fences, holds, CI waits, backoff and retry/lifetime limits
 still apply; exhaustion follows the existing escalation. Ordinary foreign heads
 and explicit exact-head review transfers retain review behavior. Fully certified
-daemon merge authority is unchanged.
+daemon merge authority is unchanged. An unreadable ownership probe grants no
+Hammer ownership or verdict certification; existing recovery rules still apply.
+Cancellation and operation timeouts retain their existing failure handling.
 
 Source acceptance uses disposable synthetic watcher, closure, retry-cap and
 rescue fixtures. After normal deployment, observe a naturally occurring closer

@@ -350,6 +350,13 @@ pre-ASR-04 terminal behaviour (loudly — every such write logs
 `ARGUS_ROUTE_DISABLED`). `npm run argus:backfill` recovers rows already stranded
 in the old status; open rows also self-heal on the next watcher tick.
 
+Existing immutable file releases use the [LAC-2117 provenance contract](docs/RUNBOOK-argus-artifact-provenance.md).
+The collector verifies base-established producer identity and exact merged
+artifacts through the Agent OS rubric. Model caches bind the current base/head,
+artifact digests and deterministic findings; only CI-only changes reuse model
+work. This changes no queue states or lifecycle/smoke declarations. Historical
+completed results are retained; adoption requires a normal new reviewed head.
+
 The Argus drain reserves a shared Gemini identity before spawning its review
 child when Gemini is enabled. A structured child outcome penalizes that identity
 only for a recorded Gemini failure other than quota exhaustion or identity

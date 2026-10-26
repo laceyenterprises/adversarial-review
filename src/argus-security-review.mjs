@@ -26,6 +26,7 @@
 // which keeps every bucket transition in one place.
 
 import { argusReviewerFailure, argusFailureDefers, argusReviewerDeferral } from './argus-reviewer-failures.mjs';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -141,6 +142,8 @@ export function normalizeArgusFinding(raw, { source = 'model' } = {}) {
     category,
     severity,
     title: boundedText(raw?.title || raw?.summary || category, 200),
+    ...(raw?.packagePath ? { packagePath: boundedText(raw.packagePath, 300) } : {}),
+    ...(raw?.provenanceClaim === 'source_protocol' ? { provenanceClaim: 'source_protocol' } : {}),
     detail: boundedText(raw?.detail ?? raw?.evidence ?? raw?.message ?? ''),
     path: raw?.path ? String(raw.path) : null,
     source,
@@ -201,8 +204,21 @@ export function parseArgusReviewOutput(text) {
  * without a reserved-category `high` does not block, and a model that says
  * `approve` over a `high` does not approve.
  */
-export function composeArgusVerdict({ modelReview, rubricFindings = [], verification = null }) {
-  const findings = [...rubricFindings, ...(modelReview?.findings || [])];
+export function composeArgusVerdict({ modelReview, rubricFindings = [], verification = null, verifiedArtifactSources = [] }) {
+  const modelFindings = (modelReview?.findings || []).map((finding) => {
+    // Reconcile only an explicit protocol-only claim with an independently
+    // verified exact entry. Never infer this from model prose or suppress
+    // credential, install, integrity or other source findings on the same file.
+    const proof = finding.category === 'non_registry_source' && finding.provenanceClaim === 'source_protocol'
+      && verifiedArtifactSources.find((item) => item.lockfilePath === finding.path && item.packagePath === finding.packagePath);
+    if (!proof) return finding;
+    return { ...finding, severity: 'low', demotedFrom: finding.severity,
+      title: `Existing file source verified for ${finding.packagePath}`,
+      detail: `Both releases match merged same-producer artifacts and SHA-256/SHA-512 integrity (${proof.headSha256}).`,
+      evidenceDowngradeReason: 'protocol-only claim disproved by deterministic artifact provenance',
+      originalFinding: finding };
+  });
+  const findings = [...rubricFindings, ...modelFindings];
   const blocking = findings.filter((finding) => finding.severity === 'high');
   const advisory = findings.filter((finding) => finding.severity !== 'high');
   if (blocking.length > 0) {
@@ -226,7 +242,7 @@ export function composeArgusVerdict({ modelReview, rubricFindings = [], verifica
   }
   return {
     verdict: ARGUS_VERDICTS.APPROVE,
-    summary: modelReview?.summary || 'Argus found no high-severity finding.',
+    summary: `Argus found no high-severity finding.${advisory.length ? ` ${advisory.length} advisory finding${advisory.length === 1 ? '' : 's'}.` : ''}`,
     findings,
     blocking,
     advisory,
@@ -296,10 +312,10 @@ function renderFinding(finding) {
   const safe = (text) => defangUntrustedMarkdown(redactSensitiveText(text));
   const where = finding.path ? ` (${safe(finding.path)})` : '';
   const demoted = finding.demotedFrom
-    ? ` — demoted from \`${finding.demotedFrom}\`: \`${finding.category}\` is not a reserved-high category`
+    ? ` — demoted from \`${finding.demotedFrom}\`: \`${safe(finding.category)}\` ${safe(finding.evidenceDowngradeReason || 'exceeds its severity ceiling')}`
     : '';
   const detail = finding.detail ? `\n  ${safe(finding.detail).replace(/\n/gu, '\n  ')}` : '';
-  return `- **[${finding.severity}]** \`${finding.category}\` — ${safe(finding.title)}${where}${demoted}${detail}`;
+  return `- **[${finding.severity}]** \`${safe(finding.category)}\` — ${safe(finding.title)}${where}${demoted}${detail}`;
 }
 
 /**
@@ -395,9 +411,20 @@ function supersededOutcome({ pr, nowIso }) {
   };
 }
 
-function cachedReviewFor(job, nowMs) {
+export function argusEvidenceFingerprint({ job, diff, evidence }) {
+  return createHash('sha256').update(JSON.stringify({
+    contractVersion: 3, repo: job.repo, prNumber: job.prNumber, headSha: job.headSha, diff,
+    // Best-effort network/local-checkout context is not immutable evidence.
+    sections: (evidence.sections || []).filter(({ title }) => title !== 'CI on this head'
+      && title !== "This repository's usage of the package" && !title.startsWith('Upstream release notes')),
+    rubricFindings: evidence.rubricFindings, rubric: evidence.rubric, artifactBindings: evidence.artifactBindings,
+    verifiedArtifactSources: evidence.verifiedArtifactSources,
+  })).digest('hex');
+}
+
+function cachedReviewFor(job, nowMs, fingerprint) {
   const cached = job?.drain?.cachedReview;
-  if (!cached || cached.headSha !== job.headSha) return null;
+  if (!cached || cached.headSha !== job.headSha || cached.evidenceFingerprint !== fingerprint) return null;
   const reviewedMs = Date.parse(cached.reviewedAt || '');
   if (!Number.isFinite(reviewedMs) || nowMs - reviewedMs > ARGUS_CACHED_REVIEW_MAX_AGE_MS) return null;
   return cached;
@@ -449,24 +476,21 @@ export async function reviewArgusJob({
     return supersededOutcome({ pr, nowIso });
   }
 
-  let cached = cachedReviewFor(job, nowMs);
-  let evidence = null;
+  // Re-read deterministic facts on retries. Only model work is cached: a changed
+  // base security facts, artifact, producer proof or rubric invalidate approval.
+  let diff;
+  try {
+    diff = await deps.fetchDiff({ repo: job.repo, prNumber: job.prNumber, headSha: job.headSha });
+  } catch (err) {
+    return { kind: ARGUS_REVIEW_OUTCOME.RETRY, error: `PR diff read failed: ${err?.message || err}` };
+  }
+  const evidence = typeof deps.gatherEvidence === 'function'
+    ? await deps.gatherEvidence({ job, pr, diff, workDir })
+    : { sections: [], rubricFindings: [], rubric: null, dependency: null };
+  if (evidence.fatal) return { kind: ARGUS_REVIEW_OUTCOME.RETRY, error: evidence.fatal };
+  const evidenceFingerprint = argusEvidenceFingerprint({ job, pr, diff, evidence });
+  let cached = cachedReviewFor(job, nowMs, evidenceFingerprint);
   if (!cached) {
-    let diff;
-    try {
-      diff = await deps.fetchDiff({ repo: job.repo, prNumber: job.prNumber, headSha: job.headSha });
-    } catch (err) {
-      return { kind: ARGUS_REVIEW_OUTCOME.RETRY, error: `PR diff read failed: ${err?.message || err}` };
-    }
-    evidence = typeof deps.gatherEvidence === 'function'
-      ? await deps.gatherEvidence({ job, pr, diff, workDir })
-      : { sections: [], rubricFindings: [], rubric: null, dependency: null };
-    if (evidence.fatal) {
-      // The deterministic rubric crashed, or its manifest trees could not be
-      // read. Its `high` findings are the authoritative ones, so the review is
-      // not decided without it.
-      return { kind: ARGUS_REVIEW_OUTCOME.RETRY, error: evidence.fatal };
-    }
     const models = await deps.resolveReviewerModels({ job, pr });
     if (!Array.isArray(models) || models.length === 0) {
       return argusReviewerDeferral({ ...deps.reviewerDeferral?.(), nowMs });
@@ -491,6 +515,10 @@ export async function reviewArgusJob({
     }
     cached = {
       headSha: job.headSha,
+      evidenceFingerprint,
+      baseSha: pr.baseSha,
+      artifactBindings: evidence.artifactBindings || [],
+      verifiedArtifactSources: evidence.verifiedArtifactSources || [],
       reviewedAt: nowIso,
       model: ran.model,
       execution: ran.execution,
@@ -517,12 +545,17 @@ export async function reviewArgusJob({
   const composed = composeArgusVerdict({
     modelReview: cached.modelReview,
     rubricFindings: cached.rubricFindings,
+    verifiedArtifactSources: cached.verifiedArtifactSources,
     verification,
   });
   const result = {
     schemaVersion: 1,
     kind: 'argus-security-result',
     source: ARGUS_REVIEW_RESULT_SOURCE,
+    headSha: job.headSha,
+    baseSha: pr.baseSha,
+    evidenceFingerprint,
+    artifactBindings: cached.artifactBindings,
     verdict: composed.verdict,
     summary: composed.summary,
     simplicityNote: cached.modelReview.simplicityNote ?? null,

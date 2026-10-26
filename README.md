@@ -295,7 +295,11 @@ It rejects a reply if:
 - any text other than the optional `## Adversarial Review …` header comes
   before the first required heading;
 - a required heading outside fenced code appears twice;
-- `## Verdict` is not the last section, or anything follows its verdict line.
+- `## Verdict` is not the last section, or anything follows its verdict line;
+- the effective verdict is `Request changes` but no blocking finding is listed
+  (`request-changes-without-findings`, REVIEWVERDICTEMPTY-01). Non-blocking
+  findings alone do not satisfy this rule. `Comment only` and `Approved`
+  remain valid with no findings.
 
 A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
 on the bounded `reviewer-output` path and records the reason in

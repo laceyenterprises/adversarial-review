@@ -21,7 +21,8 @@ import { maskReviewFences } from './review-markdown.mjs';
 //   - no required heading outside fenced code may appear twice;
 //   - `## Verdict` may be followed only by the optional final simplicity
 //     advisory. The verdict itself may hold no heading or code fence and
-//     its last line must be a recognised verdict.
+//     its last line must be a recognised verdict;
+//   - a request-changes verdict must carry at least one blocking finding.
 //
 // A rejection throws `ReviewerReplyRejectedError`, whose `[reviewer-output]`
 // tag routes the attempt onto the watcher's bounded `reviewer-output` retry.
@@ -35,6 +36,7 @@ import {
   parseNonBlockingFindingsSection,
 } from './review-findings.mjs';
 import {
+  extractReviewVerdict,
   normalizeVerdictSectionLine,
   normalizeWhitespace,
   promoteCanonicalReviewSectionHeadings,
@@ -128,9 +130,10 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
   // Inspect parsed card fields, never arbitrary prose labels or code examples.
   // Share the corroboration rule with consumers of historical review bodies.
   const unfenced = unfencedLines.join('\n');
+  const blockingFindings = parseBlockingFindingsSection(unfenced) ?? [];
   const echoed = new Set();
   for (const finding of [
-    ...(parseBlockingFindingsSection(unfenced) ?? []),
+    ...blockingFindings,
     ...(parseNonBlockingFindingsSection(unfenced) ?? []),
   ]) {
     if (!isTemplatePlaceholderFinding(finding, placeholders)) continue;
@@ -174,6 +177,12 @@ function validateReviewerReply(reviewText, { placeholders = reviewTemplatePlaceh
       || !KNOWN_VERDICTS.has(normalizeVerdictSectionLine(verdictLines.at(-1) ?? ''))) {
       reasons.push('text after the Verdict');
     }
+  }
+  // Use the same effective verdict as downstream consumers, including the
+  // stricter tiebreak when blocking and permissive verdict lines coexist.
+  if (normalizeVerdictSectionLine(extractReviewVerdict(text)) === 'request-changes'
+    && blockingFindings.length === 0) {
+    reasons.push('request-changes-without-findings');
   }
   return { ok: reasons.length === 0, reasons };
 }

@@ -138,7 +138,7 @@ test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executo
   assert.equal(monitor.summary().children.psql?.count ?? 0, 0, 'fixtures must not start real async children');
 });
 
-test('WATCHERLAG-01: pending public provenance read yields to admission and failure retains the claim', async () => {
+test('WATCHERLAG-01: pending public provenance read yields to admission and failure permits title review intake', async () => {
   let release;
   const pending=new Promise(resolve=>{release=resolve;});
   let calls=0, complete=false;
@@ -147,7 +147,11 @@ test('WATCHERLAG-01: pending public provenance read yields to admission and fail
   }).then(result=>{complete=true;return result;});
   await flush();assert.equal(calls,1);assert.equal(complete,false);
   release();
-  assert.equal((await lookup).deferClaim,true);
+  const result = await lookup;
+  assert.equal(result.ok,false);
+  assert.equal(result.reason,'dispatch-read-unavailable');
+  assert.equal(result.deferClaim,false);
+  assert.equal(result.launchRequestId,undefined);
 });
 
 for (const evidence of ['merged', 'unreadable', 'replacement-owner', 'replacement-status-owner']) {

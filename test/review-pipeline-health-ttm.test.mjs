@@ -309,3 +309,23 @@ test('an unreadable distribution emits the blind code and withholds the slow one
   assert.match(prometheus, /^review_pipeline_ttm_queue_pressure_multiplier NaN$/m);
   assert.doesNotMatch(prometheus, /^review_pipeline_ttm_open_budget_breaches 0$/m);
 });
+
+test('HOLDOWNER-01: ownerless flags reach the progress-stalled finding with lane reasons', async () => {
+  const { observeTtmReviewLane } = await import('../src/ttm-owner.mjs');
+  const { runTtmTrackerTick } = await import('../src/ttm-tracker.mjs');
+  const rootDir = tempRoot();
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  try {
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, review_status, revision_ref)
+      VALUES ('example/project', 1, ?, 'fixture', 'pending', 'synthetic-head')`).run(iso(60));
+    observeTtmReviewLane(db, { repo: 'example/project', prNumber: 1, headSha: 'synthetic-head',
+      suppressed: true, reason: 'hammer-validated-head', observedAt: iso(20) });
+    runTtmTrackerTick(db, { now: () => new Date(iso(20)), env: {} });
+  } finally { db.close(); }
+  const snapshot = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir, env: {}, now: () => new Date(NOW) });
+  const finding = findingFor(snapshot, 'review:pr_progress_stalled');
+  assert.ok(finding);
+  assert.ok(finding.details.flagKinds.includes('ownerless'));
+  assert.ok(finding.evidence.some(line => /example\/project#1.*hammer-validated-head/.test(line)));
+});

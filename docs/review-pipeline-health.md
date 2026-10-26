@@ -371,7 +371,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:conflicting_pr_unowned` | an open conflicting PR has no current-head remediation or merge ownership marker past the unowned-conflict age threshold (default 30m) | ticket | the PR gets a current-head ownership marker, leaves the conflicting/open population, or falls below the age threshold |
 | `review:duplicate_family_held_too_long` | one finding per active duplicate family older than 24h, capped at 10 oldest families per snapshot; evidence and `details.evidenceFingerprint` are stable on family ID for Sentinel dedupe | ticket | the family is adjudicated/closed, abandoned, becomes inactive, all remaining members are suppressed or ignored, or its age falls below the configured threshold |
 | `review:ttm_budget_breach` | **SLOW** (trend, not alarm): open PR age exceeds a budget DERIVED from the measured merge distribution -- the configured percentile (default p90) of each review-round bucket, weighted-least-squares fitted to `base + review_rounds * per_round` and scaled by measured queue pressure (Little's Law, capped at 3x). Nothing here is a literal; change the distribution and the budget moves. | ticket | the PR merges/closes or falls back under the derived budget |
-| `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, or the reviewer lease expired while the row still claims an in-flight review. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
+| `review:pr_progress_stalled` | **STUCK** (page-worthy): an open PR is not progressing -- a re-review was requested and no reviewer pass has started since, the reviewer lease expired while the row still claims an in-flight review, or STUCK `ownerless` names a suppressed review, missing owner or expired/unbounded hold after seven minutes. Independent of the TTM budget and of elapsed time. | ticket | a reviewer pass starts after the re-review request, or the stale lease is reclaimed/settled |
 | `review:rereview_lane_unfair_share` | one open PR consumes a sustained unfair share of recent re-review starts while queued re-review work exists | ticket | re-review starts are no longer monopolized by one PR, or queued re-review work clears |
 | `review:ttm_budget_model_unreadable` | SEN-02 `blind`: the merged-PR distribution the TTM budget is derived from could not be read, so no budget exists to compare against. The SLOW finding is withheld this tick; the STUCK findings still evaluate. Never a health verdict. | ticket | `reviews.db` `reviewed_prs`/`reviewer_passes` are queryable again |
 | `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
@@ -641,3 +641,12 @@ API, scales the 30-minute window once, and owns finding/dedupe/promotion. D8
 starts at warn: seven days with zero false dead-lane findings, checked against
 AMA audits, are required before a separate reviewed page-code promotion.
 Existing merge gates and offline smoke promises remain unchanged.
+
+
+HOLDOWNER-01 resolves one owner per open tracked PR: operator hold, live closer or
+remediator, bounded machine-checkable hold, then actionable review lane. A settled
+review alone is not an owner. All STUCK flags now reach the watcher alert path,
+once per PR head; ownerless reasons name the declined lanes. Health collection
+remains read-only. See [ownership observations](data-model/ttm-ownership.md) for
+clock reset, hold deadline and durable delivery semantics. SLOW budgets, existing
+STUCK thresholds, routing and merge gates are unchanged.

@@ -649,7 +649,8 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription:
       'an open PR is not progressing: a re-review was requested and no reviewer pass '
       + 'has started since, or the reviewer lease expired while the row still claims an '
-      + 'in-flight review. Deliberately independent of the TTM budget and of elapsed time.',
+      + 'in-flight review, or no actionable owner exists beyond the fixed ownership grace. '
+      + 'Deliberately independent of the TTM budget and of elapsed time.',
   },
   {
     code: 'review:rereview_lane_unfair_share',
@@ -5594,6 +5595,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   // ── STUCK: not progressing. Independent of budget and of elapsed time.
   const progressStalls = snapshot.ttm.flags.filter((flag) => (
     flag.flagKind === 'rereview_unanswered' || flag.flagKind === 'reviewer_lease_expired'
+      || flag.flagKind === 'ownerless'
   ));
   if (progressStalls.length > 0) {
     const byReason = new Map();
@@ -5618,7 +5620,8 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
         `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
         + `review_status=${flag.details?.reviewStatus || 'unknown'} `
         + `rereview_requested=${flag.details?.rereviewRequestedAt || 'none'} `
-        + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'}`
+        + `latest_pass_started=${flag.details?.latestPassStartedAt || 'none'} `
+        + `reason=${flag.details?.stallReason || flag.flagKind}`
       )).concat(
         queuedRereview.oldest
           ? [
@@ -5628,7 +5631,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
             ]
           : []
       ),
-      recommendedAction: 'For re-review stalls, check the watcher claim CAS, reviewer pool capacity, dispatch drain state, and reviewer-specific capacity caps (for example Gemini credential concurrency). For expired reviewer leases, check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature (agent-os#6288).',
+      recommendedAction: 'For ownerless PRs, inspect the named lane declines and restore ownership through the existing lanes. For re-review stalls, check the watcher claim CAS, reviewer pool capacity, dispatch drain state, and reviewer-specific capacity caps (for example Gemini credential concurrency). For expired reviewer leases, check reviewer-pass-reaper liveness and the lease reclamation path; this is the lease/gate deadlock signature.',
       observedAt,
       details: {
         progressClass: 'stuck',
@@ -6218,6 +6221,7 @@ function collectReviewPipelineHealth({
           now: () => new Date(observedAt),
           env,
           config: config.ttm,
+          rootDir, hqRoot,
         })
       : {
           observedAt,

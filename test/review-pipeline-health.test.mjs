@@ -6298,6 +6298,7 @@ test('all health row counters exclude held PRs and report a shared held total', 
     assert.deepEqual(after.mergeOutcomes, [{ outcome: 'open', count: 6 }]);
     assert.equal(after.ttm.budget.openPrCount, 0);
     assert.equal(after.ttm.budget.held, 6);
+    assert.equal(after.ttm.timelines.filter(row => row.ownership?.owner === 'operator-hold').length, 6);
   } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
 });
 

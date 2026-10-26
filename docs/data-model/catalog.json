@@ -944,6 +944,13 @@
       "recordContract": {
         "primaryKey": "jobId",
         "uniqueIdentity": ["repo", "prNumber", "headSha"],
+        "artifactReviewBinding": {
+          "cachedReviewFields": ["baseSha", "evidenceFingerprint", "artifactBindings", "verifiedArtifactSources"],
+          "resultFields": ["headSha", "baseSha", "evidenceFingerprint", "artifactBindings"],
+          "sourceRecord": "vendor/argus-artifacts.json",
+          "cacheContractVersion": 2,
+          "legacyPolicy": "fingerprint-less caches rerun; completed results retained"
+        },
         "lastAutoadjudicationAttempt": {
           "fields": ["schemaVersion", "decision", "reason", "inputs", "attemptedAt", "deferrals"],
           "optionalFields": ["notBefore", "mergeDisposition", "mergeReason", "mergeReasons"],

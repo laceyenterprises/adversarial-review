@@ -35,6 +35,7 @@ import { promisify } from 'node:util';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { parseDependabotDependencyTitle } from './dependency-bot-autoadjudication.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
+import { gatherArtifactEvidence, MAX_ARTIFACT_BYTES } from './argus-artifact-evidence.mjs';
 import { normalizeArgusFinding } from './argus-security-review.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -179,7 +180,7 @@ export function summarizeLockfileDelta({ baseLock, headLock, packageName = null 
     if (!path || entry?.link) continue;
     const prior = base[path];
     if (!prior) added.push(path);
-    else if (prior.version !== entry.version || prior.resolved !== entry.resolved) changed.push(path);
+    else if (JSON.stringify(prior) !== JSON.stringify(entry)) changed.push(path);
     else continue;
     const name = packageNameFromLockPath(path);
     if (entry.hasInstallScript && !prior?.hasInstallScript) installScriptsAdded.push(name);
@@ -278,6 +279,8 @@ export async function gatherArgusEvidence({
   const sections = [];
   const rubricFindings = [];
   const rubricResults = [];
+  const artifactBindings = [];
+  const verifiedArtifactSources = [];
   const dependency = resolveDependencyBump({ job, pr });
   const pythonPath = resolveArgusRubricPythonPath({ rootDir, env, existsImpl: io.existsImpl || existsSync });
   const checkoutDir = resolveRepoCheckoutDir({ repo: job.repo, rootDir, existsImpl: io.existsImpl || existsSync });
@@ -390,7 +393,16 @@ export async function gatherArgusEvidence({
       rubricResults.push({ dir, status: pythonPath ? 'skipped-incomplete-trees' : 'unavailable' });
       continue;
     }
+    let artifactEvidence;
+    try {
+      artifactEvidence = await gatherArtifactEvidence({ job, pr, dir, treeRoot, files, io });
+    } catch (err) {
+      fatal = `artifact evidence read failed: ${err?.message || err}`;
+      continue;
+    }
+    artifactBindings.push({ dir, artifactEvidence });
     const request = {
+      artifactEvidence,
       repo: job.repo,
       prNumber: job.prNumber,
       title: pr.title || '',
@@ -417,6 +429,13 @@ export async function gatherArgusEvidence({
         riskDirection: doc?.riskDirection || null,
         ...(baseSynthesized.length > 0 ? { baseSynthesized } : {}),
       });
+      const assessments = (doc?.axes || []).find((axis) => axis.axis === 'provenance')?.data?.artifactProvenance || {};
+      for (const [packagePath, assessment] of Object.entries(assessments)) {
+        if (assessment.verified === true) verifiedArtifactSources.push({
+          lockfilePath: dir ? `${dir}/package-lock.json` : 'package-lock.json', packagePath,
+          baseSha256: assessment.baseSha256, headSha256: assessment.headSha256,
+        });
+      }
       for (const finding of doc?.findings || []) {
         rubricFindings.push(normalizeArgusFinding(
           { ...finding, path: dir ? `${dir}/package-lock.json` : 'package-lock.json' },
@@ -459,6 +478,8 @@ export async function gatherArgusEvidence({
   return {
     sections,
     rubricFindings,
+    artifactBindings,
+    verifiedArtifactSources,
     rubric: rubricResults.length > 0 ? { pythonPath: pythonPath ? 'resolved' : null, results: rubricResults } : null,
     dependency,
     fatal,
@@ -542,6 +563,28 @@ export function createDefaultArgusEvidenceIo({
         if (/\b404\b|Not Found/iu.test(`${err?.message || ''} ${err?.stderr || ''}`)) return null;
         throw err;
       }
+    },
+    async fetchProducerPullRequest({ repo, prNumber }) {
+      const { stdout } = await execGhWithRetryImpl({
+        args: ['api', `repos/${repo}/pulls/${prNumber}`], env,
+        timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
+      });
+      const doc = JSON.parse(stdout);
+      return { merged: doc.merged === true, mergeCommit: doc.merge_commit_sha };
+    },
+    async fetchArtifactAtRef({ repo, path, ref }) {
+      const encoded = path.split('/').map(encodeURIComponent).join('/');
+      const { stdout } = await execGhWithRetryImpl({
+        args: ['api', `repos/${repo}/contents/${encoded}?ref=${ref}`], env,
+        timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
+      });
+      const doc = JSON.parse(stdout);
+      if (doc.encoding !== 'base64' || !Number.isSafeInteger(doc.size) || doc.size > MAX_ARTIFACT_BYTES) {
+        throw new Error('artifact missing inline base64 or exceeds byte budget');
+      }
+      const data = Buffer.from(doc.content || '', 'base64');
+      if (data.length !== doc.size) throw new Error('artifact size mismatch');
+      return data;
     },
     async runRubric({ requestPath, pythonPath }) {
       try {

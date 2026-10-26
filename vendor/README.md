@@ -31,3 +31,13 @@ merged revision pins are recorded as `recorded.dispatchLookupSdk` in
 0.4.0 captures remain unchanged. Runtime activation still requires the producer,
 complete grants and the explicit default-off flag documented in
 `docs/producer-contract-readers.md#dispatch-lookup`.
+
+## Argus provenance record (LAC-2117)
+
+`argus-artifacts.json` seeds the existing 0.8.0 merged producer from the record
+above; this PR does not upgrade the dependency or change either immutable
+archive. Future upgrades update this machine record alongside the lockfile.
+It is an untrusted claim until the collector reads the producer's authoritative
+merged PR/commit and Argus compares both old/new producer and consumer bytes.
+See [the runbook](../docs/RUNBOOK-argus-artifact-provenance.md). Enrollment must
+reach the reviewed base before a later upgrade can use the same-producer rule.

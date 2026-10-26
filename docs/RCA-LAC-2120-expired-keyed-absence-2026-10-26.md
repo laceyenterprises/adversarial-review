@@ -54,3 +54,12 @@ producer and consumer generations: unverified. Exact entitlement provisioning,
 owner dry-run/apply and organic #9445/#9448 recovery: separately authorized and
 unverified. This worker did not remediate/merge those PRs, edit dispatch records,
 change live grants/flags/roles/providers or restart/deploy a service.
+
+Full offline validation completed in 750 seconds with exit 1: 15,426 passed,
+ten skipped, one failure in unchanged `test/derived-artifacts.test.mjs:335`.
+The cancellation fixture's `spawnSync ps` is refused with `EPERM` in this worker
+environment. The test and imported artifact implementation are unchanged from
+origin/main. A bounded replay of that unchanged file reproduced the same failure
+(38 passed, one skipped, one failed). This is a disclosed environment/baseline
+limitation, not full-suite green; no test, process guard or permission was
+weakened. All changed recovery slices remain green.

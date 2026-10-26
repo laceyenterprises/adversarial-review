@@ -331,3 +331,30 @@ test('CIBLOCKINFRA-01 historical exact-job evidence releases a CI-only legacy st
   assert.equal(result.infrastructureStop.failedChecks[0].steps.length, 0);
   assert.equal(JSON.stringify(audit), original);
 });
+
+test('CIBLOCKINFRA-01 historical recovery validates record identity and retains an existing live owner', async t => {
+  for (const scenario of ['foreign-repository', 'foreign-pr', 'live-owner']) {
+    const rootDir = root(t), current = active(rootDir);
+    const stopped = markFollowUpJobStopped({ rootDir, jobPath: current.jobPath, stoppedAt: now,
+      stopCode: 'no-progress', stopReason: 'Synthetic CI failure.', failure: { ciGate: redGate },
+      commentDeliveryExemption: 'synthetic-fixture' });
+    if (scenario === 'live-owner') {
+      const live = { ...stopped.job, jobId: stopped.job.jobId + '-current',
+        status: 'pending', failure: null, remediationWorker: null };
+      const livePath = join(rootDir, 'data/follow-up-jobs/pending', live.jobId + '.json');
+      mkdirSync(join(livePath, '..'), { recursive: true });
+      writeFollowUpJob(livePath, live);
+    } else {
+      const mismatched = readFollowUpJob(stopped.jobPath);
+      if (scenario === 'foreign-repository') mismatched.repo = 'example/other';
+      else mismatched.prNumber = 43;
+      writeFollowUpJob(stopped.jobPath, mismatched);
+    }
+    const before = readFileSync(stopped.jobPath, 'utf8');
+    const recovered = await recoverInfrastructureCiStops({ rootDir, repo, prNumber,
+      headSha: head, ciGate: greenGate, now: later,
+      execFileImpl: async () => assert.fail('foreign/live-owned records must not be inspected') });
+    assert.equal(recovered.length, 0, scenario);
+    assert.equal(readFileSync(stopped.jobPath, 'utf8'), before, scenario);
+  }
+});

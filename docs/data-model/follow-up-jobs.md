@@ -27,9 +27,11 @@ Closure inspects existing failed/stopped CI records before
 budget decisions. Only all-infrastructure recorded failures on the current head,
 with successful replacements for every named failure, permit
 `failed/stopped -> pending`, one refunded round and cleared stop/failure.
-The retry history retains the old stop, failure and step evidence. Missing,
-mixed, real, skipped-only, unrelated or moved-head evidence never releases a
-stop. Historical missing steps can use the same bounded reader; narrative
+The retry history retains the old stop, failure and step evidence. Stored
+repository/PR identity must match the requested subject under the
+queue writer lock; a filename prefix alone is insufficient. An existing
+pending/in-progress owner supersedes historical recovery. Missing, mixed, real,
+skipped-only, unrelated or moved-head evidence never releases a stop. Historical missing steps can use the same bounded reader; narrative
 alone is insufficient. Recovery examines at most 20 records per bucket for each selected subject.
 Multiple workflows reuse an executor-scoped, 512-entry exact-head/job cache;
 one missing workflow page is read per observation. A tentative wait records

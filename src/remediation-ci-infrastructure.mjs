@@ -72,9 +72,16 @@ export function deferCiInfrastructureProbe({ rootDir, jobPath, now }) {
 // failures may use the same single bounded evidence read; narrative is not proof.
 export async function recoverInfrastructureCiStops({ rootDir, repo, prNumber, headSha, ciGate, now, execFileImpl }) {
   if (!headSha || ciGate?.headSha !== headSha || ciGate.state !== 'green') return [];
+  const sameSubject = job => String(job.repo || '').toLowerCase() === String(repo || '').toLowerCase()
+    && Number(job.prNumber) === Number(prNumber);
+  // A newer live owner supersedes historical recovery; never create a second
+  // pending owner from an old stop while that PR is already being repaired.
+  if (['pending', 'inProgress'].some(key => listFollowUpJobsInDir(rootDir, key,
+    { repo, prNumber, caseInsensitiveRepo: true }).some(({ job }) => sameSubject(job)))) return [];
   const recovered = [];
   for (const key of ['stopped', 'failed']) {
-    for (const { job, jobPath } of listFollowUpJobsInDir(rootDir, key, { repo, prNumber }).slice(0, 20)) {
+    for (const { job, jobPath } of listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo: true }).slice(0, 20)) {
+      if (!sameSubject(job)) continue;
       const code = job.remediationPlan?.stop?.code || job.failure?.code;
       const head = job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha
         || job.completion?.workerPushedHeadSha || job.revisionRef;
@@ -83,7 +90,7 @@ export async function recoverInfrastructureCiStops({ rootDir, repo, prNumber, he
       const recordedFailures = recordedCiFailures(job);
       const failedChecks = await enrichCiInfrastructureEvidence({ rollup: recordedFailures, repo, headSha, execFileImpl });
       if (!infrastructureOnlyFailures(failedChecks) || !checksExecutedAgain(ciGate.rollup, failedChecks)) continue;
-      const result = releaseInfrastructureCiStop({ rootDir, jobPath, headSha, now,
+      const result = releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now,
         recordedFailures, failedChecks });
       if (result) recovered.push(result);
     }

@@ -3528,13 +3528,15 @@ function requeueFollowUpJobForNextRound({
 }
 
 // CIBLOCKINFRA-01: proof is revalidated under the queue writer lock.
-export function releaseInfrastructureCiStop({ rootDir, jobPath, headSha, now, recordedFailures, failedChecks }) {
+export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now, recordedFailures, failedChecks }) {
   return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
     const job = readFollowUpJob(jobPath);
     const code = job.remediationPlan?.stop?.code || job.failure?.code;
     const recordedHead = job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha
       || job.completion?.workerPushedHeadSha || job.revisionRef;
-    if (!['stopped', 'failed'].includes(job.status) || recordedHead !== headSha
+    if (String(job.repo || '').toLowerCase() !== String(repo || '').toLowerCase()
+      || Number(job.prNumber) !== Number(prNumber)
+      || !['stopped', 'failed'].includes(job.status) || recordedHead !== headSha
       || ![...CI_INFRASTRUCTURE_STOP_REASONS, 'max-rounds-reached'].includes(code)
       || (job.failure?.code && !CI_INFRASTRUCTURE_STOP_REASONS.has(job.failure.code))
       || JSON.stringify(recordedFailures) !== JSON.stringify(recordedCiFailures(job))

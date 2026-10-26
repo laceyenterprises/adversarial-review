@@ -314,6 +314,22 @@ function buildRoleFallbackEnvAliases() {
 
 const OSG_SCHEMA = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8'));
 
+// Python-owned strict module fields absent from this reader's consumer schema.
+// Keep the mirror packaged, like OSG_SCHEMA; never read a parent checkout or
+// derive validation rules from configuration values at runtime.
+const PYTHON_MODULE_SCHEMA = JSON.parse(readFileSync(new URL('./python-module-schema.v1.json', import.meta.url), 'utf8'));
+
+function extendModuleSchema(target, additions) {
+  for (const [key, value] of Object.entries(additions)) {
+    if (target[key] && typeof value === 'object' && !Array.isArray(value)) {
+      extendModuleSchema(target[key], value);
+    } else {
+      target[key] = structuredClone(value);
+    }
+  }
+  return target;
+}
+
 function schemaV1() {
   const workerClassVaultSchema = {
     __type: TYPE_DICT,
@@ -334,7 +350,7 @@ function schemaV1() {
       },
     },
   };
-  return {
+  return extendModuleSchema({
     __type: TYPE_DICT,
     __strict: true,
     __keys: {
@@ -2301,6 +2317,24 @@ function schemaV1() {
             },
           },
           ...buildRoleFallbackSchemaKeys(),
+          // OSGCFGPARITY-01: Python recovery dispatch owns this role; mirror its
+          // strict shape so a shared module cascade validates in both readers.
+          merge_agent_failure_recovery: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              worker_class: {
+                __type: TYPE_STRING,
+                __default: 'codex',
+                __enum: ['codex', 'codex-corp', 'claude-code'],
+              },
+              fallback_path: {
+                __type: TYPE_STRING,
+                __default: 'none',
+                __enum: ENUM_ROLES_FALLBACK_PATH,
+              },
+            },
+          },
           quota_probe: {
             // Intentionally remains under `roles` to mirror the Python
             // HRR-02b schema; relocating it must happen in both loaders
@@ -3737,7 +3771,7 @@ function schemaV1() {
         },
       },
     },
-  };
+  }, { __keys: PYTHON_MODULE_SCHEMA });
 }
 
 // -------- Env alias table --------------------------------------------------
@@ -4748,6 +4782,14 @@ export const ENV_ALIASES = {
   'feature_flags.resume_context_envelope': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE',
     aliases: [],
+  },
+  'roles.merge_agent_failure_recovery.worker_class': {
+    canonical: 'AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_WORKER_CLASS',
+    aliases: [['MERGE_AGENT_FAILURE_RECOVERY_WORKER_CLASS', identity]],
+  },
+  'roles.merge_agent_failure_recovery.fallback_path': {
+    canonical: 'AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_FALLBACK_PATH',
+    aliases: [['LITELLM_VK_FALLBACK_FOR_MERGE_AGENT_FAILURE_RECOVERY', identity]],
   },
   'handoff.final_to_hammer': {
     canonical: 'AGENT_OS_HANDOFF_FINAL_TO_HAMMER',

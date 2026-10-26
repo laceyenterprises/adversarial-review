@@ -3225,3 +3225,13 @@ Focused synthetic fixtures in `test/finalization-queue-routing.test.mjs`,
 `test/ama-hammer-retry-cap.test.mjs` and `test/pr-next-action.test.mjs` cover
 wake, expiry, retry credit and stop behavior. Existing smoke promises are unchanged;
 post-deploy observation is described in `docs/RUNBOOK-ama-closure.md`.
+
+Strict shared-config module acceptance is covered by
+`test/config-module-parity.test.mjs`. The loader packages Python-owned module
+fields in `src/python-module-schema.v1.json`, preserving their types, bounds,
+allowlists and strict nested objects alongside its existing consumer schema.
+The parent repository's cross-reader tests exercise committed effective module
+cascades against both readers. Session-ledger shorthand is normalized by its
+existing consumer adapter before validation; node identity is supplied by that
+layer, while its default remains owned by Python. The schema mirror does not
+load a parent checkout or infer validation rules from input values.

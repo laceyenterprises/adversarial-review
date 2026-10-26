@@ -50,6 +50,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>ADVERSARIAL_DISPATCH_READS_ENABLED</key>
+        <string>1</string>
         <!-- Watchdog thresholds raised from the code defaults (stall 10m,
              starvation 15m) to 45m. A single watcher poll legitimately exceeds
              the defaults on this host: each pass reads provider quota status,

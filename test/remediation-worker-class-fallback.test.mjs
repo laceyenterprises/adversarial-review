@@ -3,6 +3,8 @@ import './helpers/load-aware-timeout-fixture.mjs';
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
+import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 
 import {
   nextRoundReviewerModels,
@@ -17,6 +19,19 @@ function fleetStatusStub(rows) {
   const stdout = JSON.stringify({ providerStatuses: rows });
   return async () => ({ stdout });
 }
+
+test('ITPPOOLCONFLICT-01 declared remediator with conflicting policy keeps its class route', async t => {
+  const fixture = poolConflictFixture(t, { identities: ['codex', 'remediator-codex'] });
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+    codexAccountPolicy: 'pinned',
+    selectAccountImpl: request => selectWorkerTokenAccount({ ...request, env: fixture.env,
+      ownerImpl: () => assert.fail('conflicting configuration cannot propose an account') }),
+    execFileImpl: fleetStatusStub([{ provider: 'openai', state: 'ok' }]),
+  });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.hold, false);
+  assert.equal(result.pooled, undefined);
+});
 
 test('ITPREMEDHOLD-01 available remediator pools take precedence over legacy personal-class policy', async () => {
   const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex',

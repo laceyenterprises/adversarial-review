@@ -6091,12 +6091,19 @@ export function loadConfigRuntime({
   });
 }
 
+// Worker proposal projection only: an undeclared identity has no pool contract
+// to validate. Global/startup readers retain strict declaration validation.
+export function loadConfigForIdentityTokenPool({ identity, ...options } = {}) {
+  return loadConfigImpl({ ...options, tokenPoolIdentity: identity });
+}
+
 function loadConfigImpl({
   topPath = null,
   modulePaths = [],
   env = null,
   cliOverrides = null,
   tolerateCheckedInUnknown = false,
+  tokenPoolIdentity,
 } = {}) {
   const envView = env || process.env;
   checkDeprecatedEnvVars(envView);
@@ -6299,6 +6306,9 @@ function loadConfigImpl({
 
   enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
+  const pools = merged.oauth?.identity_token_pools;
+  if (tokenPoolIdentity !== undefined && pools !== null && typeof pools === 'object'
+    && !Array.isArray(pools) && !Object.hasOwn(pools, tokenPoolIdentity)) return null;
   validateOAuthDeclarations(merged.oauth, trace);
   validateOsgShape(merged.osg);
 

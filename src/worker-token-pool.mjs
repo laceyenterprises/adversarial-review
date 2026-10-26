@@ -2,6 +2,7 @@
 // execution lease at admission; a proposal is neither a pin nor merge authority.
 import { isDeepStrictEqual } from 'node:util';
 import { resolveIdentityTokenPools } from './role-config.mjs';
+import { PoolConfigConflictError, warnPoolConfigConflicts } from './config-token-pool-migration.mjs';
 import { readAccountSelection, readIdentityTokenPools } from './identity-token-snapshot.mjs';
 import { reviewerPoolOwner } from './reviewer-token-pool.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -21,7 +22,11 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
   const base = { identity, workerClass: identity, pooled: true };
   const fromConfig = oauth === null;
   try {
-    oauth ??= resolvePoolsImpl({ env });
+    oauth ??= resolvePoolsImpl({ env, identity });
+    if (oauth === null) return null;
+    const pools = oauth?.identity_token_pools;
+    if (pools !== null && typeof pools === 'object' && !Array.isArray(pools)
+      && !Object.hasOwn(pools, identity)) return null;
     oauth = readIdentityTokenPools(oauth);
     if (!Object.hasOwn(oauth.identity_token_pools, identity)) return null;
     if (legacyAccountPinned) return { ...base, hold: true, status: 'held', reason: 'legacy-account-pin-requires-migration' };
@@ -37,7 +42,7 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
       throw new Error('worker pool request mismatch');
     }
     const selection = readAccountSelection(wire.selection, { oauth, request: wire.request });
-    if (fromConfig && !isDeepStrictEqual(oauth, resolvePoolsImpl({ env }))) {
+    if (fromConfig && !isDeepStrictEqual(oauth, resolvePoolsImpl({ env, identity }))) {
       return { ...base, hold: true, status: 'held', reason: 'evidence-generation-mismatch' };
     }
     if (selection.status !== 'selected') return { ...base, hold: true,
@@ -46,7 +51,12 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
       tokenAccountId: selection.account_id,
       brokerProvider: oauth.token_accounts[selection.account_id].broker_provider,
       evidenceGeneration: selection.generation, selection };
-  } catch {
+  } catch (error) {
+    if (error instanceof PoolConfigConflictError) {
+      warnPoolConfigConflicts(error.keys);
+      return { ...base, hold: false, status: 'config-conflict',
+        reason: 'pool-config-conflict', conflictKey: error.key };
+    }
     // Report evidence failures explicitly; callers own hold/compatibility
     // policy. No credential reads or diagnostics are emitted here.
     return { ...base, hold: true, status: 'held', reason: 'evidence-unknown' };
@@ -80,6 +90,11 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   // proposals cannot ground that role. Dispatch still owns account admission.
   if (kind === 'remediator' && account.status !== 'selected'
     && !(account.status === 'unavailable' && account.reason === 'accounts-unavailable')) return null;
+  // A conflict is diagnostic, never account evidence or a closer hold. Keep
+  // its class path and audit fields; dispatch admission still selects accounts.
+  if (kind === 'hammer' && account.reason === 'pool-config-conflict') {
+    return { ...account, workerClass: identity, fellBack: false, hold: false };
+  }
   const base = { ...account, workerClass: identity, fellBack: false,
     ...(kind === 'remediator' && account.status === 'unavailable' ? { capSource: account.reason } : {}) };
   if (account.status !== 'unavailable' && (!preferCrossFamily || account.hold)) return base;
@@ -96,7 +111,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       skipped.push({ workerClass: candidate, reason: fallback?.reason || fallback?.status || 'pool-undeclared' });
       continue;
     }
-    if (!fallback || fallback.status === 'unavailable') continue;
+    if (!fallback || fallback.status === 'unavailable' || fallback.reason === 'pool-config-conflict') continue;
     if (fallback.hold) return { ...base, hold: true, status: 'held', reason: fallback.reason, skipped };
     return { ...fallback, workerClass: candidate, fellBack: true, from: identity, to: candidate,
       provider: FAMILIES[identity] === 'codex' ? 'openai' : 'anthropic',

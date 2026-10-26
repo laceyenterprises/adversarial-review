@@ -2422,7 +2422,18 @@ The Node result is a proposal only. Managed `hq dispatch` revalidates admission
 and acquires/binds the account under its existing global semaphore. It emits no
 automatic harness or account pin. The proposal uses the role's coding/merge task
 policy, while reviewers retain their stricter reviewer reserve policy. Hammer
-unknown, stale or unreadable evidence holds before fallback. Remediators instead
+unknown, stale or unreadable evidence for a valid declared pool holds before fallback.
+ITPPOOLCONFLICT-01 checks each worker's membership in the effective raw pool map
+before validating pool declarations or legacy policy. An undeclared role keeps
+its class route even when another role's pool is invalid. A legacy/new policy
+conflict produces `pool-config-conflict` with `conflictKey`, never an account
+value or `evidence-unknown`. Each conflicting key warns once per process.
+A declared hammer with a conflict dispatches on its class route and records
+the diagnostic in AMA audit evidence; admission still owns account selection.
+`validateStartupRoleConfig` returns these conflicts as `warnings` entries
+(`reason`, `key`) and logs them without refusing startup. Global declaration
+validation and the legacy conflict rules remain strict.
+Remediators instead
 retain legacy class routing when their own identity has no declaration or usable
 evidence (including selector errors); declaring only `codex` does not enroll
 `remediator-codex`. A declared remediator pool with a usable account takes

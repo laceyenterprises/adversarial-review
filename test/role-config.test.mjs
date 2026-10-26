@@ -29,6 +29,15 @@ function writeYaml(path, body) {
   writeFileSync(path, body, { encoding: 'utf8' });
 }
 
+test('ITPPOOLCONFLICT-01 startup returns an empty warning list for clean role config', t => {
+  const dir = makeTmp();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  writeYaml(topPath, 'version: 1\n');
+  assert.deepEqual(validateStartupRoleConfig({ topPath, modulePaths: [], env: {},
+    warn: () => assert.fail('clean config must not warn') }), { warnings: [] });
+});
+
 const REVIEWER_ROUTE_BY_MODEL = {
   claude: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
   'claude-code': { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },

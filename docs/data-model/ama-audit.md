@@ -64,6 +64,13 @@ revalidates admission and owns the actual durable account binding. Pool holds
 use the existing `deferred` audit outcome and `harness-hold:<reason>`; the legacy
 quota snapshot is not an alternative source of pooled admission evidence.
 
+ITPPOOLCONFLICT-01 adds optional `conflictKey` to `harnessResolution` and its
+`accountProposal`, also retained per attempt. A legacy/new policy conflict
+records `reason: pool-config-conflict`, `hold: false`, and the conflicting config
+key path, never its value. No account/provider/generation is selected. The closer
+continues on its class route and records the ordinary dispatch outcome;
+the conflict does not create a deferred attempt or a new lifecycle state.
+
 OSG-14 resolves the optional remediator arm before the closer writes its audit.
 `harnessResolution.workerClass` is the selected physical execution class.
 When an arm applies, optional `harnessResolution.modelResolution` contains

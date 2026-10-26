@@ -6864,6 +6864,7 @@ async function maybeDispatchAmaCloserAttempt({
     ...(harnessFallback?.pooled ? { accountProposal: {
       identity: harnessFallback.identity, tokenAccountId: harnessFallback.tokenAccountId || null,
       brokerProvider: harnessFallback.brokerProvider || null, reason: harnessFallback.reason,
+      ...(harnessFallback.conflictKey ? { conflictKey: harnessFallback.conflictKey } : {}),
       evidenceGeneration: harnessFallback.evidenceGeneration || null,
     } } : {}),
     workerClass: dispatchWorkerClass,
@@ -6872,6 +6873,7 @@ async function maybeDispatchAmaCloserAttempt({
     ...(osgRemediatorRoute.osg ? { osgRemediator: osgRemediatorRoute.osg } : {}),
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),
+    ...(harnessFallback?.conflictKey ? { conflictKey: harnessFallback.conflictKey } : {}),
     ...(harnessFallback?.diagnostics?.length ? { diagnostics: harnessFallback.diagnostics } : {}),
     evidenceSource: harnessFallback?.evidenceSource || null,
     evidenceAgeMs: harnessFallback?.evidenceAgeMs ?? null,

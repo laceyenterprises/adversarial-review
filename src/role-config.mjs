@@ -20,7 +20,7 @@
 // or override `topPath` to make the cascade hermetic against the real
 // `~/agent-os/config.yaml` on the host.
 
-import { validateLegacyPoolOverrides } from './config-token-pool-migration.mjs';
+import { legacyPoolOverrideConflicts, validateLegacyPoolOverrides, warnPoolConfigConflicts } from './config-token-pool-migration.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
@@ -29,6 +29,7 @@ import {
   AgentOSConfigError,
   loadConfig,
   loadConfigCached,
+  loadConfigForIdentityTokenPool,
   resetConfigCache,
 } from './config-loader.mjs';
 
@@ -513,8 +514,15 @@ export function resolveGeminiReviewerIdentities({
 }
 
 // Reader-only rollout: callers opt in; existing role/pin selectors are intact.
-export function resolveIdentityTokenPools(options = {}) {
-  const cfg = loadRoleConfig({ ...options, contextKey: 'oauth.identity_token_pools' });
+export function resolveIdentityTokenPools({ identity, ...options } = {}) {
+  const cfg = loadRoleConfig({ ...options,
+    ...(identity === undefined ? {} : { loaderImpl: args =>
+      (options.loaderImpl === undefined ? loadConfigForIdentityTokenPool : options.loaderImpl)({ ...args, identity }) }),
+    contextKey: 'oauth.identity_token_pools' });
+  if (cfg === null) return null;
+  const pools = cfg.get('oauth.identity_token_pools', {});
+  if (identity !== undefined && pools !== null && typeof pools === 'object'
+    && !Array.isArray(pools) && !Object.hasOwn(pools, identity)) return null;
   validateLegacyPoolOverrides(cfg);
   const rawLegacy = cfg.get('reviewer.gemini.identities', null);
   const legacy = Array.isArray(rawLegacy) ? rawLegacy.map(String) : rawLegacy;
@@ -570,14 +578,18 @@ export function validateStartupRoleConfig({
   topPath,
   modulePaths,
   loaderImpl,
+  warn = console.warn,
 } = {}) {
-  loadRoleConfig({
+  const cfg = loadRoleConfig({
     env,
     topPath,
     modulePaths,
     loaderImpl,
     contextKey: null,
   });
+  const keys = legacyPoolOverrideConflicts(cfg);
+  warnPoolConfigConflicts(keys, warn);
+  return { warnings: keys.map(key => ({ reason: 'pool-config-conflict', key })) };
 }
 
 export {

@@ -10,7 +10,7 @@ import { reconcilePreReceiptIntent } from '../src/ama/pre-receipt-intent.mjs';
 import { appendOperatorMutationAuditRow } from '../src/operator-mutation-audit.mjs';
 
 const usage = `Usage: node bin/settle-legacy-closer-intent.mjs
-  --root-dir <review-root> --hq-root <hq-root> --ledger-target <canonical-target>
+  --root-dir <review-root> --hq-root <hq-root>
   --repo <owner/repo> --pr <number> --head <dispatch-head-sha>
   [--apply --reason <operator-reason>]
 Dry-run is the default. Apply requires the dispatch directory owner. Supports legacy and expired keyed intents.
@@ -25,7 +25,10 @@ export async function main(args = process.argv.slice(2), options = {}) {
   } });
   const print = options.print || console.log;
   if (values.help) { print(usage); return; }
-  for (const key of ['root-dir', 'hq-root', 'ledger-target', 'repo', 'pr', 'head']) {
+  if (values['ledger-target'] !== undefined) {
+    throw new Error('--ledger-target is no longer supported: settlement uses the grant-scoped app SDK, not a canonical ledger target');
+  }
+  for (const key of ['root-dir', 'hq-root', 'repo', 'pr', 'head']) {
     if (!values[key]) throw new Error(`--${key} is required\n${usage}`);
   }
   if (!/^[^/\s]+\/[^/\s]+$/.test(values.repo) || !/^[a-f0-9]{40}$/i.test(values.head)
@@ -52,7 +55,6 @@ export async function main(args = process.argv.slice(2), options = {}) {
   const audit = row => appendOperatorMutationAuditRow(rootDir, { ...auditBase, ...row });
   const result = await reconcilePreReceiptIntent(rootDir, identity, {
     ...options, now, dryRun, operatorSettlement: true, hqRoot: resolve(values['hq-root']),
-    ledgerTarget: values['ledger-target'],
     beforeSettlement: next => audit({ outcome: 'settlement-authorized',
       evidence: next.preReceiptReconciliation.query }),
   });

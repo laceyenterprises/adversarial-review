@@ -191,7 +191,7 @@ identity conflicts log `ama_closer.launch_identity_mismatch`. A foreign lease sk
 the receipt lookup and records query reason `lookup-skipped-foreign-lease` with
 no query attempts.
 
-Receipt lookups use the ledger's load-aware 30-second nominal budget with at
+Receipt lookups use the app SDK's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded
 attempt results, adapter reason and detail, backend/source, row count and launch
@@ -268,11 +268,12 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. A Postgres launch with no
-readable ticket identity also blocks absence proof; the reader never substitutes
-`NULL = ticket` for a canonical lookup. The query includes the exact attempt
-boundary and null request timestamps and never filters repository, head or
-terminal status. An operator key read returning zero cannot bypass an unreadable
+that window refuses this ticket-based recovery. The SDK query is grant-scoped;
+it does not reproduce the deleted Postgres reader's global unidentified-row
+check. The consumer uses an inclusive UTC attempt boundary and adds no
+repository, head or terminal-status filter. Full grant coverage is an activation
+prerequisite; filtered emptiness is not independent proof of global absence.
+An operator key read returning zero cannot bypass an unreadable
 supplemental ticket query. A returned unidentified, conflicting or same-ticket
 wrong-head receipt remains ambiguous even when terminal; an empty ticket query
 cannot settle it. Dry-run remains the default;
@@ -282,6 +283,11 @@ completion audit. Audit evidence includes the recorded ID and both queries.
 A promoted lease can be removed only if the same successful key query proves
 its exact recorded ID belongs to a foreign ticket and the ticket query proves
 closer absence; removal compares the unchanged lease under its mutation lock.
+SDK query evidence records backend `app-contract` and source `app-sdk`.
+`--ledger-target` is rejected before reconciliation. Reads require the default-off
+`ADVERSARIAL_DISPATCH_READS_ENABLED=1` activation flag after verified producer
+release, full grants and submodule `npm ci`; see the
+[reader deployment contract](producer-contract-readers.md#dispatch-lookup-activation-and-limits).
 Source changes authorize no live recovery action.
 
 
@@ -4065,8 +4071,12 @@ sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-
 
 Pin `<hq-root>` and `<ledger-target>` to the values used by the watcher;
 `--ledger-target` accepts a SQLite path/`sqlite://` URI or Postgres DSN.
-This avoids environment loss under `sudo -H`. Both commands print the resolved
-ledger backend and source (without DSN credentials), plus scanned, terminal,
+This avoids environment loss under `sudo -H`. This legacy CLI still validates the target and prints its resolved label
+(without DSN credentials) for compatibility. SDK launch reads ignore that target;
+the printed `ledger` label does not certify a canonical launch read. Enable
+`ADVERSARIAL_DISPATCH_READS_ENABLED=1` only after release, producer and full-grant
+readiness, and inspect recorded `app-contract` / `app-sdk` evidence.
+Both commands also print scanned, terminal,
 missing, unreadable, changed, and active counts. Target resolution failure aborts
 before rewriting records. Verify the preview's ledger metadata before apply.
 Apply preserves original fields, writes `state: launch-terminal`, the
@@ -4075,7 +4085,7 @@ changes. The normal dispatch capacity scan reconciles only launches still within
 the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
-HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes, including in-process SQLite reads without snapshot rows, admit queries for at most one second. Unprobed, missing and unreadable receipted records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; pre-receipt intents never reserve fleet capacity; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch SDK probes admit queries for at most one second. Unprobed, missing and unreadable receipted records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; pre-receipt intents never reserve fleet capacity; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
 

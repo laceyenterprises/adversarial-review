@@ -375,3 +375,38 @@ The contained controller uses SDK `readHcpDispatchLookup` with its provisioned
 worker token to observe exactly its own LRQ. The watcher keeps app-scoped lookup
 for retries, leases and receipt recovery. Route selection occurs before the
 read; a transport failure never switches routes or opens local state.
+
+### Dispatch lookup activation and limits
+
+Runtime reads default off. After verifying the reviewed merged 0.8.0 producer
+release and its artifact hashes, deploy its endpoint and complete app grants.
+Run `npm ci` in the deployed adversarial-review submodule, then have the runtime
+owner set `ADVERSARIAL_DISPATCH_READS_ENABLED=1` in the watcher/follow-up and
+contained controller environments through the normal reviewed service deployment.
+Observe organic own-LRQ HCP reads and app receipt/retry reads. Disabled reads
+return unavailable with `dispatch lookup disabled`; they retain ownership holds
+and refuse hammer starts. Rollback removes the flag (or sets it to `0`) and
+uses the normal service deployment to pause observations safely; no SQL/file
+fallback is restored. Source publication does not authorize service activation.
+Dispatch-only SDK exports load at read time, so an older installed SDK produces
+unavailable evidence rather than preventing daemon module linking.
+
+The current candidate lacks a verified merged release revision; see
+`vendor/README.md`. SDK 0.8.0 `not_found` is scoped to the authenticated grants,
+not an independent global absence proof. Its envelope has no authorization
+completeness field. A coordinated producer change must distinguish unauthorized
+or incomplete scope before partial grants can safely support absence settlement.
+The consumer retains the existing SDK absence mapping in this round; full grant
+coverage remains an operator prerequisite. `--ledger-target` is now rejected by
+the settlement CLI so it cannot misrepresent which source was queried.
+
+Session reuse is keyed by connection settings and caller timeout (8 seconds by
+default; receipt recovery supplies its load-aware 30-second budget). Every
+connection/read failure evicts the session. Results expose the shared transient
+classification and fixed secret-free diagnostics, allowing the existing receipt
+owner to retry at most three times with its 100/200ms backoff; no nested retry
+loop is added. A caller deadline or abort bounds settlement across registration
+and lookup. SDK 0.8.0 does not accept an abort signal: its outstanding HTTP work
+can outlive caller cancellation and follows SDK transport timeout handling. Full
+transport cancellation requires a producer SDK update. Sync compatibility reads
+are included in watcher latency summaries under `node`.

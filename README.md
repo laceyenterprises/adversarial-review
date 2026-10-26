@@ -3262,3 +3262,18 @@ project/repository grants. Unavailable reads retain ownership holds; they never
 fall back to SQLite, psql or OS files. Existing blocked-decision, cancellation,
 rearm and authoritative merged/closed policy remains in the app.
 See [the reader contract](docs/producer-contract-readers.md#dispatch-lookup).
+
+
+Dispatch lookup activation defaults off (`ADVERSARIAL_DISPATCH_READS_ENABLED=1`
+is required in each deployed reader environment). The runtime owner must verify
+the merged SDK release record, deploy the producer and complete grants, and run
+`npm ci` in this submodule before enabling it through normal service deployment.
+Removing the flag safely pauses reads and holds ownership. SDK 0.8.0 cannot prove
+global absence under partial grants; the candidate's merged release revision is
+still unverified. See the reader contract for these remaining producer obligations
+and cancellation limits. Existing lifecycle states, transitions and smoke promises
+are unchanged. Focused offline regressions run with:
+
+```bash
+node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
+```

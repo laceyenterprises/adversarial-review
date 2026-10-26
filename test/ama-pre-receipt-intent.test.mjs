@@ -396,7 +396,7 @@ test('legacy query yielding preserves a replacement owner', async t => {
 
 function operatorArgs(f, extra = []) {
   return ['--root-dir', f.rootDir, '--hq-root', join(f.rootDir, 'hq'),
-    '--ledger-target', f.options.ledgerDbPath, '--repo', identity.repo,
+    '--repo', identity.repo,
     '--pr', String(identity.prNumber), '--head', identity.headSha, ...extra];
 }
 
@@ -490,7 +490,7 @@ test('audit failure prevents operator settlement', async t => {
 test('legacy intent passes the whole ticket window through the SDK', async () => {
   const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started,
     dispatchSession: { dispatchLookup: async selector => {
-      assert.deepEqual(selector, {ticket_ref: "AMA-PR-8'fixture", requested_at_or_after: started});
+      assert.deepEqual(selector, {ticket_ref: "AMA-PR-8'fixture", requested_at_or_after: new Date(started).toISOString()});
       return {schema_version:1,status:'not_found',complete:true,roots:[],items:[],retry_edges:[]};
     } } });
   assert.equal(r.ok, true);
@@ -1089,4 +1089,28 @@ for (const scenario of ['absent', 'receipt']) test(`CLOSERINTENTRECON-01 rekeyed
   assert.equal(f.record().retryCount, 2);
   assert.equal(f.lease().watcherPid, 434343);
   assert.equal(f.lease().status, 'pending');
+});
+
+test('operator settlement refuses retired ledger-target before any reconciliation', async () => {
+  await assert.rejects(settleLegacyIntent(['--ledger-target', '/synthetic/canonical']),
+    /--ledger-target is no longer supported/);
+});
+
+
+test('SDK transient classification reaches receipt-owner retries with safe persisted evidence', async t => {
+  const f = fixture(t);
+  let calls = 0;
+  const delays = [];
+  const result = await f.reconcile({
+    dispatchSession: { dispatchLookup: async () => {
+      if (++calls === 1) throw Object.assign(new Error('secret endpoint token'), { code: 'ECONNRESET' });
+      return { schema_version: 1, status: 'not_found', complete: true, roots: [], items: [], retry_edges: [] };
+    } },
+    delayAsyncImpl: async ms => delays.push(ms),
+  });
+  assert.equal(result.status, 'no-launch');
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [100]);
+  assert.equal(result.evidence.attempts[0].detail, 'transient dispatch lookup failure');
+  assert.doesNotMatch(JSON.stringify(f.read().preReceiptReconciliation), /secret endpoint token/);
 });

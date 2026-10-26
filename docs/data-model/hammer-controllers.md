@@ -20,11 +20,13 @@ Version 1 fields: `schemaVersion`, random `token`, exact `launchRequestId`,
 States are `running`, `stopping`, `quiescent`, and `cleanup-unconfirmed`.
 Normal shell exit, TERM/INT/HUP/ALRM, the absolute two-hour ceiling, validator
 timeout, or terminal/parked/foreign exact-launch evidence starts stopping.
-The controller reads through the existing bounded session-ledger adapter and
+The controller reads through the bounded SDK dispatch lookup adapter and
 producer status vocabulary every 10 seconds (`LAUNCH_POLL_MS`, never load
 scaled), one read at a time and without blocking the one-second process census.
-Each read uses the adapter's load-aware ledger timeout with a matching abort
-signal. A readable terminal, parked or foreign row stops at once (`launch-ended`).
+Each read uses the adapter's load-aware timeout and a bounded caller abort
+signal. SDK 0.8.0 may retain its HTTP request until its transport deadline after
+caller cancellation. Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1`
+in the controller environment after the verified producer release and grants are live. A readable terminal, parked or foreign row stops at once (`launch-ended`).
 A failed read (timeout, spawn error, unreadable target) is recorded and the
 round continues; it stops with `launch-unreadable` only after
 `LAUNCH_UNREADABLE_GRACE_MS` (120 seconds, widened to the poll plus two read
@@ -61,10 +63,10 @@ error codes without process commands, environment contents or credentials.
 Every write carries `launchReadFailures`, `launchReadFirstFailureAt` and
 `launchReadLastError` (a bounded reason or error code), so a no-merge audit can
 tell a transient read from a real cancellation.
-`launchReadSource` records the latest read's adapter target source, or null
-when unavailable. Under the Postgres backend, a non-empty canonical DSN sets
-this to `env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN` and overrides the worker's
-target/DSN. Under SQLite (including the default), canonical DSNs are ignored.
+`launchReadSource` records `app-sdk` for a successful SDK read, or null
+when unavailable. The contained controller uses its own-LRQ HCP token; app
+reads use provisioned project/repository grants. Launch reads never resolve
+canonical or standby database settings.
 Only the source label is stored; connection DSNs, credentials and paths are
 never copied into the registration. Older version 1 receipts omit this field.
 `directTermSent` / `directKillSent` identify a direct-child-only fallback when

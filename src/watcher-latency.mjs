@@ -4,7 +4,7 @@ import { channel } from 'node:diagnostics_channel';
 import { basename } from 'node:path';
 import { createHistogram, monitorEventLoopDelay, performance } from 'node:perf_hooks';
 
-const commands = new Set(['gh', 'git', 'hq', 'psql']);
+const commands = new Set(['gh', 'git', 'hq', 'psql', 'node']);
 let activeObserver = null;
 const milliseconds = histogram => histogram.count ? {
   p50_ms: histogram.percentile(50) / 1e6,

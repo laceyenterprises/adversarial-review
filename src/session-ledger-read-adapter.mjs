@@ -878,15 +878,16 @@ export async function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
   return readDispatchLaunches({ idempotency_key: args.idempotencyKey }, args);
 }
 export async function readLaunchRequestsForTicketSinceAsync(args = {}) {
-  if (!normalizeText(args.ticketRef) || !Number.isFinite(Date.parse(args.requestedAtOrAfter))) {
+  if (!normalizeText(args.ticketRef) || typeof args.requestedAtOrAfter !== 'string'
+    || !Number.isFinite(Date.parse(args.requestedAtOrAfter))) {
     return { ok: false, reason: 'invalid-ticket-attempt-query' };
   }
   return readDispatchLaunches({ ticket_ref: args.ticketRef,
-    requested_at_or_after: args.requestedAtOrAfter }, args);
+    requested_at_or_after: new Date(args.requestedAtOrAfter).toISOString() }, args);
 }
 
-// With includeRetryChain, a traversal failure preserves the base status and
-// sets retryChainUnreadable. Ownership-changing callers must check that flag.
+// With includeRetryChain, incomplete traversal makes the whole read unavailable.
+// No base-row status or absence evidence escapes an incomplete SDK reply.
 export function readLaunchRequestStatusFromLedger(args = {}) {
   if (!normalizeText(args.launchRequestId)) return { ok: false, reason: 'missing-launch-request-id' };
   const result = args.launchSnapshot ?? readDispatchLaunchesSync({

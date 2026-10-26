@@ -322,6 +322,106 @@ const PYTHON_MODULE_SCHEMA = JSON.parse(readFileSync(new URL('./python-module-sc
 
 let cachedSchemaV1;
 
+// SPE-01: independent strict-reader mirror; metadata only, no secret resolution.
+const SEARCH_OPERATIONS = Object.freeze({
+  brave: ['web_search', 'news_search', 'answer', 'research', 'brave.image_search', 'brave.video_search', 'brave.local_search', 'brave.place_search', 'brave.llm_context'],
+  exa: ['web_search', 'fetch', 'extract', 'answer', 'research'],
+  firecrawl: ['web_search', 'news_search', 'fetch', 'extract', 'firecrawl.map', 'firecrawl.crawl', 'firecrawl.agent'],
+  parallel: ['web_search', 'extract', 'answer', 'research'],
+  perplexity: ['web_search', 'answer', 'research', 'perplexity.reason'],
+  tavily: ['web_search', 'news_search', 'fetch', 'extract', 'research', 'tavily.map', 'tavily.crawl'],
+});
+const SEARCH_LIMIT_PATHS = new Set(Object.keys(SEARCH_OPERATIONS).map(p => `services.hcp.search.providers.${p}.operation_limits`));
+const SEARCH_MONEY_PATTERN = '^[0-9]{1,12}([.][0-9]{1,9})?$';
+const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%]+/[^/\s?#%][^/?#%\r\n]*/[^/\s?#%]+$`;
+const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
+
+function searchSchema() {
+  const record = keys => ({ __type: TYPE_DICT, __strict: true, __strict_always: true, __keys: keys });
+  const money = () => ({ __type: TYPE_STRING, __default: '0.00', __pattern: SEARCH_MONEY_PATTERN, __nullable: false });
+  const ref = () => ({ __type: TYPE_STRING, __pattern: SEARCH_REF_PATTERN, __nullable: false });
+  const providers = {};
+  for (const [provider, operations] of Object.entries(SEARCH_OPERATIONS)) {
+    const limitKeys = Object.fromEntries(SEARCH_COUNT_LIMITS.map(key => [key, {
+      __type: TYPE_INT, __min: 1, __enforce_max: true, __max: key === 'max_duration_seconds' ? 86400 : 1000000000,
+    }]));
+    Object.assign(limitKeys, {
+      max_charge_usd: { __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN },
+      currency: { __type: TYPE_STRING, __enum: ['USD'] },
+      pricing_provenance: { __type: TYPE_STRING, __pattern: String.raw`^\S[^\r\n]{0,511}$` },
+      research_effort: { __type: TYPE_STRING, __enum: ['low', 'medium', 'high'] },
+      processor: { __type: TYPE_STRING, __pattern: '^[A-Za-z0-9_-]{1,64}$' },
+    });
+    const limits = record({});
+    limits.__strict = false;
+    limits.__extra_keys_schema = record(limitKeys);
+    const keys = {
+      enabled: { __type: TYPE_BOOL, __default: false },
+      presentation: { __type: TYPE_STRING, __default: 'abstracted', __enum: ['abstracted', 'native'] },
+      credential_ref: ref(),
+      budget_usd: money(),
+      budget_window_seconds: { __type: TYPE_INT, __default: 86400, __min: 1, __enforce_max: true, __max: 2678400 },
+      allowed_operations: { __type: TYPE_LIST, __item: { __type: TYPE_STRING, __enum: operations }, __default: [] },
+      operation_limits: limits,
+    };
+    if (provider === 'brave') keys.answers_credential_ref = ref();
+    providers[provider] = record(keys);
+  }
+  return record({
+    enabled: { __type: TYPE_BOOL, __default: false },
+    run_budget_usd: money(),
+    providers: record(providers),
+  });
+}
+
+function validateSearch(search = {}) {
+  const fail = (path, reason) => {
+    const key = `services.hcp.search${path}`;
+    throw new AgentOSConfigError(`${key}: ${reason}`, { key });
+  };
+  const money = (value, path) => {
+    if (typeof value !== 'string' || !(new RegExp(SEARCH_MONEY_PATTERN).test(value)) || value.endsWith('\n')) {
+      fail(path, 'expected nonnegative finite decimal USD string');
+    }
+    // Only positivity is compared: decimal billing arithmetic belongs to HCP.
+    return /[1-9]/.test(value);
+  };
+  const runPositive = money(search.run_budget_usd ?? '0.00', '.run_budget_usd');
+  if (search.enabled && !runPositive) fail('.run_budget_usd', 'enabled gateway requires a positive budget');
+  for (const [provider, entry] of Object.entries(search.providers ?? {})) {
+    const path = `.providers.${provider}`;
+    if (!Object.hasOwn(SEARCH_OPERATIONS, provider)) fail(path, 'unknown provider');
+    const positive = money(entry.budget_usd ?? '0.00', `${path}.budget_usd`);
+    for (const field of ['credential_ref', 'answers_credential_ref']) {
+      if (Object.hasOwn(entry, field) && (!(new RegExp(SEARCH_REF_PATTERN).test(entry[field])) || entry[field].endsWith('\n'))) {
+        fail(`${path}.${field}`, 'expected unambiguous op reference metadata');
+      }
+    }
+    const operations = entry.allowed_operations ?? [];
+    if (new Set(operations).size !== operations.length || operations.some(op => !SEARCH_OPERATIONS[provider].includes(op))) {
+      fail(`${path}.allowed_operations`, 'expected unique supported operation IDs');
+    }
+    const limits = entry.operation_limits ?? {};
+    for (const [operation, limit] of Object.entries(limits)) {
+      const opPath = `${path}.operation_limits.${operation}`;
+      if (!SEARCH_OPERATIONS[provider].includes(operation) || !operations.includes(operation)) fail(opPath, 'operation must be supported and explicitly allowed');
+      if (!money(limit.max_charge_usd, `${opPath}.max_charge_usd`)) fail(opPath, 'maximum charge must be positive');
+      if (limit.currency !== 'USD' || typeof limit.pricing_provenance !== 'string' || !limit.pricing_provenance.trim() || /[\r\n]/.test(limit.pricing_provenance)) {
+        fail(opPath, 'USD currency and pricing provenance are required');
+      }
+      if (Object.hasOwn(limit, 'processor') && /[\r\n]/.test(limit.processor)) fail(opPath, 'invalid processor');
+      if (!SEARCH_COUNT_LIMITS.some(key => Object.hasOwn(limit, key))) fail(opPath, 'at least one request ceiling is required');
+    }
+    if (entry.enabled) {
+      if (!positive || !runPositive) fail(path, 'enabled provider requires positive provider and run budgets');
+      if (!entry.credential_ref || !operations.length || !Object.keys(limits).length) fail(path, 'enabled provider requires credential metadata and a bounded operation');
+      if (provider === 'brave' && operations.some(op => ['answer', 'research'].includes(op)) && !entry.answers_credential_ref) {
+        fail(path, 'Brave answer/research requires separate Answers credential metadata');
+      }
+    }
+  }
+}
+
 function schemaV1() {
   if (cachedSchemaV1) return cachedSchemaV1;
   const workerClassVaultSchema = {
@@ -1326,6 +1426,7 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              search: searchSchema(),
               capability_vocabulary: {
                 __type: TYPE_LIST,
                 __item: { __type: TYPE_STRING },
@@ -5091,6 +5192,9 @@ function validateDictPresentKeysOnly(
     droppedUnknownKeys = null,
   } = {},
 ) {
+  if ((doc === null || doc === undefined) && schema.__strict_always) {
+    throw new AgentOSConfigError(`${keyPath}: expected mapping`, { key: keyPath, source });
+  }
   if (doc === null || doc === undefined) return {};
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new AgentOSConfigError(
@@ -5103,6 +5207,7 @@ function validateDictPresentKeysOnly(
       },
     );
   }
+  if (schema.__strict_always) tolerateUnknown = false;
   const allowed = schema.__keys || {};
   const extraSchema = schema.__extra_keys_schema || null;
   const strict = schema.__strict !== false;
@@ -5218,6 +5323,7 @@ function validateDictPresentKeysOnly(
 export function validateSchema(doc, options = {}) {
   const validated = validateSchemaLayer(doc, options);
   validateOAuthDeclarations(validated.oauth ?? {}, null, options.source);
+  validateSearch(validated.services?.hcp?.search);
   return validated;
 }
 
@@ -5322,7 +5428,7 @@ function flatten(doc, prefix = '', preserveEmptyMap = () => false, atomicPaths =
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
     const full = prefix ? `${prefix}.${key}` : key;
-    if (atomicPaths.has(full)) {
+    if (atomicPaths.has(full) || SEARCH_LIMIT_PATHS.has(full)) {
       out[full] = value;
     } else if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (Object.keys(value).length > 0) {
@@ -6375,6 +6481,7 @@ function loadConfigImpl({
     && !Object.hasOwn(pools, 'gemini-reviewer');
   if (!legacyGeminiReviewer || !undeclaredGemini) validateOAuthDeclarations(merged.oauth, trace);
   validateOsgShape(merged.osg);
+  validateSearch(merged.services?.hcp?.search);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

@@ -231,6 +231,7 @@
     {"name": "null-limits", "valid": false, "search": {"providers": {"brave": {"operation_limits": null}}}},
     {"name": "null-limit-entry", "valid": false, "search": {"providers": {"brave": {"allowed_operations": ["web_search"], "operation_limits": {"web_search": null}}}}},
     {"name": "newline-provenance", "valid": false, "base": "configured", "patches": [{"path": ["providers", "brave", "operation_limits", "web_search", "pricing_provenance"], "value": "fixture\n"}]},
-    {"name": "newline-processor", "valid": false, "base": "configured", "patches": [{"path": ["providers", "brave", "operation_limits", "web_search", "processor"], "value": "fixture\n"}]}
+    {"name": "newline-processor", "valid": false, "base": "configured", "patches": [{"path": ["providers", "brave", "operation_limits", "web_search", "processor"], "value": "fixture\n"}]},
+    {"name": "exa-kb-pat-excluded", "valid": false, "search": {"providers": {"exa": {"credential_ref": "op://test-vault/Exa KB PAT/credential"}}}}
   ]
 }

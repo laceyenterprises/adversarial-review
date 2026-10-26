@@ -397,6 +397,9 @@ function validateSearch(search = {}) {
         fail(`${path}.${field}`, 'expected unambiguous op reference metadata');
       }
     }
+    if (provider === 'exa' && entry.credential_ref?.split('/')[3] === 'Exa KB PAT') {
+      fail(`${path}.credential_ref`, 'Exa KB PAT is outside the search credential inventory');
+    }
     const operations = entry.allowed_operations ?? [];
     if (new Set(operations).size !== operations.length || operations.some(op => !SEARCH_OPERATIONS[provider].includes(op))) {
       fail(`${path}.allowed_operations`, 'expected unique supported operation IDs');

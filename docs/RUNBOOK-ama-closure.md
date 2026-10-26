@@ -4938,7 +4938,22 @@ its persisted `acquiredAt + dispatchTimeoutMs`. Uncertain process/ownership
 reads cannot extend that deadline; closure rechecks after a yielded ownership
 probe and proceeds through ordinary next-action admission in the same pass.
 The terminal receipt remains until normal exclusive reacquisition. Startup logs
-the released count. Current-process leases, review handoffs, live launches and
+the released count. CLAIMPIDSTALE-01 also treats legacy leases without
+`holderHost` as local, matching pending ownership and dispatch reclaim. A dead
+legacy watcher therefore leaves a terminal receipt and abandonment log at
+startup or the next closure evaluation rather than an indefinite in-flight wait.
+This includes legacy leases with missing or null `dispatchTimeoutMs`: dead-PID
+proof does not require a timeout. Shared abandonment runs before the reaper's
+age-based selector; the 30-minute dead-holder tier and 6-hour floor apply only
+to leases left for that fallback, outside unresolved-intent fences.
+The same hostless dead/reused-watcher proof also enters pre-receipt intent
+reconciliation before the intent deadline. Entry does not prove no submission:
+a legacy keyless intent still requires a successful empty closer-ticket/time
+ledger query; keyed intents retain their existing receipt and absence-proof
+rules. Successful absence settlement records `no-dispatch`, defers the matching
+lease and refunds the intent retry increment once. Unreadable or ambiguous
+evidence retains the intent fence.
+Current-process leases, review handoffs, live launches and
 operator holds retain their handling. Unresolved keyed dispatch intents stay
 fenced for native reconciliation; abandonment alone cannot prove no submission.
 `runStaleStateReaper` and its startup wrapper accept `captureProcessImpl` and

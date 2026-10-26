@@ -608,7 +608,7 @@ esac
     const nodeStub = join(bin, 'audit-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
-  */bin/legacy-lane-write.mjs) shift 8; exec "$@" ;;
+  */bin/legacy-lane-write.mjs) shift; while [ "$1" != -- ]; do shift; done; shift; exec "$@" ;;
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
   */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module)
@@ -1124,12 +1124,13 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
     HAM_AUDIT_REMEDIATED_TOTAL: '0', HAM_AUDIT_REMEDIATED_BLOCKING: '0', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
     HAM_DOC_CURRENCY: 'not applicable', HAM_DOC_CURRENCY_REASON: 'synthetic no-diff close',
     HAM_FAILING_TESTS_FIXED: 'fixture CI green', HAM_AMA_TRAILERS: 'Worker-Class: hammer\nTicket: GHBUDGET-01',
-    REAL_NODE: process.execPath, HAM_NODE_BIN: join(dir, 'node-stub'),
+    REAL_NODE: process.execPath, REAL_LEGACY_CLI: join(root, 'bin/legacy-lane-write.mjs'), HAM_NODE_BIN: join(dir, 'node-stub'),
     PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
   };
   writeFileSync(join(dir, 'details'), 'Synthetic no-diff close.');
-  writeFileSync(join(dir, 'clock'), '1700000000');
+  // The real lane wrapper shares this absolute deadline with the fake shell clock.
+  writeFileSync(join(dir, 'clock'), String(Math.floor(Date.now() / 1000)));
   writeFileSync(join(dir, 'verdict'), JSON.stringify({ eligible: true, trace: { headMatch: { current: head }, branchProtection: { required: false } } }));
   writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
   writeFileSync(join(dir, 'sleep'), `#!${process.execPath}
@@ -1139,6 +1140,9 @@ fs.writeFileSync(file, String(Number(fs.readFileSync(file)) + Number(process.arg
   writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$*" in 'rev-parse HEAD') echo '${head}' ;; 'diff --name-only '*) exit 0 ;; *) echo '${base}' ;; esac\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'node-stub'), `#!/bin/sh
 case "$1" in
+  # Resolve the entrypoint: the fixture's symlinked bin directory otherwise
+  # makes the CLI's direct-execution check skip the real lane writer.
+  */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$REAL_LEGACY_CLI" "$@" ;;
   */merge-lease.mjs)
     if [ "$2" = acquire ]; then echo '{"leaseId":"fixture-lease"}';
     elif [ "$2" = needs-revalidation ]; then echo '{"needsRevalidation":false}';

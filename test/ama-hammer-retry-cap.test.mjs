@@ -25,6 +25,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { readClosureNextAction } from '../src/ama/closure-next-action.mjs';
+import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
 import {
   acquireAmaCloserLease,
@@ -55,6 +56,175 @@ const MERGE_COMMIT = 'c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2';
 const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.slice(0, 12)}`;
 const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+
+test('HAMLANEWAIT-01: two lane-busy launches back off without exhausting retries or arming a stop', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-recovery-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD };
+  for (let i = 1; i <= 2; i++) {
+    const dispatchedAt = `2026-07-06T12:${i}0:00Z`;
+    const auditAt = `2026-07-06T12:${i}0:10Z`;
+    const launchRequestId = `synthetic-lane-busy-${i}`;
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD, now: dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, reviewedSha: REVIEWED_HEAD,
+      targetRemediationSha: ADVANCED_HEAD, state: 'dispatched', workerClass: 'hammer',
+      launchRequestId, dispatchedAt, retryCount: i }));
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+      attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId }, now: auditAt });
+    for (let observation = 0; observation < 2; observation++) {
+      const result = await maybeDispatchAmaCloser({
+        ...hammerDispatchArgs(rootDir, {
+          prMetadata: { headSha: ADVANCED_HEAD, mergeableState: 'UNKNOWN',
+            statusCheckRollup: [{ name: 'synthetic-unit', conclusion: 'SUCCESS' }] },
+          dispatchContext: { targetRemediationSha: ADVANCED_HEAD, baseBranch: 'main',
+            dispatchedAt: `2026-07-06T12:${i * 10 + observation * 5}:30Z` },
+        }),
+        options: validHamTerminalRemediationOptions(),
+        ...hammerDispatchDeps({
+          execFileImpl: async () => ({ stdout: '{"status":"failed"}', stderr: '' }),
+          readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
+          attemptDaemonCleanMergeImpl: () => assert.fail('UNKNOWN still blocks merge'),
+          deliverAlertImpl: () => assert.fail('lane contention must not page'),
+        }),
+      });
+      assert.notEqual(result.needsOperator, true, JSON.stringify(result));
+      assert.match(result.reason, observation === 0 ? /hammer-deferral-backoff/ : /mergeability-unknown/);
+      assert.notEqual(result.nextAction?.row, 'R07-stop');
+      const ledger = readHammerRetryCapLedger(rootDir, identity);
+      assert.equal(ledger.attemptCount, 0);
+      assert.equal(ledger.targetAttemptCount, 0);
+      assert.equal(ledger.lifetimeAttemptCount, 0);
+      assert.equal(ledger.leaseWaitLaunches.length, i, 'one refund per launch across repeated observations');
+      assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
+    }
+  }
+});
+
+for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
+  test(`HAMLANEWAIT-01: ${outcome} lane-busy launch retries ordinary repair without HAM certification`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-repair-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let launches = 0;
+    let alerts = 0;
+    const status = outcome === 'no_work_done' ? 'failed' : outcome;
+    const deps = hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status,
+        ...(outcome === 'no_work_done' ? { failure_class: outcome } : {}) } }),
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status }) };
+        if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+          ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-repair-${++launches}`, dispatchId: `synthetic-dispatch-${launches}` }) };
+        return { stdout: '{}' };
+      },
+      deliverAlertImpl: async () => { alerts++; },
+    });
+    let result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    for (let i = 1; i <= 3; i++) {
+      const record = readAmaCloserDispatchRecord(rootDir, identity);
+      writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+        attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId: record.launchRequestId },
+        now: `2026-07-06T12:${i}0:00Z` });
+      const run = dispatchedAt => maybeDispatchAmaCloser({
+        ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt } }), ...deps,
+      });
+      result = await run(`2026-07-06T12:${i}0:30Z`);
+      assert.equal(result.reason, 'hammer-deferral-backoff');
+      const next = readHammerRetryCapLedger(rootDir, identity).deferralNextAt;
+      // Repeated observation neither re-refunds nor extends the backoff/page.
+      result = await run(`2026-07-06T12:${i}1:00Z`);
+      assert.equal(result.reason, 'hammer-deferral-backoff');
+      assert.equal(readHammerRetryCapLedger(rootDir, identity).deferralNextAt, next);
+      assert.equal(alerts, i === 3 ? 1 : 0);
+      result = await run(next);
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.notEqual(result.needsOperator, true);
+      const ledger = readHammerRetryCapLedger(rootDir, identity);
+      assert.equal(ledger.attemptCount, 1, 'only the new repair launch remains charged');
+      assert.equal(ledger.lifetimeAttemptCount, 1);
+      assert.equal(ledger.leaseWaitLaunches.length, i);
+      assert.equal(ledger.laneBusyDeferral.launches.length, i);
+      assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
+    }
+    assert.equal(launches, 4);
+    assert.equal(alerts, 1);
+  });
+}
+
+
+for (const status of ['superseded', 'not-found', 'cancelled', 'canceled', 'unverified-terminal-success']) {
+  test(`HAMLANEWAIT-01: lane-busy preserves ${status} launch semantics`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-status-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const logs = [];
+    let launches = 0;
+    const deps = hammerDispatchDeps({
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status }) };
+        if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+          ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `status-launch-${++launches}`, dispatchId: `status-dispatch-${launches}` }) };
+        return { stdout: '{}' };
+      },
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status } }),
+      logger: { log() {}, warn() {}, error() {}, info: message => logs.push(message) },
+    });
+    assert.equal((await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps })).dispatched, true);
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+      attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId: record.launchRequestId },
+      now: '2026-07-06T12:01:00Z' });
+    const run = dispatchedAt => maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt } }), ...deps,
+    });
+    assert.equal((await run('2026-07-06T12:01:30Z')).reason, 'hammer-deferral-backoff');
+    await run('2026-07-06T12:04:00Z');
+    assert.ok(logs.some(message => message.includes(`"reason":"terminal-status-${status}"`)),
+      'terminal cleanup must receive the original HQ status');
+  });
+}
+
+test('HAMLANEWAIT-01: uncertified corrupt park audit emits a warning', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-audit-warning-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+    attempt: { outcome: 'deferred', reason: 'lane-busy' }, now: '2026-07-06T12:00:00Z' });
+  const { amaAuditFilePath } = await import('../src/ama/audit.mjs');
+  writeFileSync(amaAuditFilePath(join(rootDir, 'hq-root'), REPO, PR_NUMBER, REVIEWED_HEAD), '{broken');
+  const warnings = [];
+  // The later terminal-audit read retains its existing fail-closed exception.
+  await assert.rejects(maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps({
+    logger: { log() {}, info() {}, error() {}, warn: message => warnings.push(message) },
+  }) }), SyntaxError);
+  assert.ok(warnings.some(message => message.includes('park audit unreadable')));
+});
+
+test('HAMLANEWAIT-01: same-head lane backoff caps at 30 minutes and resets on head or series change', async t => {
+  const { deferHammerRetryDispatch, evaluateHammerDeferralQueue } = await import('../src/ama/hammer-retry-cap.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-backoff-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const now = '2026-07-06T12:00:00Z';
+  for (let i = 1; i <= 14; i++) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now });
+    const ledger = deferHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD,
+      headSha: REVIEWED_HEAD, launchRequestId: `busy-${i}`, now, laneBusy: true, leaseWaitExhausted: true });
+    assert.equal(Date.parse(ledger.deferralNextAt) - Date.parse(now), Math.min(1800, 60 * 2 ** Math.min(i, 5)) * 1000);
+    assert.deepEqual(evaluateHammerDeferralQueue(ledger, now), { expired: false, backoff: true });
+    assert.deepEqual(evaluateHammerDeferralQueue(ledger, ledger.deferralNextAt), { expired: false, backoff: false });
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 0);
+  }
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD, now });
+  const moved = deferHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD,
+    launchRequestId: 'new-head', now, laneBusy: true, leaseWaitExhausted: true });
+  assert.deepEqual(moved.laneBusyDeferral, { headSha: ADVANCED_HEAD, launches: ['new-head'] });
+  assert.equal(Date.parse(moved.deferralNextAt) - Date.parse(now), 120_000);
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: ADVANCED_HEAD, headSha: ADVANCED_HEAD, now });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).laneBusyDeferral, null);
+});
 
 function hammerDispatchArgs(rootDir, overrides = {}) {
   return {
@@ -3359,9 +3529,9 @@ for (const status of ['reaped', 'cancelled']) {
   });
 }
 
-for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'green-lease-wait']) {
-  const leaseWaitExhausted = parkKind === 'green-lease-wait';
-  const parkReason = leaseWaitExhausted ? 'merge-lease-timeout' : parkKind;
+for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'green-lease-wait', 'lane-busy']) {
+  const leaseWaitExhausted = ['green-lease-wait', 'lane-busy'].includes(parkKind);
+  const parkReason = parkKind === 'green-lease-wait' ? 'merge-lease-timeout' : parkKind;
   for (const pendingCi of [false, true]) {
     test(`certified lease park waits for UNKNOWN then resumes daemon merge: ${parkKind}, pending CI=${pendingCi}`, async (t) => {
       const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-closer-'));
@@ -3394,7 +3564,7 @@ for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-me
         }),
       });
       const backoff = await run('2026-07-06T12:02:00Z', ADVANCED_HEAD, 'UNKNOWN');
-      assert.equal(backoff.reason, leaseWaitExhausted
+      assert.equal(backoff.reason, leaseWaitExhausted && parkKind !== 'lane-busy'
         ? (pendingCi ? 'checks-pending' : 'mergeability-unknown')
         : 'hammer-deferral-backoff');
       assert.equal(backoff.recoveryWait, true);

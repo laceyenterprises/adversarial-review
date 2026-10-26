@@ -2225,7 +2225,7 @@ stateDiagram-v2
     s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)
     s1 --> s7: hammer-dispatch.10 failed outcome reconciled
-    s2 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; merged success stays sticky
+    s2 --> s0: hammer-dispatch.11 bounded same-head retry or changed context; green lease exhaustion resumes next pass without failure charge; legacy lane-busy refunds failure credit with 2-minute exponential backoff capped at 30 minutes and durable third-launch same-head page; only succeeded/failed rewrite for uncertified repair; merged success stays sticky
     s4 --> s0: hammer-dispatch.12 bounded retry, next-poll branch confirmation or changed context
     s5 --> s0: hammer-dispatch.13 bounded retry or changed context
     s7 --> s0: hammer-dispatch.14 bounded retry or changed context
@@ -3147,3 +3147,15 @@ failed acknowledgement/release cannot complete. Existing smoke promises stay;
 no new smoke action or blocking check is added. Worker source tests are separate
 from deployed observations. Only the operator activates or approves after merge;
 retain legacy support for one release cycle.
+
+HAMLANEWAIT-01: legacy closer lane writes wait for release notifications until
+a fresh 60-second merge-attempt deadline after CI/lease waits. A bounded
+`lane-busy` result remains deferred and retries with two-minute exponential
+backoff capped at thirty minutes; the third same-head launch pages through the
+durable closure-wait receipt. Contention retries proceed without charging
+final-no-merge or automated-stop budgets. Real refusals and queue-v2 behavior retain their existing contracts.
+Focused synthetic fixtures in `test/finalization-queue-routing.test.mjs`,
+`test/finalization-queue-owner.test.mjs`, `test/hamunknown-02.test.mjs`,
+`test/ama-hammer-retry-cap.test.mjs` and `test/pr-next-action.test.mjs` cover
+wake, expiry, retry credit and stop behavior. Existing smoke promises are unchanged;
+post-deploy observation is described in `docs/RUNBOOK-ama-closure.md`.

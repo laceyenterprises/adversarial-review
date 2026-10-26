@@ -49,16 +49,19 @@ export function createLaneRoutingController({ store, now = () => new Date().toIS
     db.prepare(`INSERT INTO finalization_queue_route VALUES (?,?,'legacy',?,NULL,NULL,?) ON CONFLICT DO NOTHING`)
       .run(...args(route.lane), route.configGeneration, queueTime(now()));
   });
-  async function locked(lane, action) {
+  async function locked(lane, action, legacyDeadline) {
     lane = resolveLaneKey(lane);
-    const release = ownerAdapter.tryLock(lane);
-    if (!release) return { ok: false, reason: 'owner-operation-in-flight' };
+    const started = performance.now();
+    let release = ownerAdapter.tryLock(lane);
+    if (!release && legacyDeadline) release = await ownerAdapter.waitForLock(lane, { deadline: legacyDeadline, now });
+    if (!release) return { ok: false, reason: 'owner-operation-in-flight',
+      ...(legacyDeadline ? { outcome: 'lane-busy', waitedMs: Math.round(performance.now() - started) } : {}) };
     try { return await action(lane); } finally { release(); }
   }
   return {
     adapterName: reader.name, read: reader.read,
     // This is the sole writer-route decision for both legacy invocation paths.
-    async run({ cfg, lane, kind, subject = null, legacy, queue }) {
+    async run({ cfg, lane, kind, subject = null, legacy, queue, legacyDeadline }) {
       const desired = resolveLaneRoute(cfg, lane);
       if (!desired.autonomousExecutionEnabled) return { ok: false, reason: 'autonomous-merge-execution-disabled' };
       return locked(desired.lane, async lane => {
@@ -85,7 +88,7 @@ export function createLaneRoutingController({ store, now = () => new Date().toIS
             .run(JSON.stringify({ outcome: 'succeeded', sourceRef: `local-return:${id}` }), id);
         }
         return result;
-      });
+      }, desired.executor === 'legacy' ? legacyDeadline : undefined);
     },
     async transfer({ cfg, lane, expectedGeneration, drainAdapter, returnAdapter, deadline, load }) {
       const desired = resolveLaneRoute(cfg, lane);

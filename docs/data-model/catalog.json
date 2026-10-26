@@ -741,7 +741,8 @@
       "operatorHoldRefundsLifetime": true,
       "leaseWaitExhausted": "green exact-head contention refunds failures and resumes next pass",
       "leaseDeferralHistoryLimit": 64,
-      "leaseDeferralHistoryField": "leaseWaitLaunches"
+      "leaseDeferralHistoryField": "leaseWaitLaunches",
+      "laneBusyDeferral": "optional {headSha, launches}: newest 64 distinct same-head lane-busy launches; reset on parked head/review series change or non-lane deferral; 2-minute exponential backoff capped at 30 minutes and durable closure-wait page on third launch; no failure-budget charge"
     },
     {
       "id": "closer-authored-stale",
@@ -866,7 +867,7 @@
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait", "final-round"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round", "lane-busy"],
       "finalRoundReceiptScope": "per PR across heads; independent of primary-change",
       "waitProgress": "launch/head progress restarts the deadline before stall evaluation; retained running/starting launch or confirmed dispatched lease timestamps advance existing final-round rows only when no later than observation time; retained succeeded-awaiting-audit-or-merged-signal holds supply no launch progress; running background dispatch uses ephemeral launchWait from actual start for its dispatch timeout (15-minute fallback), preserving original debt on refusal and paging explicitly on overrun",
       "legacyWaitMigration": "none; one-time deadline and page-reservation reset"

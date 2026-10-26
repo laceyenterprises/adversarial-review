@@ -131,7 +131,7 @@ if (result) console.log(JSON.stringify(result));
     const nodeStub = join(bin, 'fixture-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
-  */bin/legacy-lane-write.mjs) shift 8; exec "$@" ;;
+  */bin/legacy-lane-write.mjs) shift; while [ "$1" != -- ]; do shift; done; shift; exec "$@" ;;
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
   */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module) cat >/dev/null; echo '{"ok":true,"state":"OPEN","headMatches":true,"checksConclusion":"SUCCESS"}' ;;

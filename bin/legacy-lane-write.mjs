@@ -4,19 +4,27 @@ import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
 
 export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stderr = process.stderr, run = runLegacyLaneWrite } = {}) {
   const options = {};
-  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base' };
+  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline' };
   let i = 0;
   for (; i < argv.length && argv[i] !== '--'; i += 2) {
     if (!keys[argv[i]] || !argv[i + 1]) return 64;
     options[keys[argv[i]]] = argv[i + 1];
   }
   if (!options.rootDir || !options.repository || !options.base || argv[i] !== '--' || !argv[i + 1]) return 64;
+  if (options.deadline !== undefined) {
+    const ms = Number(options.deadline);
+    if (!Number.isSafeInteger(ms) || !Number.isFinite(new Date(ms).getTime())) return 64;
+    options.deadline = new Date(ms).toISOString();
+  }
   try {
     const commandArgs = argv.slice(i + 2);
     const headIndex = commandArgs.indexOf('--match-head-commit');
     const result = await run({ ...options, subject: { target: commandArgs.find(arg => /^https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(arg)) ?? null,
       head: headIndex >= 0 ? commandArgs[headIndex + 1] ?? null : null }, command: argv[i + 1], argv: argv.slice(i + 2) });
-    if (result?.ok === false) { stderr.write(`legacy lane write refused: ${result.reason}\n`); return 75; }
+    if (result?.ok === false) {
+      stderr.write(`legacy lane write refused: ${result.reason}${result.reason === 'owner-operation-in-flight' && result.outcome === 'lane-busy' ? `; lane-busy; waited ${result.waitedMs ?? 0}ms` : ''}\n`);
+      return 75;
+    }
     stdout.write(result.stdout || ''); stderr.write(result.stderr || ''); return 0;
   } catch (error) {
     stdout.write(error.stdout || '');

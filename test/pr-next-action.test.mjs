@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { NEXT_ACTIONS, NEXT_ACTION_ACTORS, NEXT_ACTION_DEADLINE_MS, deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { fromLegacyClosureOwner, fromLegacyNoProgressLane, fromLegacyPostedReviewOutcome } from '../src/pr-next-action-consumer.mjs';
 import { createMergeAgentSnapshotPass } from '../src/merge-agent-candidate-snapshot.mjs';
+import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 
 // Synthetic fixtures only: opaque subject keys, fabricated heads and evidence.
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
@@ -51,6 +52,26 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 }
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
+
+test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a real refusal still stops', () => {
+  const attempts = [1, 2].map(i => ({ outcome: 'deferred', reason: 'lane-busy', head: HEAD,
+    startedAt: `2026-01-01T00:00:0${i}Z`, attemptPhase: 'hammer-gh-pr-merge' }));
+  const readStop = () => readHammerStopForHead({ hqRoot: '/synthetic', repo: 'fixture/repo',
+    prNumber: 17, headSha: HEAD, readAuditImpl: () => ({ attempts }) });
+  assert.equal(readStop(), null);
+  const retry = nextAction(snap({ reviews: { verdict: 'request changes', blockingFindingCount: 1 },
+    remediation: { roundsLeft: false }, controls: { stop: readStop() },
+    launches: { closer: { headSha: HEAD, status: 'failed', outcome: 'no-merge', retryable: true } } }));
+  assert.equal(retry.row, 'R08-retry');
+  assert.equal(retry.actor, 'hammer');
+  attempts.push({ outcome: 'failed-without-merge', reason: 'permanent-merge-rejection', head: HEAD,
+    startedAt: '2026-01-01T00:00:03Z', attemptPhase: 'hammer-gh-pr-merge' });
+  const stop = readStop();
+  assert.equal(stop.refusal.reasons[0], 'permanent-merge-rejection');
+  const held = nextAction(snap({ controls: { stop: { deterministic: true, headSha: HEAD,
+    recordedAt: stop.recordedAt, fingerprint: stop.refusal.key } } }));
+  assert.equal(held.row, 'R07-stop');
+});
 
 const STOP = { deterministic: true, headSha: HEAD, recordedAt: ANCHOR, fingerprint: `${HEAD}:2:${ANCHOR}` };
 const AFTER_STOP = '2026-01-01T00:00:30.000Z';

@@ -10,7 +10,7 @@ const runtime = { build: QUEUE_RUNNING_BUILD, pid: process.pid, loadedAt: new Da
 // Minimal frozen-v1 boundary. Unmigrated installations retain their legacy
 // behavior. Once a lane has a durable route, cached legacy config cannot bypass
 // it, including when the selector is removed during rollback.
-export async function routeFinalizationWriter({ rootDir, cfg, lane, kind, subject = null, legacy, queue }) {
+export async function routeFinalizationWriter({ rootDir, cfg, lane, kind, subject = null, legacy, queue, legacyDeadline, now }) {
   if (!lane?.repository || !lane?.base) {
     if (cfg?.laneRoutes?.length) return { ok: false, taken: false, dispatched: false, skipMergeAgent: true, reason: 'lane-identity-unavailable' };
     return legacy();
@@ -18,7 +18,7 @@ export async function routeFinalizationWriter({ rootDir, cfg, lane, kind, subjec
   resolveLaneRoute(cfg, lane);
   const store = openFinalizationQueueStore({ rootDir });
   try {
-    const result = await createLaneRoutingController({ store, runtime }).run({ cfg, lane, kind, subject, legacy, queue });
+    const result = await createLaneRoutingController({ store, runtime, now }).run({ cfg, lane, kind, subject, legacy, queue, legacyDeadline });
     return result?.ok === false ? { ...result, taken: false, dispatched: false, skipMergeAgent: true } : result;
   } finally { store.close(); }
 }

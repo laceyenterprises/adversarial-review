@@ -5707,6 +5707,33 @@ adds the route-scoped closer prompt described below. Those explicit composition 
 satisfied and observed before an operator promotes a lane. Capability availability
 is not an assertion that such a consumer is running.
 
+HAMLANEWAIT-01 bounds the legacy shell writer's lane-lock wait by the caller's
+existing absolute deadline (`--deadline-ms`; the closer passes its shared CI/merge
+deadline). Direct library callers retain the existing 60-second default when no
+deadline is supplied. The merge subprocess receives only the remaining budget.
+A directory watch, registered before the acquisition recheck, wakes on release
+of the persistent lock inode; release updates its timestamp after closing the
+lock descriptor. Every wake retries the same exclusive lock and rechecks the
+durable route before issuing. There is no polling sleep or added config key.
+Watch/notification failures retain the deadline as the bounded fallback.
+
+If contention lasts through that deadline, the wrapper exits 75 with
+`owner-operation-in-flight; lane-busy; waited Nms`. Only exit 75 with this refusal
+is retryable lane contention. The closer records `deferred` / `lane-busy`, releases
+the merge lease as a retryable abort, and reports a next-pass retry. It preserves
+the deferred audit rather than posting a terminal no-merge closing status.
+Recovery uses the existing lease-wait refund, once per launch, for series, target
+and lifetime credit; repeated lane-busy outcomes cannot arm the automated stop.
+Real predicate, head, check and other route refusals retain their existing behavior.
+An earlier deterministic real refusal remains authoritative.
+
+This applies only to the legacy writer retained alongside MGQ-10 and during its
+rollback window. Queue-v2 routing/admission and migrated closer execution do not
+wait through this path or gain merge authority. Deploy the reviewed source through
+the ordinary release; no route flip, runtime edit or manual retry is required.
+After deployment, observe natural legacy contention for a release wake or bounded
+lane-busy audit followed by ordinary retry; source tests do not prove live rollout.
+
 All registered writer invocations and queue mutations share the existing
 single-host issuance flock. A configured route alone never transfers durable
 ownership. `createLaneRoutingController.transfer` is the runtime-owner port:

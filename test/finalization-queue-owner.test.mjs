@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import Database from 'better-sqlite3';
 import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
 import { createQueueOwner } from '../src/finalization/executor-lease-store.mjs';
+import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { foldQueue, reconcileQueuePublication } from '../src/finalization/ledger-fold.mjs';
 import { QUEUE_ACTIONABLE_PHASES, resolveLaneKey } from '../src/finalization/ledger-events.mjs';
 import { queueWaitMs } from '../src/finalization/queue-wait.mjs';
@@ -78,6 +79,25 @@ test('repositories and case-sensitive bases remain independent', async t => {
   for (const key of [lane, { ...lane, base: 'Main' }, { ...lane, repository: 'example/other' }]) {
     assert.equal((await f.owner.claim({ lane: key, ownerId: 'owner', expiresAt: time(60) })).ok, true);
   }
+});
+
+test('HAMLANEWAIT-01: release in another process wakes the bounded native lane waiter', { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  const child = fork(fileURLToPath(new URL('./helpers/queue-claimant.mjs', import.meta.url)),
+    [JSON.stringify({ root: f.root, lane, now: time(0), lockOnly: true })], {
+      execArgv: [], env: { ...process.env, NODE_TEST_CONTEXT: '' }, stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    });
+  const exited = once(child, 'exit');
+  t.after(async () => { if (child.exitCode === null) child.kill(); await exited; });
+  assert.equal((await once(child, 'message'))[0], 'ready');
+  const adapter = resolveQueueOwnerAdapter({ rootDir: f.root, db: f.store.db });
+  assert.equal(adapter.tryLock(lane), null);
+  const pending = adapter.waitForLock(lane, { deadline: new Date(Date.now() + 3000).toISOString() });
+  child.send('release');
+  const release = await pending;
+  assert.equal(typeof release, 'function', 'must acquire from release wake before the deadline');
+  try { assert.equal(adapter.tryLock(lane), null); } finally { release(); }
+  await exited;
 });
 
 test('stale generation/route and expired owner cannot renew, release, progress, push or merge', async t => {

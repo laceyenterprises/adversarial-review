@@ -16,7 +16,7 @@ const unknown = { ...green, ok: false, mergeable: 'UNKNOWN', mergeStateStatus: '
 
 // Run the complete rendered merge procedure. Only external reads/writes are
 // stubbed; gate sampling, both gate callers, merge and audit branching are real.
-function runMerge(t, gates) {
+function runMerge(t, gates, { laneRefusal = null, laneExit = 75 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamunknown-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const path of ['modules/worker-pool/lib/python', 'platform/session-ledger/src']) mkdirSync(join(dir, path), { recursive: true });
@@ -31,8 +31,12 @@ const dir = process.env.TMPDIR;
 const args = process.argv.slice(2);
 const log = value => fs.appendFileSync(dir + '/events', JSON.stringify(value) + '\\n');
 if (args[0].endsWith('/bin/legacy-lane-write.mjs')) {
+  if (${JSON.stringify(laneRefusal)} !== null) {
+    console.error(${JSON.stringify(laneRefusal)}); process.exit(${laneExit});
+  }
   const {spawnSync} = require('node:child_process');
-  const child = spawnSync(args[8], args.slice(9), {stdio:'inherit'});
+  const separator = args.indexOf('--');
+  const child = spawnSync(args[separator + 1], args.slice(separator + 2), {stdio:'inherit'});
   process.exit(child.status ?? 1);
 }
 if (args[0] === '--input-type=module') {
@@ -292,4 +296,22 @@ test('HAMUNKNOWN-02: recovered gate uses latest-run classification and excludes 
     ...rerun, { __typename: 'CheckRun', name: context, conclusion: 'FAILURE' },
   ] } });
   assert.equal((await evaluateHammerStopHold({ ...externalRed.args, excludeContexts: [context] })).action, 'hold');
+});
+
+for (const [reason, exitCode, outcome] of [
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, 'deferred'],
+  ['lane-transfer-required', 75, 'failed-without-merge'],
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, 'failed-without-merge'],
+]) test(`HAMLANEWAIT-01: rendered closer classifies ${reason}, exit ${exitCode}`, t => {
+  const result = runMerge(t, [green], { laneRefusal: `legacy lane write refused: ${reason}`, laneExit: exitCode });
+  assert.equal(result.status, outcome === 'deferred' ? 75 : 1, result.stderr);
+  const audit = result.events.findLast(event => event.outcome);
+  assert.equal(audit.outcome, outcome);
+  assert.equal(audit.attempt.reason, outcome === 'deferred' ? 'lane-busy' : 'unclassified-merge-failure');
+  assert.ok(!result.events.some(event => event.merge));
+  if (outcome === 'deferred') {
+    assert.match(result.stderr, /waited 3000ms/);
+    assert.match(result.release, /release:lane-busy/);
+    assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
+  }
 });

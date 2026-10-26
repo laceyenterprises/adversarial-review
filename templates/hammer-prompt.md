@@ -344,10 +344,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    note or measured `HAM_HEAD_WAITED_SECONDS` and `HAM_REQUIRED_CHECKS_WAITED_SECONDS`.
    Missing CI becomes terminal only after the existing head/check waits; on head
    timeout say checks could not start (0s). Preserve different-live-head race handling.
-   Green lease-wait exhaustion is a retryable deferral: quote the helper's
-   “lease wait exhausted behind …” holders and state acquisition retries next
-   pass. Retain its deferred audit; never overwrite it with failed-without-merge
-   or a terminal no-merge comment.
+   Green lease-wait exhaustion and legacy `lane-busy` (exit 75 plus
+   `owner-operation-in-flight`) are retryable deferrals. Report the wait/holders
+   and next-pass retry; preserve the deferred audit. Never replace it with
+   failed-without-merge or a terminal no-merge comment.
    For other terminal stops, the comment must contain the line `HAM closing status — no merge.`.
    Never post it after merge or claim remediation/rebase completion as merge.
    At either lease admission cap (gate attempts or repeated no-merge releases),
@@ -904,7 +904,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
+In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the closing report from mandate 0b when the PR remains open, preserving retryable deferrals such as `lane-busy`.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

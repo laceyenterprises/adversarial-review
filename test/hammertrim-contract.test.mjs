@@ -608,7 +608,7 @@ esac
     const nodeStub = join(bin, 'audit-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
-  */bin/legacy-lane-write.mjs) shift 8; exec "$@" ;;
+  */bin/legacy-lane-write.mjs) shift; while [ "$1" != -- ]; do shift; done; shift; exec "$@" ;;
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
   */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module)
@@ -1129,7 +1129,8 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
   };
   writeFileSync(join(dir, 'details'), 'Synthetic no-diff close.');
-  writeFileSync(join(dir, 'clock'), '1700000000');
+  // The real lane wrapper shares this absolute deadline with the fake shell clock.
+  writeFileSync(join(dir, 'clock'), String(Math.floor(Date.now() / 1000)));
   writeFileSync(join(dir, 'verdict'), JSON.stringify({ eligible: true, trace: { headMatch: { current: head }, branchProtection: { required: false } } }));
   writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
   writeFileSync(join(dir, 'sleep'), `#!${process.execPath}

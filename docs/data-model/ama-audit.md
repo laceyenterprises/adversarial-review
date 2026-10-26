@@ -262,3 +262,9 @@ Optional proactive refresh failure with a usable held credential creates no
 terminal failure. Raw transport output and credentials never enter these
 records. An unavailable audit is reported as an error; sticky succeeded
 protection still applies.
+
+
+HAMLANEWAIT-01 uses the existing `deferred` outcome with reason `lane-busy` for
+legacy lane-lock `owner-operation-in-flight` exit 75. It is not a terminal
+no-merge attempt. No schema or migration changes; the wrapper reports measured
+`waitedMs` in its refusal diagnostic. Other refusals keep their prior outcomes.

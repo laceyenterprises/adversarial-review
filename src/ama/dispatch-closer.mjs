@@ -4837,19 +4837,23 @@ async function maybeDispatchAmaCloserAttempt({
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
   const orphanAdmit = ownerProofRecovery;
   let queuedParkAudit = null;
-  if (prMetadata?.headSha && verdict.trace?.hamTerminalRemediation?.ok === true) {
+  if (prMetadata?.headSha) {
     try {
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
+      if (verdict.trace?.hamTerminalRemediation?.ok !== true
+        && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy') queuedParkAudit = null;
     } catch (error) {
-      logger?.warn?.(`[ama-closer] park audit unreadable; retaining merge hold: ${error?.message || error}`);
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
+      if (verdict.trace?.hamTerminalRemediation?.ok === true) {
+        logger?.warn?.(`[ama-closer] park audit unreadable; retaining merge hold: ${error?.message || error}`);
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
+      }
     }
   }
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
-    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(queuedParkReason);
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'lane-busy'].includes(queuedParkReason);
   // Certification and parking are execution evidence. The shared workflow
   // determines whether this attempt observes, resumes the daemon, or repairs.
   const repairCertifiedPark = certifiedContentionPark && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
@@ -5069,9 +5073,10 @@ async function maybeDispatchAmaCloserAttempt({
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
-    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(parkReason)
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'lane-busy'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
+  const laneBusyPark = deferredPark && parkReason === 'lane-busy';
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
@@ -5080,7 +5085,10 @@ async function maybeDispatchAmaCloserAttempt({
   if (deferredPark && existingRecord?.launchRequestId) {
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
-      leaseWaitExhausted: parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true,
+      // Lane-lock contention issued no merge; reuse the lease-wait refund so
+      // repeated busy passes cannot consume the failure or lifetime budget.
+      leaseWaitExhausted: parkReason === 'lane-busy'
+        || (parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true),
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
     });
   }
@@ -5621,6 +5629,14 @@ async function maybeDispatchAmaCloserAttempt({
       && prefetchedLaunchRequestProbe?.row?.failure_class === 'no_work_done';
     const capFinalDecision = await reconcileCapFinalDecision(status);
     if (capFinalDecision) return capFinalDecision;
+    // A timed-out legacy lock wait never issued a merge. Even without current
+    // HAM certification, a settled launch must re-enter ordinary repair/admission
+    // rather than being classified as a final no-merge or an exit without close.
+    if (laneBusyPark && !certifiedPark &&
+      (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || AMA_CLOSER_RETRYABLE_STATUSES.has(status))) {
+      status = 'failed';
+      existingDispatchStatus = status;
+    }
     if (certifiedContentionPark && !deferredPark &&
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
@@ -5629,6 +5645,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed') || reportedNoWork) {
       if (
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || reportedNoWork)
+        && !laneBusyPark
         && auditTerminalOutcome !== 'succeeded'
         // HAMBG-02: the validated-HAM exemption holds only while the same-head
         // daemon merge below can act on it. With a readable merged signal it
@@ -6392,7 +6409,7 @@ async function maybeDispatchAmaCloserAttempt({
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,
-        terminalOutcome: terminalLaunchLeaseOutcome({ status,
+        terminalOutcome: laneBusyPark ? 'deferred' : terminalLaunchLeaseOutcome({ status,
           headAdvanced: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge }),
         launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt,

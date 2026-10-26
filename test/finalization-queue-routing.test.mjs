@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
-import { createQueueOwner } from '../src/finalization/queue-owner.mjs';
+import { createQueueOwner, resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { createLaneRoutingController, resolveLaneRoute } from '../src/finalization/queue-routing.mjs';
 import { routeFinalizationWriter } from '../src/finalization/queue-routing-boundary.mjs';
 import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
@@ -226,6 +226,72 @@ test('legacy shell wrapper preserves command, arguments, output and exit code wh
   assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => { throw new Error(); } }), 75);
   assert.equal(err, 'legacy lane write failed; reconciliation may be required\n');
   assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => ({ ok: false, reason: 'lane-transfer-required' }) }), 75);
+  err = '';
+  assert.equal(await legacyLaneWriteMain(args, { ...streams, run: async () => ({ ok: false,
+    reason: 'owner-operation-in-flight', outcome: 'lane-busy', waitedMs: 1234 }) }), 75);
+  assert.equal(err, 'legacy lane write refused: owner-operation-in-flight; lane-busy; waited 1234ms\n');
+  assert.equal(await legacyLaneWriteMain(['--deadline-ms', 'invalid', ...args], streams), 64);
+  await legacyLaneWriteMain(['--deadline-ms', '1792886400000', ...args], {
+    ...streams, run: async r => { assert.equal(r.deadline, at); return {}; },
+  });
+});
+
+test('HAMLANEWAIT-01: legacy merge wakes on another operation release within its original deadline', { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  const adapter = resolveQueueOwnerAdapter(f.store);
+  let release = adapter.tryLock(lane);
+  t.after(() => release?.());
+  let called = false;
+  const started = performance.now();
+  const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'synthetic-merge', argv: [],
+    deadline: new Date(Date.now() + 3000).toISOString(), readConfig: () => ({}),
+    exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout > 0 && timeout < 3000); return { stdout: 'merged' }; } });
+  const timer = setTimeout(() => { release(); release = null; }, 50);
+  t.after(() => clearTimeout(timer));
+  assert.equal(called, false);
+  assert.equal((await pending).stdout, 'merged');
+  assert.equal(called, true);
+  assert.ok(performance.now() - started < 2500, 'release wake must precede deadline');
+});
+
+test('HAMLANEWAIT-01: deadline exhaustion is lane-busy with no merge or durable writer intent', { timeout: 5000 }, async t => {
+  const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
+  const release = adapter.tryLock(lane);
+  try {
+    const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane,
+      deadline: new Date(Date.now() + 80).toISOString(), readConfig: () => ({}),
+      exec: () => assert.fail('busy lane cannot issue a merge') });
+    assert.equal(result.reason, 'owner-operation-in-flight');
+    assert.equal(result.outcome, 'lane-busy');
+    assert.ok(result.waitedMs >= 60 && result.waitedMs < 2000);
+    assert.deepEqual(f.routing.read(lane).legacyWriters, []);
+  } finally { release(); }
+  assert.equal((await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
+    exec: async () => ({ stdout: 'next-pass-merged' }) })).stdout, 'next-pass-merged');
+});
+
+test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old legacy route', { timeout: 5000 }, async t => {
+  const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
+  assert.equal((await transfer(f, queue)).ok, true);
+  const release = adapter.tryLock(lane);
+  const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
+    deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('stale route must refuse') });
+  release();
+  const result = await pending;
+  assert.equal(result.reason, 'lane-transfer-required');
+  assert.equal(result.outcome, undefined);
+});
+
+test('HAMLANEWAIT-01: configured queue-v2 route retains immediate contention refusal', async t => {
+  const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
+  const release = adapter.tryLock(lane);
+  try {
+    const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => queue,
+      deadline: new Date(Date.now() + 3000).toISOString(), exec: () => assert.fail('queue cannot run legacy') });
+    assert.equal(result.reason, 'owner-operation-in-flight');
+    assert.equal(result.outcome, undefined);
+    assert.equal(result.waitedMs, undefined);
+  } finally { release(); }
 });
 
 test('unconfigured lane is legacy even for a raw queue claimant', async t => {

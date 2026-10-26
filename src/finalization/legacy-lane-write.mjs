@@ -12,7 +12,7 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
   const clock = typeof now === 'function' ? now : () => now;
   deadline ??= new Date(Date.parse(clock()) + 60_000).toISOString();
   const cfg = readConfig({ rootDir });
-  return routeFinalizationWriter({ rootDir, cfg, lane: { repository, base }, kind: 'closer', subject,
+  return routeFinalizationWriter({ rootDir, cfg, lane: { repository, base }, kind: 'closer', subject, legacyDeadline: deadline, now: clock,
     legacy: () => {
       const timeout = queueWaitMs(30_000, { ceilingMs: 60_000, deadline, now: clock(), load });
       if (!timeout) throw new Error('legacy writer deadline expired');

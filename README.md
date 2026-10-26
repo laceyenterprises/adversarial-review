@@ -3147,3 +3147,13 @@ failed acknowledgement/release cannot complete. Existing smoke promises stay;
 no new smoke action or blocking check is added. Worker source tests are separate
 from deployed observations. Only the operator activates or approves after merge;
 retain legacy support for one release cycle.
+
+HAMLANEWAIT-01: legacy closer lane writes wait for release notifications until
+their existing deadline. A bounded `lane-busy` result remains deferred and retries
+on the normal closure schedule without charging final-no-merge or automated-stop
+budgets. Real refusals and queue-v2 behavior retain their existing contracts.
+Focused synthetic fixtures in `test/finalization-queue-routing.test.mjs`,
+`test/finalization-queue-owner.test.mjs`, `test/hamunknown-02.test.mjs`,
+`test/ama-hammer-retry-cap.test.mjs` and `test/pr-next-action.test.mjs` cover
+wake, expiry, retry credit and stop behavior. Existing smoke promises are unchanged;
+post-deploy observation is described in `docs/RUNBOOK-ama-closure.md`.

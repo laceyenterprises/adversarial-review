@@ -2248,3 +2248,10 @@ whole lane, changes one reviewed selector, bounces/verifies registered system
 services, observes exact-head receipts and slot release before CI, rehearses
 rollback/reactivation and records explicit approval. Worker publication and PR
 merge do not complete operator approval. No new smoke/check or merge authority.
+
+HAMLANEWAIT-01: the legacy closer's lane-lock contention waits on release up to
+its existing absolute deadline. Exhaustion records `deferred` with reason
+`lane-busy`; retryable-abort lease release and the existing lease-wait refund
+return it to ordinary closure evaluation without final-no-merge or automated-stop
+credit. Real refusals retain their terminal behavior, including an earlier
+deterministic stop. Queue-v2 and migrated closer transitions are unchanged.

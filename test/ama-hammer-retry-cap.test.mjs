@@ -25,6 +25,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { readClosureNextAction } from '../src/ama/closure-next-action.mjs';
+import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
 import {
   acquireAmaCloserLease,
@@ -55,6 +56,88 @@ const MERGE_COMMIT = 'c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2';
 const REVIEWED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${REVIEWED_HEAD.slice(0, 12)}`;
 const ADVANCED_HAMMER_WORKER_ID = `hammer-ama-pr-${PR_NUMBER}-${ADVANCED_HEAD.slice(0, 12)}`;
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+
+test('HAMLANEWAIT-01: two lane-busy launches on one head never exhaust retries or arm a stop', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-recovery-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD };
+  for (let i = 1; i <= 2; i++) {
+    const dispatchedAt = `2026-07-06T12:0${i}:00Z`;
+    const auditAt = `2026-07-06T12:0${i}:10Z`;
+    const launchRequestId = `synthetic-lane-busy-${i}`;
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD, now: dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, reviewedSha: REVIEWED_HEAD,
+      targetRemediationSha: ADVANCED_HEAD, state: 'dispatched', workerClass: 'hammer',
+      launchRequestId, dispatchedAt, retryCount: i }));
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+      attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId }, now: auditAt });
+    for (let observation = 0; observation < 2; observation++) {
+      const result = await maybeDispatchAmaCloser({
+        ...hammerDispatchArgs(rootDir, {
+          prMetadata: { headSha: ADVANCED_HEAD, mergeableState: 'UNKNOWN',
+            statusCheckRollup: [{ name: 'synthetic-unit', conclusion: 'SUCCESS' }] },
+          dispatchContext: { targetRemediationSha: ADVANCED_HEAD, baseBranch: 'main',
+            dispatchedAt: `2026-07-06T12:0${i}:30Z` },
+        }),
+        options: validHamTerminalRemediationOptions(),
+        ...hammerDispatchDeps({
+          execFileImpl: async () => ({ stdout: '{"status":"failed"}', stderr: '' }),
+          readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
+          attemptDaemonCleanMergeImpl: () => assert.fail('UNKNOWN still blocks merge'),
+          deliverAlertImpl: () => assert.fail('lane contention must not page'),
+        }),
+      });
+      assert.notEqual(result.needsOperator, true, JSON.stringify(result));
+      assert.match(result.reason, /mergeability-unknown/);
+      assert.notEqual(result.nextAction?.row, 'R07-stop');
+      const ledger = readHammerRetryCapLedger(rootDir, identity);
+      assert.equal(ledger.attemptCount, 0);
+      assert.equal(ledger.targetAttemptCount, 0);
+      assert.equal(ledger.lifetimeAttemptCount, 0);
+      assert.equal(ledger.leaseWaitLaunches.length, i, 'one refund per launch across repeated observations');
+      assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
+    }
+  }
+});
+
+for (const outcome of ['failed', 'succeeded', 'no_work_done']) {
+  test(`HAMLANEWAIT-01: ${outcome} lane-busy launch retries ordinary repair without HAM certification`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'lane-busy-repair-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let launches = 0;
+    const status = outcome === 'no_work_done' ? 'failed' : outcome;
+    const deps = hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status,
+        ...(outcome === 'no_work_done' ? { failure_class: outcome } : {}) } }),
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status }) };
+        if (argv[0] === 'dispatch' && argv[1] === '--priority') return { stdout: JSON.stringify({
+          ticketRef: `AMA-PR-${PR_NUMBER}`, launchRequestId: `synthetic-repair-${++launches}`, dispatchId: `synthetic-dispatch-${launches}` }) };
+        return { stdout: '{}' };
+      },
+      deliverAlertImpl: () => assert.fail('lane-busy must not arm an automated stop'),
+    });
+    let result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    for (let i = 1; i <= 2; i++) {
+      const record = readAmaCloserDispatchRecord(rootDir, identity);
+      writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity,
+        attempt: { outcome: 'deferred', reason: 'lane-busy', launchRequestId: record.launchRequestId },
+        now: `2026-07-06T12:0${i}:00Z` });
+      result = await maybeDispatchAmaCloser({
+        ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt: `2026-07-06T12:0${i}:30Z` } }), ...deps,
+      });
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.notEqual(result.needsOperator, true);
+      const ledger = readHammerRetryCapLedger(rootDir, identity);
+      assert.equal(ledger.attemptCount, 1, 'only the new repair launch remains charged');
+      assert.equal(ledger.lifetimeAttemptCount, 1);
+      assert.equal(ledger.leaseWaitLaunches.length, i);
+    }
+    assert.equal(launches, 3);
+  });
+}
 
 function hammerDispatchArgs(rootDir, overrides = {}) {
   return {
@@ -3359,9 +3442,9 @@ for (const status of ['reaped', 'cancelled']) {
   });
 }
 
-for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'green-lease-wait']) {
-  const leaseWaitExhausted = parkKind === 'green-lease-wait';
-  const parkReason = leaseWaitExhausted ? 'merge-lease-timeout' : parkKind;
+for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown', 'green-lease-wait', 'lane-busy']) {
+  const leaseWaitExhausted = ['green-lease-wait', 'lane-busy'].includes(parkKind);
+  const parkReason = parkKind === 'green-lease-wait' ? 'merge-lease-timeout' : parkKind;
   for (const pendingCi of [false, true]) {
     test(`certified lease park waits for UNKNOWN then resumes daemon merge: ${parkKind}, pending CI=${pendingCi}`, async (t) => {
       const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-closer-'));

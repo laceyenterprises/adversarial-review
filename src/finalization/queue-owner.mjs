@@ -1,7 +1,7 @@
 import fsExt from 'fs-ext';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { closeSync, mkdirSync, openSync, realpathSync, utimesSync, watch } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { resolveLaneKey, QUEUE_ACTIONABLE_PHASES } from './ledger-events.mjs';
 import { assertQueueStoreOwner, queueId, queueTime } from './queue-store.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
@@ -15,22 +15,67 @@ export function resolveQueueOwnerAdapter({ rootDir, db }) {
   const root = realpathSync(rootDir);
   if (resolve(db.name) !== join(root, 'data', 'reviews.db')) throw new Error('queue lock and DB root mismatch');
   if (typeof fsExt.flockSync !== 'function') throw new Error('queue owner locking unavailable');
-  return {
+  const lockPath = lane => {
+    const key = createHash('sha256').update(JSON.stringify(resolveLaneKey(lane))).digest('hex');
+    const dir = join(root, 'data', 'finalization-queue-locks');
+    mkdirSync(dir, { recursive: true });
+    return join(dir, key + '.lock');
+  };
+  const adapter = {
     name: 'single-host-flock-v1',
     tryLock(lane) {
-      const key = createHash('sha256').update(JSON.stringify(resolveLaneKey(lane))).digest('hex');
-      const dir = join(root, 'data', 'finalization-queue-locks');
-      mkdirSync(dir, { recursive: true });
-      const fd = openSync(join(dir, key + '.lock'), 'a', 0o600);
+      const path = lockPath(lane);
+      const fd = openSync(path, 'a', 0o600);
       try { fsExt.flockSync(fd, 'exnb'); }
       catch (error) {
         closeSync(fd);
         if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return null;
         throw error;
       }
-      return () => closeSync(fd);
+      return () => {
+        closeSync(fd);
+        // Like the merge-lease directory wake, this is only an acquisition
+        // hint. Notify AFTER unlocking; the persistent inode is never replaced.
+        try { const at = new Date(); utimesSync(path, at, at); } catch { /* deadline remains the fallback */ }
+      };
+    },
+    async waitForLock(lane, { deadline, now = () => new Date().toISOString() }) {
+      const remaining = Date.parse(deadline) - Date.parse(now());
+      if (!Number.isFinite(remaining)) throw new TypeError('invalid lane wait deadline');
+      if (remaining <= 0) return null;
+      const path = lockPath(lane);
+      return new Promise((resolve, reject) => {
+        let watcher, timer, settled = false;
+        const finish = (release, error) => {
+          if (settled) { release?.(); return; }
+          settled = true;
+          clearTimeout(timer);
+          watcher?.close();
+          if (error) reject(error); else resolve(release);
+        };
+        const started = performance.now();
+        const acquire = () => {
+          if (settled) return;
+          if (performance.now() - started >= remaining || Date.parse(now()) >= Date.parse(deadline)) return finish(null);
+          try {
+            const release = adapter.tryLock(lane);
+            if (release) finish(release);
+          } catch (error) { finish(null, error); }
+        };
+        timer = setTimeout(() => finish(null), Math.min(remaining, 2 ** 31 - 1));
+        try {
+          // Register before rechecking the CAS, so release cannot be lost
+          // between the initial refusal and subscription. No polling sleeps.
+          watcher = watch(dirname(path), (_event, filename) => {
+            if (filename == null || String(filename) === basename(path) || String(filename) === basename(dirname(path))) acquire();
+          });
+          watcher.on('error', () => watcher.close());
+        } catch { /* An unavailable wake waits only for the caller's deadline. */ }
+        acquire();
+      });
     },
   };
+  return adapter;
 }
 
 const args = lane => Object.values(resolveLaneKey(lane));

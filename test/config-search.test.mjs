@@ -47,6 +47,12 @@ for (const item of fixture.cases) {
         if (item.valid) load();
         else assert.throws(load, AgentOSConfigError);
       }
+      writeFileSync(topPath, 'version: 1\n');
+      writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify({ services: doc.services }));
+      for (const load of [() => loadConfig({ topPath, env: {} }), () => loadConfigRuntime({ topPath, env: {} })]) {
+        if (item.valid) load();
+        else assert.throws(load, AgentOSConfigError);
+      }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }

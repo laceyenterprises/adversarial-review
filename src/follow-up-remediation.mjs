@@ -3245,18 +3245,14 @@ async function consumeNextFollowUpJob({
     if (claimed.job.nonBlockingOnly === true && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(workerClass)) {
       codexModelResolution = resolveConfiguredNonBlockingCodexModel(jobEnv);
     }
-    const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
+    // Pooled accounts require dispatcher-owned selection, binding and leases.
+    // A successful proposal selects that path even when local mode was chosen
+    // by config or health routing; it must never become a repeating quota hold.
+    const remediationMode = remediatorRouting.pooled ? 'os' : resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
       env: jobEnv,
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
-    if (remediatorRouting.pooled && remediationMode !== 'os') {
-      const heldAt = now();
-      return holdClaimedJobForCappedRemediator({ rootDir, jobPath: claimed.jobPath,
-        heldAt, delayedPendingPaths, log,
-        routing: { ...remediatorRouting, hold: true, reason: 'pooled-remediation-requires-dispatch',
-          holdUntil: new Date(Date.parse(heldAt) + 60_000).toISOString() } });
-    }
     if (remediationMode === 'os') {
       remediatorRouting = await resolveOsgRemediatorRouteImpl({ current: remediatorRouting,
         kind: 'remediator', rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,

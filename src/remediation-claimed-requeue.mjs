@@ -83,9 +83,11 @@ export function holdClaimedJobForCappedRemediator({
     .map(({ workerClass, reason }) => `${workerClass} ${reason}`)
     .join(', ') || 'none declared';
   const resets = routing.resetAt ? `, resets ${routing.resetAt}` : '';
+  const holdReason = routing.capSource || routing.reason || routing.status || routing.primaryState || 'unavailable';
+  const holdState = routing.pooled ? 'pool unavailable' : routing.capSource ? 'capped' : 'held';
   const cause = routing.reason === 'primary-resets-within-hold-window'
     ? `${routing.workerClass} resets inside the hold window${resets}`
-    : `${routing.workerClass} capped (${routing.capSource}${resets}); fallback: ${passedOver}`;
+    : `${routing.workerClass} ${holdState} (${holdReason}${resets}); fallback: ${passedOver}`;
   const retryReason = `Remediator ${cause}. Holding without respawning until ${routing.holdUntil}; the next claim re-resolves the class.`;
   const job = {
     ...requeued.job,
@@ -116,8 +118,8 @@ export function holdClaimedJobForCappedRemediator({
             resetAt: routing.resetAt || null,
             providerResetAt: routing.resetAt || null,
             source: 'remediator-fallback-resolution',
-            capSource: routing.capSource || null,
-            fallbackReason: routing.reason,
+            capSource: holdReason,
+            fallbackReason: routing.reason || routing.status || holdReason,
             skipped: routing.skipped || [],
             noRespawn: true,
             maxUnvalidatedHoldMs: MAX_QUOTA_HOLD_WINDOW_MS,
@@ -134,7 +136,7 @@ export function holdClaimedJobForCappedRemediator({
   // shape: no provider was contacted, so the fleet hold counter must not count it.
   log?.log?.(
     `[follow-up-remediation] Held ${job.repo}#${job.prNumber} -> remediator-capped-hold ` +
-      `(${cause}) until ${routing.holdUntil}; not respawning the capped remediator`
+      `(${cause}) until ${routing.holdUntil}; not respawning the held remediator`
   );
   return { consumed: false, reason: 'remediator-capped-hold', job, jobPath: requeued.jobPath };
 }

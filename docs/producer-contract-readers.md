@@ -487,8 +487,9 @@ retries retain that default (no `builder_identity:true`). That builder selector
 allows later completions for reviewer routing and must not identify the opener.
 The producer omits `signal_kind` from the wire; adding a consumer-only field or
 blindly enabling builder identity cannot impose opener semantics. Ambiguous PR
-pages fail closed; branch evidence must uniquely identify this PR, with a matching
-repository/branch and positive PR number. The immutable source and recorded
+pages fail closed. Branch provenance is diagnostic-only: even a unique matching
+launch can be remediation when grants hide the opener, so it cannot supply merge
+identity after an inconclusive opener lookup. The immutable source and recorded
 SQLite projection in `test/fixtures/producer-contracts/pr-opener-projection.json`
 include simultaneous opener, later remediation, superseded and foreign records;
 `provenance.json` pins source and capture hashes. Authorization is stubbed in

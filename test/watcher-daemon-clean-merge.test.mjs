@@ -1347,7 +1347,7 @@ async function resolveIdentityFromProvenanceRecord({record,expectedRepo,prNumber
     readBuildCompletionSignalForPrImpl:()=>({ok:false,reason:'missing-build-completion-signal'})});
 }
 
-test('AMA identity fallback resolves via owner-qualified prRepoFullName against the full rollup repo', async () => {
+test('AMA branch provenance matches the full rollup repo but cannot certify the opener', async () => {
   const identity = await resolveIdentityFromProvenanceRecord({
     expectedRepo: 'laceyenterprises/agent-os', // full form from the live GitHub rollup
     prNumber: 4018,
@@ -1364,10 +1364,9 @@ test('AMA identity fallback resolves via owner-qualified prRepoFullName against 
       prHeadSha: 'head-at-open',
     },
   });
-  assert.equal(identity.ok, true);
-  assert.equal(identity.resolvedBy, 'launch-provenance');
-  assert.equal(identity.launchRequestId, 'lrq_full_identity');
-  assert.equal(identity.workerClass, 'claude-code');
+  assert.equal(identity.ok, false);
+  assert.equal(identity.launchRequestId, undefined);
+  assert.equal(identity.launchProvenanceReason, 'branch-provenance-does-not-prove-pr-opener');
 });
 
 test('AMA identity fallback keeps a legacy short-form-only provenance record fail-closed', async () => {
@@ -1767,7 +1766,7 @@ test('daemon clean merge defers when the live PR head moved after the tick snaps
   }
 });
 
-test('daemon clean merge resolves worker identity from public provenance when build completion is absent', async () => {
+test('daemon clean merge refuses branch provenance when opener build completion is absent', async () => {
   const rootDir = tempRoot();
   try {
     const workerDir = join(rootDir, 'workers', 'claude-code-hcc-02-14a16b9d');
@@ -1843,18 +1842,15 @@ test('daemon clean merge resolves worker identity from public provenance when bu
       env: { HQ_ROOT: rootDir },
     });
 
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
-    assert.equal(mergeAttempted, true);
-    assert.equal(capturedIdentity?.resolvedBy, 'launch-provenance');
-    assert.equal(capturedIdentity?.launchRequestId, 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26');
-    assert.equal(capturedIdentity?.workerClass, 'claude-code');
-    assert.equal(capturedIdentity?.buildCompletionReason, 'missing-build-completion-signal');
+    assert.equal(result.reason, 'worker-identity-unresolved');
+    assert.equal(mergeAttempted, false);
+    assert.equal(capturedIdentity, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('daemon clean merge accepts public provenance without worker candidate files', async () => {
+test('daemon clean merge cannot use branch provenance or worker candidate files as opener proof', async () => {
   const rootDir = tempRoot();
   try {
     const staleWorkerDir = join(rootDir, 'workers', 'stale-cleanup-race');
@@ -1919,9 +1915,8 @@ test('daemon clean merge accepts public provenance without worker candidate file
       env: { HQ_ROOT: rootDir },
     });
 
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
-    assert.equal(capturedIdentity?.launchRequestId, 'lrq_valid_after_missing_candidates');
-    assert.equal(capturedIdentity?.workerClass, 'codex');
+    assert.equal(result.reason, 'worker-identity-unresolved');
+    assert.equal(capturedIdentity, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

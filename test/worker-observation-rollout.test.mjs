@@ -173,11 +173,27 @@ test('cold backfill CLI registers once before synchronous OS accounting; failed 
 
 test('branch provenance cannot infer a merge owner from missing PR attribution or multiple matching launches', async () => {
   const row = {launch_request_id:'launch',worker_class:'codex',repo:'example/repo',branch:'feature',head_sha:'original'};
-  for (const items of [[row],[{...row,pr_number:42},{...row,pr_number:42,launch_request_id:'repair'}]]) {
+  for (const items of [[row],[{...row,pr_number:42}],[{...row,pr_number:42},{...row,pr_number:42,launch_request_id:'repair'}]]) {
     const identity = await resolveDaemonWorkerIdentityForPr({repo:'example/repo',prNumber:42,
       currentHeadSha:'current',currentBranch:'feature',env:{},dispatchSession:{dispatchLookup:async selector =>
         page(selector.branch ? items : [])}});
     assert.equal(identity.ok,false);
     assert.equal(identity.launchRequestId,undefined);
   }
+});
+
+
+test('partial grants hiding the opener cannot promote the visible remediation branch launch to merge identity', async () => {
+  const repair = {...fixture.responses.builder.items[0],repo:'example/repo',pr_number:42,branch:'feature'};
+  const selectors = [];
+  const identity = await resolveDaemonWorkerIdentityForPr({repo:'example/repo',prNumber:42,
+    currentHeadSha:'current',currentBranch:'feature',env:{},dispatchSession:{dispatchLookup:async selector => {
+      selectors.push(selector);
+      return page(selector.branch ? [repair] : []);
+    }}});
+  assert.ok(selectors.some(selector => selector.branch === 'feature'));
+  assert.equal(identity.ok,false);
+  assert.equal(identity.launchRequestId,undefined);
+  assert.equal(identity.workerClass,undefined);
+  assert.equal(identity.launchProvenanceReason,'branch-provenance-does-not-prove-pr-opener');
 });

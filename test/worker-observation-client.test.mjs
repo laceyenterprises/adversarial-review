@@ -177,7 +177,7 @@ test('partial pages are collected in producer order and failed or malformed page
     ledgerDbPath:'/missing-synthetic',spawnSyncImpl:()=>{throw new Error('forbidden');}}).ok,false);
 });
 
-test('daemon branch identity reads public provenance and never scans worker files',async()=>{
+test('daemon branch provenance cannot replace missing opener evidence or scan worker files',async()=>{
   const result=await resolveDaemonWorkerIdentityForPr({repo:'example/review',prNumber:12,
     currentHeadSha:'current',currentBranch:'feature',hqRoot:'/unreadable-synthetic-root',env:{},
     readBuildCompletionSignalForPrImpl:async()=>({ok:false,reason:'missing-build-completion-signal'}),
@@ -187,9 +187,9 @@ test('daemon branch identity reads public provenance and never scans worker file
       return page('provenance',[{launch_request_id:'launch',worker_class:'worker',repo:'example/review',
         branch:'feature',head_sha:'original',pr_number:12}]);
     }}});
-  assert.equal(result.ok,true);
-  assert.equal(result.launchRequestId,'launch');
-  assert.equal(result.launchProvenanceSource,'app-sdk');
+  assert.equal(result.ok,false);
+  assert.equal(result.launchRequestId,undefined);
+  assert.equal(result.launchProvenanceReason,'branch-provenance-does-not-prove-pr-opener');
   assert.equal('launchProvenancePath' in result,false);
 });
 

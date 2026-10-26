@@ -3374,7 +3374,9 @@ review intake with a persisted inconclusive finding, while authoritative merge
 identity, leases and OS-selected usage remain unknown. Positive head attestations
 remain usable independently; no private fallback is restored. Default PR
 provenance identifies the opener; `builder_identity:true` is distinct and allows
-later completions. Reroute awaits async provenance; cold backfill registers once
+later completions. Branch launch provenance is diagnostic-only when opener
+evidence is missing, including under partial grants. Reroute awaits async
+provenance; cold backfill registers once
 before its synchronous reads and reports readiness failures before writes.
 See [rollout and selector details](docs/producer-contract-readers.md#worker-observations). Existing lifecycle states, transitions, current-head verdict checks,
 merged/closed terminal handling and smoke promises are unchanged. Session usage

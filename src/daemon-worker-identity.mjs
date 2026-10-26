@@ -188,19 +188,6 @@ export async function resolveDaemonWorkerIdentityForPr({
       currentBranch,
       env, rootDir, dispatchSession,
     });
-    if (launchProvenance.ok) {
-      return stamp({
-        ok: true,
-        launchRequestId: launchProvenance.launchRequestId,
-        workerClass: launchProvenance.workerClass,
-        rowHeadSha: launchProvenance.headSha || null,
-        currentHeadSha: currentHead || null,
-        resolvedBy: 'launch-provenance',
-        headMovedAfterBuildCompletion: false,
-        buildCompletionReason: resolved?.reason || 'missing-build-completion-signal',
-        launchProvenanceSource: 'app-sdk',
-      });
-    }
     return stamp({
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
@@ -347,12 +334,11 @@ async function readDaemonWorkerLaunchProvenanceForPr({ repo, prNumber, currentBr
   const result = await readWorkerObservation({observation:'provenance',repo,branch:currentBranch,limit:100},
     {env,rootDir,dispatchSession,timeoutMs});
   if (!result.ok) return result;
-  const candidates = result.rows.filter(row => row.repo?.toLowerCase() === repo.toLowerCase()
+  // Branch launch provenance can describe remediation as well as the opener.
+  // A grant-filtered PR query may hide the opener while exposing exactly one
+  // later launch here. This is diagnostic evidence only, never merge identity.
+  const matches = result.rows.some(row => row.repo?.toLowerCase() === repo.toLowerCase()
     && row.branch === currentBranch && Number(row.pr_number) === Number(prNumber)
     && row.launch_request_id && row.worker_class);
-  // Branch evidence must identify this PR uniquely; missing PR attribution or
-  // multiple launches on a reused branch cannot choose a merge identity.
-  const row = candidates.length === 1 ? candidates[0] : null;
-  return row ? {ok:true,launchRequestId:row.launch_request_id,workerClass:row.worker_class,
-    headSha:row.head_sha} : {ok:false,reason:'missing-launch-provenance'};
+  return {ok:false,reason:matches ? 'branch-provenance-does-not-prove-pr-opener' : 'missing-launch-provenance'};
 }

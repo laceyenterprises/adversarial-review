@@ -37,7 +37,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
   const detachedTrackerImport = watcher.indexOf('createDetachedReviewerDispatchTracker,');
   const detachedTracker = watcher.indexOf('const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker');
-  const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
+  const postedQueue = watcher.indexOf('const postedReviewHandlers = []');
   const discoveryDrainHelper = watcher.indexOf('const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({');
   const subjectFifoSort = watcher.indexOf(
     'compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)',

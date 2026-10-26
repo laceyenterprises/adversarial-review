@@ -2,6 +2,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 // NOOWNER-01 (SEV1): a PR whose hammer cannot launch or has stopped never sits
 // without an owner. Each case is built from the 2026-10-10 watcher log lines
 // quoted in the ticket; every test here fails on the pre-NOOWNER-01 main.
+import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
@@ -432,6 +433,7 @@ test('STOPHOLDINFRA-01 deterministic primary-change-reverted still holds and pag
     });
     assert.equal(result.action, 'hold');
     assert.equal(result.hammerStop.predicate, 'primary-change-reverted');
+    assertHoldRecord(JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha]);
     assert.equal(result.hammerStop.paged, true);
   }
   assert.equal(alerts.length, 1);

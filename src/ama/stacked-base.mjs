@@ -1,3 +1,4 @@
+import { normalizeHoldRecord, writeHoldRecord, evaluateHoldRecord } from './hold-record.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { execFile } from 'node:child_process';
@@ -83,6 +84,21 @@ export async function inspectStackedBase({ repo, prNumber, baseBranch, defaultBr
   }
 }
 
+export function normalizeStackedBaseHold(record, now = new Date().toISOString()) {
+  const firstObservedAt = record.firstObservedAt || record.commentedAt || now;
+  const retry = record.reason === 'stacked-base-read-failed';
+  return normalizeHoldRecord(record, { holdType: 'stacked-base', owner: retry ? 'closure-recovery' : 'operator',
+    firstObservedAt, deadline: new Date(Date.parse(firstObservedAt) + (retry ? 60_000 : 0)).toISOString(),
+    onDeadline: 'ama:stacked-base-merged',
+    awaits: retry ? [{ kind: 'retry-at', at: new Date(Date.parse(firstObservedAt) + 60_000).toISOString() }]
+      : [{ kind: 'event', name: 'stacked-base-cleared' }] });
+}
+
+function writeStackedBaseHold(path, record) {
+  const hold = normalizeStackedBaseHold(record);
+  writeHoldRecord(path, hold);
+}
+
 // Repository + PR scope survives head changes and daemon restarts. The lock
 // serializes remediation and closure so they cannot both post the same comment.
 export async function holdStackedBase({ state, rootDir = process.cwd(), repo, prNumber, execFileImpl = execFileAsync, signal, logger = console }) {
@@ -100,8 +116,8 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
     // Retain the delivered receipt if an intervening API read fails.
     if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
-      if (prior?.reason !== reason || (prior?.readError ?? null) !== readError) {
-        writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason, readError }));
+      if (prior?.reason !== reason || (prior?.readError ?? null) !== readError || prior?.holdVersion !== 1 || prior?.releasedAt) {
+        writeStackedBaseHold(path, { ...prior, ...(prior?.reason !== reason || prior?.releasedAt ? { holdVersion: undefined, firstObservedAt: undefined, owner: undefined, deadline: undefined, awaits: undefined, releasedAt: undefined, clearedAt: undefined } : {}), repo, prNumber, reason, readError });
         if (readError) logger?.warn?.(`[${new Date().toISOString()}] Stacked base hold ${repo} PR ${prNumber}: ${reason} readError=${readError}`);
       }
       return result;
@@ -119,7 +135,7 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
     catch (error) { if (error.code === 'EEXIST') return result; throw error; }
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first comment */ }
     if (prior?.commentedAt) return result;
-    writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason }));
+    writeStackedBaseHold(path, { repo, prNumber, reason });
     // GitHub is the receipt after a crash between posting and the local write.
     const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api',
       `repos/${repo}/issues/${prNumber}/comments`, '--paginate', '--slurp'],
@@ -145,7 +161,7 @@ export async function holdStackedBase({ state, rootDir = process.cwd(), repo, pr
       await execGhWithRetry({ execFileImpl: postWithReceiptProbe, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
         '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: loadAwareTimeoutMs(15_000), retries: 2, backoffMs: 500, signal });
     }
-    writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason, commentedAt: new Date().toISOString() }));
+    writeStackedBaseHold(path, { repo, prNumber, reason, commentedAt: new Date().toISOString() });
   } catch { /* Hold persists; retry comment delivery on the next observation. */ } finally { if (claimed) { try { unlinkSync(lock); } catch { /* expired claim */ } } }
   return result;
 }
@@ -158,6 +174,7 @@ export async function guardStackedBase(options) {
     `${createHash('sha256').update(`${options.repo.toLowerCase()}#${options.prNumber}`).digest('hex')}.json`);
   try {
     const prior = JSON.parse(readFileSync(path, 'utf8'));
+    if (prior.reason) evaluateHoldRecord(normalizeStackedBaseHold(prior), { namespace: options.rootDir, events: { 'stacked-base-cleared': true } });
     if (prior.reason) writeFileAtomic(path, JSON.stringify({ ...prior, reason: null, readError: null,
       clearedAt: new Date().toISOString() }));
   } catch { /* No hold to clear; a delivered comment receipt remains reusable. */ }

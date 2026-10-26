@@ -1,3 +1,4 @@
+import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,6 +70,7 @@ test('COMPANIONFLOAT-01 open companion ignores unrelated inputs and refunds only
     assert.equal(ledger.lifetimeAttemptCount, 1);
     assert.equal(ledger.dispatchCharges['real-1'].companionWaitRefund, undefined);
   }
+  assertHoldRecord(f.entry());
   assert.equal(f.entry().mode, 'companion');
   assert.equal(f.entry().retryAfter, undefined);
   assert.equal(f.pages.length, 0);

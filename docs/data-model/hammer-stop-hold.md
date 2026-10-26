@@ -32,6 +32,15 @@ unchanged.
 **Source of truth:** `src/ama/hammer-stop-hold.mjs`
 **Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`, `src/posted-review-row.mjs`
 
+## Shared closer contract (HOLDCONTRACT-01)
+
+Each active head entry also carries `owner`, `awaits`, `deadline`, `onDeadline`
+and `reason`, validated before persistence. The shared evaluator retains the
+existing release and paging horizons, and poll evaluation includes scheduled-out
+subjects. Existing readers normalize legacy entries. See the
+[shared record and predicate contract](closer-holds.md) for writer inventory,
+legacy defaults, poll deduplication and deadline receipts.
+
 ## Companion dependency waits (COMPANIONFLOAT-01)
 
 Pure `companion-submodule-pr-unmerged`, `companion-float-pending` and
@@ -87,7 +96,7 @@ rules are defined in the [AMA audit contract](ama-audit.md).
 
 One atomically rewritten JSON object per `(repo, PR)` lives at
 `<repo-slug>-pr-<number>.json`. The slug replaces every character outside
-`A-Za-z0-9._-` with `-`, including `/`. There is no schema-version field.
+`A-Za-z0-9._-` with `-`, including `/`. Entries now carry `holdVersion: 1`; legacy entries remain readable.
 
 | Field | Shape | Contract |
 |---|---|---|

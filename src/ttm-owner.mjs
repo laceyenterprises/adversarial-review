@@ -101,7 +101,7 @@ export function readTtmOwnerEvidence(rootDir, row, state, { hqRoot } = {}) {
       const hold = readHammerStopHoldForHead({ ...identity, rootDir, stopKey: stop.stopKey });
       if (hold && !hold.releasedAt) holds.push({ reason: stop.predicate,
         releaseCondition: hold.inputs ? 'hammer-inputs-change' : null,
-        deadline: hold.retryAfter || hold.deadline, releasedAt: hold.releasedAt });
+        deadline: hold.deadlineSource ? hold.retryAfter || hold.deadline : null, releasedAt: hold.releasedAt });
     }
   }
   if (row.quotaResetAt) holds.push({ reason: 'review quota reset', releaseCondition: 'quota-reset-time', deadline: row.quotaResetAt });

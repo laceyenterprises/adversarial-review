@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "closer-holds",
+      "title": "Shared Closer Hold Contract",
+      "path": "docs/data-model/closer-holds.md",
+      "store": "data/follow-up-jobs/hammer-stop-hold/, data/operator-label-holds/, data/stacked-base-holds/",
+      "schemaSurface": "src/ama/hold-record.mjs",
+      "relatedSchemaSurfaces": ["src/ama/closer-hold-records.mjs", "src/ama/hammer-stop-hold.mjs", "src/ama/companion-stop-wait.mjs", "src/ama/operator-label-gates.mjs", "src/ama/stacked-base.mjs", "src/watcher.mjs"],
+      "owner": "AMA closure; existing per-hold owner and escalation recipients",
+      "compatibility": "Legacy records normalize with existing paging horizons and receipts; active versioned writes require owner and deadline. No schema change: operator-label CI clearance requires readable gate arrays and stored own-context policy"
+    },
+    {
       "id": "ttm-ownership",
       "title": "TTM ownership observations",
       "path": "docs/data-model/ttm-ownership.md",

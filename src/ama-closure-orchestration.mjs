@@ -927,6 +927,7 @@ async function dispatchAmaClosureFor({
   observeClosureWaitImpl = observeClosureWait,
   readHammerStopForHeadImpl = readHammerStopForHead,
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
+  deliverAlertImpl = deliverAlert,
   recoverInfrastructureChecksImpl = recoverInfrastructureChecks,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
   mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
@@ -1618,7 +1619,7 @@ async function dispatchAmaClosureFor({
   if (autonomousMergeExecutionEnabled && prMetadata.isOpen && companionOnlyStop(recordedStop)) {
     const wait = await evaluateHammerStopHoldImpl({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
-      logger, deliverAlertImpl: deliverAlert, now: new Date(now()).toISOString() });
+      logger, deliverAlertImpl, now: new Date(now()).toISOString() });
     if (wait.action === 'hold') return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
       recoveryWait: true, reason: 'hammer-stop-awaiting-companion', hammerStop: wait.hammerStop }, { amaEnabled: true });
     if (wait.action === 'release') recordedStop = null;

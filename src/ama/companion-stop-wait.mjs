@@ -22,7 +22,7 @@ export function companionReference(value) {
 }
 
 function repoFromUrl(value) {
-  const match = String(value || '').match(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/);
+  const match = String(value || '').match(/^(?:https:\/\/github\.com\/|git:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/);
   return match?.[1] || null;
 }
 

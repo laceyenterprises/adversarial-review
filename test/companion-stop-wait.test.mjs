@@ -36,7 +36,7 @@ function fixture(t, { structured = true } = {}) {
       if (live.fail && endpoint.includes(live.fail)) throw new Error('synthetic read failure');
       let value;
       if (endpoint === 'repos/example/project/pulls/3') value = { state: 'open', head: { sha: head }, base: { sha: base } };
-      else if (endpoint.includes('/contents/.gitmodules')) value = { content: Buffer.from('[submodule "component"]\n path = tools/component\n url = https://github.com/example/component.git\n').toString('base64') };
+      else if (endpoint.includes('/contents/.gitmodules')) value = { content: Buffer.from(`[submodule "component"]\n path = tools/component\n url = ${live.submoduleUrl}\n`).toString('base64') };
       else if (endpoint === 'repos/example/component/pulls/7') value = { state: live.state,
         merged_at: live.merged ? at(60_000) : null, merge_commit_sha: live.merged ? merge : null };
       else if (endpoint.includes('/contents/tools/component?ref=')) value = { sha: live.link, submodule_git_url: live.submoduleUrl };
@@ -95,6 +95,19 @@ test('COMPANIONFLOAT-01 observes merge, waits for ancestry in base, persists bot
   assert.equal(f.entry().companionWait.mergeCommit, merge, 'merge identity survives a failed ancestry read');
 });
 
+for (const gitlink of [merge, link]) test(`COMPANIONFLOAT-01 git protocol releases a floated companion at ${gitlink === merge ? 'merge' : 'descendant'}`, async t => {
+  const f = fixture(t);
+  f.live.submoduleUrl = 'git://github.com/example/component.git';
+  f.live.merged = true;
+  f.live.state = 'closed';
+  f.live.link = gitlink;
+  f.live.compare = 'ahead';
+  assert.equal((await f.evaluate({ now: at(120_000) })).action, 'release');
+  assert.equal(f.entry().companionWait.containsMerge, true);
+  assert.equal(f.entry().probeError, undefined);
+  assert.deepEqual(f.entry().releasedBy, ['companion-floated']);
+});
+
 for (const cause of ['closed', 'late', 'unreadable']) test(`COMPANIONFLOAT-01 ${cause} escalates once with companion and automated owner`, async t => {
   const f = fixture(t);
   await f.evaluate();
@@ -119,6 +132,14 @@ test('COMPANIONFLOAT-01 legacy note resolves only a unique companion mapped by b
   assert.equal(f.calls.filter(call => call.includes('.gitmodules')).length, 1);
   await f.evaluate();
   assert.equal(f.calls.filter(call => call.includes('.gitmodules')).length, 1, 'persisted dependency avoids rediscovery');
+});
+
+test('COMPANIONFLOAT-01 legacy note resolves a git protocol base submodule', async t => {
+  const f = fixture(t, { structured: false });
+  f.live.submoduleUrl = 'git://github.com/example/component.git';
+  assert.equal((await f.evaluate()).action, 'hold');
+  assert.equal(f.entry().companionWait.repo, companion.repo);
+  assert.equal(f.entry().probeError, undefined);
 });
 
 for (const mismatch of ['wrong-repository', 'wrong-merge-base', 'unknown-comparison']) {

@@ -2589,6 +2589,13 @@ caps. Closed-unmerged companions or a missing float after the 24-hour backstop
 plus one-hour margin escalate once, naming the dependency and automated owner.
 See the hold-store companion contract for fields, migration and offline fixtures.
 
+Companion repository identity accepts GitHub HTTPS, `git://`, SCP-style SSH and
+`ssh://git@` URLs in both base `.gitmodules` discovery and contents API evidence.
+The expected repository and merge ancestry must still match. Closure orchestration
+forwards its optional `deliverAlertImpl` to companion escalation; omitted handlers
+use the production alert deliverer. PR state is normalized from `candidate.prState`
+before applying the companion fence, accepting both `open` and `OPEN`.
+
 - **Hammer stop hold** (`src/ama/hammer-stop-hold.mjs`). When the hammer's
   latest terminal audit for the live head is `failed-without-merge` with an
   explicitly deterministic refusal, the closer

@@ -343,7 +343,7 @@ function searchSchema() {
   const providers = {};
   for (const [provider, operations] of Object.entries(SEARCH_OPERATIONS)) {
     const limitKeys = Object.fromEntries(SEARCH_COUNT_LIMITS.map(key => [key, {
-      __type: TYPE_INT, __min: 1, __enforce_max: true, __max: key === 'max_duration_seconds' ? 86400 : 1000000000,
+      __type: TYPE_INT, __min: 1, __max: key === 'max_duration_seconds' ? 86400 : 1000000000,
     }]));
     Object.assign(limitKeys, {
       max_charge_usd: { __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN },
@@ -360,7 +360,7 @@ function searchSchema() {
       presentation: { __type: TYPE_STRING, __default: 'abstracted', __enum: ['abstracted', 'native'] },
       credential_ref: ref(),
       budget_usd: money(),
-      budget_window_seconds: { __type: TYPE_INT, __default: 86400, __min: 1, __enforce_max: true, __max: 2678400 },
+      budget_window_seconds: { __type: TYPE_INT, __default: 86400, __min: 1, __max: 2678400 },
       allowed_operations: { __type: TYPE_LIST, __item: { __type: TYPE_STRING, __enum: operations }, __default: [] },
       operation_limits: limits,
     };
@@ -396,9 +396,9 @@ function validateSearch(search = {}) {
       if (Object.hasOwn(entry, field) && (!(new RegExp(SEARCH_REF_PATTERN).test(entry[field])) || entry[field].endsWith('\n'))) {
         fail(`${path}.${field}`, 'expected unambiguous op reference metadata');
       }
-    }
-    if (provider === 'exa' && entry.credential_ref?.split('/')[3] === 'Exa KB PAT') {
-      fail(`${path}.credential_ref`, 'Exa KB PAT is outside the search credential inventory');
+      if (entry[field]?.split('/')[3]?.trim().replace(/\s+/g, ' ').toLowerCase() === 'exa kb pat') {
+        fail(`${path}.${field}`, 'Exa KB PAT is outside the search credential inventory');
+      }
     }
     const operations = entry.allowed_operations ?? [];
     if (new Set(operations).size !== operations.length || operations.some(op => !SEARCH_OPERATIONS[provider].includes(op))) {
@@ -5219,6 +5219,8 @@ function validateDictPresentKeysOnly(
     );
   }
   if (schema.__strict_always) {
+    // Search policy and atomic declarations cannot use rolling-schema
+    // tolerance; deploy their Node mirror before publishing new config keys.
     tolerateUnknown = false;
     if (Object.keys(doc).some(key => key.startsWith('__'))) {
       throw new AgentOSConfigError(`${keyPath}: unknown policy key`, { key: keyPath, source });
@@ -5600,11 +5602,14 @@ function validateModuleDoc(
 
   // Local overrides preserve accepted empty maps; unknown empty maps retain
   // their historical drop behavior, and module normalization stays unchanged.
+  // Preserve the strict search subtree until schema validation, including
+  // metadata-prefixed keys and empty maps that generic flattening drops.
+  const atomicPaths = new Set([...TOKEN_POOL_DECLARATION_PATHS, 'services.hcp.search']);
   const rawFlat = flatten(body, '', (key) =>
     preserveEmptyMaps && isValidSchemaPath(schema, aliases[key] || key),
     new Set([
-      ...TOKEN_POOL_DECLARATION_PATHS,
-      ...Object.entries(aliases).filter(([, canonical]) => TOKEN_POOL_DECLARATION_PATHS.has(canonical)).map(([key]) => key),
+      ...atomicPaths,
+      ...Object.entries(aliases).filter(([, canonical]) => atomicPaths.has(canonical)).map(([key]) => key),
     ]),
   );
   for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
@@ -5788,6 +5793,12 @@ function schemaLeaf(schema, key) {
 }
 
 function* flattenSchemaLeaves(doc, schema, path = []) {
+  // A layer replaces a provider's complete declaration, even with {}.
+  // Operation IDs may contain dots and must never become provenance paths.
+  if (SEARCH_LIMIT_PATHS.has(path.join('.'))) {
+    yield { dotted: path.join('.'), path, value: doc };
+    return;
+  }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
     yield { dotted: path.join('.'), path, value: doc };
     return;

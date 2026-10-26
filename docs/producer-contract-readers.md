@@ -358,8 +358,10 @@ The controller also stops interpreting canonical/standby database settings.
 
 Operator-provisioned app grants must explicitly name each project and
 owner-qualified repository observed by CLI-origin review/closer launches.
-Activate the producer and grants before this consumer. Endpoint outage or
-incomplete traversal means unavailable, never absence or permission to retry.
+These grants are a separate operator step for app-scoped lookups; the hammer
+controller's own-launch HCP read uses its provisioned worker token and needs no
+app grant. Endpoint outage or incomplete traversal means unavailable, never
+absence or permission to retry.
 Successful reads carry `app-contract` / `app-sdk` transport provenance, without
 connection details. Settlement deadlines, lease mutation fences, parked work,
 rearm, cancellation and current-head merge authority remain caller policy.
@@ -378,16 +380,22 @@ read; a transport failure never switches routes or opens local state.
 
 ### Dispatch lookup activation and limits
 
-Runtime reads default off. After verifying the reviewed merged 0.8.0 producer
-release and its artifact hashes, deploy its endpoint and complete app grants.
-Run `npm ci` in the deployed adversarial-review submodule, then have the runtime
-owner set `ADVERSARIAL_DISPATCH_READS_ENABLED=1` in the watcher/follow-up and
-contained controller environments through the normal reviewed service deployment.
-Observe organic own-LRQ HCP reads and app receipt/retry reads. Disabled reads
-return unavailable with `dispatch lookup disabled`; they retain ownership holds
-and refuse hammer starts. Rollback removes the flag (or sets it to `0`) and
-uses the normal service deployment to pause observations safely; no SQL/file
-fallback is restored. Source publication does not authorize service activation.
+Runtime reads require exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1` and default
+off in environments without it. The tracked watcher and follow-up service
+templates now carry this flag so hammer controllers inherit the activation
+required by their mandatory own-launch HCP read. That read uses the provisioned
+worker token; app grants remain a separate operator step and are not needed for
+hammer starts. Without grants, key, ticket and receipt lookups return not-found,
+which maps to `dispatch absence scope unproven` and retains ownership holds.
+
+Before service deployment, verify the reviewed merged 0.8.0 producer release
+and its artifact hashes, deploy its endpoint, and run `npm ci` in the deployed
+adversarial-review submodule. Observe organic own-LRQ HCP reads and, once grants
+are provisioned, app receipt/retry reads. Disabled reads return unavailable with
+`dispatch lookup disabled`; they retain ownership holds and refuse hammer starts.
+Rollback removes the flag from both templates and redeploys through the normal
+service deployment to pause observations safely; no SQL/file fallback is
+restored. Source publication does not authorize service activation.
 Dispatch-only SDK exports load at read time, so an older installed SDK produces
 unavailable evidence rather than preventing daemon module linking.
 

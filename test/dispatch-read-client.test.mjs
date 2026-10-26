@@ -263,6 +263,7 @@ for (const mutation of [
   value => { value.absence_proof.selector.idempotency_key = 'foreign-key'; },
   value => { value.absence_proof.selector.extra = 'broader'; },
   value => { value.absence_proof.grant_id = ''; },
+  value => { value.absence_proof.grant_id = ' \t\n '; },
   value => { value.absence_proof.observed_at = 'invalid'; },
   value => { value.complete = false; },
 ]) test('partial, unbound or malformed absence never releases the consumer hold', async () => {
@@ -271,6 +272,19 @@ for (const mutation of [
   mutation(result);
   assert.equal((await readDispatchLaunches(selector, options(result))).ok, false);
   assert.equal(readDispatchLaunchesSync(selector, options(result)).ok, false);
+});
+test('undefined selectors and missing own proof keys never certify absence', async () => {
+  for (const [selector, proofSelector] of [
+    [{ idempotency_key: undefined }, { other_key: 'val' }],
+    [{ idempotency_key: undefined }, { idempotency_key: undefined }],
+    [{ ticket_ref: undefined, requested_at_or_after: '2026-01-01T00:00:00.000Z' },
+      { other_key: 'val', requested_at_or_after: '2026-01-01T00:00:00.000Z' }],
+    [{ idempotency_key: 'key' }, Object.assign(Object.create({ idempotency_key: 'key' }), { other_key: 'val' })],
+  ]) {
+    const args = options(authorizedAbsence(proofSelector));
+    assert.equal((await readDispatchLaunches(selector, args)).ok, false);
+    assert.equal(readDispatchLaunchesSync(selector, args).ok, false);
+  }
 });
 test('exact absence proof cannot authorize launch ID or retry-chain absence', async () => {
   for (const selector of [{ launch_request_ids: ['missing'] },

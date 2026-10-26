@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as installedSdk from '@agent-os/app-sdk';
 import { main as settle } from '../../bin/settle-legacy-closer-intent.mjs';
 import { reconcilePreReceiptIntent } from '../../src/ama/pre-receipt-intent.mjs';
@@ -28,7 +29,11 @@ updateAmaCloserDispatchRecord(root, identity, () => record);
 acquireAmaCloserLease({ rootDir: root, ...identity, watcherPid: 424242, now: started });
 const read = () => readAmaCloserDispatchRecord(root, identity);
 const lease = () => readAmaCloserLease(root, identity);
-const sdk = input.sdk_entry ? await import(input.sdk_entry) : installedSdk;
+const require = createRequire(import.meta.url);
+const sdkEntry = input.sdk_entry
+  ? (isAbsolute(input.sdk_entry) ? input.sdk_entry : fileURLToPath(input.sdk_entry))
+  : require.resolve('@agent-os/app-sdk');
+const sdk = input.sdk_entry ? await import(pathToFileURL(sdkEntry).href) : installedSdk;
 let calls = 0;
 const dispatchSession = { dispatchLookup: async selector => {
   const result = await sdk.readSessionDispatchLookup(selector, input);
@@ -96,6 +101,4 @@ if (['live', 'reused'].includes(scenario)) {
   assert.equal(lease().status, 'pending');
   assert.equal(read().state, scenario === 'receipt-race' ? 'dispatched' : 'dispatching');
 }
-const require = createRequire(import.meta.url);
-const sdkEntry = input.sdk_entry ? new URL(input.sdk_entry).pathname : require.resolve('@agent-os/app-sdk');
 console.log(JSON.stringify({ scenario, calls, sdkVersion: JSON.parse(readFileSync(join(sdkEntry, '../../package.json'))).version }));

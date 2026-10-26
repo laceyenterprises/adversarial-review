@@ -12,9 +12,10 @@ recovery authorization, never an app registration claim or a project-grant guess
 `dispatch-read-client.mjs` accepts empty results only when `scope_complete` is
 exactly true and `absence_proof` names version 1,
 `canonical-exact-selector-absence`, the exact selector just queried, a bounded
-nonempty `grant_id` and a valid `observed_at`. Only exact key or whole ticket/time
-selectors qualify. A missing row in a positive snapshot, a launch-ID selector,
-retry traversal, malformed/unbound proof, transport failure or unsupported old
+`grant_id` containing non-whitespace and a valid `observed_at`. Selector keys must
+be own properties of the proof with defined values equal to the query. Only exact
+key or whole ticket/time selectors qualify. A missing row in a positive snapshot,
+a launch-ID selector, retry traversal, malformed/unbound proof, transport failure or unsupported old
 producer retains ownership. The producer's negative fact is point-in-time;
 existing submission/deadline rules and native fences still decide settlement.
 
@@ -56,7 +57,9 @@ On demand, the producer suite `test_dispatch_absence.py` starts authenticated
 HTTP and calls `test/helpers/absence-settlement-composition.mjs` in an explicitly
 provisioned companion checkout. The latter uses the installed locked SDK and
 native settlement command against disposable stores. The producer also replays
-the immutable 0.9.0 archive. Existing and foreign launches, partial grants,
+the immutable 0.9.0 archive. A custom `sdk_entry` accepts an absolute filesystem
+path or a `file:` URL, including encoded spaces and URL-sensitive characters.
+Existing and foreign launches, partial grants,
 unreadable transport, live/reused identities, concurrent receipt/replacement
 and refund replay exercise the complete boundary. No model validation or live
 queue action is performed. Existing smoke promises remain unchanged.

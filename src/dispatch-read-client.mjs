@@ -68,10 +68,11 @@ function completeAbsence(result, selector) {
   const exactTicket = keys.length === 2 && keys[0] === 'requested_at_or_after' && keys[1] === 'ticket_ref';
   if ((!exactKey && !exactTicket) || result.scope_complete !== true
     || proof?.version !== 1 || proof.kind !== 'canonical-exact-selector-absence'
-    || typeof proof.grant_id !== 'string' || !proof.grant_id || proof.grant_id.length > 256
+    || typeof proof.grant_id !== 'string' || !proof.grant_id.trim() || proof.grant_id.length > 256
     || typeof proof.observed_at !== 'string' || !Number.isFinite(Date.parse(proof.observed_at))
     || !proof.selector || Object.keys(proof.selector).length !== keys.length) return false;
-  return keys.every(key => proof.selector[key] === selector[key]);
+  return keys.every(key => Object.hasOwn(proof.selector, key)
+    && selector[key] !== undefined && proof.selector[key] === selector[key]);
 }
 export function launchProbe(result, launchRequestId, includeRetryChain) {
   if (!result.ok) return result;

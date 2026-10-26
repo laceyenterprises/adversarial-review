@@ -655,5 +655,8 @@ requires `push`. An exit code alone cannot satisfy these launch contracts.
 See [the recovery contract](../dispatch-absence-recovery.md) for the exact expiring producer
 entitlement, selector-bound proof and native audited settlement composition.
 Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
-query evidence retains both absence proofs; current receipt, submitter,
+query evidence retains both absence proofs, including version, kind, `grant_id`,
+selector and `observed_at`. Grant IDs must contain non-whitespace within 256
+characters; proof selector keys must be own properties with defined values equal
+to the query. Current receipt, submitter,
 record/lease fences and once-only refund rules remain unchanged.

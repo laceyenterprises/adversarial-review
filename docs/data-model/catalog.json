@@ -1,5 +1,4 @@
 {
-  "dispatchAbsenceContract": "LAC-2120: exact expiring operator absence entitlement and canonical-exact-selector-absence proof permit only selector-bound empty key/ticket evidence. query.absenceProof and query.ticketQuery.absenceProof persist grant ID, selector and observed time in intent and operator audit. Filtered emptiness, malformed/unbound/partial/unreadable scope retain ownership. Existing native locks, full snapshot fences, submitter/deadline policy, receipt recovery and once-only retry refund are unchanged; no new states or smoke promises. On-demand producer HTTP -> immutable SDK 0.8/0.9 -> native settlement fixtures cover actual composition; source, loaded deployment and organic recovery are independent.",
   "version": 1,
   "entries": [
     {
@@ -782,6 +781,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "dispatchAbsenceContract": "LAC-2120: exact expiring operator entitlement permits only selector-bound canonical-exact-selector-absence proof. preReceiptReconciliation.query.absenceProof and query.ticketQuery.absenceProof retain version, kind, grant_id, selector and observed_at in intent and operator audit. Grant IDs must contain non-whitespace within 256 characters; selector keys must be own properties with defined, equal values. Filtered, malformed, unbound, partial or unreadable scope retains ownership; existing fences, settlement and once-only refunds are unchanged.",
       "noWorkFields": ["failure", "failureReason"],
       "noWorkStatus": "failed",
       "terminalLaunchEvidence": "Wire-only terminal rows override stale active worker observations; succeeded maps to unverified-terminal-success until independent closure proof, failed remains failed.",
@@ -801,6 +801,7 @@
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-record-read.mjs",
         "src/ama/pre-receipt-intent.mjs",
+        "src/dispatch-read-client.mjs",
         "src/ama/dispatch-submitter.mjs",
         "src/session-ledger-read-adapter.mjs",
         "src/ama/closer-terminal-cancel.mjs",

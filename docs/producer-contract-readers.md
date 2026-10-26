@@ -349,7 +349,7 @@ lists the complete helper-consumer commands, results and baseline limitations.
 
 ## Dispatch lookup
 
-The pinned `vendor/agent-os-app-sdk-0.8.0.tgz` supplies `dispatchLookup` and the
+The pinned `vendor/agent-os-app-sdk-0.9.0.tgz` supplies `dispatchLookup` and the
 bounded `readDispatchLookupSync` compatibility reader. `dispatch-read-client.mjs`
 adapts the producer's `schema_version: 1`, `roots`, ordered `items`, `retry_edges`
 and completeness evidence. The historical launch-reader export names remain
@@ -388,7 +388,7 @@ worker token; app grants remain a separate operator step and are not needed for
 hammer starts. Without grants, key, ticket and receipt lookups return not-found,
 which maps to `dispatch absence scope unproven` and retains ownership holds.
 
-Before service deployment, verify the reviewed merged 0.8.0 producer release
+Before service deployment, verify the reviewed merged 0.9.0 producer release
 and its artifact hashes, deploy its endpoint, and run `npm ci` in the deployed
 adversarial-review submodule. Observe organic own-LRQ HCP reads and, once grants
 are provisioned, app receipt/retry reads. Disabled reads return unavailable with
@@ -400,8 +400,8 @@ Dispatch-only SDK exports load at read time, so an older installed SDK produces
 unavailable evidence rather than preventing daemon module linking.
 
 The SDK release is pinned to merged producer revision
-`387fb06d5d8835e320f49388a2ebdf67f2249945`; see `vendor/README.md`.
-SDK 0.8.0 `not_found` is scoped to authenticated grants, and its envelope
+`f37c7489439a8b53eafecb38870f75fe9f07fa57`; see `vendor/README.md`.
+SDK 0.9.0 `not_found` is scoped to authenticated grants, and its envelope
 has no authorization completeness field. The consumer therefore maps empty
 lookups and missing rows within positive snapshots to `dispatch-read-unavailable`
 with `dispatch absence scope unproven`. They never prove absence for terminal
@@ -412,13 +412,14 @@ complete scope; provisioned grants alone cannot enable absence settlement.
 `--ledger-target` is rejected by the settlement CLI so it cannot misrepresent
 which source was queried.
 
-Session reuse is keyed by connection settings and caller timeout (8 seconds by
-default; receipt recovery supplies its load-aware 30-second budget). Every
+Session reuse is keyed by connection settings, excluding caller timeout. Each
+HTTP request receives its own remaining budget (8 seconds by default; receipt
+recovery supplies its load-aware 30-second budget). Every
 connection/read failure evicts the session. Results expose the shared transient
 classification and fixed secret-free diagnostics, allowing the existing receipt
 owner to retry at most three times with its 100/200ms backoff; no nested retry
 loop is added. A caller deadline or abort bounds settlement across registration
-and lookup. SDK 0.8.0 does not accept an abort signal: its outstanding HTTP work
+and lookup. SDK 0.9.0 does not accept an abort signal: its outstanding HTTP work
 can outlive caller cancellation and follows SDK transport timeout handling. Full
 transport cancellation requires a producer SDK update. Sync compatibility reads
 are included in watcher latency summaries under `node`.
@@ -509,6 +510,7 @@ reason on failure. The backfill CLI calls `prepareWorkerObservationSession` once
 before entering its synchronous pass/closer/attribution loops; failed readiness
 returns an error before writes. Disabled observations are reported explicitly;
 local-only backfill can proceed, while OS-selected usage remains unknown.
-Programmatic synchronous backfill callers must also await preparation or supply
-an explicit existing session token at the observation transport boundary.
+Programmatic synchronous backfill callers must await preparation using matching
+default connection settings. Direct synchronous observation readers can instead
+supply an explicit existing session token in `connectOptions`.
 Partial worker accounting remains marked partial through reviewer capture.

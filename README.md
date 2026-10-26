@@ -1645,8 +1645,10 @@ operator-label holds and stacked-base holds under a validated owner, predicate
 list, absolute deadline, escalation identifier and reason. Legacy records retain
 their paging horizons and delivery receipts. One evaluator serves existing owners
 and the poll sweep, including subjects skipped by the no-progress scheduler;
-remote evidence probes keep their existing cadence. Release precedes escalation
-and still grants no dispatch or merge authority. See the
+remote evidence probes keep their existing cadence. Fresh evidence or receipts
+are re-evaluated within a poll; operator-label CI clearance excludes the stored
+pipeline contexts and requires readable gate names and exclusion policy. Release
+precedes escalation and still grants no dispatch or merge authority. See the
 [shared hold contract](docs/data-model/closer-holds.md) for predicates and writer inventory.
 
 COMPANIONFLOAT-01 gives pure companion stops a separate event wait. Closure

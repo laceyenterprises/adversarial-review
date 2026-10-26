@@ -118,8 +118,10 @@ export function evaluateHoldRecord(record, { now = new Date().toISOString(), inp
   assertHoldRecord(record);
   const scope = polls.getStore()?.open ? polls.getStore().results : null;
   const key = JSON.stringify([namespace, holdRecordKey(record)]);
-  // A new stop/dependency within a poll must not inherit a predecessor result.
-  const signature = JSON.stringify([record.awaits, record.deadline, record.stopKey, record.releasedAt]);
+  // Reuse only identical observations. Owners can collect fresh evidence or
+  // persist a release/escalation receipt after an earlier evaluation this poll.
+  const signature = JSON.stringify([record, now, inputs, events, companionWait, evidenceUnreadable,
+    holdEscalatedInProcess(record, namespace)]);
   const cached = scope?.get(key);
   if (cached?.signature === signature) return cached.result;
   const changed = record.releasedAt || record.clearedAt ? []

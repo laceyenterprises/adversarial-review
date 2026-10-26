@@ -9,7 +9,7 @@
       "schemaSurface": "src/ama/hold-record.mjs",
       "relatedSchemaSurfaces": ["src/ama/closer-hold-records.mjs", "src/ama/hammer-stop-hold.mjs", "src/ama/companion-stop-wait.mjs", "src/ama/operator-label-gates.mjs", "src/ama/stacked-base.mjs", "src/watcher.mjs"],
       "owner": "AMA closure; existing per-hold owner and escalation recipients",
-      "compatibility": "Legacy records normalize with existing paging horizons and receipts; active versioned writes require owner and deadline"
+      "compatibility": "Legacy records normalize with existing paging horizons and receipts; active versioned writes require owner and deadline. No schema change: operator-label CI clearance requires readable gate arrays and stored own-context policy"
     },
     {
       "id": "finalization-queue-cutover",

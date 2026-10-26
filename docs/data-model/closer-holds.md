@@ -39,8 +39,6 @@ Predicates are data, never executable expressions:
   recovered GitHub gates, computable primary-change evidence, conflicts,
   successful stacked-base inspection and cleared operator-label gates. CI waits can also release on an observed
   check fingerprint change. Review-finding waits never use CI greenness as
-  release evidence. CI waits can also release on an observed
-  check fingerprint change. Review-finding waits never use CI greenness as
   release evidence.
 - `retry-at` stores an absolute `at` timestamp. Transient hammer retries retain
   their five-minute bound and fallback precedence after other releases.
@@ -52,7 +50,11 @@ Predicates are data, never executable expressions:
 `evaluateHoldRecord` is the only predicate evaluator. Each watcher poll has a
 bounded-lifetime evaluation scope. Existing owners evaluate with their complete
 observations; the final sweep evaluates holds for discovered open subjects that
-were skipped by scheduling. It adds no remote read. Hammer receipts require a current matching audit stop;
+were skipped by scheduling. Cached results require identical record, time and
+evidence; fresh inputs, recovery events or receipts are evaluated again within
+the poll. Operator-label CI clearance applies the stored own-context exclusions
+and required gate names; missing gate arrays or exclusion policy cannot prove
+clearance. It adds no remote read. Hammer receipts require a current matching audit stop;
 a leftover receipt cannot create a hold after the audit clears. Missing review snapshots,
 check rollups or own-context policy cannot stand in for fresh evidence. Expensive
 companion and primary-change probes retain their existing cadence. The existing

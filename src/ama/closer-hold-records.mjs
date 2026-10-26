@@ -72,7 +72,11 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
       if (!Array.isArray(metadata.statusCheckRollup) || !Array.isArray(record.excludeContexts)) delete inputs.checks;
       const events = {};
       if (type === 'operator-label' && record.holdSource === 'checks'
-        && classifyCheckRollup(metadata.statusCheckRollup, { requiredContexts: record.gates.map(gate => gate.check).filter(Boolean) }) === 'SUCCESS') events['operator-label-gates-cleared'] = true;
+        && Array.isArray(record.gates) && Array.isArray(record.excludeContexts)
+        && classifyCheckRollup(metadata.statusCheckRollup, {
+          requiredContexts: record.gates.map(gate => gate?.check).filter(Boolean),
+          excludeContexts: new Set(record.excludeContexts),
+        }) === 'SUCCESS') events['operator-label-gates-cleared'] = true;
       if ((metadata.baseBranch || metadata.baseRefName) && (metadata.baseBranch || metadata.baseRefName) === metadata.defaultBranch) events['stacked-base-cleared'] = true;
       const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir, inputs, events });
       if (evaluation.action !== 'release' && !evaluation.escalate) continue;

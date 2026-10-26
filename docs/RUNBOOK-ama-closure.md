@@ -26,7 +26,10 @@ owner, machine-checkable awaited predicates, absolute deadline, existing
 escalation identifier and reason. Existing files normalize on read; no manual
 state migration or configuration change is required. The watcher evaluates
 scheduled-out holds without another remote read. Evidence probes, companion
-ancestry, retry bounds and merge admission retain their existing rules.
+ancestry, retry bounds and merge admission retain their existing rules. Fresh
+evidence or receipts invalidate cached evaluations within the poll. Operator-label
+CI clearance uses the stored required gates and pipeline-context exclusions;
+missing gate arrays or exclusion policy keep that clearance unproven.
 
 After normal deployment, the runtime owner can observe an organic hold carrying
 these fields and a single successful deadline receipt, followed by a release

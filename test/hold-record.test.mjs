@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, withHoldRecordPoll, assertHoldRecord } from '../src/ama/hold-record.mjs';
+import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, withHoldRecordPoll, assertHoldRecord, markHoldEscalated } from '../src/ama/hold-record.mjs';
 import { evaluateHammerStopHold, normalizeHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { holdForOperatorLabels, normalizeOperatorLabelHold } from '../src/ama/operator-label-gates.mjs';
 import { holdStackedBase, normalizeStackedBaseHold } from '../src/ama/stacked-base.mjs';
@@ -116,18 +116,124 @@ test('HOLDCONTRACT-01 backed-off poll deadlines escalate once per head across re
   assert.equal(attempts, 3);
 });
 
-test('HOLDCONTRACT-01 one evaluation per poll; terminal subjects cannot page', async t => {
+test('HOLDCONTRACT-01 identical evidence reuses evaluation; fresh time releases within the poll', async () => {
   const hold = record([{ kind: 'retry-at', at: later }]);
   await withHoldRecordPoll(async () => {
     const first = evaluateHoldRecord(hold, { now });
-    assert.strictEqual(evaluateHoldRecord(hold, { now: later }), first);
+    assert.strictEqual(evaluateHoldRecord(hold, { now }), first);
+    assert.equal(evaluateHoldRecord(hold, { now: later }).action, 'release');
   });
   assert.equal(evaluateHoldRecord(hold, { now: later }).action, 'release');
+});
+
+test('HOLDCONTRACT-01 fresh inputs and recovery events cannot inherit a cached hold', async () => {
+  for (const name of ['hold-released', 'primary-change-evidence']) {
+    const hold = record([{ kind: 'event', name }]);
+    await withHoldRecordPoll(async () => {
+      assert.equal(evaluateHoldRecord(hold, { now }).action, 'hold');
+      assert.deepEqual(evaluateHoldRecord(hold, { now, events: { [name]: true } }).changed, [name]);
+    });
+  }
+  const hold = record([{ kind: 'base-change', from: 'old' }]);
+  await withHoldRecordPoll(async () => {
+    assert.equal(evaluateHoldRecord(hold, { now, inputs: { baseSha: 'old' } }).action, 'hold');
+    assert.deepEqual(evaluateHoldRecord(hold, { now, inputs: { baseSha: 'new' } }).changed, ['base']);
+  });
+});
+
+test('HOLDCONTRACT-01 fresh companion proof and persisted receipts invalidate cached results', async () => {
+  const hold = record([{ kind: 'gitlink-contains-commit', repo, prNumber: 2, commit: head }]);
+  const companionWait = { repo, prNumber: 2, state: 'merged', mergeCommit: head, containsMerge: true };
+  await withHoldRecordPoll(async () => {
+    assert.equal(evaluateHoldRecord(hold, { now }).action, 'hold');
+    assert.equal(evaluateHoldRecord(hold, { now, companionWait, evidenceUnreadable: true }).action, 'hold');
+    assert.equal(evaluateHoldRecord(hold, { now, companionWait }).action, 'release');
+  });
+  for (const field of ['clearedAt', 'pagedAt', 'alertedAt', 'escalatedAt']) {
+    await withHoldRecordPoll(async () => {
+      const original = evaluateHoldRecord(hold, { now });
+      assert.equal(original.escalate, true);
+      const updated = evaluateHoldRecord({ ...hold, [field]: now }, { now });
+      assert.equal(updated.escalate, false, field);
+      assert.equal(updated.action, field === 'clearedAt' ? 'release' : 'hold');
+    });
+  }
+  await withHoldRecordPoll(async () => {
+    const namespace = 'fresh-receipts';
+    assert.equal(evaluateHoldRecord(hold, { now, namespace }).escalate, true);
+    markHoldEscalated(hold, namespace);
+    assert.equal(evaluateHoldRecord(hold, { now, namespace }).escalate, false);
+  });
+});
+
+test('HOLDCONTRACT-01 terminal subjects cannot page', async t => {
   const rootDir = root(t);
   const identity = { rootDir, repo, prNumber: 1, headSha: head };
   await holdForOperatorLabels({ ...identity, now, logger, gates: [{ reason: 'synthetic' }], deliverAlertImpl: async () => { throw new Error('offline'); } });
   await evaluateCloserHoldsForPoll({ rootDir, subjects: [{ ...identity, holdMetadata: { lifecycle: 'terminal', terminal: true } }], now: later, logger,
     deliverAlertImpl: async () => assert.fail('terminal subject paged') });
+});
+
+test('HOLDCONTRACT-01 hammer evidence recovery releases after an earlier same-poll hold evaluation', async t => {
+  const rootDir = root(t);
+  const identity = { rootDir, repo, prNumber: 1, headSha: head };
+  const args = { ...identity, hqRoot: rootDir, now, logger, prMetadata: { headSha: head },
+    readAuditImpl: () => ({ attempts: [{ head, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'primary-change-read-failed', startedAt: now }] }), deliverAlertImpl: async () => {} };
+  await evaluateHammerStopHold({ ...args, fetchPrimaryChangeImpl: async () => ({ headSha: head, readFailed: true }) });
+  const [stored] = readCloserHoldRecords(identity);
+  await withHoldRecordPoll(async () => {
+    assert.equal(evaluateHoldRecord(stored.record, { now, namespace: rootDir, inputs: stored.record.inputs }).action, 'hold');
+    const recovered = await evaluateHammerStopHold({ ...args,
+      fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) });
+    assert.equal(recovered.action, 'release');
+    assert.deepEqual(recovered.changed, ['primary-change-evidence']);
+  });
+  assert.equal(readCloserHoldRecords(identity).length, 0);
+});
+
+test('HOLDCONTRACT-01 operator CI clearance excludes own contexts and requires green external gates', async t => {
+  const rootDir = root(t);
+  const gates = [{ check: 'synthetic', reason: 'synthetic-label' }];
+  const green = { name: 'synthetic', conclusion: 'SUCCESS' };
+  const own = { context: 'agent-os/adversarial-gate', state: 'PENDING' };
+  const cases = [
+    { rollup: [green, own], release: true },
+    { rollup: [own], release: false },
+    { rollup: [green, own, { name: 'sibling', status: 'IN_PROGRESS' }], release: false },
+    { rollup: [{ ...green, conclusion: 'FAILURE' }, own], release: false },
+    { rollup: [], release: false },
+    { rollup: null, release: false },
+  ];
+  for (const [i, { rollup, release }] of cases.entries()) {
+    const identity = { rootDir, repo, prNumber: i + 1, headSha: head };
+    // No check fingerprint movement: release must come from the clearance event.
+    await holdForOperatorLabels({ ...identity, now, logger, gates,
+      prMetadata: { headSha: head, statusCheckRollup: rollup }, deliverAlertImpl: async () => {} });
+    const stored = readCloserHoldRecords(identity)[0];
+    await withHoldRecordPoll(() => evaluateCloserHoldsForPoll({ rootDir, now: later, logger,
+      subjects: [{ ...identity, holdMetadata: { headSha: head, statusCheckRollup: rollup } }] }));
+    assert.equal(readCloserHoldRecords(identity).length, release ? 0 : 1, `case ${i}`);
+    if (release) {
+      assert.deepEqual(JSON.parse(readFileSync(stored.path, 'utf8')).releasedBy, ['operator-label-gates-cleared']);
+    }
+  }
+});
+
+test('HOLDCONTRACT-01 malformed gate arrays and absent exclusion policy hold safely during sweeps', async t => {
+  const rootDir = root(t);
+  const gates = [{ check: 'synthetic', reason: 'synthetic-label' }];
+  const metadata = { headSha: head, statusCheckRollup: [{ name: 'synthetic', conclusion: 'SUCCESS' }] };
+  const cases = [{ gates: undefined }, { gates: null }, { gates: {} }, { excludeContexts: undefined }];
+  for (const [i, patch] of cases.entries()) {
+    const identity = { rootDir, repo, prNumber: i + 1, headSha: head };
+    await holdForOperatorLabels({ ...identity, now, logger, gates, prMetadata: metadata, deliverAlertImpl: async () => {} });
+    const stored = readCloserHoldRecords(identity)[0];
+    writeFileSync(stored.path, JSON.stringify({ ...stored.record, ...patch }));
+    await withHoldRecordPoll(() => evaluateCloserHoldsForPoll({ rootDir, now: later, logger,
+      subjects: [{ ...identity, holdMetadata: metadata }] }));
+    assert.equal(readCloserHoldRecords(identity).length, 1, `case ${i}`);
+  }
 });
 
 

@@ -60,11 +60,54 @@ test('suppressed review is ownerless after cadence plus margin and pages once pe
     await tick(db, 11, { deliverAlertFn });
     await tick(db, 19, { deliverAlertFn });
     assert.equal(pages.length, 1, 'same head does not repage after a transient owner');
+    db.prepare("UPDATE reviewed_prs SET revision_ref = 'head-b'").run();
     observeTtmReviewLane(db, { repo: 'example/project', prNumber: 1, headSha: 'head-b', ...suppressed, observedAt: at(20) });
     assert.equal((await tick(db, 20, { deliverAlertFn })).flags.length, 0, 'new head gets a fresh grace');
     await tick(db, 28, { deliverAlertFn });
     assert.equal(pages.length, 2);
     assert.equal(pages[1].metadata.payload.headSha, 'head-b');
+  } finally { db.close(); }
+});
+
+test('tracker alone follows revision changes, resets suppression and grace, and pages each head once', async () => {
+  const db = fixture();
+  const pages = [];
+  const options = { deliverAlertFn: async (text, metadata) => pages.push({ text, metadata }) };
+  try {
+    await tick(db, 0, options);
+    await tick(db, 8, options);
+    assert.equal(pages.length, 1);
+    // No observeTtmReviewLane call: the tracker must reconcile a new revision itself.
+    db.prepare("UPDATE reviewed_prs SET revision_ref = 'head-b'").run();
+    const moved = await tick(db, 9, options);
+    assert.equal(moved.timelines[0].headSha, 'head-b');
+    assert.equal(moved.timelines[0].ownership.owner, 'review-lane');
+    assert.equal(moved.timelines[0].ownerlessSince, null);
+    assert.equal(moved.flags.length, 0);
+    assert.deepEqual(db.prepare('SELECT * FROM ttm_owner_state').get(), {
+      repo: 'example/project', pr_number: 1, head_sha: 'head-b',
+      review_suppressed: 0, review_reason: null, observed_at: at(9), ownerless_since: null,
+    });
+    db.prepare("UPDATE reviewed_prs SET review_status = 'posted'").run();
+    await tick(db, 10, options);
+    assert.equal((await tick(db, 17, options)).flags.length, 0);
+    const stalled = await tick(db, 18, options);
+    assert.equal(stalled.flags[0].details.headSha, 'head-b');
+    assert.equal(stalled.timelines[0].ownerlessSince, at(10));
+    await tick(db, 19, options);
+    assert.equal(pages.length, 2);
+    assert.deepEqual(pages.map(page => page.metadata.payload.headSha), ['head-a', 'head-b']);
+    assert.deepEqual(db.prepare('SELECT head_sha FROM ttm_stuck_pages ORDER BY paged_at').all(),
+      [{ head_sha: 'head-a' }, { head_sha: 'head-b' }]);
+    // A second move while unowned must immediately start a fresh grace clock.
+    db.prepare("UPDATE reviewed_prs SET revision_ref = 'head-c'").run();
+    const unownedMove = await tick(db, 20, options);
+    assert.equal(unownedMove.flags.length, 0);
+    assert.equal(unownedMove.timelines[0].ownerlessSince, at(20));
+    assert.equal(unownedMove.timelines[0].ownerlessMinutes, 0);
+    await tick(db, 28, options);
+    assert.equal(pages.length, 3);
+    assert.equal(pages[2].metadata.payload.headSha, 'head-c');
   } finally { db.close(); }
 });
 
@@ -97,15 +140,17 @@ test('all existing STUCK kinds page through the same path, and failed delivery r
     await tick(db, 1, { deliverAlertFn: async text => { attempts++; pages.push(text); } });
     assert.match(pages[0], /rereview_unanswered/);
     assert.match(pages[0], /reviewer_lease_expired/);
+    assert.doesNotMatch(pages[0], /undefined/);
     assert.equal(attempts, 2, 'one attempt per head per poll; a failed delivery retries on the next poll');
     await tick(db, 2, { deliverAlertFn: async text => pages.push(text) });
     assert.equal(pages.length, 1);
     // Terminal-but-unmerged uses the same generic STUCK selection too.
     const { pageTtmStuckFlags } = await import('../src/ttm-owner.mjs');
     await pageTtmStuckFlags(db, [{ repo: 'example/project', prNumber: 2, flagKind: 'terminal_but_unmerged',
-      progressClass: 'stuck', details: { headSha: 'head-c', stallReason: 'settled' } }],
+      progressClass: 'stuck', details: { headSha: 'head-c' } }],
     { observedAt: START, deliverAlertFn: async text => pages.push(text) });
     assert.match(pages[1], /terminal_but_unmerged/);
+    assert.doesNotMatch(pages[1], /undefined/);
   } finally { db.close(); }
 });
 
@@ -121,6 +166,10 @@ test('observations retain suppression across deferred polls, clear it on admissi
     observe({ headSha: 'head-b' });
     assert.equal(db.prepare('SELECT review_suppressed FROM ttm_owner_state').get().review_suppressed, 0);
     assert.equal(readTtmOwnerEvidence(null, { reviewStatus: 'pending', reviewerLeaseExpiredMinutes: null }, null).review.suppressed, false);
+    const staleState = { head_sha: 'head-a', review_suppressed: 1, review_reason: 'old-head' };
+    const evidence = readTtmOwnerEvidence(null, { headSha: 'head-b', reviewStatus: 'pending' }, staleState);
+    assert.equal(evidence.review.suppressed, false);
+    assert.equal(evidence.review.reason, null);
   } finally { db.close(); }
 });
 
@@ -159,6 +208,11 @@ test('local readers distinguish a live closer, terminal launch, pushed head, and
   write(amaCloserLeaseFilePath(rootDir, identity), { ...identity, status: 'pending', lrqId: null });
   assert.equal(read().owner, 'live-closer', 'new pending lease owns a retry before a receipt replaces the old record');
   rmSync(amaCloserLeaseFilePath(rootDir, identity));
+  const nextIdentity = { ...identity, headSha: 'head-b' };
+  write(amaCloserLeaseFilePath(rootDir, nextIdentity), { ...nextIdentity, status: 'pending' });
+  assert.equal(resolveTtmOwner(readTtmOwnerEvidence(rootDir, { ...row, ...nextIdentity },
+    { head_sha: 'head-a' }), START).owner, 'live-closer', 'current-head lease wins over cached head');
+  rmSync(amaCloserLeaseFilePath(rootDir, nextIdentity));
   const jobFile = join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'example__project-pr-1-fixture.json');
   write(jobFile, { repo: identity.repo, prNumber: 1, remediationWorker: { state: 'spawned', launchRequestId: 'fixture-remediator' } });
   assert.equal(read().owner, 'live-closer');
@@ -188,6 +242,9 @@ test('hammer holds use existing exports and require both a computable release an
   const read = nowIso => resolveTtmOwner(readTtmOwnerEvidence(rootDir, row, null, { hqRoot: rootDir }), nowIso);
   save({ inputs: { headSha: identity.headSha }, retryAfter: at(10) });
   assert.equal(read(START).owner, 'hold');
+  assert.equal(resolveTtmOwner(readTtmOwnerEvidence(rootDir, { ...row, headSha: 'b'.repeat(40) },
+    { head_sha: identity.headSha }, { hqRoot: rootDir }), START).owner, null,
+  'a current head cannot borrow the cached head hammer hold');
   assert.match(read(at(10)).reason, /deadline expired/);
   save({ inputs: { headSha: identity.headSha } });
   assert.match(read(START).reason, /no deadline/);

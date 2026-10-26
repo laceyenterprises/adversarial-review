@@ -72,7 +72,8 @@ function readState(db, row) {
 }
 
 export function readTtmOwnerEvidence(rootDir, row, state, { hqRoot } = {}) {
-  const headSha = state?.head_sha || row.headSha;
+  const headSha = row.headSha || state?.head_sha;
+  const headState = state?.head_sha === headSha ? state : null;
   const identity = { repo: row.repo, prNumber: row.prNumber, headSha };
   const closers = [];
   const holds = [];
@@ -107,18 +108,19 @@ export function readTtmOwnerEvidence(rootDir, row, state, { hqRoot } = {}) {
   return { labels: row.labels, closers, holds,
     review: { status: row.reviewStatus,
       live: row.reviewStatus === 'reviewing' && time(row.reviewerLeaseExpiresAt) > time(row.observedAt),
-      suppressed: Boolean(state?.review_suppressed) || row.reviewerLeaseExpiredMinutes != null,
-      reason: state?.review_reason || (row.reviewerLeaseExpiredMinutes != null ? 'reviewer-lease-expired' : null) } };
+      suppressed: Boolean(headState?.review_suppressed) || row.reviewerLeaseExpiredMinutes != null,
+      reason: headState?.review_reason || (row.reviewerLeaseExpiredMinutes != null ? 'reviewer-lease-expired' : null) } };
 }
 
 export function attachTtmOwnership(db, rows, { observedAt, rootDir, hqRoot, readEvidence = readTtmOwnerEvidence }) {
   return rows.map(row => {
     if (row.prState !== 'open' || row.mergedAt) return row;
     const state = readState(db, row);
-    const headSha = state?.head_sha || row.headSha;
+    const headSha = row.headSha || state?.head_sha;
+    const headState = state?.head_sha === headSha ? state : null;
     let ownership;
     try {
-      ownership = resolveTtmOwner(readEvidence(rootDir, { ...row, observedAt }, state, { hqRoot }), observedAt);
+      ownership = resolveTtmOwner(readEvidence(rootDir, { ...row, headSha, observedAt }, headState, { hqRoot }), observedAt);
     } catch (error) {
       // One unreadable local record must not swallow every other PR's STUCK
       // flags. Unknown evidence cannot prove ownership; report the gap.
@@ -126,9 +128,9 @@ export function attachTtmOwnership(db, rows, { observedAt, rootDir, hqRoot, read
         : { owner: null, reason: `ownership evidence unreadable: ${error.code || error.name}` };
     }
     return { ...row, headSha, ownership,
-      ownerlessSince: ownership.owner ? null : state?.ownerless_since || observedAt,
-      ownerlessMinutes: !ownership.owner && state?.ownerless_since
-        ? Math.max(0, (time(observedAt) - time(state.ownerless_since)) / 60_000) : 0 };
+      ownerlessSince: ownership.owner ? null : headState?.ownerless_since || observedAt,
+      ownerlessMinutes: !ownership.owner && headState?.ownerless_since
+        ? Math.max(0, (time(observedAt) - time(headState.ownerless_since)) / 60_000) : 0 };
   });
 }
 
@@ -138,7 +140,11 @@ export function syncTtmOwnership(db, rows, observedAt) {
     for (const row of rows) {
       if (!row.ownership) continue;
       db.prepare(`INSERT INTO ttm_owner_state (repo, pr_number, head_sha, observed_at, ownerless_since)
-        VALUES (?, ?, ?, ?, ?) ON CONFLICT(repo, pr_number) DO UPDATE SET ownerless_since = excluded.ownerless_since`)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(repo, pr_number) DO UPDATE SET
+        review_suppressed = CASE WHEN head_sha = excluded.head_sha THEN review_suppressed ELSE 0 END,
+        review_reason = CASE WHEN head_sha = excluded.head_sha THEN review_reason ELSE NULL END,
+        head_sha = excluded.head_sha, observed_at = excluded.observed_at,
+        ownerless_since = excluded.ownerless_since`)
         .run(row.repo, row.prNumber, row.headSha || '', observedAt, row.ownerlessSince);
     }
     db.prepare(`UPDATE ttm_owner_state SET ownerless_since = NULL WHERE NOT EXISTS
@@ -160,7 +166,7 @@ export async function pageTtmStuckFlags(db, flags, { deliverAlertFn, observedAt,
     const siblings = flags.filter(other => other.progressClass === 'stuck' && other.repo === flag.repo && other.prNumber === flag.prNumber);
     try {
       await deliverAlertFn(`Adversarial-watcher: ${flag.repo}#${flag.prNumber} head=${head || 'unknown'} STUCK: `
-        + siblings.map(other => `${other.flagKind}: ${other.details.stallReason}`).join('; '), {
+        + siblings.map(other => `${other.flagKind}: ${other.details?.stallReason || other.flagKind}`).join('; '), {
         event: 'adversarial_review.pr_progress_stalled', payload: { repo: flag.repo, prNumber: flag.prNumber, headSha: head, flags: siblings },
       });
       db.prepare('INSERT OR IGNORE INTO ttm_stuck_pages (repo, pr_number, head_sha, paged_at) VALUES (?, ?, ?, ?)')

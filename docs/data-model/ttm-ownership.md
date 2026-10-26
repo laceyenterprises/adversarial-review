@@ -10,8 +10,13 @@ retry, hold release, or merge. Existing routing and merge authority are unchange
 `ttm_owner_state` has one row per `(repo, pr_number)`: `head_sha`,
 `review_suppressed` (0/1), `review_reason`, `observed_at`, and nullable
 `ownerless_since`. Reviewer gates record decisions they already made. An ordinary
-poll preserves a previous suppression until a gate admits review or observes a
-new head. New heads reset suppression and the ownerless clock. The tracker sets
+poll preserves a previous suppression until a gate admits review or the tracker
+observes a new head. The timeline's current revision takes precedence over a cached
+`head_sha`; the cached head is a fallback only when the timeline has none.
+Evidence reads ignore cached suppression and reasons from another head. The
+tracker itself persists the current `head_sha` and `observed_at` on each poll,
+clearing suppression and its reason on head changes even without a reviewer-gate
+observation. New heads reset the ownerless clock. The tracker sets
 `ownerless_since` on its first unowned observation, preserves it while unowned,
 and clears it when ownership returns or the PR becomes terminal. Restarting the
 watcher retains the clock. No backdated PR age or TTM budget starts it.
@@ -32,9 +37,10 @@ budget classification keep their thresholds and conditions.
 
 `ttm_stuck_pages` is keyed by `(repo, pr_number, head_sha)` and stores `paged_at`.
 All STUCK kinds share one page per head through `alert-delivery.mjs`, with every
-active reason in the payload. A receipt is saved only after alert enqueue succeeds;
-errors retry next poll. The alert outbox also uses a deterministic PR/head identity,
-so losing the tracker receipt after enqueue cannot duplicate the page. Ownership
+active reason in the payload. Alert text falls back to the flag kind when a
+legacy STUCK flag has no `stallReason`. A receipt is saved only after alert
+enqueue succeeds; errors retry next poll. The alert outbox also uses a
+deterministic PR/head identity, so losing the tracker receipt after enqueue cannot duplicate the page. Ownership
 return or flag resolution does not erase a page receipt. New heads are evaluated
 anew. These are observation/delivery records, not blocking gates.
 

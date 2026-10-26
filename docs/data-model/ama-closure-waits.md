@@ -16,7 +16,7 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `bounded-wait` for other waits. Primary-change receipts remain independent of final-round receipts. |
+| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `lane-busy` for the third repeated legacy lane-busy launch on a head, and `bounded-wait` for other waits. Lane-busy pages are immediate, retain contention refunds/backoff, retry failed delivery, and dedupe per PR/head across restarts. Primary-change receipts remain independent of final-round receipts. |
 | `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |

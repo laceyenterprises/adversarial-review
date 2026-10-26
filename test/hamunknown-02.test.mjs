@@ -16,7 +16,7 @@ const unknown = { ...green, ok: false, mergeable: 'UNKNOWN', mergeStateStatus: '
 
 // Run the complete rendered merge procedure. Only external reads/writes are
 // stubbed; gate sampling, both gate callers, merge and audit branching are real.
-function runMerge(t, gates, { laneRefusal = null, laneExit = 75 } = {}) {
+function runMerge(t, gates, { laneRefusal = null, laneExit = 75, leaseWaitSeconds = 0 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamunknown-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const path of ['modules/worker-pool/lib/python', 'platform/session-ledger/src']) mkdirSync(join(dir, path), { recursive: true });
@@ -31,6 +31,10 @@ const dir = process.env.TMPDIR;
 const args = process.argv.slice(2);
 const log = value => fs.appendFileSync(dir + '/events', JSON.stringify(value) + '\\n');
 if (args[0].endsWith('/bin/legacy-lane-write.mjs')) {
+  const deadline = Number(args[args.indexOf('--deadline-ms') + 1]);
+  const now = Number(fs.readFileSync(dir + '/clock')) * 1000;
+  log({ laneDeadline: deadline, at: now / 1000 });
+  if (deadline <= now) { console.error('legacy writer deadline expired'); process.exit(75); }
   if (${JSON.stringify(laneRefusal)} !== null) {
     console.error(${JSON.stringify(laneRefusal)}); process.exit(${laneExit});
   }
@@ -78,7 +82,7 @@ POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head}
 HAM_VERDICT_FILE="$TMPDIR/verdict.json" HAM_VERDICT_READY_FILE="$TMPDIR/verdict.json"
 HAM_NODE_BIN="$TMPDIR/fixture-node.cjs"
 ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" >> "$TMPDIR/release"; HAM_MERGE_LEASE_HELD=0; }
-ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
+ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; echo $(( $(cat "$TMPDIR/clock") + ${leaseWaitSeconds} )) > "$TMPDIR/clock"; }
 ham_base_touches_pr_files() { return 1; }
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
 date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
@@ -301,6 +305,7 @@ test('HAMUNKNOWN-02: recovered gate uses latest-run classification and excludes 
 for (const [reason, exitCode, outcome] of [
   ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, 'deferred'],
   ['lane-transfer-required', 75, 'failed-without-merge'],
+  ['owner-operation-in-flight', 75, 'failed-without-merge'],
   ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, 'failed-without-merge'],
 ]) test(`HAMLANEWAIT-01: rendered closer classifies ${reason}, exit ${exitCode}`, t => {
   const result = runMerge(t, [green], { laneRefusal: `legacy lane write refused: ${reason}`, laneExit: exitCode });
@@ -314,4 +319,15 @@ for (const [reason, exitCode, outcome] of [
     assert.match(result.release, /release:lane-busy/);
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
   }
+});
+
+
+test('HAMLANEWAIT-01: spent CI deadline after lease wait leaves a fresh 60s merge budget', t => {
+  const result = runMerge(t, [{ ...green, ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, green], { leaseWaitSeconds: 1000 });
+  assert.equal(result.status, 0, result.stderr);
+  const write = result.events.find(event => event.laneDeadline);
+  assert.equal(write.at, 2030, 'lease wait outlasted the original CI deadline at 1900');
+  assert.equal(write.laneDeadline, (write.at + 60) * 1000);
+  assert.ok(result.events.some(event => event.merge));
+  assert.ok(result.events.some(event => event.outcome === 'succeeded'));
 });

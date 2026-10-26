@@ -1064,9 +1064,11 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 1
   fi
+  # CI and merge-lease waits do not consume the legacy writer's 60s budget.
+  HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
-    --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$((HAM_REMOTE_CI_DEADLINE * 1000))" -- \
+    --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$HAM_LANE_WRITE_DEADLINE_MS" -- \
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
@@ -1076,7 +1078,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
   if [ "$HAM_MERGE_EXIT" -eq 75 ] \
-    && grep -Eq '^legacy lane write refused: owner-operation-in-flight([;[:space:]]|$)' "$HAM_MERGE_STDERR"; then
+    && grep -Eq '^legacy lane write refused: owner-operation-in-flight; lane-busy; waited [0-9]+ms$' "$HAM_MERGE_STDERR"; then
     cat "$HAM_MERGE_STDERR" >&2 || true
     echo 'HAM lane-busy: merge deferred; retry on the next closure pass' >&2
     ham_append_terminal_audit deferred lane-busy || true

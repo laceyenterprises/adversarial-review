@@ -5708,9 +5708,9 @@ satisfied and observed before an operator promotes a lane. Capability availabili
 is not an assertion that such a consumer is running.
 
 HAMLANEWAIT-01 bounds the legacy shell writer's lane-lock wait by the caller's
-existing absolute deadline (`--deadline-ms`; the closer passes its shared CI/merge
-deadline). Direct library callers retain the existing 60-second default when no
-deadline is supplied. The merge subprocess receives only the remaining budget.
+absolute deadline (`--deadline-ms`; the closer computes a fresh now + 60 seconds
+at the merge attempt, after CI and merge-lease waits). Direct library callers
+retain the existing 60-second default when no deadline is supplied. The merge subprocess receives only the remaining budget.
 A directory watch, registered before the acquisition recheck, wakes on release
 of the persistent lock inode; release updates its timestamp after closing the
 lock descriptor. Every wake retries the same exclusive lock and rechecks the
@@ -5724,6 +5724,18 @@ the merge lease as a retryable abort, and reports a next-pass retry. It preserve
 the deferred audit rather than posting a terminal no-merge closing status.
 Recovery uses the existing lease-wait refund, once per launch, for series, target
 and lifetime credit; repeated lane-busy outcomes cannot arm the automated stop.
+Lane-busy launches use the ordinary two-minute exponential backoff, capped at
+thirty minutes, including certified launches. The third distinct lane-busy launch
+on one parked head in the review series pages through the durable closure-wait
+receipt (`lane-busy` class); repeated observations and restarts reuse that page.
+Failed delivery retries on the next pass. A new parked head or review series
+starts a new count. This limits launch cadence and signals persistent contention
+without converting contention into a final-no-merge. A bare queue-route
+`owner-operation-in-flight` refusal retains its terminal classification.
+Uncertified recovery rewrites only `succeeded`/`failed` launches for ordinary
+repair; other launch statuses retain their existing semantics. Audit-read errors
+warn for both certified and uncertified attempts; certified attempts retain
+the existing merge hold.
 Real predicate, head, check and other route refusals retain their existing behavior.
 An earlier deterministic real refusal remains authoritative.
 

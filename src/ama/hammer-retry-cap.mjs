@@ -750,7 +750,11 @@ const HAMMER_DEFERRAL_LAUNCH_LIMIT = 12;
 const HAMMER_DEFERRAL_WINDOW_MS = 6 * 3600_000;
 const LIFETIME_DEFERRAL_REFUND_BUDGET = HAMMER_DEFERRAL_LAUNCH_LIMIT;
 export function evaluateHammerDeferralQueue(ledger, now = new Date().toISOString()) {
-  if (ledger?.leaseWaitExhausted === true) return { expired: false, backoff: false };
+  if (ledger?.leaseWaitExhausted === true) {
+    const next = Date.parse(ledger.deferralNextAt);
+    return { expired: false, backoff: Boolean(ledger.laneBusyDeferral)
+      && (!Number.isFinite(next) || !Number.isFinite(Date.parse(now)) || Date.parse(now) < next) };
+  }
   const nowMs = Date.parse(now);
   const started = Date.parse(ledger?.deferralStartedAt);
   const next = Date.parse(ledger?.deferralNextAt);
@@ -769,6 +773,7 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
     ? Math.min(LIFETIME_DEFERRAL_REFUND_BUDGET, raw) : LIFETIME_DEFERRAL_REFUND_BUDGET;
   return {
     deferralLaunches: jobKeyChanged ? [] : launches,
+    ...(existing?.laneBusyDeferral ? { laneBusyDeferral: jobKeyChanged ? null : existing.laneBusyDeferral } : {}),
     ...(existing?.leaseWaitLaunches && !jobKeyChanged ? { leaseWaitLaunches: existing.leaseWaitLaunches } : {}),
     ...(existing?.leaseWaitExhausted === true && !jobKeyChanged ? { leaseWaitExhausted: true } : {}),
     deferralStartedAt: jobKeyChanged ? null : existing?.deferralStartedAt || null,
@@ -778,7 +783,7 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
 }
 
 // Contention has its own bounded history, separate from ordinary retry refunds.
-function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false } = {}) {
+function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false, laneBusy = false, laneBusyHeadSha = headSha } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
   const fields = deferralFieldsForSeries(ledger);
@@ -789,7 +794,10 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const refund = !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const deferredAt = now || new Date().toISOString();
-  const count = launches.length + 1;
+  const laneBusyLaunches = laneBusy && ledger.laneBusyDeferral?.headSha === laneBusyHeadSha
+    && Array.isArray(ledger.laneBusyDeferral.launches)
+    ? ledger.laneBusyDeferral.launches : [];
+  const count = (laneBusy ? laneBusyLaunches.length : launches.length) + 1;
   const doc = { ...ledger, ...fields,
     attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
     lifetimeAttemptCount: lifetimeRefund ? Math.max(0, ledger.lifetimeAttemptCount - 1) : ledger.lifetimeAttemptCount,
@@ -797,11 +805,13 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
     targetAttemptCount: refund && ledger.targetRemediationSha === headSha
       ? Math.max(0, ledger.targetAttemptCount - 1) : ledger.targetAttemptCount,
     leaseWaitExhausted,
+    ...(laneBusy ? { laneBusyDeferral: { headSha: laneBusyHeadSha, launches: [...laneBusyLaunches, launchRequestId].slice(-64) } }
+      : ledger.laneBusyDeferral ? { laneBusyDeferral: null } : {}),
     ...(leaseWaitExhausted
       ? { leaseWaitLaunches: [...launches, launchRequestId].slice(-64) }
       : { deferralLaunches: [...launches, launchRequestId] }),
     deferralStartedAt: leaseWaitExhausted ? fields.deferralStartedAt : ledger.deferralStartedAt || deferredAt,
-    deferralNextAt: leaseWaitExhausted ? deferredAt : new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
+    deferralNextAt: leaseWaitExhausted && !laneBusy ? deferredAt : new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
     updatedAt: deferredAt,
   };
   creditHammerDispatchBudgets(doc, launchRequestId, { pr: refund,

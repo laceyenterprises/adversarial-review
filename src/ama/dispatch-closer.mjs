@@ -4844,8 +4844,8 @@ async function maybeDispatchAmaCloserAttempt({
       if (verdict.trace?.hamTerminalRemediation?.ok !== true
         && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy') queuedParkAudit = null;
     } catch (error) {
+      logger?.warn?.(`[ama-closer] park audit unreadable: ${error?.message || error}`);
       if (verdict.trace?.hamTerminalRemediation?.ok === true) {
-        logger?.warn?.(`[ama-closer] park audit unreadable; retaining merge hold: ${error?.message || error}`);
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
       }
     }
@@ -5087,6 +5087,7 @@ async function maybeDispatchAmaCloserAttempt({
       jobKey: reviewedSha, headSha: existingRecord.headSha,
       // Lane-lock contention issued no merge; reuse the lease-wait refund so
       // repeated busy passes cannot consume the failure or lifetime budget.
+      laneBusy: parkReason === 'lane-busy', laneBusyHeadSha: prMetadata.headSha,
       leaseWaitExhausted: parkReason === 'lane-busy'
         || (parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true),
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
@@ -5096,7 +5097,20 @@ async function maybeDispatchAmaCloserAttempt({
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'hammer-deferral-ledger-unavailable', needsOperator: true });
   }
-  if (deferredPark && !certifiedPark && parkLedger) {
+  // Keep contention refundable, but bound worker launch cadence and surface
+  // repeated same-head contention through the existing durable page receipt.
+  if (laneBusyPark && parkLedger?.laneBusyDeferral?.launches.length >= 3) {
+    try {
+      await observeClosureWait({ rootDir, repo, prNumber, headSha: parkLedger.laneBusyDeferral.headSha,
+        reason: 'repeated legacy lane-busy launches (3 or more on this head)',
+        waitClass: 'lane-busy', immediate: true, now: Date.parse(dispatchContext.dispatchedAt),
+        pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.lane_busy_repeated',
+          payload: { repo, prNumber, headSha: parkLedger.laneBusyDeferral.headSha } }) });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] lane-busy alert failed; retry next pass: ${error?.message || error}`);
+    }
+  }
+  if (deferredPark && (!certifiedPark || laneBusyPark) && parkLedger) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
@@ -5632,8 +5646,7 @@ async function maybeDispatchAmaCloserAttempt({
     // A timed-out legacy lock wait never issued a merge. Even without current
     // HAM certification, a settled launch must re-enter ordinary repair/admission
     // rather than being classified as a final no-merge or an exit without close.
-    if (laneBusyPark && !certifiedPark &&
-      (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || AMA_CLOSER_RETRYABLE_STATUSES.has(status))) {
+    if (laneBusyPark && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
       status = 'failed';
       existingDispatchStatus = status;
     }

@@ -1,4 +1,6 @@
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
+import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
+import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -2199,6 +2201,48 @@ for (const ageMs of [0, 59_999, 60_000]) {
     if (ageMs < 60_000) {
       assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
       assert.equal(deps.calls.length, 0);
+    }
+  });
+}
+
+for (const declared of [false, true]) {
+  test(`ITPPOOLCONFLICT-01 conflicting builder config permits closer dispatch; hammer declared=${declared}`, async t => {
+    const fixture = poolConflictFixture(t, { identities: declared ? ['codex', 'hammer'] : ['codex'] });
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-pool-conflict-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir);
+    const deps = testDeps();
+    const events = [];
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      logger: { ...deps.logger, info: event => events.push(event), log: event => events.push(event) },
+      resolveOsgRemediatorRouteImpl: async ({ current }) => current,
+      resolveCloserDispatchHarnessImpl: options => resolveCloserDispatchHarness({ ...options,
+        codexAccountPolicy: 'pinned',
+        selectAccountImpl: request => selectWorkerTokenAccount({ ...request, env: fixture.env,
+          ownerImpl: () => assert.fail('no account proposal is valid under this conflict') }),
+        execFileImpl: async () => ({ stdout: '{}' }),
+      }),
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(result.harnessResolution.hold, false);
+    const dispatch = deps.calls.find(call => call.args[0] === 'dispatch');
+    assert.equal(dispatch.args[dispatch.args.indexOf('--worker-class') + 1], 'hammer');
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, args.dispatchContext.repo, 404, HEAD);
+    for (const resolution of [result.harnessResolution, audit.harnessResolution,
+      audit.attempts.find(attempt => attempt.harnessResolution)?.harnessResolution]) {
+      assert.ok(resolution);
+      assert.equal(resolution.hold, false);
+      if (declared) {
+        assert.equal(resolution.reason, 'pool-config-conflict');
+        assert.equal(resolution.conflictKey, 'roles.build_pack_default_worker_class');
+        assert.equal(resolution.accountProposal.conflictKey, resolution.conflictKey);
+        assert.equal(resolution.accountProposal.tokenAccountId, null);
+      }
+    }
+    if (declared) {
+      assert.ok(JSON.stringify(events).includes('pool-config-conflict'));
+      assert.equal(JSON.stringify(result.harnessResolution).includes('personal-first'), false);
+      assert.equal(JSON.stringify(result.harnessResolution).includes(fixture.options.topPath), false);
     }
   });
 }

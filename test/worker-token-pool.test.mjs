@@ -14,6 +14,7 @@ import { buildLegacyHqRemediationDispatchArgs } from '../src/remediation-dispatc
 import { resolveRemediationModel } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from '../src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import { remediationWorkerGitIdentity } from '../src/remediation-worker-provenance.mjs';
+import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 
 const pool = await import('../src/worker-token-pool.mjs').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
@@ -34,6 +35,79 @@ function wireFor(identity, index = 0) {
       reason: i === index ? 'ready' : 'quota-exhausted', component: i === index ? null : 'quota' })) };
   return value;
 }
+
+for (const invalidAccounts of [false, true]) {
+  test(`ITPPOOLCONFLICT-01 undeclared workers retain class routing with invalidAccounts=${invalidAccounts}`, async t => {
+    const fixture = poolConflictFixture(t, { invalidAccounts });
+    const selectAccountImpl = request => pool.selectWorkerTokenAccount({ ...request, env: fixture.env,
+      ownerImpl: () => assert.fail('undeclared pool must not read account evidence') });
+    for (const identity of ['hammer', 'remediator-codex']) {
+      assert.equal(await selectAccountImpl({ identity, model: 'gpt-6' }), null);
+      assert.equal(await pool.selectWorkerTokenAccount({ identity, model: 'gpt-6', oauth: fixture.oauth,
+        ownerImpl: () => assert.fail('membership precedes wire validation') }), null);
+    }
+    const closer = await resolveCloserDispatchHarness({ workerClass: 'hammer', env: {},
+      codexAccountPolicy: 'pinned', selectAccountImpl, execFileImpl: async () => ({ stdout: '{}' }) });
+    assert.equal(closer.workerClass, 'hammer');
+    assert.equal(Boolean(closer.hold), false);
+    const remediator = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+      codexAccountPolicy: 'pinned', selectAccountImpl, execFileImpl: async () => ({ stdout: '{}' }) });
+    assert.equal(remediator.workerClass, 'codex');
+    assert.equal(remediator.hold, false);
+  });
+}
+
+test('ITPPOOLCONFLICT-01 declared hammer conflicts are diagnostic and warn once per key', async t => {
+  const fixture = poolConflictFixture(t, { identities: ['codex', 'hammer', 'remediator-codex'] });
+  const messages = [];
+  t.mock.method(console, 'warn', message => messages.push(message));
+  const selectAccountImpl = request => pool.selectWorkerTokenAccount({ ...request, env: fixture.env,
+    ownerImpl: () => assert.fail('a conflict cannot propose an account') });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await resolveCloserDispatchHarness({ workerClass: 'hammer',
+      fallbackWorkerClasses: ['hammer-claude'], selectAccountImpl, env: {},
+      execFileImpl: () => assert.fail('a conflict keeps its class path without a quota read') });
+    assert.equal(result.workerClass, 'hammer');
+    assert.equal(result.hold, false);
+    assert.equal(result.fellBack, false);
+    assert.equal(result.reason, 'pool-config-conflict');
+    assert.equal(result.conflictKey, 'roles.build_pack_default_worker_class');
+    assert.equal(result.tokenAccountId, undefined);
+    assert.equal(await pool.resolvePooledWorkerRouting({ primary: 'codex', kind: 'remediator',
+      selectAccountImpl, modelForClass: () => 'gpt-6' }), null);
+  }
+  assert.deepEqual(messages, [
+    'pool-config-conflict: roles.build_pack_default_worker_class',
+    'pool-config-conflict: roles.codex_worker_account_order',
+  ]);
+});
+
+for (const held of ['evidence-unknown', 'capacity-saturated']) {
+  test(`ITPPOOLCONFLICT-01 valid declared hammer retains ${held} hold`, async () => {
+    const wire = wireFor('hammer');
+    const result = await resolveCloserDispatchHarness({ workerClass: 'hammer', env: {},
+      modelForWorkerClass: () => 'gpt-6',
+      selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
+        ownerImpl: async () => ({ held }) }),
+      execFileImpl: () => assert.fail('valid pool holds must not read legacy quota') });
+    assert.equal(result.hold, true);
+    assert.equal(result.reason, held);
+  });
+}
+
+test('ITPPOOLCONFLICT-01 a conflicting fallback is not a selected account', async () => {
+  const result = await pool.resolvePooledWorkerRouting({ primary: 'hammer', kind: 'hammer',
+    fallbackWorkerClasses: ['hammer-claude'], modelForClass: () => 'gpt-6',
+    selectAccountImpl: async ({ identity }) => ({ identity, pooled: true,
+      status: identity === 'hammer' ? 'unavailable' : 'config-conflict',
+      reason: identity === 'hammer' ? 'accounts-unavailable' : 'pool-config-conflict',
+      hold: identity === 'hammer', conflictKey: 'roles.merge_agent_worker_class' }),
+  });
+  assert.equal(result.workerClass, 'hammer');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.hold, true, 'positive primary exhaustion retains its hold');
+  assert.equal(result.reason, 'no-available-fallback');
+});
 
 for (const identity of ['hammer', 'hammer-claude', 'remediator-codex', 'remediator-claude']) {
   for (const index of [0, 1]) test(`ITP-14 ${identity} account ${index} keeps canonical privileged dispatch`, async () => {

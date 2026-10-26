@@ -1,5 +1,23 @@
 # RUNBOOK — AMA closure pipeline
 
+## Worker pool policy conflicts (ITPPOOLCONFLICT-01)
+
+Worker proposals check membership before pool validation. A builder-only pool
+cannot hold an undeclared hammer or remediator when its declarations or legacy
+policy fail validation. For a declared hammer, a legacy/new account-policy
+conflict keeps class routing with `hold: false`, reason `pool-config-conflict`
+and the conflicting key in `conflictKey`. The closer audit retains that reason
+and key; dispatch admission remains the account-selection authority. Genuine
+unknown evidence and capacity holds for a valid declared pool retain their rules.
+
+`validateStartupRoleConfig` reports the same policy conflicts in its `warnings`
+result without refusing startup. Startup and worker proposals share one warning
+per key per process, containing only the key and reason. Resolve the conflicting
+policy through the existing migration workflow; no override or config key is added.
+Global schema/declaration errors still refuse startup. Reviewer pools are unchanged.
+The synthetic worker, migration, remediator and closer dispatch fixtures cover
+these boundaries; existing lifecycle states and smoke promises are unchanged.
+
 
 ## Actions billing/quota blocks (CIBLOCKINFRA-01)
 

@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
-import { validateLegacyPoolOverrides } from '../src/config-token-pool-migration.mjs';
-import { resolveIdentityTokenPools } from '../src/role-config.mjs';
+import { PoolConfigConflictError, legacyPoolOverrideConflicts, validateLegacyPoolOverrides } from '../src/config-token-pool-migration.mjs';
+import { resolveIdentityTokenPools, validateStartupRoleConfig } from '../src/role-config.mjs';
+import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,6 +12,36 @@ const accounts = {
   corp: { family: 'codex', broker_provider: 'codex-corp', allowed_models: ['gpt-6'], concurrency: 1 },
   personal: { family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1 },
 };
+
+test('ITPPOOLCONFLICT-01 startup reports runtime conflicts as nonfatal redacted warnings', t => {
+  const fixture = poolConflictFixture(t, { identities: ['codex', 'hammer'] });
+  const messages = [];
+  t.mock.method(console, 'warn', message => messages.push(message));
+  const keys = ['roles.build_pack_default_worker_class', 'roles.codex_worker_account_order'];
+  assert.deepEqual(legacyPoolOverrideConflicts(loadConfig(fixture.options)), keys);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = validateStartupRoleConfig(fixture.options);
+    assert.deepEqual(result.warnings, keys.map(key => ({ reason: 'pool-config-conflict', key })));
+    assert.throws(() => resolveIdentityTokenPools(fixture.options), error => {
+      assert.ok(error instanceof PoolConfigConflictError);
+      assert.equal(error.key, keys[0]);
+      assert.deepEqual(error.keys, keys);
+      return true;
+    });
+  }
+  assert.deepEqual(messages, keys.map(key => `pool-config-conflict: ${key}`));
+  assert.equal(JSON.stringify(messages).includes('personal-first'), false);
+  assert.equal(JSON.stringify(messages).includes(fixture.options.topPath), false);
+});
+
+test('ITPPOOLCONFLICT-01 identity projection leaves global declaration validation strict', t => {
+  const fixture = poolConflictFixture(t, { invalidAccounts: true });
+  assert.equal(resolveIdentityTokenPools({ ...fixture.options, identity: 'hammer' }), null);
+  for (const read of [loadConfig, resolveIdentityTokenPools, validateStartupRoleConfig]) {
+    assert.throws(() => read(fixture.options), /concurrency/);
+  }
+  assert.throws(() => resolveIdentityTokenPools({ ...fixture.options, identity: 'codex' }), /concurrency/);
+});
 
 test('ITP-17 strict loader default is corporate-first before any role selector', () => {
   assert.equal(loadConfig({ topPath: '/nonexistent/itp17/config.yaml', modulePaths: [], env: {} }).get('roles.codex_worker_account_order'), 'corporate-first');

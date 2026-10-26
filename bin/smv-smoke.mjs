@@ -13,7 +13,14 @@ let commit = process.env.SMV_COMMIT || 'unknown';
 const scratch = mkdtempSync(join(tmpdir(), 'smv-'));
 const steps = [];
 let child;
-const signalGroup = () => { if (child?.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } } };
+const signalGroup = () => {
+  if (!child?.pid) return;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
+    // macOS can report EPERM for a group whose leader has already exited.
+    if (error.code === 'EPERM' && (child.exitCode !== null || child.signalCode !== null)) return;
+    if (error.code !== 'ESRCH') throw error;
+  }
+};
 const interrupted = () => { process.exitCode = 1; signalGroup(); };
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, interrupted);
 try {

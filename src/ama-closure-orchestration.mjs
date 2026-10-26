@@ -1577,9 +1577,10 @@ async function dispatchAmaClosureFor({
       ...closerLeaseLivenessOptions, ...preReceiptIntentOptions,
       now: now(), prMetadata, env, signal, logger,
     });
-    handoffLease = currentPrHeadSha && readAmaCloserLease(rootDir, {
-      repo: repoPath, prNumber, headSha: currentPrHeadSha,
-    });
+    handoffLease = handoffLease?.headSha ? readAmaCloserLease(rootDir, handoffLease)
+      : currentPrHeadSha && readAmaCloserLease(rootDir, {
+        repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      });
     const abandoned = abandonAmaCloserLease(rootDir, handoffLease,
       { ...closerLeaseLivenessOptions, now: now(), logger });
     if (abandoned) handoffLease = abandoned;

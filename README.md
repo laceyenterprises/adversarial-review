@@ -1661,7 +1661,8 @@ reconciliation in the recovery reaper warns and leaves that lease excluded from
 age-only release while processing other leases. Successful absence recovery
 returns the persisted terminal/deferred lease snapshot, including its updated
 timestamp, rather than the pending discovery snapshot. Closure rekeys a live
-older-head lease before reading the current-head handoff lease. These guards
+older-head lease before reading the current-head handoff lease, then refreshes
+the held lease by its own identity after reconciliation. These guards
 change no durable states, transitions or existing smoke promises.
 
 Native per-PR snapshots and bounded live directory/CLI PR reads retire confirmed

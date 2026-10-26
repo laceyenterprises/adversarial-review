@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
 import { createLaneRoutingController } from '../src/finalization/queue-routing.mjs';
+import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
+import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
 
@@ -107,7 +109,7 @@ function findingsRemediationArgs(rootDir, overrides = {}) {
 }
 
 
-test('MGQ-10: migrated dispatch renders handoff-and-exit with no legacy merge procedures', async () => {
+test('MGQ-10: migrated dispatch renders once with no legacy merge procedures', async () => {
   const { openFinalizationQueueStore } = await import('../src/finalization/queue-store.mjs');
   const { createLaneRoutingController } = await import('../src/finalization/queue-routing.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'queue-dispatch-'));
@@ -122,7 +124,7 @@ test('MGQ-10: migrated dispatch renders handoff-and-exit with no legacy merge pr
     deps.writeFileImpl = (_dir, _path, body) => { prompt = body; };
     const args = findingsRemediationArgs(rootDir, { cfg: { laneRoutes }, prMetadata: { baseBranch: lane.base },
       dispatchContext: { repo: lane.repository, baseBranch: lane.base,
-        queueCloser: { handoffInstructions: 'Use the composed handoff service.', handoff: async () => {} } } });
+        queueCloser: { handoffInstructions: 'Use the composed handoff service with literal <<RUN_DIR>> and <<REPO>>.', handoff: async () => {} } } });
     const result = await maybeDispatchAmaCloser({ ...args, ...deps });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     const launch = deps.calls.find(c => c.args.includes('--completion-shape'));
@@ -130,9 +132,55 @@ test('MGQ-10: migrated dispatch renders handoff-and-exit with no legacy merge pr
     assert.equal(launch.args[launch.args.indexOf('--required-outcome') + 1], 'push');
     assert.match(prompt, /Queue remediation closer/);
     assert.match(prompt, /Exit successfully/);
-    assert.doesNotMatch(prompt, /<<|ham_merge_phase\(/);
+    assert.match(prompt, /literal <<RUN_DIR>> and <<REPO>>/);
+    assert.doesNotMatch(prompt.replace('literal <<RUN_DIR>> and <<REPO>>', ''), /<<|ham_merge_phase\(/);
     const record = readAmaCloserDispatchRecord(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD });
     assert.equal(readdirSync(record.scratchDir).some(name => /^hammer-(verify-head|publish|merge)\.sh$/.test(name)), false);
+  } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('legacy closer launches while another writer holds the lane flock without preflight writes', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-locked-dispatch-'));
+  const store = openFinalizationQueueStore({ rootDir });
+  const lane = { repository: 'example/review', base: 'main' };
+  const release = resolveQueueOwnerAdapter(store).tryLock(lane);
+  try {
+    assert.equal(typeof release, 'function');
+    const before = store.db.serialize();
+    const deps = testDeps();
+    deps.guardStackedBaseImpl = async () => null;
+    const args = findingsRemediationArgs(rootDir, { prMetadata: { baseBranch: lane.base },
+      dispatchContext: { repo: lane.repository, baseBranch: lane.base } });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.deepEqual(store.db.serialize(), before);
+  } finally { release?.(); store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('missing queue prompt input returns a structured refusal and releases the unsubmitted lease', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'queue-prompt-missing-'));
+  const store = openFinalizationQueueStore({ rootDir });
+  try {
+    const lane = { repository: 'example/review', base: 'main' };
+    const cfg = { laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
+    await createLaneRoutingController({ store }).transfer({ cfg, lane, expectedGeneration: 0,
+      drainAdapter: { read: async () => ({ quiescent: true, sourceRef: 'fixture:drain', results: {} }) } });
+    for (const missing of ['prUrl', 'riskClass']) {
+      const deps = testDeps();
+      deps.guardStackedBaseImpl = async () => null;
+      const args = findingsRemediationArgs(rootDir, { cfg, prMetadata: { baseBranch: lane.base },
+        dispatchContext: { repo: lane.repository, baseBranch: lane.base, [missing]: undefined,
+          queueCloser: { handoffInstructions: 'Use the composed handoff service.', handoff: async () => {} } } });
+      const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+      assert.equal(result.reason, 'queue-closer-prompt-input-missing', JSON.stringify(result));
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(deps.calls.length, 0);
+      const lease = readAmaCloserLease(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD });
+      assert.equal(lease.status, 'terminal');
+      assert.equal(lease.terminalOutcome, 'deferred');
+      assert.equal(readAmaCloserDispatchRecord(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD }), null);
+      assert.deepEqual(readdirSync(join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts')), []);
+    }
   } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
 });
 

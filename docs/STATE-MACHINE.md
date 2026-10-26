@@ -2236,8 +2236,13 @@ certified closer recovery, explicit trusted handoff/resource-release composition
 exclusive writer inventory and the bounded read-only `--capability cutover`
 probe. Durable complete ack precedes mandatory idempotent closer/worker release;
 only the queue waits CI/rebases/merges. Legacy and rollback retain existing paths
-and incident fixtures for one release cycle. No lane is activated by this source
-change. Missing composed adapters or organic release/receipt evidence is pending.
+and incident fixtures for one release cycle. Legacy closer preflight only reads
+routing and creates no writer intent or lane lock; unreadable durable routing
+refuses explicitly. No lane is activated by this
+source change. Before deployment/bounce, inventory existing queue lanes: absent
+closer composition refuses all their remediation, including findings repair.
+Acks observed by the final dispatch recheck suppress launch; commits after that
+read can still race submission. Missing organic release/receipt evidence is pending.
 After prior canary approval, the named operator transfers one privately supplied
 whole lane, changes one reviewed selector, bounces/verifies registered system
 services, observes exact-head receipts and slot release before CI, rehearses

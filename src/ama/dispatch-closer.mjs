@@ -4963,7 +4963,7 @@ async function maybeDispatchAmaCloserAttempt({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   };
   const queueCloser = dispatchContext.queueCloserPrepared;
-  let prompt = queueCloser ? renderQueueCloserPrompt(closerTemplateValues(promptInputs), queueCloser) : composeCloserPrompt(promptInputs);
+  let prompt = queueCloser ? '' : composeCloserPrompt(promptInputs);
   if (reviewState?.operatorLabelFindings?.gated?.length) {
     prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
   }
@@ -5818,8 +5818,7 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
-          const reserve = queueCloser ? (_request, invoke) => invoke() : withDaemonMergeReservation;
-          sameHeadHamMerge = await reserve({ rootDir, repo,
+          sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => routeFinalizationWriter({ rootDir, cfg,
             lane: { repository: repo, base: baseBranch }, kind: 'closer', subject: { prNumber, head: mergeHead },
@@ -6984,7 +6983,9 @@ async function maybeDispatchAmaCloserAttempt({
   const dispatchIdempotencyKey = `ama-closer-${randomUUID()}`;
   if (queueCloser) {
     // Re-read after asynchronous eligibility/status work and under the existing
-    // per-PR dispatch single-flight. A late committed handoff cannot relaunch.
+    // per-PR dispatch single-flight. This suppresses a handoff committed before
+    // this read; handoff commits do not share this PR lock, so a later ack can
+    // still race the launch. Publication requires expected-old-head protection.
     const prepared = await prepareQueueCloserDispatch({ rootDir, cfg,
       lane: { repository: repo, base: baseBranch }, prNumber, head: targetRemediationSha,
       composition: dispatchContext.queueCloser });
@@ -7090,7 +7091,18 @@ async function maybeDispatchAmaCloserAttempt({
     writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   }
-  prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
+  if (queueCloser) {
+    try { prompt = renderQueueCloserPrompt(procedureValues, queueCloser) + prompt; }
+    catch (error) {
+      if (error.code !== 'QUEUE_CLOSER_INPUT_MISSING') throw error;
+      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
+        terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'queue-closer-prompt-input-missing' });
+    }
+  } else {
+    prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
+  }
   if (writeFileImpl) {
     writeFileImpl(promptDir, promptPath, prompt);
   } else {

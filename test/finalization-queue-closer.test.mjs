@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
 import { createLaneRoutingController } from '../src/finalization/queue-routing.mjs';
+import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
 import { createCleanReviewService } from '../src/finalization/queue-clean-review.mjs';
 import { prepareQueueCloserDispatch, createQueueCloserComposition, renderQueueCloserPrompt } from '../src/finalization/queue-closer.mjs';
@@ -16,6 +18,49 @@ import { queueCleanFixture } from './helpers/queue-clean-fixture.mjs';
 const lane = { repository: 'example/review', base: 'main' };
 const cfg = { enabled: true, laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
 const drainAdapter = { read: async () => ({ quiescent: true, sourceRef: 'fake:drain', results: {} }) };
+
+test('legacy closer preflight ignores a held lane flock and performs no durable writes', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-closer-'));
+  const store = openFinalizationQueueStore({ rootDir });
+  const release = resolveQueueOwnerAdapter(store).tryLock(lane);
+  assert.equal(typeof release, 'function');
+  t.after(() => { release(); store.close(); rmSync(rootDir, { recursive: true, force: true }); });
+  const before = store.db.serialize();
+  for (let i = 0; i < 20; i++) {
+    assert.deepEqual(await prepareQueueCloserDispatch({ rootDir, cfg: {}, lane, prNumber: 101, head: 'a'.repeat(40) }),
+      { executor: 'legacy' });
+  }
+  assert.deepEqual(store.db.serialize(), before);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM finalization_queue_legacy_writer').get().n, 0);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM finalization_queue_route').get().n, 0);
+});
+
+test('legacy preflight does not create a DB or migrate an installation without queue routing', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-no-queue-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const prepare = () => prepareQueueCloserDispatch({ rootDir, cfg: {}, lane, prNumber: 101, head: 'a'.repeat(40) });
+  assert.deepEqual(await prepare(), { executor: 'legacy' });
+  assert.equal(existsSync(join(rootDir, 'data')), false);
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  try {
+    db.exec('CREATE TABLE watcher_fixture (value TEXT); INSERT INTO watcher_fixture VALUES (\'retained\')');
+    const before = db.serialize();
+    assert.deepEqual(await prepare(), { executor: 'legacy' });
+    assert.deepEqual(db.serialize(), before);
+  } finally { db.close(); }
+});
+
+test('unreadable durable routing refuses explicitly instead of assuming legacy ownership', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-bad-store-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(join(rootDir, 'data'));
+  writeFileSync(join(rootDir, 'data', 'reviews.db'), 'not a database');
+  const result = await prepareQueueCloserDispatch({ rootDir, cfg: {}, lane, prNumber: 101, head: 'a'.repeat(40) });
+  assert.equal(result.reason, 'queue-closer-route-unavailable');
+  assert.equal(result.skipMergeAgent, true);
+});
+
 async function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'queue-closer-'));
   const store = openFinalizationQueueStore({ rootDir });

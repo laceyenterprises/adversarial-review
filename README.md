@@ -3121,10 +3121,18 @@ See [the health contract](docs/review-pipeline-health.md#lane-liveness-evidence)
 Resolved `queue-v2` lanes dispatch a dedicated remediation/publication/handoff
 prompt and render no legacy merge-lease/CI/rebase/merge procedures. Completion
 requires a matching committed full-coverage acknowledgement and mandatory
-idempotent worker/closer resource release. Duplicate wakes reuse the durable ack;
-returned work owes fresh admission. Clean daemon and certified closer recovery
-only enqueue, confirming the actual stored receipt before reporting queued.
+idempotent worker/closer resource release. Wakes observing the durable ack before
+the final dispatch recheck reuse it; an ack committed after that read can still
+race launch. Returned work owes fresh admission. Clean daemon and certified closer
+recovery only enqueue, confirming the actual stored receipt before reporting queued.
 Other lanes and rollback retain existing legacy prompts and incident repair.
+Legacy closer preflight reads config and durable routing without a lane lock,
+schema migration or writer journal; unreadable durable routing refuses explicitly.
+Queue prompts render once after scratch allocation; missing inputs return
+`queue-closer-prompt-input-missing` without submitting a launch.
+Before deployment/bounce, inventory already migrated lanes: without installed
+`dispatchContext.queueCloser` composition, every closer remediation on those
+lanes refuses with `queue-closer-composition-unavailable`, including findings repair.
 
 `node src/finalization/queue-probe.mjs --capability cutover --json` reads actual
 schema/adapters, route, private loaded writer/owner observations, confirmed

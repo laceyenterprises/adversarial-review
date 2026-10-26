@@ -2,8 +2,12 @@ import { loadEffectiveMergeAuthorityConfig } from '../ama/effective-policy.mjs';
 import { createCloserQueueHandoffBoundary } from '../ama/closer-queue-handoff.mjs';
 // Route-scoped closer retirement. Live composition supplies the sanctioned
 // handoff surface; no new transport, credential source or routing configuration.
-import { readFileSync } from 'node:fs';
+import Database from 'better-sqlite3';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { openFinalizationQueueStore } from './queue-store.mjs';
+import { resolveLaneRoute, resolveQueueRoutingStore } from './queue-routing.mjs';
+import { queueWaitMs } from './queue-wait.mjs';
 import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
 import { routeFinalizationWriter } from './queue-routing-boundary.mjs';
@@ -26,6 +30,30 @@ export function readCompletedQueueHandoff(store, { lane, prNumber, head }) {
 }
 
 export async function prepareQueueCloserDispatch({ rootDir, cfg, lane, prNumber, head, composition }) {
+  // Dispatch preparation is not a finalization write. Legacy evaluations must
+  // not acquire the lane flock, converge schema or record legacy writer intents.
+  // Durable queue ownership still wins over a stale/removed config selector.
+  if (lane?.repository && lane?.base && resolveLaneRoute(cfg, lane).executor === 'legacy') {
+    let db;
+    try {
+      const path = join(rootDir, 'data', 'reviews.db');
+      let exists = true;
+      try { statSync(path); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        exists = false;
+      }
+      if (!exists) return { executor: 'legacy' };
+      db = new Database(path, { readonly: true, fileMustExist: true });
+      db.pragma(`busy_timeout = ${queueWaitMs(1_000, { ceilingMs: 5_000 })}`);
+      const installed = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finalization_queue_route'").get();
+      if (!installed) return { executor: 'legacy' };
+      const { route } = resolveQueueRoutingStore({ db }).read(lane);
+      if (!route || (route.executor === 'legacy' && !route.transition)) return { executor: 'legacy' };
+    } catch {
+      // Unreadable durable ownership cannot safely be treated as legacy.
+      return { ok: false, dispatched: false, skipMergeAgent: true, reason: 'queue-closer-route-unavailable' };
+    } finally { db?.close(); }
+  }
   return routeFinalizationWriter({ rootDir, cfg, lane, kind: 'closer', subject: { prNumber, head },
     legacy: () => ({ executor: 'legacy' }), queue: route => {
       const store = openFinalizationQueueStore({ rootDir });
@@ -48,7 +76,8 @@ export function renderQueueCloserPrompt(values, prepared) {
   return source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
     const value = { ...values, QUEUE_HANDOFF_INSTRUCTIONS: prepared.handoffInstructions,
       QUEUE_ROUTE_GENERATION: prepared.route.routeGeneration }[key];
-    if (value === undefined || value === '') throw new Error(`missing queue closer input: ${key}`);
+    if (value == null || value === '') throw Object.assign(new Error(`missing queue closer input: ${key}`),
+      { code: 'QUEUE_CLOSER_INPUT_MISSING' });
     return String(value);
   });
 }

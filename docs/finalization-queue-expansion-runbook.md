@@ -18,11 +18,21 @@ check, label, blocking probe or promotion gate is introduced.
 
 ## Runtime composition and writer inventory
 
+Before deployment or a watcher bounce, inventory both configured and durable
+`queue-v2` lanes, including existing canaries. Production does not install
+`dispatchContext.queueCloser` automatically. Without that composition, **all**
+closer remediation on an already migrated lane refuses with
+`queue-closer-composition-unavailable`, including ordinary findings repair that
+previously used a legacy prompt. Install the reviewed composition before the
+bounce, or complete the existing operator-directed rollback procedure first;
+do not remove a selector to bypass durable ownership. This source change does
+not authorize a bounce or a lane change.
+
 Before changing the selector, verify the installed runtime composition:
 
 | Invocation | Queue lane behavior | Legacy/rollback behavior |
 |---|---|---|
-| `maybeDispatchAmaCloser` | Resolve durable route before legacy recovery. Confirmed complete handoff suppresses another closer, including after restart. Recheck acknowledgement under the existing per-PR dispatch single-flight after asynchronous reads. New remediation uses `templates/queue-closer-prompt.md`, with no rendered lease/CI/rebase/merge procedures. | Existing prompt, dispatch/closer leases, incident repair and merge procedures remain. |
+| `maybeDispatchAmaCloser` | Resolve durable route before legacy recovery. A complete handoff observed before the final dispatch recheck suppresses another closer, including after restart. Recheck under the existing per-PR dispatch single-flight after asynchronous reads; a later commit can still race launch. New remediation uses `templates/queue-closer-prompt.md`, with no rendered lease/CI/rebase/merge procedures. | Read-only route preflight avoids lane locks, schema convergence and writer intents on legacy lanes. Existing prompt, dispatch/closer leases, incident repair and merge procedures remain. |
 | Closer completion | `createQueueCloserComposition` wraps the trusted handoff service, confirms the matching committed ack and requires idempotent resource release before returning success. Failed release retries the same ack. | Existing terminal/retry handoff remains; it is not a queue ack. |
 | Clean daemon and certified closer recovery | Queue admission only. Read the actual stored full receipt/ack before reporting queued; no legacy lease, checks wait or merge click. | Existing daemon/hammer eligibility, reservation, bounded repair and merge paths remain. |
 | Rendered legacy merge command | Existing route/issuance boundary refuses the old writer. Independently running old closers must also be drained, including their publication helpers and requests. | Existing entitled metered command is retained. |
@@ -42,15 +52,32 @@ a no-op release. Queue admission callbacks must use the trusted clean/handoff
 services; replies are independently joined to the actual store. Missing
 composition refuses dispatch/enqueue without legacy fallback. These ports do not
 install a production pump, tool endpoint, evidence reader, credentials or service.
-Uncomposed deployment stays pending through the existing escalation route and
-requires reviewed composition before activation.
+Uncomposed migrated lanes stall through the existing escalation route and
+require reviewed composition before deployment. Queue prompts render once after
+scratch allocation; operator-composed instruction placeholders remain literal.
+Missing prompt inputs return `queue-closer-prompt-input-missing`, release the
+unsubmitted closer lease and remove unused scratch/prompt artifacts.
+
+Legacy preflight reads the selector and, when present, the durable route through
+a read-only SQLite handle. An absent DB/routing schema or a stable legacy route
+proceeds without schema convergence, lane flock or writer journal. Configured or
+durably migrated lanes and pending transitions enter the existing locked routing
+boundary. Unreadable durable ownership returns `queue-closer-route-unavailable`;
+it cannot safely be assumed legacy. A subsequent transfer can race this read,
+so authoritative writer checks remain at the merge/publication boundaries.
+Certified recovery always retains `withDaemonMergeReservation`, regardless of
+the prepared route snapshot.
 
 Remediation may edit, validate locally, adjudicate all findings and publish its
 remediated head with entitled expected-old-head protection. Terminal adjudication
 remains final without a new model judgement. Only the queue mechanically rebases,
 waits remote CI and merges. Returned same-head entries owe fresh remediation and
 admission; a historical ack cannot hide a return. A terminal/parked acknowledged
-entry does not dispatch another closer on duplicate wakes.
+entry suppresses duplicate wakes that observe its ack. Handoff commits take the
+lane flock, not the dispatcher's PR intent lock. An ack committed after the final
+recheck can still race lease acquisition and HQ submission; this is not an atomic
+handoff/launch fence. Remediation publication must retain expected-old-head
+protection, and the operator must drain in-flight closers before transfer.
 
 ## Operator expansion procedure
 
@@ -124,10 +151,18 @@ an intermediate implementation checking only before asynchronous reads, and the
 final implementation rechecking under the existing per-PR dispatch single-flight.
 Each used twenty independent disposable stores and fake dispatch/network boundaries.
 Unfixed: 20/20 duplicate closer launches after ack. Intermediate: 20/20 duplicates.
-Final: 20/20 consecutive confirmed acknowledgements, zero duplicate launches.
+Final: 20/20 consecutive confirmed acknowledgements, zero duplicate launches
+**in that schedule**, where the ack commits before the final recheck. These
+fixtures do not establish zero duplicates for commits after that recheck; that
+remaining race is described above.
 The final suite also verifies actual queue prompt dispatch without rendered legacy
 procedures, enqueue-only daemon receipt confirmation, generation refusal,
-in-flight legacy drain and lost rollback acknowledgement. Sibling sites inspected:
+in-flight legacy drain and lost rollback acknowledgement. Focused closer
+regressions also verify legacy dispatch under a held lane flock with byte-identical
+DB contents, no legacy writer-row growth, no schema creation on old installations,
+structured unreadable-route refusal, literal instruction placeholders through
+actual dispatch, and missing-input refusal with no launch or retained pending lease.
+Sibling sites inspected:
 clean daemon, certified closer recovery, shell merge boundary, subject executor,
 validated handoff release, routing/owner issuance and receipt/outbox replay.
 

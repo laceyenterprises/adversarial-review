@@ -353,6 +353,7 @@ test('production closure context rechecks a parent merged after candidate inspec
   for (const field of ['baseBranch', 'baseRefName']) {
     let checked = 0;
     const args = closureArgs({
+      repoPath: 'example/subject-07',
       resolveAmaHammerDispatchModeImpl: () => 'inline',
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'failed-closed', reason: 'merge-retry-budget-exhausted', attempts: 2 }),
       maybeDispatchAmaCloserImpl: payload => {

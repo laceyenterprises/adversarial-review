@@ -2530,6 +2530,20 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          session_resume: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              automatic: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  cells: { __type: TYPE_LIST, __default: [], __item: { __type: TYPE_STRING } },
+                },
+              },
+            },
+          },
           recovery: {
             __type: TYPE_DICT,
             __strict: true,

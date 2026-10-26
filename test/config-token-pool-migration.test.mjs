@@ -113,7 +113,11 @@ for (const [key, value] of [
     for (const part of parts.slice(0, -1)) node = node[part] = {};
     node[parts.at(-1)] = value;
     writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify(local));
-    assert.throws(() => resolveIdentityTokenPools({ topPath, modulePaths: [], env: {} }), error =>
-      error.message.includes(key) && error.message.includes('local:'));
+    assert.throws(() => resolveIdentityTokenPools({ topPath, modulePaths: [], env: {} }), error => {
+      assert.ok(error instanceof PoolConfigConflictError);
+      assert.equal(error.key, key);
+      assert.ok(error.message.includes(key) && error.message.includes('local:'));
+      return true;
+    });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

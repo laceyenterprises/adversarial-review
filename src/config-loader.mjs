@@ -6160,6 +6160,7 @@ function loadConfigImpl({
   cliOverrides = null,
   tolerateCheckedInUnknown = false,
   tokenPoolIdentity,
+  legacyGeminiReviewer = false,
 } = {}) {
   const envView = env || process.env;
   checkDeprecatedEnvVars(envView);
@@ -6367,7 +6368,12 @@ function loadConfigImpl({
   const pools = merged.oauth?.identity_token_pools;
   if (tokenPoolIdentity !== undefined && pools !== null && typeof pools === 'object'
     && !Array.isArray(pools) && !Object.hasOwn(pools, tokenPoolIdentity)) return null;
-  validateOAuthDeclarations(merged.oauth, trace);
+  // A reviewer without its own pool still uses legacy holders. Unrelated
+  // pool errors must not break its runtime/model/holder config reads. Keep
+  // malformed mappings and every declared reviewer pool fully validated.
+  const undeclaredGemini = pools && typeof pools === 'object' && !Array.isArray(pools)
+    && !Object.hasOwn(pools, 'gemini-reviewer');
+  if (!legacyGeminiReviewer || !undeclaredGemini) validateOAuthDeclarations(merged.oauth, trace);
   validateOsgShape(merged.osg);
 
   const sources = {};
@@ -6531,7 +6537,7 @@ function _currentSignature({ topPath, modulePaths, env }, options = {}) {
   return parts.join('::');
 }
 
-function _cacheKeyFor({ topPath, modulePaths, env }) {
+function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false }) {
   // Fold the env-resolved top into the cache key so two callers with
   // the same explicit call shape but different `env.AGENT_OS_CONFIG_PATH`
   // get distinct slots (matches the signature's view of which file is
@@ -6557,6 +6563,7 @@ function _cacheKeyFor({ topPath, modulePaths, env }) {
     resolvedTopPath: resolvedTop,
     modulePaths: [...(modulePaths || [])],
     envAliases,
+    legacyGeminiReviewer,
   });
 }
 
@@ -6581,8 +6588,8 @@ function _evictCacheLruIfNeeded() {
   }
 }
 
-function _ensureFreshConfig({ topPath, modulePaths, env } = {}) {
-  const cacheKey = _cacheKeyFor({ topPath, modulePaths, env });
+function _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer = false } = {}) {
+  const cacheKey = _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer });
   const sig = _currentSignature({ topPath, modulePaths, env });
   const cached = _configCache.get(cacheKey);
   if (cached === undefined || _configSignatures.get(cacheKey) !== sig) {
@@ -6593,7 +6600,7 @@ function _ensureFreshConfig({ topPath, modulePaths, env } = {}) {
     // fail-louded at startup for ~1h). Unknown nested keys under shared roots
     // are warn-once dropped; the strict loadConfig() stays the contract for
     // tests and validation tooling so genuine module-file drift still fails CI.
-    const fresh = loadConfigRuntime({ topPath, modulePaths, env });
+    const fresh = loadConfigImpl({ topPath, modulePaths, env, tolerateCheckedInUnknown: true, legacyGeminiReviewer });
     _configCache.set(cacheKey, fresh);
     _configSignatures.set(cacheKey, sig);
     _evictCacheLruIfNeeded();
@@ -6611,6 +6618,12 @@ function _ensureFreshConfig({ topPath, modulePaths, env } = {}) {
 // re-export in `role-config.mjs`.
 export function loadConfigCached({ topPath, modulePaths, env } = {}) {
   return _ensureFreshConfig({ topPath, modulePaths, env });
+}
+
+// Separate cache slots prevent this legacy-only view from weakening ordinary
+// config readers. This is solely for Antigravity reviewer holder admission.
+export function loadGeminiReviewerConfigCached({ topPath, modulePaths, env } = {}) {
+  return _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer: true });
 }
 
 export function getConfig(key, defaultValue = null) {

@@ -202,9 +202,17 @@ identity too, so they count against the cap the same way.
 
 **Account declarations and fences.** The ITP-10 reader supplies the ordered
 `oauth.identity_token_pools.gemini-reviewer` members and their existing agy
-holder bindings when declared. Otherwise the existing ordered login list is
-imported with stable opaque account IDs. Conflicting legacy/new declarations,
-duplicate holder aliases or invalid descriptors hold admission. A validated
+holder bindings when declared. When the raw pool mapping has no
+`gemini-reviewer` entry, the existing ordered login list (or the HQ owner) is
+imported with stable opaque account IDs, even if another role's pool is invalid
+or has a legacy/new account-policy conflict. The reviewer uses a separate
+config-cache view for these legacy reads; ordinary config readers still
+validate all pools. A declared reviewer pool retains full validation:
+conflicting legacy holder order, duplicate holder aliases or invalid descriptors
+hold admission. Legacy/new conflicts warn as `pool-config-conflict` with the
+key path alone, once per key per process, rather than as an unreadable holder
+declaration. Correct the conflicting contract using the migration report.
+A validated
 holder/model fingerprint fences readiness; a changed declaration needs a new
 pass. Existing reviews retain their original lease. Explicit descriptors must
 authorize the configured agy model exactly; no CLI-slug/display-name equivalence

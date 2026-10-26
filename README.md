@@ -1379,6 +1379,14 @@ and concurrent readiness, re-admits a terminal pre-spawn failure, and starts
 authenticated recovery immediately after a failed review releases a drained
 holder. A successful probe for an obsolete declaration keeps admission fenced
 without adding authentication backoff.
+When the raw pool mapping has no `gemini-reviewer` entry, the holder plan keeps
+`reviewer.gemini.identities` (or the HQ owner) even if another role's pool is
+invalid or conflicts with a legacy account policy. Declared reviewer pools
+still fail closed, including mismatched legacy holder order. Conflicts warn as
+`pool-config-conflict` with only the key path, once per key per process.
+The scoped reviewer config cache cannot weaken ordinary config validation.
+Synthetic regressions are in `test/agy-reviewer-identities.test.mjs` and
+`test/config-token-pool-migration.test.mjs`; existing smoke promises are unchanged.
 Operator cutover still requires ITP-19 approval;
 model-ID/display-name declaration compatibility must be resolved first. See the
 [Gemini holder runbook](docs/RUNBOOK-antigravity-gemini-reviewer.md#gemini-reviewer-token-holders-itp-11-ccx-08-compatibility).

@@ -46,7 +46,9 @@ import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from './gemini-quota-cooldown.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
 import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
-import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveIdentityTokenPools } from './role-config.mjs';
+import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveGeminiReviewerTokenPools } from './role-config.mjs';
+import { loadGeminiReviewerConfigCached } from './config-loader.mjs';
+import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
 import { createAgyHolderLeaseStore, agyLeaseOwnerAlive } from './agy-holder-leases.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
@@ -628,10 +630,10 @@ function createAgyReviewerIdentityPool({
   log = console,
   now = Date.now,
   hqOwner = resolveHqOwner(),
-  loadIdentities = () => resolveGeminiReviewerIdentities({ env }),
-  resolveRuntime = () => resolveGeminiRuntime({ env }),
-  loadTokenPools = () => resolveIdentityTokenPools({ env }),
-  resolveModel = () => resolveGeminiAntigravityModel({ env }),
+  loadIdentities = () => resolveGeminiReviewerIdentities({ env, loaderImpl: loadGeminiReviewerConfigCached }),
+  resolveRuntime = () => resolveGeminiRuntime({ env, loaderImpl: loadGeminiReviewerConfigCached }),
+  loadTokenPools = () => resolveGeminiReviewerTokenPools({ env, log }),
+  resolveModel = () => resolveGeminiAntigravityModel({ env, loaderImpl: loadGeminiReviewerConfigCached }),
   runPinnedImpl = runPinnedCommand,
   checkHqOwnerAuthImpl = defaultCheckHqOwnerAuth,
   readBootstrapRecordImpl = (user) => readBootstrapRecord(user, { env }),
@@ -691,7 +693,12 @@ function createAgyReviewerIdentityPool({
       const runtime = resolveRuntime();
       if (runtime !== 'antigravity') return resolveAgyReviewerIdentityPlan({ runtime, hqOwner, env });
       const legacy = loadIdentities() || [];
-      const oauth = readIdentityTokenPools(loadTokenPools(), { legacyGeminiHolders: legacy.length ? legacy : undefined });
+      const raw = loadTokenPools();
+      const pools = raw.identity_token_pools === undefined ? {} : raw.identity_token_pools;
+      const undeclared = pools && typeof pools === 'object' && !Array.isArray(pools)
+        && !Object.hasOwn(pools, 'gemini-reviewer');
+      const oauth = readIdentityTokenPools(undeclared ? {} : raw,
+        { legacyGeminiHolders: legacy.length ? legacy : undefined });
       const members = oauth.identity_token_pools['gemini-reviewer'];
       const users = members ? members.map(id => oauth.token_accounts[id].holder_user) : (legacy.length ? legacy : [hqOwner]);
       const plan = resolveAgyReviewerIdentityPlan({ identities: users, runtime, hqOwner, env });
@@ -712,7 +719,9 @@ function createAgyReviewerIdentityPool({
       plan.generation = createHash('sha256').update(JSON.stringify({ holders: plan.identities, model: plan.model })).digest('hex');
       return plan;
     } catch (error) {
-      log.warn?.(`[agy-identities] holder declaration unreadable; admission held: ${error.message}`);
+      if (!warnPoolConfigConflict(error, log)) {
+        log.warn?.(`[agy-identities] holder declaration unreadable; admission held: ${error.message}`);
+      }
       return { multi: true, hqOwner, identities: [], refused: [], generation: 'invalid' };
     }
   }

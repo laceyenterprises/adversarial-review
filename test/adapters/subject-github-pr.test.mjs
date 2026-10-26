@@ -61,6 +61,18 @@ function makeOctokitSnapshot() {
   };
 }
 
+test('hold snapshots retain the repository default branch without guessing it', () => {
+  for (const pr of [
+    { ...fixture.pulls[0], base: { ref: 'trunk', repo: { default_branch: 'trunk' } } },
+    { ...fixture.pulls[0], repository: { defaultBranchRef: { name: 'trunk' } } },
+    { ...fixture.pulls[0], defaultBranch: 'trunk' },
+  ]) {
+    assert.equal(stateFromSnapshot(normalizePRSnapshot(fixture.repo, pr)).defaultBranch, 'trunk');
+  }
+  const unknown = { ...fixture.pulls[0], base: { ref: 'trunk' } };
+  assert.equal(stateFromSnapshot(normalizePRSnapshot(fixture.repo, unknown)).defaultBranch, undefined);
+});
+
 test('github-pr subject adapter discovers GitHub PR subjects with normalized builderClass', async () => {
   const adapter = createGitHubPRSubjectAdapter({
     octokit: makeOctokitSnapshot(),

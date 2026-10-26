@@ -63,6 +63,9 @@ check rollups or own-context policy cannot stand in for fresh evidence. Expensiv
 companion and primary-change probes retain their existing cadence. The existing
 `readHammerStopHoldForHead` export normalizes records, and
 `readCloserHoldRecords` exposes all three stores for owner-resolution consumers.
+GitHub subject snapshots retain the observed repository default branch from the
+existing adapter response, allowing the sweep to recognize stacked-base clearance
+without guessing a branch or adding a remote request.
 
 Immediate hammer/operator-label paging retains an immediate deadline. Historical
 history-read grace remains ten minutes; companion waits retain 25 hours from
@@ -75,7 +78,12 @@ receipts survive restart; a shared process receipt also suppresses repeats after
 a write failure or a superseding observation during delivery. Failed delivery retries. Poll mutations use an
 exclusive claim and compare the unchanged file before replacement, including
 after yielding to alert delivery. Existing per-head/dependency page suppression
-and retention remain in effect.
+and retention remain in effect. The process receipt cache retains at most 10,000
+keys, evicting the oldest on overflow; durable receipts remain authoritative.
+The poll claim uses the existing load-aware 60-second paging lease (five minutes
+for stacked-base comment budgets) so an orphaned
+file cannot block sweeps forever. Fresh claims remain exclusive and cleanup checks
+the acquired inode before removing a claim.
 
 Release only ends the wait. Review, findings, terminal lifecycle, eligibility,
 leases and retry/lifetime caps continue to decide the existing dispatch paths.

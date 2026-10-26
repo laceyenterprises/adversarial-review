@@ -91,6 +91,7 @@ function normalizePRSnapshot(repoPath, pr) {
     changedFiles: pr?.changed_files ?? pr?.changedFiles,
     headRefName: pr?.head?.ref || pr?.headRefName || undefined,
     baseRefName: pr?.base?.ref || pr?.baseRefName || undefined,
+    defaultBranch: pr?.defaultBranch || pr?.base?.repo?.default_branch || pr?.repository?.defaultBranchRef?.name || undefined,
     baseSha: pr?.base?.sha || pr?.baseRefOid || undefined,
     requested_reviewers: pr?.requested_reviewers ?? (Array.isArray(reviewRequests)
       ? reviewRequests.filter(request => request?.__typename !== 'Team') : reviewRequests),
@@ -138,6 +139,7 @@ function stateFromSnapshot(snapshot, {
     changedFiles: snapshot.changedFiles,
     headRefName: snapshot.headRefName,
     baseRefName: snapshot.baseRefName,
+    defaultBranch: snapshot.defaultBranch,
     baseSha: snapshot.baseSha,
     state: snapshot.state,
     isDraft: snapshot.isDraft,

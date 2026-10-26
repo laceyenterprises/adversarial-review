@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync, closeSync, openSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { classifyCheckRollup } from '../checks-summary.mjs';
 import { hammerStopInputs, normalizeHammerStopHold, readHammerStopForHead, isInfrastructureStop } from './hammer-stop-hold.mjs';
 import { normalizeOperatorLabelHold } from './operator-label-gates.mjs';
@@ -82,8 +83,19 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
       if (evaluation.action !== 'release' && !evaluation.escalate) continue;
       const lock = `${path}.lock`;
       let claimed = false;
+      let claimedInode;
       try {
+        // Match the existing owner paging lease: a crashed poll must not leave
+        // an immortal claim. Never remove a fresh claim held by another owner.
+        try {
+          const staleMs = type === 'stacked-base' ? 300_000 : loadAwareTimeoutMs(60_000);
+          if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+            unlinkSync(lock);
+            logger.warn?.('Closer hold recovered expired poll claim');
+          }
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
         closeSync(openSync(lock, 'wx')); claimed = true;
+        claimedInode = statSync(lock).ino;
         if (readFileSync(path, 'utf8') !== raw) continue;
         const updated = { ...record };
         if (evaluation.action === 'release') {
@@ -113,7 +125,7 @@ export async function evaluateCloserHoldsForPoll({ rootDir, hqRoot = rootDir, su
         writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
       } catch (error) {
         if (error.code !== 'EEXIST') logger.warn?.(`Closer hold evaluation failed: ${error.code || 'delivery-error'}`);
-      } finally { if (claimed) { try { unlinkSync(lock); } catch { /* replaced/removed claim */ } } }
+      } finally { if (claimed) { try { if (statSync(lock).ino === claimedInode) unlinkSync(lock); } catch { /* replaced/removed claim */ } } }
     }
   }
 }

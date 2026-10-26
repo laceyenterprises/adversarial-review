@@ -1647,7 +1647,10 @@ their paging horizons and delivery receipts. One evaluator serves existing owner
 and the poll sweep, including subjects skipped by the no-progress scheduler;
 remote evidence probes keep their existing cadence. Fresh evidence or receipts
 are re-evaluated within a poll; operator-label CI clearance excludes the stored
-pipeline contexts and requires readable gate names and exclusion policy. Release
+pipeline contexts and requires readable gate names and exclusion policy. Subject
+snapshots retain the observed default branch for stacked-base clearance. Poll
+claims recover after the load-aware paging lease and process receipt memory is
+bounded to 10,000 entries. Release
 precedes escalation and still grants no dispatch or merge authority. See the
 [shared hold contract](docs/data-model/closer-holds.md) for predicates and writer inventory.
 

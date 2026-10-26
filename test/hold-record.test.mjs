@@ -2,10 +2,10 @@ import './helpers/rate-limit-state-isolation.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, withHoldRecordPoll, assertHoldRecord, markHoldEscalated } from '../src/ama/hold-record.mjs';
+import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, withHoldRecordPoll, assertHoldRecord, markHoldEscalated, holdEscalatedInProcess, resetHoldEscalationsForTests, MAX_HOLD_ESCALATIONS } from '../src/ama/hold-record.mjs';
 import { evaluateHammerStopHold, normalizeHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { holdForOperatorLabels, normalizeOperatorLabelHold } from '../src/ama/operator-label-gates.mjs';
 import { holdStackedBase, normalizeStackedBaseHold } from '../src/ama/stacked-base.mjs';
@@ -23,6 +23,36 @@ function root(t) {
   t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }
+
+test('HOLDCONTRACT-01 escalation memory is bounded without evicting on duplicate receipts', () => {
+  resetHoldEscalationsForTests();
+  const first = record([{ kind: 'event', name: 'ready' }], { prNumber: 0 });
+  for (let i = 0; i < MAX_HOLD_ESCALATIONS; i++) markHoldEscalated({ ...first, prNumber: i });
+  markHoldEscalated(first);
+  assert.equal(holdEscalatedInProcess(first), true);
+  const newest = { ...first, prNumber: MAX_HOLD_ESCALATIONS };
+  markHoldEscalated(newest);
+  assert.equal(holdEscalatedInProcess(first), false);
+  assert.equal(holdEscalatedInProcess(newest), true);
+  resetHoldEscalationsForTests();
+});
+
+test('HOLDCONTRACT-01 expired sweep claims recover and fresh claims remain exclusive', async t => {
+  const rootDir = root(t);
+  const green = { headSha: head, statusCheckRollup: [{ name: 'synthetic', conclusion: 'SUCCESS' }] };
+  for (const stale of [false, true]) {
+    const identity = { rootDir, repo, prNumber: stale ? 2 : 1, headSha: head };
+    await holdForOperatorLabels({ ...identity, now, logger, gates: [{ check: 'synthetic', reason: 'synthetic-label' }],
+      prMetadata: green, deliverAlertImpl: async () => {} });
+    const stored = readCloserHoldRecords(identity)[0];
+    writeFileSync(`${stored.path}.lock`, '');
+    if (stale) utimesSync(`${stored.path}.lock`, 1, 1);
+    await withHoldRecordPoll(() => evaluateCloserHoldsForPoll({ rootDir, now: later, logger,
+      subjects: [{ ...identity, holdMetadata: green }] }));
+    assert.equal(readCloserHoldRecords(identity).length, stale ? 0 : 1);
+    assert.equal(existsSync(`${stored.path}.lock`), !stale);
+  }
+});
 
 test('HOLDCONTRACT-01 refuses ownerless/deadlineless writes before persistence', t => {
   const path = join(root(t), 'refused.json');

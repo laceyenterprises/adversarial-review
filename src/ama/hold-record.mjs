@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 // whether their observations satisfy a durable predicate. Evaluation performs no I/O.
 const polls = new AsyncLocalStorage();
 const deliveredEscalations = new Set();
+export const MAX_HOLD_ESCALATIONS = 10_000;
 const dimensions = { head: 'headSha', base: 'baseSha', mergeability: 'mergeability', checks: 'checks', review: 'review' };
 const kinds = new Set([...Object.keys(dimensions).map(name => `${name}-change`),
   'event', 'retry-at', 'companion-merged', 'gitlink-contains-commit']);
@@ -61,7 +62,11 @@ function escalationKey(record, scope) {
 }
 
 export function markHoldEscalated(record, scope = '') {
-  deliveredEscalations.add(escalationKey(record, scope));
+  const key = escalationKey(record, scope);
+  if (!deliveredEscalations.has(key) && deliveredEscalations.size >= MAX_HOLD_ESCALATIONS) {
+    deliveredEscalations.delete(deliveredEscalations.values().next().value);
+  }
+  deliveredEscalations.add(key);
 }
 
 export function holdEscalatedInProcess(record, scope = '') {

@@ -237,6 +237,7 @@
     {"name": "metadata-prefix-unknown-operation", "valid": false, "search": {"providers": {"brave": {"operation_limits": {"__unknown": {}}}}}},
     {"name": "prototype-unknown-provider", "valid": false, "search": {"providers": {"__proto__": {}}}},
     {"name": "inherited-unknown-provider", "valid": false, "search": {"providers": {"constructor": {}}}},
-    {"name": "metadata-prefix-unknown-root", "valid": false, "search": {"__upstream": "https://example.invalid/"}}
+    {"name": "metadata-prefix-unknown-root", "valid": false, "search": {"__upstream": "https://example.invalid/"}},
+    {"name": "operator-selected-vault-and-field-names", "valid": true, "search": {"providers": {"brave": {"credential_ref": "op://Test Vault/Brave Search API Key/API Key"}}}}
   ]
 }

@@ -333,7 +333,7 @@ const SEARCH_OPERATIONS = Object.freeze({
 });
 const SEARCH_LIMIT_PATHS = new Set(Object.keys(SEARCH_OPERATIONS).map(p => `services.hcp.search.providers.${p}.operation_limits`));
 const SEARCH_MONEY_PATTERN = '^[0-9]{1,12}([.][0-9]{1,9})?$';
-const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%]+/[^/\s?#%][^/?#%\r\n]*/[^/\s?#%]+$`;
+const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?$`;
 const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
 
 function searchSchema() {

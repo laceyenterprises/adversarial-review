@@ -66,7 +66,9 @@ export function readIdentityTokenPools(oauth, { legacyGeminiHolders } = {}) {
     if (!(Array.isArray(legacyGeminiHolders)
       && holders.length === legacyGeminiHolders.length
       && holders.every((holder, index) => holder === legacyGeminiHolders[index]))) {
-      throw new PoolConfigConflictError(['reviewer.gemini.identities'], 'legacy holder declaration');
+      const error = new PoolConfigConflictError(['reviewer.gemini.identities'], 'legacy holder declaration');
+      error.message = 'reviewer.gemini.identities: conflicting legacy/new declaration';
+      throw error;
     }
   }
   return frozenCopy({ token_accounts: accounts, identity_token_pools: pools });

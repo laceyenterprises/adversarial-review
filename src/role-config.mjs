@@ -548,6 +548,11 @@ export function resolveGeminiReviewerTokenPools({ log = console, ...options } = 
   }
   if (!declared) return readIdentityTokenPools({});
   const legacy = cfg.get('reviewer.gemini.identities', null);
+  if (legacy !== null && !Array.isArray(legacy)) {
+    throw new AgentOSConfigError('reviewer.gemini.identities: expected array or null', {
+      key: 'reviewer.gemini.identities', expected: 'array or null',
+    });
+  }
   return readIdentityTokenPools({
     token_accounts: cfg.get('oauth.token_accounts', {}), identity_token_pools: pools,
   }, { legacyGeminiHolders: legacy === null ? undefined : legacy.map(String) });

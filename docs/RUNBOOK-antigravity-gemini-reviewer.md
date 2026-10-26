@@ -212,6 +212,12 @@ conflicting legacy holder order, duplicate holder aliases or invalid descriptors
 hold admission. Legacy/new conflicts warn as `pool-config-conflict` with the
 key path alone, once per key per process, rather than as an unreadable holder
 declaration. Correct the conflicting contract using the migration report.
+An omitted pool mapping uses the empty-map default; a null OAuth root follows
+the loader's existing default normalization. Neither bypasses validation of a
+declared reviewer pool. Malformed legacy identity values fail through structured
+config errors, including at the raw-loader seam. Test fixtures may call
+`resetPoolConfigConflictWarnings()` from `src/pool-config-conflict.mjs` to begin
+a fresh warning scope; ordinary config reloads retain process deduplication.
 A validated
 holder/model fingerprint fences readiness; a changed declaration needs a new
 pass. Existing reviews retain their original lease. Explicit descriptors must

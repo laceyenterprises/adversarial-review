@@ -26,6 +26,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { resetPoolConfigConflictWarnings } from '../src/pool-config-conflict.mjs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -261,6 +262,8 @@ function tokenPoolPlanFixture(t, { oauth = {}, identities, local = {} } = {}) {
 }
 
 test('ITPPOOLCONFLICT-02: builder-only conflicts preserve legacy holders and warn once per key across pools', t => {
+  resetPoolConfigConflictWarnings();
+  t.after(resetPoolConfigConflictWarnings);
   const builder = { token_accounts: { 'fixture-builder': {
     family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
   } }, identity_token_pools: { codex: ['fixture-builder'] } };
@@ -286,6 +289,7 @@ test('ITPPOOLCONFLICT-02: builder-only conflicts preserve legacy holders and war
 
 test('ITPPOOLCONFLICT-02: invalid unrelated pools preserve legacy holders without weakening ordinary cached reads', t => {
   for (const oauth of [
+    { token_accounts: { 'fixture-builder': {} } },
     { token_accounts: { 'fixture-builder': {} }, identity_token_pools: { codex: ['fixture-builder'] } },
     { identity_token_pools: { codex: ['fixture-missing'] } },
   ]) {
@@ -324,6 +328,8 @@ test('ITPPOOLCONFLICT-02: adding a reviewer declaration restores full validation
 });
 
 test('ITPPOOLCONFLICT-02: declared reviewer pools still validate accounts, membership and legacy holder order', t => {
+  resetPoolConfigConflictWarnings();
+  t.after(resetPoolConfigConflictWarnings);
   const identities = ['fixture-login-a', 'fixture-login-b'];
   const accounts = Object.fromEntries(identities.map((holder_user, index) => [`fixture-agy-${index}`, {
     family: 'gemini', holder_user, concurrency: 1, allowed_models: ['gemini-test'],

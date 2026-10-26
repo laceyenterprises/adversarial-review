@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { checkItemState, latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
+import { checkInfrastructureReason, checkSteps, hasMissingActionsEvidence, infrastructureEvidencePending, enrichCiInfrastructureEvidence, infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -49,6 +50,8 @@ function normalizeCheckForRecord(item) {
     state: normalizeCheckState(item) || 'UNKNOWN',
     workflowName: item?.workflowName || null,
     detailsUrl: item?.detailsUrl || item?.targetUrl || null,
+    ...(checkInfrastructureReason(item) || Array.isArray(checkSteps(item)) ? { steps: checkSteps(item),
+      output: item.output, annotations: item.job?.annotations || item.annotations } : {}),
   };
 }
 
@@ -148,7 +151,16 @@ async function inspectRemediationCiRegression({
     };
   }
 
-  const summary = summarizeExternalChecks(payload.statusCheckRollup, { env, cfg });
+  payload.statusCheckRollup = await enrichCiInfrastructureEvidence({ rollup: payload.statusCheckRollup,
+    repo, headSha: payload.headSha, execFileImpl, env });
+  const summary = { ...summarizeExternalChecks(payload.statusCheckRollup, { env, cfg }), rollup: payload.statusCheckRollup };
+  if (infrastructureOnlyFailures(summary.failedChecks)) return {
+    ...summary, state: 'infrastructure', headSha: payload.headSha, infrastructureOnly: true,
+  };
+  if (infrastructureEvidencePending(summary.failedChecks)
+    && hasMissingActionsEvidence(summary.failedChecks, repo)) return {
+    ...summary, state: 'infrastructure', headSha: payload.headSha, infrastructureEvidencePending: true,
+  };
   if (!summary.rollupKnown) {
     return {
       state: 'unknown',

@@ -293,7 +293,7 @@ test('REMEDBRANCH-01: confirmed publication clears publication failure while awa
   assert.equal(stale.state, 'pending');
 });
 
-test('REMEDBRANCH-01: reconciliation stops committed-unpublished at the round cap and retains its workspace', async t => {
+for (const infrastructure of [false, true]) test(`REMEDBRANCH-01: committed-unpublished retains its workspace, infrastructure=${infrastructure}`, async t => {
   const options = input(t);
   const savedEnv = { ...process.env };
   t.after(() => { for (const key of ['HQ_ROOT', 'ADV_WITH_HQ_INTEGRATION', 'ADV_REPLIES_ROOT', 'AGENT_OS_DEPLOY_CHECKOUT']) {
@@ -321,7 +321,10 @@ test('REMEDBRANCH-01: reconciliation stops committed-unpublished at the round ca
   const spawned = markFollowUpJobSpawned({ rootDir: options.rootDir, jobPath: claimed.jobPath,
     worker: { processId: 12345, workspaceDir, outputPath, replyPath, model: 'codex' } });
   const result = await reconcileFollowUpJob({ rootDir: options.rootDir, job: spawned.job, jobPath: spawned.jobPath,
-    isWorkerRunning: () => false, resolvePRLifecycleImpl: async () => null,
+    isWorkerRunning: () => false, resolvePRLifecycleImpl: async () => infrastructure
+      ? { source: 'live', prState: 'open', headSha: claimed.job.revisionRef } : null,
+    inspectRemediationCiRegressionImpl: async () => ({ state: 'infrastructure', headSha: claimed.job.revisionRef,
+      failedChecks: [{ name: 'unit', state: 'FAILURE', steps: [] }] }),
     execFileImpl: async () => ({ stdout: `${commitSha}\n` }),
     postCommentImpl: async () => ({ posted: true }), log: { log() {}, warn() {}, error() {} } });
   assert.equal(result.action, 'stopped', JSON.stringify(result.job.failure));

@@ -204,3 +204,18 @@ test('inspectRemediationCiRegression keeps missing rollups unknown', async () =>
   assert.equal(result.state, 'unknown');
   assert.equal(result.headSha, 'abc123');
 });
+
+test('CIBLOCKINFRA-01 inspection separates infrastructure from executed failures', async () => {
+  for (const steps of [[], [{ name: 'test', conclusion: 'failure', status: 'completed' }]]) {
+    const result = await inspectRemediationCiRegression({
+      repo: 'example/fixture', prNumber: 42, cfg: EMPTY_CFG,
+      execFileImpl: async () => ({ stdout: JSON.stringify({
+        headRefOid: 'a'.repeat(40),
+        statusCheckRollup: [{ name: 'unit', conclusion: 'FAILURE', steps }],
+      }) }),
+    });
+    assert.equal(result.state, steps.length ? 'failed' : 'infrastructure');
+    assert.equal(result.infrastructureOnly === true, !steps.length);
+    assert.deepEqual(result.failedChecks[0].steps, steps);
+  }
+});

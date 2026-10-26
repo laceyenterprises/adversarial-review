@@ -1,3 +1,4 @@
+import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
@@ -122,12 +123,37 @@ export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
   }));
 }
 
-// Only an all-cancelled non-green set is recoverable. Missing contexts, pending
-// jobs and real failures remain with their existing admission/repair paths.
-export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
-  failedChecks = [], pendingChecks = [], execFileImpl = execFileAsync, env = process.env, signal, deliverAlertImpl = deliverAlert }) {
+// Cancelled checks and independently verified zero-step failures share the
+// existing per-head workflow budget. Pending/missing contexts never rerun.
+export async function recoverInfrastructureChecks(options) {
+  const { repo, headSha, failedChecks, pendingChecks = [], rootDir,
+    execFileImpl = execFileAsync, env = process.env, signal } = options;
+  if (!rootDir || !headSha || pendingChecks.length || !infrastructureOnlyFailures(failedChecks)) return false;
+  const targets = failedChecks.map(check => /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)(?:\?.*)?$/.exec(check.detailsUrl || ''));
+  if (targets.some(match => !match || match[1].toLowerCase() !== repo.toLowerCase())) return false;
+  // Re-read latest jobs before any side effect: old rollups/cached zero-step
+  // evidence cannot authorize rerunning a newer attempt that actually executed.
+  for (const runId of new Set(targets.map(match => match[2]))) {
+    const { stdout } = await execGhWithRetry({ execFileImpl, env, signal,
+      args: ['api', `repos/${repo}/actions/runs/${runId}/jobs?filter=latest&per_page=100`] });
+    const jobs = JSON.parse(stdout).jobs;
+    if (!Array.isArray(jobs)) return false;
+    const required = targets.filter(match => match[2] === runId);
+    if (!required.every(match => jobs.some(job => String(job.id) === match[3]
+      && job.head_sha === headSha && infrastructureOnlyFailures([job])))) return false;
+  }
+  return recoverFailedChecks({ ...options, infrastructure: true });
+}
+
+export async function recoverCancelledChecks(options) {
+  return recoverFailedChecks(options);
+}
+
+async function recoverFailedChecks({ rootDir, repo, prNumber, headSha,
+  failedChecks = [], pendingChecks = [], infrastructure = false, execFileImpl = execFileAsync, env = process.env, signal, deliverAlertImpl = deliverAlert }) {
   if (!headSha || !rootDir || !failedChecks.length || pendingChecks.length
-    || failedChecks.some(check => check.state !== 'CANCELLED')) return false;
+    || (infrastructure ? !infrastructureOnlyFailures(failedChecks)
+      : failedChecks.some(check => check.state !== 'CANCELLED'))) return false;
   for (const check of failedChecks) {
     const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/|$)/.exec(check.detailsUrl || '');
     if (!match || match[1].toLowerCase() !== repo.toLowerCase()) return false;
@@ -146,12 +172,15 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
   const errors = snapshots.filter(snapshot => snapshot.status === 'rejected');
   if (errors.length) throw errors[0].reason;
   const runs = new Map(snapshots.map(snapshot => snapshot.value));
+  const settledConclusion = run => infrastructure
+    ? ['failure', 'timed_out', 'action_required', 'stale', 'startup_failure', 'cancelled'].includes(run.conclusion)
+    : run.conclusion === 'cancelled';
   for (const run of runs.values()) {
     if (run.head_sha !== headSha || !Number.isInteger(run.run_attempt) || run.run_attempt < 1) return false;
-    if (run.conclusion !== 'cancelled'
+    if (!settledConclusion(run)
       && !['queued', 'in_progress', 'waiting', 'requested', 'pending'].includes(run.status)) return false;
   }
-  if ([...runs.values()].some(run => run.conclusion !== 'cancelled')) return true;
+  if ([...runs.values()].some(run => !settledConclusion(run))) return true;
   for (const check of failedChecks) {
     const runId = /\/actions\/runs\/(\d+)/.exec(check.detailsUrl)[1];
     const run = runs.get(runId);
@@ -159,8 +188,8 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
       runId, attempt: run.run_attempt, headSha, check: check.name, requestedAt: new Date().toISOString(),
     });
     if (claim.record.runId !== runId || run.run_attempt > claim.record.attempt) {
-      await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `required check cancelled again: ${check.name}`,
-        dedupeKey: 'required-checks-cancelled-again', env, signal, deliverAlertImpl });
+      await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `required check ${infrastructure ? 'infrastructure-blocked' : 'cancelled'} again: ${check.name}`,
+        dedupeKey: infrastructure ? 'required-checks-infrastructure-again' : 'required-checks-cancelled-again', env, signal, deliverAlertImpl });
       continue;
     }
     // The workflow claim controls the side effect, even when a check identity

@@ -1,5 +1,32 @@
 # Data Model - Hammer Stop Hold
 
+
+## Actions infrastructure recovery (CIBLOCKINFRA-01)
+
+Closure preflight calls the evaluator only for stops already classified as
+infrastructure. Ordinary executed CI and refusal-bearing stops retain the
+closer's complete review baseline; preflight cannot seed or release that hold.
+
+`isInfrastructureStop` also recognizes CI-only stop reasons when every
+recorded failure has shared zero-step or billing/quota evidence. Unknown or
+real failures and non-CI refusal reasons retain the ordinary hold. The audit
+reader preserves failed-check evidence and never lets a later infrastructure
+stop erase an earlier real deterministic refusal.
+
+Infrastructure-only CI creates no hold or page. Required-check greenness
+continues to refuse merge. On an open current head, successful replacements
+for every failed check release an existing CI hold with
+`releasedBy: ['ci-infrastructure-recovered']`. The hold retains
+`failedChecks`, `stopKey` and `releasedAt`; the event
+`ama_closer.ci_infrastructure_stop_released` names `checks-executed-again`.
+Historical job URLs may supply missing exact-head steps through one bounded
+read. Unproven historical stops remain held.
+
+Only positively identified infrastructure dispatch charges are credited
+through the existing hammer ledger's per-budget refunds. A real stop in the
+same series is preserved. Packaging-stop behavior and its retry charges are
+unchanged.
+
 **Owner:** AMA closer retry admission
 **Store:** `data/follow-up-jobs/hammer-stop-hold/`
 **Source of truth:** `src/ama/hammer-stop-hold.mjs`

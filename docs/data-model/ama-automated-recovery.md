@@ -1,5 +1,21 @@
 # Data Model - AMA Automated Recovery
 
+## Actions infrastructure (CIBLOCKINFRA-01)
+
+The shared decision's CI observer, backed by `isInfrastructureStop` and
+recorded failed-check evidence, does not increment `attempts`, start a
+stall timer or arm an exhaustion event during an Actions infrastructure block.
+
+On successful current-head replacements, a historical automated stop clears
+only if the audited stop series is entirely infrastructure-only and its unique
+launch count equals this recovery receipt's charged attempts. Unknown or mixed
+history retains the cap/event. `ciInfrastructureRecovery` records
+`reason: checks-executed-again`, `stopKey`, `refundedAt`, the previous
+`attempts` and previous `event`. Recovery is idempotent per stop key;
+existing page receipts are retained. Ordinary merge and dispatch gates still
+apply after recovery.
+
+
 **Owner:** AMA watcher recovery router
 **Store:** `data/follow-up-jobs/ama-automated-recovery/`
 **Source of truth:** `src/ama/automated-recovery.mjs`

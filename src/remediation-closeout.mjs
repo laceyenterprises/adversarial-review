@@ -56,6 +56,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   }
   const checksValue = ciGate && ciGate.headSha === head
     ? { conclusion: ({ green: 'SUCCESS', failed: 'FAILURE', pending: 'PENDING' })[ciGate.state] || 'PENDING',
+      ...(ciGate.infrastructureOnly ? { infrastructureOnly: true, failedChecks: ciGate.failedChecks } : {}),
       ...(ciGate.runnerless ? { runnerless: ciGate.runnerless } : {}) }
     : { conclusion: 'PENDING' };
   const checkReadState = ciGate?.headSha !== head ? 'unknown'

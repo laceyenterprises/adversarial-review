@@ -32,3 +32,20 @@ test('fetchMergeAgentCandidate honors the injected branch-protection reader', as
   });
 });
 
+
+test('CIBLOCKINFRA-01 candidate retains bounded exact-head job evidence for closure', async () => {
+  const calls = [];
+  const candidate = await fetchMergeAgentCandidate('example/fixture', 42, {
+    preparedSnapshot: { state: 'OPEN', headRefOid: 'a'.repeat(40),
+      statusCheckRollup: [{ name: 'unit', conclusion: 'FAILURE',
+        detailsUrl: 'https://github.com/example/fixture/actions/runs/10/job/1' }] },
+    guardStackedBaseImpl: async () => null,
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      return { stdout: JSON.stringify({ jobs: [{ id: 1, head_sha: 'a'.repeat(40), conclusion: 'failure', steps: [] }] }) };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(candidate.statusCheckRollup[0].steps, []);
+  assert.equal(candidate.checksConclusion, 'FAILURE', 'infrastructure still refuses merge');
+});

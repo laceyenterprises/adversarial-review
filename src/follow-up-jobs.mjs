@@ -1,3 +1,4 @@
+import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
 import { MAX_BRANCH_RESOLUTION_ATTEMPTS, resolveFollowUpBranch } from './follow-up-branch.mjs';
 import { captureFindingRemediationSafe } from './finding-remediation-capture.mjs';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
@@ -3524,6 +3525,40 @@ function requeueFollowUpJobForNextRound({
   };
 
   return moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+}
+
+// CIBLOCKINFRA-01: proof is revalidated under the queue writer lock.
+export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now, recordedFailures, failedChecks }) {
+  return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+    const job = readFollowUpJob(jobPath);
+    const code = job.remediationPlan?.stop?.code || job.failure?.code;
+    const recordedHead = job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha
+      || job.completion?.workerPushedHeadSha || job.revisionRef;
+    if (String(job.repo || '').toLowerCase() !== String(repo || '').toLowerCase()
+      || Number(job.prNumber) !== Number(prNumber)
+      || !['stopped', 'failed'].includes(job.status) || recordedHead !== headSha
+      || !CI_INFRASTRUCTURE_STOP_REASONS.has(code)
+      || (job.failure?.code && !CI_INFRASTRUCTURE_STOP_REASONS.has(job.failure.code))
+      || JSON.stringify(recordedFailures) !== JSON.stringify(recordedCiFailures(job))
+      || !infrastructureOnlyFailures(failedChecks)) return null;
+    const round = Number(job.remediationPlan?.currentRound || 0);
+    const result = moveFollowUpJob(rootDir, jobPath, 'pending', {
+      ...job, status: 'pending', revisionRef: headSha, pendingAt: now, claimedAt: null, claimedBy: null,
+      failure: null, stoppedAt: null, failedAt: null, completedAt: null, completion: null,
+      remediationWorker: null, reReview: null,
+      remediationPlan: { ...job.remediationPlan, currentRound: Math.max(0, round - 1),
+        stop: null, stopReason: null, retryAfter: now,
+        retryHistory: [...(job.remediationPlan.retryHistory || []), {
+          round, requeuedAt: now, retryAfter: now, retryReason: 'Infrastructure-only CI stop released after checks executed green.',
+          retryMetadata: { code: 'ci-infrastructure-refund', reason: 'checks-executed-again', headSha,
+            failure: job.failure, stop: job.remediationPlan.stop, failedChecks },
+        }],
+        nextAction: { type: 'consume-pending-round', round: Math.max(1, round), requestedAt: now,
+          requestedBy: 'ci-infrastructure-recovery', reason: 'Infrastructure-only CI stop released.' },
+      },
+    });
+    return result;
+  });
 }
 
 function stopFollowUpJob({

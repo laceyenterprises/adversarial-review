@@ -1071,6 +1071,20 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+CIBLOCKINFRA-01 keeps zero-step and Actions billing/quota failures in a bounded,
+visible CI wait without spending remediation rounds or arming automated stops.
+One durable workflow/head rerun has a CI recovery owner; repeated blocks page
+the operator. Proven publications and unpublished commits precede holds; stale
+waits clear under lock and max-rounds stops stay charged.
+Successful current-head replacements release only infrastructure-only old stops,
+with one-time audit refunds; real and mixed failures keep their normal handling.
+The existing disposable `smv-refusals` smoke covers the wait, bounded rerun, recovery and real
+failure distinction. Focused offline evidence is in
+`test/ci-infrastructure.test.mjs`; runtime owners verify the recorded wait and
+refund reasons after normal deployment using the
+[runbook](docs/RUNBOOK-ama-closure.md#actions-billingquota-blocks-ciblockinfra-01).
+
+
 RCV-08 adds permanent no-work charge/refund receipts and serialized hammer budget
 accounting. The existing launch-terminal reconciliation edge now requires the
 RCV-07 versioned verdict for full refunds; terminal PR and hammer review authority
@@ -1916,7 +1930,9 @@ Disposable halt files return distinct
 restores eligibility without reloading. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).
 A fake GitHub signed-commit policy refuses the unsigned head through the real
-daemon merge attempt. The real consumer stops exhausted rounds and operator-only
+daemon merge attempt. Infrastructure-only CI waits keep the round uncharged;
+successful replacements recover failed/stopped synthetic jobs, while executed
+failing steps retain ordinary CI failure classification. The real consumer stops exhausted rounds and operator-only
 findings; the latter page and comment once without spawning a remediator, after
 lifecycle admission. Packaging stops preserve a deterministic refusal, and
 ownerless recovery stays fenced even when only packaging audit history remains;
@@ -2077,19 +2093,20 @@ stateDiagram-v2
     s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds
     s0 --> s3: follow-up-job.04 claim failure
     s0 --> s5: follow-up-job.05 operator cancellation
-    s1 --> s2: follow-up-job.06 validated worker reply
+    s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
     s1 --> s3: follow-up-job.07 worker failure
     s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
-    s1 --> s0: follow-up-job.10 transient retry
+    s1 --> s0: follow-up-job.10 transient retry or unpublished infrastructure-only CI execution recovery without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
-    s3 --> s0: follow-up-job.12 explicit retrigger
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts
+    s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
+    s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]
@@ -2173,7 +2190,7 @@ stateDiagram-v2
     state "done" as s6
     [*] --> s1: closure-owner.01 empty-diff closure recovery until remote termination
     [*] --> s1: closure-owner.02 current automatic stops or exhaustion retain closure-recovery actor unless a newer eligible exact-head review selects daemon merge
-    [*] --> s0: closure-owner.03 project shared next action: wait
+    [*] --> s0: closure-owner.03 project shared next action: wait, including infrastructure-only CI without hammer or automated-stop charge
     [*] --> s1: closure-owner.04 project shared next action: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
     [*] --> s2: closure-owner.05 project shared next action: review (including a head-bound shared rereview-exact-head decision before historical review ceiling or hammer ownership)
     [*] --> s3: closure-owner.06 project shared next action: remediation

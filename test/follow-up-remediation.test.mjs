@@ -13087,3 +13087,33 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     }
   });
 }
+
+test('CIBLOCKINFRA-01 no-progress completion waits on infrastructure-only CI without spending its round', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ci-infrastructure-completion-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { claimed } = makeQueuedJob(rootDir, { maxRemediationRounds: 2, repo: 'example/fixture', prNumber: 42, revisionRef: 'a'.repeat(40) });
+  const workspaceDir = path.join(rootDir, 'data/follow-up-jobs/workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(outputPath, 'CI could not execute.\n');
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath, spawnedAt: '2026-01-01T00:00:00.000Z',
+    worker: { processId: 8123, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir), outputPath: path.relative(rootDir, outputPath) },
+  });
+  const result = await reconcileFollowUpJob({
+    rootDir, ...spawned, now: () => '2026-01-01T00:01:00.000Z', isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: spawned.job.revisionRef }),
+    inspectRemediationCiRegressionImpl: async () => ({
+      state: 'infrastructure', headSha: spawned.job.revisionRef,
+      failedChecks: [{ name: 'unit', state: 'FAILURE', steps: [] }],
+    }),
+    execFileImpl: async () => { throw new Error('unexpected fixture command'); },
+  });
+  assert.equal(result.action, 'active');
+  assert.equal(result.reason, 'ci-infrastructure');
+  assert.equal(result.job.status, 'in_progress');
+  assert.equal(result.job.remediationPlan.stop, null);
+  assert.equal(summarizePRRemediationLedger(rootDir, result.job).completedRoundsForPR, 0);
+});

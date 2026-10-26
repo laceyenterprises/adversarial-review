@@ -1,3 +1,4 @@
+import { rememberCheckSteps } from '../ci-infrastructure.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
@@ -134,11 +135,12 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
         });
         if (signal?.aborted) return pending;
         const job = JSON.parse(stdout);
+        if (job.head_sha === headSha) rememberCheckSteps(item, job.steps);
         const failures = Array.isArray(job.steps) ? job.steps.filter(step => step.conclusion === 'failure') : [];
         const steps = failures.map(step => ({ name: step.name, conclusion: 'FAILURE' }));
         const gates = job.head_sha === headSha && job.conclusion === 'failure'
           ? operatorLabelGateFailures(steps, { env, cfg: { requiredCheckContexts: [] } }) : [];
-        entry = { gates, expiresAt: Infinity };
+        entry = { gates, steps: job.head_sha === headSha ? job.steps : undefined, expiresAt: Infinity };
       } catch {
         if (signal?.aborted) return pending;
         entry = { gates: [], inconclusive: true, expiresAt: Date.now() + FAILED_JOB_READ_TTL_MS };
@@ -146,6 +148,7 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
       if (cache.size >= MAX_JOB_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
       cache.set(key, entry);
     }
+    rememberCheckSteps(item, entry.steps);
     if (entry.inconclusive) return pending;
     if (!entry.gates.length) return none;
     expanded.push(...entry.gates.map(gate => ({ name: `${item.name}: ${gate.check}`, conclusion: 'FAILURE',

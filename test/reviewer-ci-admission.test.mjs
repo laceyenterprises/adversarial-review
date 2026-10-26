@@ -422,3 +422,17 @@ test('CIBLOCKHAM-02: completed pending-CI round uses its remaining remediation r
   assert.equal(result.job.remediationPlan.nextAction.round, 2);
   assert.equal(result.job.completion, null, 'the next round must not inherit the completion exception');
 });
+
+test('CIBLOCKINFRA-01 infrastructure red never requeues remediation or routes a hammer', async () => {
+  const result = await guardRereviewCiBeforeReviewer({
+    repo: 'example/fixture', prNumber: 42, passKind: 'rereview', reviewerHeadSha: 'a'.repeat(40),
+    inspectCiImpl: async () => ({ state: 'infrastructure', headSha: 'a'.repeat(40),
+      failedChecks: [{ name: 'unit', state: 'FAILURE', steps: [] }] }),
+    latestJobFinder: () => assert.fail('infrastructure cannot consume a round'),
+    requeueImpl: () => assert.fail('infrastructure cannot consume a round'),
+    log: silentLog(),
+  });
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, 'ci-infrastructure');
+  assert.equal(result.hammerOwner, undefined);
+});

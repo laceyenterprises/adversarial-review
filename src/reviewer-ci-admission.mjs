@@ -4,7 +4,7 @@ import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs'
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 import { isCompletedFinalRemediationJob } from './comment-only-final-round.mjs';
-import { recoverCancelledChecks } from './ci-recovery.mjs';
+import { recoverCancelledChecks, recoverInfrastructureChecks } from './ci-recovery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
 const CI_BLOCKED_REREVIEW_RECHECK_ENV = 'ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS';
@@ -140,6 +140,14 @@ async function guardRereviewCiBeforeReviewer({
         `${String(reviewerHeadSha).slice(0, 12)}.`
     );
     return { proceed: false, reason: 'ci-head-moved', ciGate };
+  }
+
+  if (state === 'infrastructure') {
+    try {
+      await recoverInfrastructureChecks({ rootDir, repo, prNumber, headSha: ciGate.headSha,
+        failedChecks: ciGate.failedChecks, pendingChecks: ciGate.pendingChecks, execFileImpl, env, deliverAlertImpl });
+    } catch (error) { log.warn?.(`[watcher] Infrastructure CI recovery unavailable: ${error.message}`); }
+    return { proceed: false, reason: 'ci-infrastructure', ciGate };
   }
 
   if (state === 'green') {

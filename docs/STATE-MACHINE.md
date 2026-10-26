@@ -1,5 +1,25 @@
 # Adversarial Review State Machine Notes
 
+
+## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
+
+CI-only failures with zero executed steps (including billing/quota annotations
+only when corroborated by zero-step evidence) select the bounded CI observer, including after remediation or
+hammer budget exhaustion. They remain red for merge eligibility.
+Remediation keeps an uncharged in-progress wait, then requeues the same round
+after checks execute. Proven publications complete first; legacy published waits
+complete on green without a new worker. Unpublished commits keep publication
+stops. Head movement/terminal PRs clear waits under lock. The existing CI
+recovery owner revalidates current jobs, reruns each workflow/head once, and
+pages once on a repeated block; conflicts retain rebase priority. Max-rounds
+stops never refund. Existing all-infrastructure failed/stopped records
+recover on successful current-head replacement checks, with an audited round
+refund. Closure uses `isInfrastructureStop`, creates no hold/page for these
+failures, and retires old infrastructure-only holds with matching dispatch
+credits. Real and mixed stops retain ordinary refusal behavior. See the
+[queue contract](data-model/follow-up-jobs.md#actions-infrastructure-waits-ciblockinfra-01)
+and [hold contract](data-model/hammer-stop-hold.md#actions-infrastructure-recovery-ciblockinfra-01).
+
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 
 The existing `in_progress -> completed` follow-up transition now also accepts a

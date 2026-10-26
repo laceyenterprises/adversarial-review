@@ -1,3 +1,7 @@
+import { isInfrastructureStop, readHammerStopForHead, readHammerStopHoldForHead } from './hammer-stop-hold.mjs';
+import { resolveHqRoot } from '../hq-root.mjs';
+import { summarizeExternalChecks } from '../remediation-ci-regression.mjs';
+import { checksExecutedAgain } from '../ci-infrastructure.mjs';
 // AMAFIND-01: recovery owns no merge authority. Every hammer retry re-enters
 // the ordinary closer gates and lease; a rereview uses the review-state CAS.
 import fsExt from 'fs-ext';
@@ -100,6 +104,37 @@ async function recoverAmaAutomationLocked({
       }
     }
     return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state, nextAction: selected };
+  }
+  const checks = readClosureNextAction(result)?.snapshot?.observations?.checks?.value;
+  const failures = checks?.failedChecks || summarizeExternalChecks(checks?.rollup, {
+    cfg: { requiredCheckContexts: [] },
+  }).failedChecks;
+  if (selected.action === 'wait-for-CI' && isInfrastructureStop({ reason: 'ci-not-green', failedChecks: failures })) {
+    save();
+    return waiting('ci-infrastructure');
+  }
+  // Historical recovery credits only a fully evidenced infrastructure-only
+  // series. Unknown or mixed attempt history cannot reset this separate cap.
+  if (checks?.conclusion === 'SUCCESS') {
+    let stop = readHammerStopForHead({ hqRoot: resolveHqRoot(), repo, prNumber, headSha, logger });
+    const released = stop && readHammerStopHoldForHead({ rootDir, repo, prNumber, headSha, stopKey: stop.stopKey });
+    if (released?.releasedBy?.includes('ci-infrastructure-recovered')) {
+      stop = { ...stop, failedChecks: released.failedChecks,
+        refundStops: stop.refundStops.map(item => item.stopKey === stop.stopKey
+          ? { ...item, ciInfrastructureOnly: true } : item) };
+    }
+    const stops = stop?.refundStops || [];
+    if (isInfrastructureStop(stop) && checksExecutedAgain(checks.rollup, stop.failedChecks)
+      && stops.length > 0 && stops.every(item => item.ciInfrastructureOnly)
+      && state.attempts === new Set(stops.map(item => item.launchRequestId).filter(Boolean)).size
+      && state.ciInfrastructureRecovery?.stopKey !== stop.stopKey) {
+      state.ciInfrastructureRecovery = { reason: 'checks-executed-again', stopKey: stop.stopKey,
+        refundedAt: new Date(now()).toISOString(), attempts: state.attempts, event: state.event || null };
+      state.attempts = 0;
+      delete state.event;
+      delete state.blockedSince;
+      save();
+    }
   }
   // While a requested pass owns the row, don't consume retries or start HAM.
   const reviewStamp = String(reviewStateRow?.posted_at || reviewStateRow?.reviewer_session_uuid || 'unobserved');

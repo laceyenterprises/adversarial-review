@@ -31,6 +31,7 @@ import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
 import { normalizeLaneRoutes } from './config-lane-routes.mjs';
+import { extendModuleSchema, freezeSchema } from './config-module-schema.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
 
@@ -319,18 +320,10 @@ const OSG_SCHEMA = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json'
 // derive validation rules from configuration values at runtime.
 const PYTHON_MODULE_SCHEMA = JSON.parse(readFileSync(new URL('./python-module-schema.v1.json', import.meta.url), 'utf8'));
 
-function extendModuleSchema(target, additions) {
-  for (const [key, value] of Object.entries(additions)) {
-    if (target[key] && typeof value === 'object' && !Array.isArray(value)) {
-      extendModuleSchema(target[key], value);
-    } else {
-      target[key] = structuredClone(value);
-    }
-  }
-  return target;
-}
+let cachedSchemaV1;
 
 function schemaV1() {
+  if (cachedSchemaV1) return cachedSchemaV1;
   const workerClassVaultSchema = {
     __type: TYPE_DICT,
     __strict: true,
@@ -350,7 +343,7 @@ function schemaV1() {
       },
     },
   };
-  return extendModuleSchema({
+  return cachedSchemaV1 = freezeSchema(extendModuleSchema({
     __type: TYPE_DICT,
     __strict: true,
     __keys: {
@@ -3771,7 +3764,7 @@ function schemaV1() {
         },
       },
     },
-  }, { __keys: PYTHON_MODULE_SCHEMA });
+  }, { __keys: PYTHON_MODULE_SCHEMA }));
 }
 
 // -------- Env alias table --------------------------------------------------
@@ -4991,7 +4984,8 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
     );
   }
   if (typeof value === 'number') {
-    if (schema.__min !== undefined && value < schema.__min) {
+    if (schema.__min !== undefined && value < schema.__min
+      && !(value === 0 && schema.__allow_zero === true)) {
       throw new AgentOSConfigError(
         `${keyPath}: value ${value} below minimum ${schema.__min}`,
         {
@@ -5002,7 +4996,7 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
         },
       );
     }
-    if (schema.__max !== undefined && value > schema.__max) {
+    if (schema.__max !== undefined && schema.__enforceMax !== false && value > schema.__max) {
       throw new AgentOSConfigError(
         `${keyPath}: value ${value} above maximum ${schema.__max}`,
         {
@@ -5565,12 +5559,12 @@ function buildDefaultsDict(schema) {
   const out = {};
   for (const [key, child] of Object.entries(schema.__keys || {})) {
     if (key === 'version') continue;
-    if (child.__skip_global_default_tree) continue;
+    if (child.__skip_global_default_tree || child.__alias_of) continue;
     if (child.__type === TYPE_DICT) {
       const nested = buildDefaultsDict(child);
       out[key] = nested;
     } else if (Object.prototype.hasOwnProperty.call(child, '__default')) {
-      out[key] = child.__default;
+      out[key] = structuredClone(child.__default);
     }
   }
   return out;
@@ -5692,6 +5686,26 @@ function* flattenSchemaLeaves(doc, schema, path = []) {
     if (key.startsWith('__')) continue;
     yield* flattenSchemaLeaves(value, keys[key], [...path, key]);
   }
+}
+
+function schemaAliasTarget(schema, key) {
+  return schemaLeaf(schema, key)?.__alias_of || key;
+}
+
+function* canonicalSchemaLeaves(doc, schema, source) {
+  const leaves = new Map();
+  for (const entry of flattenSchemaLeaves(doc, schema)) {
+    const target = schemaAliasTarget(schema, entry.dotted);
+    const prior = leaves.get(target);
+    if (prior && !sameValue(prior.value, entry.value)) {
+      throw new AgentOSConfigError(
+        `${source}: schema alias conflict — ${prior.dotted} and ${entry.dotted}; set one only`,
+        { key: target, source, expected: 'matching values across aliased schema keys' },
+      );
+    }
+    leaves.set(target, { ...entry, path: target === entry.dotted ? entry.path : target.split('.') });
+  }
+  for (const [dotted, entry] of leaves) yield { ...entry, dotted };
 }
 
 const APP_ENV_SUFFIXES = {
@@ -5951,13 +5965,13 @@ export class AgentOSConfig {
   }
 
   get(key, defaultValue = null) {
-    const result = getLeaf(this.values, key);
+    const result = getLeaf(this.values, schemaAliasTarget(this.schema, key));
     if (result === MISSING) return defaultValue;
     return result;
   }
 
   resolutionTrace(key) {
-    const entries = this._trace[key] || [];
+    const entries = this._trace[schemaAliasTarget(this.schema, key)] || [];
     return entries.map((e) => ({ source: e.source, value: e.value, path: e.path }));
   }
 
@@ -6198,7 +6212,7 @@ function loadConfigImpl({
       }
       moduleAliases[moduleKey] = canonicalKey;
     }
-    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
+    for (const { dotted, path, value } of canonicalSchemaLeaves(validated, schema, rawPath)) {
       setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: `module:${rawPath}`,
@@ -6221,7 +6235,7 @@ function loadConfigImpl({
       warnUnknownOnce: tolerateCheckedInUnknown,
       droppedUnknownKeys: runtimeDroppedUnknownKeys,
     });
-    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
+    for (const { dotted, path, value } of canonicalSchemaLeaves(validated, schema, topPathResolved)) {
       if (dotted === 'version') continue;
       setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
@@ -6271,7 +6285,7 @@ function loadConfigImpl({
         if (!(moduleKey in moduleAliases)) moduleAliases[moduleKey] = canonicalKey;
       }
     }
-    for (const { dotted, path, value } of flattenSchemaLeaves(validatedLocal, schema)) {
+    for (const { dotted, path, value } of canonicalSchemaLeaves(validatedLocal, schema, local)) {
       if (dotted === 'version') continue;
       setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
@@ -6306,12 +6320,13 @@ function loadConfigImpl({
       value = rawValue;
     }
     value = checkLeaf(value, leaf, key, `env:${winning}`);
+    const target = schemaAliasTarget(schema, key);
     if (info.writePath) {
-      setLeafPath(merged, info.writePath, value, { dottedKey: key });
+      setLeafPath(merged, info.writePath, value, { dottedKey: target });
     } else {
-      setLeaf(merged, key, value);
+      setLeaf(merged, target, value);
     }
-    (trace[key] = trace[key] || []).push({
+    (trace[target] = trace[target] || []).push({
       source: `env:${winning}`,
       value,
       path: null,
@@ -6329,8 +6344,9 @@ function loadConfigImpl({
         );
       }
       const checked = checkLeaf(value, leaf, key, 'cli');
-      setLeaf(merged, key, checked);
-      (trace[key] = trace[key] || []).push({
+      const target = schemaAliasTarget(schema, key);
+      setLeaf(merged, target, checked);
+      (trace[target] = trace[target] || []).push({
         source: 'cli',
         value: checked,
         path: null,

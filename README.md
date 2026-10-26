@@ -3234,4 +3234,21 @@ The parent repository's cross-reader tests exercise committed effective module
 cascades against both readers. Session-ledger shorthand is normalized by its
 existing consumer adapter before validation; node identity is supplied by that
 layer, while its default remains owned by Python. The schema mirror does not
-load a parent checkout or infer validation rules from input values.
+load a parent checkout or infer validation rules from input values. Its merged
+schema is compiled once and frozen; each load receives independent mutable
+default values. Composition rejects unknown annotations, missing typeless
+parents and collisions with existing leaves, including nullable defaults.
+
+Mirrored numeric minima are enforced, except that `__allow_zero: true` permits
+zero as a disable value. Python enforces maxima only with `__enforce_max: true`;
+the packaged mirror spells this `__enforceMax`. Bare mirror maxima are advisory,
+while existing Node consumer schemas retain their hard maxima. Python's
+`__enforce_min` and `__description` annotations are informational; a declared
+minimum is always enforced. Schema `__alias_of` routes file-layer and CLI writes,
+getters and resolution traces to the canonical owner, omits duplicate defaults,
+and rejects conflicting alias/canonical values within one file. For example,
+`worker_pool.merge_agent.failure_recovery_worker_class` resolves through
+`roles.merge_agent_failure_recovery.worker_class` across the normal cascade.
+These loader-contract details also belong in the parent Agent OS
+`projects/cfg/LOADER-CONTRACT.md`; that superproject document is outside this
+repository's remediation diff.

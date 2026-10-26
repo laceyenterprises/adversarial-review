@@ -2229,11 +2229,8 @@ test('worker_pool.memory.dynamic legacy env aliases resolve through Node schema'
 });
 
 test('versioned config.local.yaml tolerates unknown nested worker_pool keys and reads the mirrored one', () => {
-  // worker_pool is now a known partial root; in operator-local config.local.yaml
-  // unknown nested worker_pool.* keys (dispatch/memory.pressure/etc., owned by
-  // the Python CFG reader) are tolerated-dropped (nested-unknown drop, debug
-  // log — NOT a top-level foreign warn), while mirrored deep_reconcile and
-  // memory.dynamic keys are read.
+  // Local unknown worker_pool keys are dropped, while all mirrored siblings
+  // (including memory.pressure after OSGCFGPARITY-01) are validated and read.
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2255,6 +2252,7 @@ test('versioned config.local.yaml tolerates unknown nested worker_pool keys and 
         memory:
           pressure:
             projected_headroom_floor_mb: 4096
+            unknown_pressure_key: true
           dynamic:
             enabled: true
     `);
@@ -2262,7 +2260,8 @@ test('versioned config.local.yaml tolerates unknown nested worker_pool keys and 
     assert.equal(cfg.get('roots.hq'), '/from-local');
     assert.equal(cfg.get('worker_pool.anything'), null);
     assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
-    assert.equal(cfg.get('worker_pool.memory.pressure.projected_headroom_floor_mb'), null);
+    assert.equal(cfg.get('worker_pool.memory.pressure.projected_headroom_floor_mb'), 4096);
+    assert.equal(cfg.get('worker_pool.memory.pressure.unknown_pressure_key'), null);
     assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -5047,7 +5046,7 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   // adversarial-review loader, ...). worker_pool is now a KNOWN partial root in
   // this reader; its unknown nested keys (owned by the Python CFG reader) are
   // tolerated-dropped per-key under tolerateNestedUnknownLocalKeys, while
-  // mirrored deep_reconcile and memory.dynamic are validated and kept.
+  // mirrored deep_reconcile, memory.pressure and memory.dynamic are kept.
   const out = validateSchema(
     {
       version: 1,
@@ -5055,7 +5054,7 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
         anything: true,
         dag: { autowalk: { deep_reconcile: true } },
         memory: {
-          pressure: { projected_headroom_floor_mb: 4096 },
+          pressure: { projected_headroom_floor_mb: 4096, unknown_pressure_key: true },
           dynamic: { enabled: true },
         },
         secrets_bus: {
@@ -5072,7 +5071,8 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.version, 1);
   assert.equal(out.worker_pool?.anything, undefined, 'unknown nested key dropped');
   assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
-  assert.equal(out.worker_pool?.memory?.pressure, undefined, 'unknown sibling subtree dropped');
+  assert.equal(out.worker_pool?.memory?.pressure?.projected_headroom_floor_mb, 4096);
+  assert.equal(out.worker_pool?.memory?.pressure?.unknown_pressure_key, undefined, 'unknown sibling key dropped');
   assert.equal(out.worker_pool?.memory?.dynamic?.enabled, true);
   assert.equal(out.worker_pool?.secrets_bus?.op_timeout_seconds, 20.0);
 });

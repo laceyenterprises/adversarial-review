@@ -1,4 +1,5 @@
 import { creditHammerDispatchBudgets, readHammerRetryCapLedger, updateHammerRetryCapLedger } from './hammer-retry-cap.mjs';
+import { meteredExecFile } from '../metered-gh.mjs';
 
 export const COMPANION_WAIT_REASONS = new Set(['companion-submodule-pr-unmerged', 'companion-float-pending', 'companion-submodule-float-pending']);
 // Normal all-submodule float backstop (24h), plus one hour of scheduling margin.
@@ -30,7 +31,7 @@ function repoFromUrl(value) {
 // The injected executor keeps all regression coverage fully offline.
 export async function probeCompanionWait({ repo, prNumber, headSha, prMetadata, stop, prior, execFileImpl }) {
   const get = async endpoint => {
-    const { stdout } = await execFileImpl('gh', ['api', endpoint], { timeout: 15_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['api', endpoint], { timeout: 15_000, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   };
   let companion = companionReference(stop.companionWait) || companionReference(prior?.companionWait);

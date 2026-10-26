@@ -203,3 +203,10 @@ exercise ledger are reviewed by the named operator. Record explicit approval
 through the existing rollout completion owner. Merging source or satisfying JSON
 does not complete operator approval. This procedure installs no live consumer,
 service restart, automated promotion or new CI/smoke action.
+
+## After canary approval
+
+Proceed to the [whole-lane expansion and retirement walkthrough](finalization-queue-expansion-runbook.md)
+only after explicit operator approval. Expansion uses a separate private
+observation artifact and `--capability cutover`; it retains this canary record,
+the existing transfer/rollback contract and one release cycle of legacy support.

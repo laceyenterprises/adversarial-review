@@ -162,3 +162,6 @@ export { routeFinalizationWriter, createFinalizationLaneRouting } from './queue-
 export { openQueueStatus, readRoutingConfig, renderQueueStatus } from './queue-status.mjs';
 
 export { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, resolveQueueCanaryAdapter, readCanaryEvidence } from './queue-canary.mjs';
+
+export { createQueueCloserComposition, prepareQueueCloserDispatch, renderQueueCloserPrompt } from './queue-closer.mjs';
+export { readCutoverEvidence, resolveQueueCutoverAdapter } from './queue-cutover.mjs';

@@ -1,3 +1,4 @@
+import { readCutoverEvidence, resolveQueueCutoverAdapter } from './queue-cutover.mjs';
 // Read-only post-deploy observation. Never converges schema or claims a lane.
 import Database from 'better-sqlite3';
 import { readFileSync, realpathSync } from 'node:fs';
@@ -23,7 +24,7 @@ export { queueRuntimeBuild } from './queue-build.mjs';
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = new Date().toISOString(), load, configPath, capability, readConfig = readRoutingConfig } = {}) {
-  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false }, canary: { available: false } }, runtime: {
+  const result = { capabilities: { owner: { available: false }, handoff: { available: false }, admission: { available: false }, rebase: { available: false }, checks: { available: false }, merge: { available: false }, shadow: { available: false }, routing: { available: false }, canary: { available: false }, cutover: { available: false } }, runtime: {
     build: queueRuntimeBuild(), role: 'read-only-observer', pid: process.pid, observedAt: now, checkout: realpathSync(resolve(moduleDir, '../..')),
   }, observations: null };
   let db;
@@ -181,6 +182,17 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
       result.capabilities.routing = { available: true, adapter: adapter.name, schema: '20261029_finalization_queue_routing',
         selector: 'roles.adversarial.merge_authority.lane_routes', defaultExecutor: 'legacy' };
     } catch { result.capabilities.routing.reason = 'routing-store-config-or-adapter-unavailable'; }
+    if (capability === 'cutover') try {
+      if (!result.capabilities.routing.available || !result.capabilities.shadow.available) throw new Error('cutover prerequisites unavailable');
+      const adapter = resolveQueueCutoverAdapter({ db });
+      let evidence = null, evidenceReason;
+      try { evidence = readCutoverEvidence(rootDir); }
+      catch (error) { evidenceReason = error.code === 'ENOENT' ? 'operator-evidence-unavailable' : 'operator-evidence-unreadable-or-invalid'; }
+      const expansion = adapter.read({ evidence, cfg: readConfig({ rootDir, configPath }), build: result.runtime.build, now });
+      if (evidenceReason) expansion.pending = [evidenceReason];
+      result.rollout = { expansion };
+      result.capabilities.cutover = { available: true, adapter: adapter.name, schema: 'operator-cutover-observations-v1', noMutation: true };
+    } catch { result.capabilities.cutover.reason = 'cutover-store-config-or-evidence-incompatible'; }
     if (capability === 'canary') try {
       if (!result.capabilities.routing.available || !result.capabilities.shadow.available) throw new Error('canary prerequisites unavailable');
       const adapter = resolveQueueCanaryAdapter({ db });
@@ -208,6 +220,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
     result.capabilities.shadow.reason = result.capabilities.owner.reason;
     result.capabilities.routing.reason = result.capabilities.owner.reason;
     result.capabilities.canary.reason = result.capabilities.owner.reason;
+    result.capabilities.cutover.reason = result.capabilities.owner.reason;
   } finally { reference?.close(); db?.close(); }
   return result;
 }
@@ -216,9 +229,9 @@ export function queueProbeMain(argv = process.argv.slice(2), { stdout = process.
   let rootDir;
   let capability;
   let configPath;
-  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow|routing|canary --json [--root DIR] [--config FILE]';
+  const usage = 'usage: queue-probe.mjs --capability owner|handoff|admission|rebase|checks|merge|shadow|routing|canary|cutover --json [--root DIR] [--config FILE]';
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow', 'routing', 'canary'].includes(argv[i + 1])) {
+    if (argv[i] === '--capability' && ['owner', 'handoff', 'admission', 'rebase', 'checks', 'merge', 'shadow', 'routing', 'canary', 'cutover'].includes(argv[i + 1])) {
       capability = argv[i + 1];
       i++;
     }

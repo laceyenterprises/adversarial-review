@@ -19,7 +19,7 @@ Usage:
   adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
   adversarial-review finalization queue status --repo OWNER/REPO --base REF [--root DIR] [--config FILE] [--json]
   adversarial-review finalization queue receipt --repo OWNER/REPO --pr N [--base REF] [--root DIR] [--config FILE] [--json]
-  adversarial-review finalization queue probe --capability routing|canary --json [--root DIR] [--config FILE]
+  adversarial-review finalization queue probe --capability routing|canary|cutover --json [--root DIR] [--config FILE]
 `;
 
 function parseArgs(argv) {

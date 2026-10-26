@@ -4938,7 +4938,11 @@ its persisted `acquiredAt + dispatchTimeoutMs`. Uncertain process/ownership
 reads cannot extend that deadline; closure rechecks after a yielded ownership
 probe and proceeds through ordinary next-action admission in the same pass.
 The terminal receipt remains until normal exclusive reacquisition. Startup logs
-the released count. Current-process leases, review handoffs, live launches and
+the released count. CLAIMPIDSTALE-01 also treats legacy leases without
+`holderHost` as local, matching pending ownership and dispatch reclaim. A dead
+legacy watcher therefore leaves a terminal receipt and abandonment log at
+startup or the next closure evaluation rather than an indefinite in-flight wait.
+Current-process leases, review handoffs, live launches and
 operator holds retain their handling. Unresolved keyed dispatch intents stay
 fenced for native reconciliation; abandonment alone cannot prove no submission.
 `runStaleStateReaper` and its startup wrapper accept `captureProcessImpl` and

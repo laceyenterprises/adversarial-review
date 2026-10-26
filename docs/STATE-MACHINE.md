@@ -826,7 +826,8 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
-`abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID, or
+`abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID
+(including legacy hostless leases, CLAIMPIDSTALE-01), or
 `abandoned-timeout` strictly after its recorded dispatch timeout. Startup and
 periodic sweeps record the outcome and released count; closure re-evaluates the
 next action that pass, including after an uncertain ownership probe crosses the

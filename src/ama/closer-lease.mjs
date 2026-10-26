@@ -113,8 +113,10 @@ export function abandonedAmaCloserLeaseOutcome(lease, {
   isProcessAlive = isAmaCloserPidAlive, captureProcessImpl = captureCloserProcessSync,
 } = {}) {
   if (lease?.status !== PENDING || lease.lrqId) return null;
-  const local = lease.holderHost === host;
-  if ((!lease.holderHost || local) && Number(lease.watcherPid) === Number(livePid)) return null;
+  // Legacy hostless leases use the local PID namespace, as pending ownership
+  // and dispatch reclaim already do. Otherwise a dead watcher can retain them.
+  const local = !lease.holderHost || lease.holderHost === host;
+  if (local && Number(lease.watcherPid) === Number(livePid)) return null;
   const acquiredAt = Date.parse(lease.acquiredAt);
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
   const timeout = Number(lease.dispatchTimeoutMs);

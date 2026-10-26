@@ -1385,6 +1385,43 @@ for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
   }
 }
 
+for (const runSweep of [runStartupStaleStateReaper, runStaleStateReaper]) {
+  for (const scenario of ['dead', 'live', 'current', 'launch', 'intent']) {
+    test(`CLAIMPIDSTALE-01 ${runSweep.name} hostless holder ${scenario}`, async t => {
+      const rootDir = tempRoot();
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const lease = { repo: 'fixture/project', prNumber: 7, headSha: 'a'.repeat(40),
+        status: scenario === 'launch' ? 'dispatched' : 'pending',
+        lrqId: scenario === 'launch' ? 'lrq_fixture' : null, terminalOutcome: null,
+        acquiredAt: minutesAgo(1), updatedAt: minutesAgo(1), dispatchTimeoutMs: 120_000,
+        watcherPid: scenario === 'current' ? process.pid : DEAD_PID };
+      const path = writeLease(rootDir, lease);
+      if (scenario === 'intent') {
+        const recordPath = amaCloserDispatchFilePath(rootDir, lease);
+        mkdirSync(dirname(recordPath), { recursive: true });
+        writeFileSync(recordPath, JSON.stringify({ ...lease, state: 'dispatching' }));
+      }
+      const logs = [];
+      const result = await runSweep({ rootDir, now: NOW, env: {},
+        isProcessAlive: () => scenario === 'live',
+        captureProcessImpl: () => ({ startedAt: minutesAgo(2) }),
+        preReceiptIntentOptions: { readPullRequestStateImpl: async () => ({}),
+          readLegacyIntentLaunchesImpl: async () => ({ ok: false }),
+          processExecFileSyncImpl: () => { throw Error('synthetic unavailable scan'); } },
+        logger: { warn: text => logs.push(text), log() {}, error() {} } });
+      const after = JSON.parse(readFileSync(path, 'utf8'));
+      assert.equal(result.closerLeases.released, scenario === 'dead' ? 1 : 0);
+      if (scenario === 'dead') {
+        assert.equal(after.status, 'terminal');
+        assert.equal(after.terminalOutcome, 'abandoned-holder-dead');
+        assert.equal(after.watcherPid, lease.watcherPid, 'receipt retains the abandoned owner');
+        assert.equal(after.acquiredAt, lease.acquiredAt);
+        assert.ok(logs.some(text => text.includes('outcome=abandoned-holder-dead')));
+      } else assert.deepEqual(after, lease);
+    });
+  }
+}
+
 for (const scenario of ['dead', 'timeout', 'live', 'current', 'launch', 'handoff', 'intent']) {
   test(`CLOSERLEASEDEAD-01 startup sweep ${scenario}`, async t => {
     const rootDir = tempRoot();

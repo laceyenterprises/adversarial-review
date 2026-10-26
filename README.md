@@ -2237,8 +2237,10 @@ stateDiagram-v2
 
 CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
 launch-less pending leases with a confirmed absent/reused same-host watcher PID
-or an elapsed dispatch timeout. Startup sweeps log releases; closure resumes
-normal next-action admission that pass. Uncertain probes cannot refresh the
+or an elapsed dispatch timeout. CLAIMPIDSTALE-01 includes legacy leases without
+holderHost in local PID checks; dead owners leave the terminal receipt and
+abandonment log at startup or the next closure evaluation. Startup sweeps log
+releases; closure resumes normal next-action admission that pass. Uncertain probes cannot refresh the
 deadline. Existing submission fences, current-process leases, review handoffs,
 launch ownership and operator holds remain. Offline coverage is in the closer
 lease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke

@@ -118,8 +118,8 @@ status-only evidence remains unknown. No new durable states or fields are added.
 ## Abandoned pending holders (CLOSERLEASEDEAD-01)
 
 Startup/periodic sweeps and closure routing share the abandonment rule for
-`pending` leases without `lrqId`. A matching `holderHost` permits a local PID
-probe: a confirmed absent PID or a process started after `acquiredAt` records
+`pending` leases without `lrqId`. A matching `holderHost` or a legacy lease
+without `holderHost` permits a local PID probe: a confirmed absent PID or a process started after `acquiredAt` records
 `abandoned-holder-dead`. Unreadable identity evidence retains the lease until
 its own persisted dispatch timeout; even foreign-host leases record
 `abandoned-timeout` strictly after that deadline. Observation never refreshes
@@ -135,6 +135,8 @@ CAS; startup logs the released count. Closure recomputes its next action from
 that terminal lease, including when an uncertain ownership read crosses the
 deadline. Operator holds still suppress closure routing and lease mutation.
 No merge eligibility, finding-remediation or current-head proof is granted by
-abandonment. Offline regressions cover dead/reused PIDs, uncertain and foreign
-ownership, deadline boundaries, a raced launch, retained live owners and
+abandonment. CLAIMPIDSTALE-01 applies the same local PID rule to hostless leases
+in startup recovery and each closure evaluation, retaining the terminal owner
+receipt and abandonment log. Offline regressions cover dead/reused PIDs,
+uncertain and foreign ownership, deadline boundaries, a raced launch, retained live owners and
 same-pass hammer admission.

@@ -434,6 +434,29 @@ test('CLOSERLEASEDEAD-01 bounds uncertain ownership and checks holder identity',
 });
 
 
+test('CLAIMPIDSTALE-01 hostless lease abandonment agrees with local ownership', () => {
+  const acquiredAt = '2026-01-01T00:00:00Z';
+  const lease = { status: 'pending', lrqId: null, watcherPid: 4242,
+    acquiredAt, dispatchTimeoutMs: 120_000 };
+  const opts = { now: Date.parse(acquiredAt) + 1_000, host: 'fixture-host', livePid: 4343,
+    captureProcessImpl: () => ({ startedAt: '2025-12-31T23:59:00Z' }) };
+  for (const holderHost of [undefined, null, '']) {
+    const legacy = { ...lease, holderHost };
+    assert.equal(abandonedAmaCloserLeaseOutcome(legacy, { ...opts,
+      isProcessAlive: () => false }), 'abandoned-holder-dead');
+    for (const isProcessAlive of [() => true, () => null, () => { throw Error('unreadable'); }]) {
+      assert.equal(abandonedAmaCloserLeaseOutcome(legacy, { ...opts, isProcessAlive }), null);
+    }
+    const noProbe = () => assert.fail('current processes and launch owners must not be probed');
+    for (const changed of [{ watcherPid: opts.livePid }, { lrqId: 'lrq_fixture' }]) {
+      assert.equal(abandonedAmaCloserLeaseOutcome({ ...legacy, ...changed }, {
+        ...opts, isProcessAlive: noProbe, captureProcessImpl: noProbe }), null);
+    }
+  }
+  assert.equal(abandonedAmaCloserLeaseOutcome({ ...lease, holderHost: 'foreign-fixture' }, {
+    ...opts, isProcessAlive: () => assert.fail('foreign PIDs must not be probed') }), null);
+});
+
 test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity probe is preserved', t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

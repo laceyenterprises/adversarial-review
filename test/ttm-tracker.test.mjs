@@ -411,8 +411,9 @@ test('tick reuses pre-sync event rows and in-memory sync writes instead of query
     });
 
     assert.equal(counts.flagEventSelects, 1);
-    assert.equal(tick.eventRows.length, 2);
-    assert.equal(tick.sync.eventRows.length, 2);
+    assert.equal(tick.eventRows.length, 3);
+    assert.equal(tick.sync.eventRows.length, 3);
+    assert.equal(tick.sync.eventRows.find(row => row.flag_kind === 'ownerless').state, 'resolved');
     assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
     assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 30);
   } finally {

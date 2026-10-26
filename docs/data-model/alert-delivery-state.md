@@ -94,6 +94,14 @@ Directory: `data/alert-delivery/`
   series can page again on the same head. If record persistence fails, no series
   ID is supplied and the normal outbox identity applies; the lane debounce still
   suppresses repeats. Legacy payloads without a series ID also use normal IDs.
+- HOLDOWNER-01 `adversarial_review.pr_progress_stalled` is a page for every TTM
+  STUCK kind, including `ownerless`. It uses
+  `pr-progress-<sha256(JSON.stringify([repo, prNumber, headSha]))>` and reuses
+  pending, inflight, delivered and dead-letter documents after a lost tracker
+  receipt. All active reasons for that PR share the same per-head page. A new
+  head gets a new identity; SLOW flags never enter this path. The tracker owns
+  the additional observation and page-receipt tables documented in
+  [TTM ownership observations](ttm-ownership.md).
 - Model-refusal `reviewer.model_unavailable` alerts use
   `reviewer-model-<sha256(JSON.stringify([refusedModel, YYYY-MM-DD]))>`,
   where the date is UTC. Daily deduplication reuses pending, inflight, delivered

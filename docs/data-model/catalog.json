@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "ttm-ownership",
+      "title": "TTM ownership observations",
+      "path": "docs/data-model/ttm-ownership.md",
+      "store": "data/reviews.db: ttm_owner_state and ttm_stuck_pages",
+      "schemaSurface": "src/ttm-owner.mjs",
+      "relatedSchemaSurfaces": ["src/ttm-tracker.mjs", "src/pollonce-phases.mjs", "src/alert-delivery.mjs"],
+      "owner": "watcher TTM tracker; observation only",
+      "headBinding": "Current timeline revision wins over cached state; tracker polls persist head and observation time and reset suppression, reason and ownerless grace on head change."
+    },
+    {
       "id": "finalization-queue-cutover",
       "title": "Queue Expansion and Closer Release Observations",
       "path": "docs/data-model/finalization-queue-cutover.md",

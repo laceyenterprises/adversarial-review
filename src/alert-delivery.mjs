@@ -641,6 +641,12 @@ function alertPresentationForDoc(doc) {
       detail: `Reason: ${event}; path class: ${payload.pathClass}; error code: ${payload.errorCode}`,
     };
   }
+  if (event === 'adversarial_review.pr_progress_stalled') {
+    return { severity: 'SEV1', headline: 'Open PR progress stalled',
+      body: String(doc.text || event),
+      action: 'Inspect the named lane declines and restore ownership through the existing lanes.',
+      detail: `${payload.repo}#${payload.prNumber} head=${payload.headSha || 'unknown'}` };
+  }
   if (event === REVIEW_STALL_EVENT) {
     const ageMinutes = Math.max(1, Math.round(Number(payload.age_ms || 0) / 60_000));
     const pendingCount = Number.isFinite(Number(payload.pending_review_count))
@@ -1507,10 +1513,12 @@ async function deliverAlert(text, {
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
   // Deduplication must inspect the same real sink that queueAlertDoc writes.
   // fsImpl supplies token/config reads; virtual token presence is not a receipt.
-  if (event === 'reviewer.model_unavailable') {
-    doc.id = fixedAlertId('reviewer-model', crypto.createHash('sha256').update(JSON.stringify([
-      payload?.refusedModel, new Date(now).toISOString().slice(0, 10),
-    ])).digest('hex'));
+  if (event === 'reviewer.model_unavailable' || event === 'adversarial_review.pr_progress_stalled') {
+    const progressStalled = event === 'adversarial_review.pr_progress_stalled';
+    doc.id = fixedAlertId(progressStalled ? 'pr-progress' : 'reviewer-model', crypto.createHash('sha256').update(JSON.stringify(
+      progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
+        : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)],
+    )).digest('hex'));
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if ((receiptFsImpl?.existsSync || existsSync)(existingPath)) {

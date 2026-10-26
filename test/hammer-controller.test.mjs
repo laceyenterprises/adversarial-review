@@ -939,6 +939,9 @@ test('real shell: assert-launch clears on a fresh read and blocks a stale unread
         printf cleared > "$HAM_RUN_DIR/audit"
       else printf blocked > "$HAM_RUN_DIR/audit"; fi`;
     const clear = fixture(t, gate);
+    // This case tests a fresh read, not startup deadline expiry. Match the
+    // unreadable-read sibling's grace on loaded full-suite CI workers.
+    clear.env.FIXTURE_GRACE_MS = '60000';
     writeFileSync(join(clear.dir, 'go'), 'go');
     const p = clear.start();
     assert.equal((await p.closed)[0], 0, `${p.output()} ${JSON.stringify(clear.receipt())}`);

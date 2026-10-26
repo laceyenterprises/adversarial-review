@@ -3308,3 +3308,16 @@ are unchanged. Focused offline regressions run with:
 ```bash
 node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
 ```
+
+HOLDOWNER-01 adds observational ownership resolution to the TTM tracker. An open
+tracked PR without an actionable review, live closer/remediator, bounded
+machine-checkable hold or operator hold label becomes STUCK `ownerless` after
+seven minutes. All STUCK kinds page once per head through the durable alert
+outbox. The tracker uses the current timeline revision and resets cached review
+suppression and ownerless grace on a head change, even before a reviewer-gate
+observation. Legacy flags without stall reasons use the flag kind in alert text.
+See [the ownership data contract](docs/data-model/ttm-ownership.md).
+Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
+verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
+routing and existing smoke promises are unchanged; post-deploy observation uses
+natural flags and receipts, with no forced stall or alert delivery test.

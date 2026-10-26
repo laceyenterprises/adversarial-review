@@ -1,4 +1,5 @@
-import { operatorHeldSql, readHeldOpenPrCount } from './operator-hold-labels.mjs';
+import { OWNERLESS_GRACE_MINUTES, attachTtmOwnership, syncTtmOwnership, pageTtmStuckFlags } from './ttm-owner.mjs';
+import { isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
 /**
  * Time-to-merge tracking, split into SLOW and STUCK.
  *
@@ -15,7 +16,7 @@ import { operatorHeldSql, readHeldOpenPrCount } from './operator-hold-labels.mjs
  *            distribution and scaled by measured queue pressure
  *            (`ttm-budget-model.mjs`); it belongs on a trend, not an alarm.
  *   STUCK -- `rereview_unanswered`, `reviewer_lease_expired`,
- *            `terminal_but_unmerged`. None of these consult the TTM budget:
+ *            `terminal_but_unmerged`, `ownerless`. None of these consult the TTM budget:
  *            a PR that is not progressing is stuck at any elapsed time, and a
  *            PR that is progressing is not stuck no matter how slow the host
  *            is. This is what is worth paging on.
@@ -65,6 +66,7 @@ const TTM_STUCK_FLAG_KINDS = new Set([
   'rereview_unanswered',
   'reviewer_lease_expired',
   'terminal_but_unmerged',
+  'ownerless',
 ]);
 
 function parsePositiveNumber(value, fallback) {
@@ -373,6 +375,10 @@ function derivePrTtmTimeline(row, passes, { nowIso, mergeAuthorityStrictMode = t
   return {
     repo: row.repo,
     prNumber: Number(row.pr_number),
+    headSha: row.revision_ref || row.reviewer_head_sha || null,
+    reviewedHeadSha: row.reviewer_head_sha || null,
+    labels: row.labels_json,
+    quotaResetAt: row.quota_reset_at_utc || null,
     openedAt,
     reviewRoundStarts,
     reviewRoundEnds,
@@ -422,10 +428,11 @@ function computeTtmBudget(reviewRounds, config) {
 }
 
 function flagKeyFor(row, flagKind) {
-  return `${row.repo}#${row.prNumber}:${flagKind}`;
+  return `${row.repo}#${row.prNumber}:${flagKind}${flagKind === 'ownerless' ? `:${row.headSha || 'unknown'}` : ''}`;
 }
 
 const TTM_STALL_MINUTES_BY_KIND = Object.freeze({
+  ownerless: row => row.ownerlessMinutes,
   rereview_unanswered: (row) => row.rereviewUnansweredMinutes,
   reviewer_lease_expired: (row) => row.reviewerLeaseExpiredMinutes,
   terminal_but_unmerged: (row) => row.terminalUnmergedMinutes,
@@ -453,6 +460,7 @@ function buildTtmFlag(row, flagKind, observedAt, config, extraDetails = {}) {
     stallMinutes,
     reviewRounds: row.reviewRounds,
     details: {
+      headSha: row.headSha || null,
       prState: row.prState,
       reviewStatus: row.reviewStatus,
       latestVerdict: row.latestVerdict,
@@ -487,6 +495,15 @@ function evaluateTtmTimelines(rows, { observedAt, config, budgetBlind = false })
   const flags = [];
   for (const row of rows) {
     if (row.prState !== 'open') continue;
+    if (row.ownership?.owner === null && row.ownerlessMinutes > OWNERLESS_GRACE_MINUTES) {
+      flags.push(buildTtmFlag(row, 'ownerless', observedAt, config, {
+        stallReason: row.ownership.reason, ownerlessSince: row.ownerlessSince,
+        ownership: row.ownership, ownerlessThresholdMinutes: OWNERLESS_GRACE_MINUTES,
+      }));
+    }
+    // Existing accounting deliberately excludes operator-held PRs. Ownership
+    // still resolves them, but SLOW and the older STUCK classes stay unchanged.
+    if (isOperatorHeld(row.labels)) continue;
 
     // ── SLOW: over budget, still moving. Trend, not alarm. ────────────────
     const budgetMinutes = computeTtmBudget(row.reviewRounds, config);
@@ -536,8 +553,8 @@ function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
     reviewRows = db.prepare(
       `SELECT repo, pr_number, reviewed_at, pr_state, merged_at, closed_at,
               review_status, posted_at, rereview_requested_at,
-              reviewer_lease_expires_at
-         FROM reviewed_prs WHERE pr_state IS NOT 'open' OR NOT ${operatorHeldSql()}`
+              reviewer_lease_expires_at, revision_ref, reviewer_head_sha, labels_json, quota_reset_at_utc
+         FROM reviewed_prs`
     ).all();
     passRows = db.prepare(
       `SELECT repo, pr_number, attempt_number, pass_kind, started_at, ended_at,
@@ -841,6 +858,7 @@ function summarizeTtmRollupFromTimelines(rows, {
     .filter((flag) => flag.flagKind === 'terminal_but_unmerged');
   const terminalCleanRereviewBlocked = rows.filter((row) => (
     row.prState === 'open'
+    && !isOperatorHeld(row.labels)
     && row.terminalClean
     && row.reviewStatus === 'pending'
     && row.rereviewUnansweredMinutes !== null
@@ -922,7 +940,7 @@ function readRecentTtmFlagEvents(db, { observedAt, config }) {
  */
 function applyMeasuredTtmBudget(db, config, timelines) {
   const held = readHeldOpenPrCount(db);
-  const openPrCount = timelines.filter((row) => row.prState === 'open').length;
+  const openPrCount = timelines.filter((row) => row.prState === 'open' && !isOperatorHeld(row.labels)).length;
   const pinned = config.budgetPinned || { base: false, perRound: false };
   if (pinned.base && pinned.perRound) {
     return {
@@ -1007,13 +1025,14 @@ function evaluateTtmFromDb(db, {
   now = () => new Date(),
   env = process.env,
   config: configOverrides = {},
+  rootDir, hqRoot, readOwnerEvidence,
 } = {}) {
   const observedAt = typeof now === 'function' ? now().toISOString() : new Date(now).toISOString();
   const seededConfig = resolveTtmTrackerConfig(env, configOverrides);
-  const timelines = readTtmTimelines(db, {
+  const timelines = attachTtmOwnership(db, readTtmTimelines(db, {
     nowIso: observedAt,
     mergeAuthorityStrictMode: seededConfig.mergeAuthorityStrictMode,
-  });
+  }), { observedAt, rootDir, hqRoot, readEvidence: readOwnerEvidence });
   const { config, budget } = applyMeasuredTtmBudget(db, seededConfig, timelines);
   const flags = evaluateTtmTimelines(timelines, {
     observedAt,
@@ -1042,6 +1061,7 @@ function evaluateTtmFromDb(db, {
 
 function runTtmTrackerTick(db, options = {}) {
   const result = evaluateTtmFromDb(db, options);
+  syncTtmOwnership(db, result.timelines, result.observedAt);
   const sync = syncTtmFlags(db, result.flags, { observedAt: result.observedAt });
   const eventRows = [...result.eventRows, ...sync.eventRows];
   return {
@@ -1058,9 +1078,10 @@ function runTtmTrackerTick(db, options = {}) {
   };
 }
 
-function runTtmTrackerWatcherTick({ db, logger = console } = {}) {
+async function runTtmTrackerWatcherTick({ db, logger = console, deliverAlertFn, ...options } = {}) {
   try {
-    const ttm = runTtmTrackerTick(db);
+    const ttm = runTtmTrackerTick(db, options);
+    await pageTtmStuckFlags(db, ttm.flags, { deliverAlertFn, observedAt: ttm.observedAt, logger });
     if (ttm.sync.activated > 0 || ttm.sync.resolved > 0) {
       logger.log?.(
         `[watcher] ttm-tracker active=${ttm.sync.active} activated=${ttm.sync.activated} `

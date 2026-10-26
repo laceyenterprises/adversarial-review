@@ -513,7 +513,7 @@ export async function evaluateHammerStopHold({
       reasons: prior.refusal.reasons }, { repo, prNumber, headSha })) {
       const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
       const changed = changedHammerStopInputs(prior.inputs, inputs);
-      const hammerStop = { headSha, predicate: prior.predicate,
+      const hammerStop = { headSha, predicate: prior.predicate, deterministic: true,
         refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) };
       if (changed.length > 0) {
         persist({ ...prior, releasedAt: now, releasedBy: changed, releasedInputs: inputs });

@@ -266,6 +266,7 @@ for (const reason of INFRA_REASONS) {
       const onlyPackaging = { attempts: [audit.attempts.at(-1)] };
       const persisted = await f.evaluate({ ...deps, readAuditImpl: () => onlyPackaging });
       assert.equal(persisted.action, 'hold');
+      assert.equal(persisted.hammerStop.deterministic, true);
       assert.deepEqual(persisted.hammerStop.refusal, held.hammerStop.refusal);
       assert.equal(readFileSync(f.statePath, 'utf8'), heldState);
     });
@@ -311,6 +312,7 @@ for (const reason of INFRA_REASONS) {
         readAuditImpl: () => onlyPackaging });
       assert.equal(result.action, 'release');
       assert.equal(result.hammerStop.predicate, 'verdict-not-eligible');
+      assert.equal(result.hammerStop.deterministic, true);
       assert.deepEqual(result.changed, [dimension]);
       const entry = JSON.parse(readFileSync(f.statePath, 'utf8')).heads[f.identity.headSha];
       assert.equal(entry.releasedAt, now);
@@ -1565,6 +1567,28 @@ for (const reason of ['unclassified-merge-failure', 'merge-lane-busy', 'actions-
     assert.equal((await f.evaluate({ ...deps, now: retryAt })).action, 'hold', 'a new stop starts a new backoff');
   });
 }
+
+test('CLOSERSTOPTRANSIENT-01 a new same-predicate stop re-arms an unreleased transient hold', async t => {
+  const f = infrastructureFixture(t, 'unclassified-merge-failure');
+  const first = await f.evaluate();
+  assert.equal(first.action, 'hold');
+  const latestStopAt = minutesAfter(f.at, 3);
+  f.recordStop(latestStopAt);
+  const latest = await f.evaluate({ now: latestStopAt });
+  assert.equal(latest.action, 'hold');
+  assert.equal(latest.hammerStop.predicate, first.hammerStop.predicate);
+  assert.notEqual(latest.hammerStop.stopKey, first.hammerStop.stopKey);
+  const retryAt = new Date(Date.parse(latestStopAt) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString();
+  assert.equal(latest.hammerStop.retryAfter, retryAt);
+  _resetHammerStopHoldPageDebounceForTests();
+  const repeated = await f.evaluate({ now: first.hammerStop.retryAfter });
+  assert.equal(repeated.action, 'hold', 'the original deadline cannot release the new stop');
+  assert.equal(repeated.hammerStop.retryAfter, retryAt, 'repeat observations retain the new deadline');
+  assert.equal((await f.evaluate({ now: new Date(Date.parse(retryAt) - 1).toISOString() })).action, 'hold');
+  const released = await f.evaluate({ now: retryAt });
+  assert.equal(released.action, 'release');
+  assert.deepEqual(released.changed, ['transient-stop-backoff']);
+});
 
 test('CLOSERSTOPTRANSIENT-01 deterministic classification is an explicit allowlist', async t => {
   for (const reason of ['verdict-not-eligible', 'blocking-findings-present', 'blocking-findings-unknown',

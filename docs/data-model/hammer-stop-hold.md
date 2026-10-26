@@ -89,7 +89,9 @@ A transient hold returns `hammer-stop-transient-backoff` with `recoveryWait`
 and a `retryAfter` deadline. Changed inputs and existing recovery probes can
 release sooner; otherwise the next scheduled evaluation at or after the deadline
 records `transient-stop-backoff` and releases. A new terminal stop starts a new
-five-minute window; repeat evaluation of an already released stop neither
+five-minute window on first observation, even when an unreleased transient hold
+has the same predicate but a different `stopKey`. Only the same transient
+`stopKey` reuses its deadline; repeat evaluation of an already released stop neither
 re-arms its timer nor emits another release audit. Next-action projections carry
 `deterministic: false`, preventing R07 from turning a transient stop into a
 permanent automated stop. Ordinary launch/lease checks and retry/lifetime caps
@@ -121,6 +123,7 @@ audit history remains, an unreleased persisted deterministic refusal returns
 `hold` without a state write or another page when inputs are unchanged, including
 before ownerless recovery. Changed base, mergeability, checks or review inputs
 release that refusal with `releasedAt`, `releasedBy` and `releasedInputs`.
+Both synthetic hold and release results explicitly carry `hammerStop.deterministic: true`.
 Closer preflight evaluates cleanup even when audit history is absent. Unknown
 or transient predicates prevent classification as a pure infrastructure stop.
 Mixed reasons strip packaging reasons from the computed deterministic refusal;

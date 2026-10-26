@@ -26,17 +26,12 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+SDK launch replies now supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer no longer joins
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the

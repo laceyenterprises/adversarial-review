@@ -165,17 +165,12 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+SDK launch replies now supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer no longer joins
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -4267,39 +4262,19 @@ required for a group signal after leader exit. Unknown process inspection refuse
 startup or retains `cleanup-unconfirmed` with status 125; it cannot establish
 absence or release a matching lease. An empty/malformed census fails closed.
 
-LAC-2091 (agent-os#9186): the controller hands its inherited env and
-`HAM_HQ_ROOT` to `resolveSessionLedgerReadTarget`. When `session_ledger.backend`
-is Postgres, a SQLite-era `.hq/config.json` `ledgerDbPath` is ignored, as in
-Python `session_ledger.db_path.resolve_ledger_target`; it no longer refuses
-bootstrap as `legacy-hq-config` / `postgres-configured-but-sqlite-resolved`.
-For generic adapter reads, an explicit
-`ledgerTarget`/`AGENT_OS_SESSION_LEDGER_TARGET` still wins.
-`--ledger-db`, `AGENT_OS_SESSION_LEDGER_DB_PATH` and `SESSION_LEDGER_DB_PATH`
-SQLite paths still fail closed under Postgres. A stale explicit target returns
-`missing-launch-request-row`; that is a correct refusal, not a routing defect.
+DOG-09 replaces the controller's earlier LAC-2091 ledger-target selection.
+Startup, poll and fresh-read gates use the SDK own-LRQ HCP route with provisioned
+worker credentials. `HAM_HQ_ROOT`, canonical/standby DSNs and disposable test
+ledger settings do not select live launch truth. There is no database fallback,
+including during rollback. `launchReadSource` records `app-sdk` on successful
+reads and null when unavailable, without credentials or paths. Generic non-launch
+ledger readers retain their separate backend-resolution rules.
 
-Inside a worker, when the configured `session_ledger.backend` is `postgres`,
-the controller's startup, poll and fresh-read gates pass an explicit Postgres
-`ledgerTarget` built by `controllerLedgerTarget(env)` from non-empty
-`AGENT_OS_SESSION_LEDGER_CANONICAL_DSN`. This controller-only target outranks
-`AGENT_OS_SESSION_LEDGER_TARGET`; the registration's `launchReadSource` names
-the latest read's resolved source without retaining its DSN or path (null when
-unavailable). With SQLite, the default backend, the canonical DSN is ignored
-and the existing SQLite resolution applies, including during rollback.
-The ordinary
-`AGENT_OS_SESSION_LEDGER_DSN` is the worker's disposable test ledger and must
-not supply live launch truth. Without the canonical DSN, resolution follows
-the existing adapter rules above. Generic implicit reads retain their existing
-precedence, including the test DSN; no global canonical override is applied.
-
-The canonical DSN must be fully qualified with runtime host, port, database
-and user, for example `postgresql://ledger-user@runtime.example:5432/ledger`;
-do not use an abbreviated DSN such as `postgresql:///ledger`. The `psql`
-child inherits the worker process's libpq `PG*` environment. Provision the DSN
-and worker environment together: remove disposable-ledger connection settings
-(including `PGHOSTADDR` and `PGSERVICE`) and supply runtime authentication and
-transport settings explicitly. A fully qualified DSN must not depend on test
-`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` or credentials to fill missing values.
+Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1` after the verified
+merged SDK release, producer/grants deployment and submodule `npm ci` described
+in the reader contract. Removing that flag pauses launch observations safely
+and retains ownership holds. A caller abort stops waiting; SDK 0.8.0 still owns
+outstanding HTTP work until its own transport completes.
 
 During cancellation the shell defers its trap release. Only after confirmed
 group drain may fallback cleanup release the exact acquisition receipt's local

@@ -228,8 +228,9 @@ index), and at most one new batch per UTC date. An immediate SQLite transaction
 assigns up to 100 oldest findings from confirmed merged PRs. Ready-to-merge rows
 remain visible but cannot dispatch until merged. The watcher checks cached UTC
 midnight and hourly settlement deadlines after its ordinary poll. Only the daily
-sweep claims batches or dispatches workers; hourly settlement-only passes collect
-worker manifests and observe batch PR merges, asynchronously from review admission. The deadline
+sweep claims batches and dispatches preparation workers. Hourly collection passes
+collect worker manifests, dispatch the publication follow-up when needed, and
+observe batch PR merges, asynchronously from review admission. The deadline
 advances after successful sweep completion; startup failures and fleet-stop
 interruptions retry on the next poll with the existing claimed batches and dispatch
 keys. An in-flight sweep fences overlapping ticks. Claim/dispatch errors remain
@@ -237,12 +238,56 @@ recorded for the next daily sweep; settlement errors retry on the hourly pass.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
 normal priority. It persists the batch before submission and uses its stable
-idempotency key after a lost receipt. A recorded launch fences further dispatch
-until completion, across days and restarts. The manifest and atomic outcome
+idempotency key after a lost receipt. A recorded preparation launch fences further
+preparation until completion, across days and restarts. The manifest and atomic outcome
 artifact live in `data/finding-batches/<batch-id>/`; retain them until collected.
-Workers re-check current main, drop stale/no-evidence findings with reasons and
-open one normal-review PR per area for valid fixes. An all-dropped batch needs
-no PR. Outcome JSON must cover every manifest ID exactly once. Applied outcomes
+FINDINGSSHAPE-01 keeps preparation `decision-only`: workers re-check current main,
+drop stale/no-evidence findings with reasons, and push tested fixes on their batch
+branch. They write provisional outcomes in the existing schema, with null
+`prNumber` and the pushed commit as `headSha`. A provisional applied outcome never
+settles a finding. An all-dropped/declined batch completes from this artifact with
+no PR, push, or publication launch.
+
+For provisional applied findings or advice, the collector validates complete
+manifest coverage, waits for terminal preparation (including a launch parked at
+publication), and reads its branch from `hq dispatch status --json`. Before any
+GitHub publication read, its `branch_pushed` milestone must be `done`; otherwise
+the collector records `batch-push-evidence-missing` locally and retains the batch
+fence. It looks for PRs on that branch across all states before inspecting the
+remote ref, preserving branch slashes and percent-encoding each path segment. One
+same-repository PR with the exact marker is bound through ordinary settlement;
+an unmerged close stays unresolved and never starts another publisher. Foreign,
+unmarked, or ambiguous PR evidence retains the batch fence. This also recovers a
+PR opened before its worker could rewrite the outcome artifact, even after its
+branch was deleted or normal review rebased the head.
+
+With no existing PR, a matching remote branch SHA
+permit one follow-up `--completion-shape pr --branch <existing-branch>` launch.
+Both phases retain the batch ID, ticket and `findings-batch-<batch-id>` idempotency
+key; the dispatcher contract is unchanged. A PR-shaped launch without PR evidence
+still fails. The collector queries the existing launch-ledger adapter by that key,
+including terminal rows, before submission. Any publisher receipt fences another
+publisher, even after failure or a lost response. A per-batch file lock serializes
+collectors, and atomic `publish-intent.json` records `batchId`, `branch`,
+`idempotencyKey`, and `sourceLaunchId` before submission. An ambiguous transport
+failure with no visible receipt retains that intent and reports
+`batch-publish-receipt-pending`; it never guesses that enqueue failed. Retain the
+intent, `publish.lock` inode, and `publish-prompt.md` beside the outcomes artifact.
+These are collector recovery artifacts; the outcome schema and SQLite schema do
+not change. Failed or uncertain publication requires repairing the existing
+launch/intent after proving its state, rather than resetting the batch ID/key or
+starting a fresh branch. No automatic timeout releases that fence.
+
+The publisher reuses the pushed branch and checks for an existing PR again,
+opens the single PR through `hq pr open --spec-ref none` with the exact batch
+marker, and atomically updates only `prNumber` and `headSha` in the outcome
+artifact. For an older parked batch, retain its original batch row and launch ID,
+restore a complete provisional manifest from its prepared fixes if needed, and
+retain its pushed branch. Collection follows the same recovery path without
+reapplying fixes or opening a duplicate PR. No runtime recovery is performed by
+this source change.
+
+Outcome JSON must cover every manifest ID exactly once. Applied outcomes
 require a merged PR in the same repository with the
 `Finding-Batch: <batch-id>` body marker; otherwise the batch stays unresolved.
 The collector reads body and merge state via `gh pr view` using the retrying
@@ -252,8 +297,8 @@ completion records the worker outcome and PR merge, without granting merge autho
 `outcome` is null, `applied` or `dropped`; terminal rows retain `reason` and
 `result_pr` (null for dropped findings). Batch failures retain `error` until valid manifest and batch PR
 evidence is confirmed, at which point even an unmerged PR clears the stale error
-without settling findings. Failures never discard findings or launch a second
-worker blindly. Diagnose a missing artifact or failed worker before
+without settling findings. Failures never discard findings or blindly repeat a
+preparation/publication phase. Diagnose a missing artifact or failed worker before
 repairing its existing batch; no automatic timeout releases its fence.
 
 `pipeline-health` JSON includes `nonBlockingBacklog`; the read-only local CLI is

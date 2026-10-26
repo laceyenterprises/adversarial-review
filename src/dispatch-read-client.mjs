@@ -9,7 +9,9 @@ function options(args) {
     ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? 8000 };
 }
 function sessionKey(config) {
-  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => key !== 'request_timeout_ms')));
+  return JSON.stringify(Object.fromEntries(Object.entries(config)
+    .filter(([key]) => key !== 'request_timeout_ms')
+    .sort(([a], [b]) => a.localeCompare(b))));
 }
 // The composition seam accepts a packaged SDK session (also used by offline
 // consumer fixtures); policy callers never select a ledger backend.

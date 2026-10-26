@@ -1515,7 +1515,7 @@ function readBestReviewerEvidenceTokenUsage({
     ledgerTarget, ledgerDbPath,
     env,
     rootDir,
-  }) || readReviewerSessionTokenUsage({
+  }) || ((adapterSessionKey || sessionKeys.length) ? readReviewerSessionTokenUsage({
     adapterSessionKey,
     sessionKeys,
     workspacePath,
@@ -1524,7 +1524,7 @@ function readBestReviewerEvidenceTokenUsage({
     ledgerTarget, ledgerDbPath,
     env,
     rootDir,
-  });
+  }) : null);
   // An OS-selected worker's unavailable public accounting stays unknown. Local
   // reviewer evidence is a separate app policy for reviews without an OS worker.
   if (!ledgerUsage && (workerRunId || launchRequestId)) return null;
@@ -1752,20 +1752,30 @@ function backfillReviewerPasses(rootDir, {
         ? 'completed'
         : (job.status === 'failed' ? 'failed' : 'cancelled');
       const launchRequestId = worker.launchRequestId || worker.launchRequestID || job.replyStorageKey || null;
+      const adapterSessionKey = [worker.adapterSessionKey, job.adapterSessionKey]
+        .find(key => typeof key === 'string' && key.trim()) || null;
+      const sessionKeys = [...new Set([worker.sessionKeys, job.sessionKeys]
+        .flatMap(keys => Array.isArray(keys) ? keys : [])
+        .filter(key => typeof key === 'string' && key.trim()))];
+      // A workspace path cannot select a public session. Only explicit linked
+      // keys may reach session accounting; unlinked history keeps its existing
+      // transcript/log fallback without an inert observation call.
       const publicUsage = readWorkerRunTokenUsage({
         workerRunId: worker.workerRunId || worker.runId || null,
         launchRequestId,
         ledgerTarget, ledgerDbPath,
         env,
         rootDir,
-      }) || readReviewerSessionTokenUsage({
+      }) || ((adapterSessionKey || sessionKeys.length) ? readReviewerSessionTokenUsage({
+        adapterSessionKey,
+        sessionKeys,
         workspacePath,
         startedAt,
         endedAt,
         ledgerTarget, ledgerDbPath,
         env,
         rootDir,
-      });
+      }) : null);
       const usage = publicUsage || (!(worker.workerRunId || worker.runId || launchRequestId)
         ? (transcriptFallback ? readTranscriptTokenUsageForModel({
         reviewerModel: worker.model || worker.workerClass,

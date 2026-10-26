@@ -432,7 +432,8 @@ transport method. Async observations use the public SDK
 `readSessionDispatchLookup(selector, options)` on `/v1/dispatch/lookup`, as the
 synchronous observation bridge does. The registered session supplies its token
 and endpoint; each call supplies its remaining physical HTTP timeout. Connection
-identity excludes `request_timeout_ms`, so pagination and concurrent callers
+identity sorts option keys and excludes `request_timeout_ms`, so equivalent
+options in different insertion orders, pagination and concurrent callers
 reuse one registration without mutating a shared session timeout. Registration,
 lookup and caller settlement are bounded; failures evict cached session evidence.
 SDK 0.9.0 has no AbortSignal API: caller abort settles promptly, while physical
@@ -456,7 +457,12 @@ Session time windows preserve the former ledger null semantics explicitly.
 A missing/blank start satisfies an upper bound; a lower bound requires a
 non-empty end timestamp or its start fallback. Rows with neither timestamp are
 included without a lower bound and excluded with one, without parsing an empty
-string. Timestamp comparisons are inclusive.
+string. Timestamp comparisons are inclusive. A successful non-empty observation
+whose rows all fall outside the requested interval returns `no-session-in-window`;
+it is distinct from transport/grant unavailability or inconclusive empty evidence.
+Historical accounting uses explicit `adapterSessionKey`/`sessionKeys` from a worker
+or job. A workspace path alone never initiates a public session lookup; existing
+unlinked transcript/log fallback remains separate from OS-selected accounting.
 
 The 0.9.0 artifact is byte-identical to merged producer revision
 `f37c7489439a8b53eafecb38870f75fe9f07fa57` ([agent-os#9435](https://github.com/laceyenterprises/agent-os/pull/9435)).

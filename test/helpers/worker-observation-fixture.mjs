@@ -25,7 +25,7 @@ function reply(selector, args) {
         row.total_cache_write_tokens = session?.total_cache_write_tokens ?? null;
         if (db.prepare("SELECT name FROM sqlite_master WHERE name='worker_processes'").get()) {
           const processes = db.prepare('SELECT * FROM worker_processes WHERE launch_request_id=?').all(row.launch_request_id)
-            .sort((a,b)=>String(b.updated_at||b.exited_at||b.started_at||b.created_at||'').localeCompare(String(a.updated_at||a.exited_at||a.started_at||a.created_at||'')) || String(b.worker_process_id).localeCompare(String(a.worker_process_id)));
+            .sort((a,b)=>String(b.updated_at||b.exited_at||b.started_at||b.created_at||'').localeCompare(String(a.updated_at||a.exited_at||a.started_at||a.created_at||'')) || Number(b.worker_process_id) - Number(a.worker_process_id));
           row.pid = processes[0]?.pid ?? null;
           row.process_status = processes[0]?.process_status ?? null;
         }

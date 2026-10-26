@@ -351,7 +351,12 @@ Observation capture is staged separately through the default-off env-only
 reads retain unknown OS usage, never fabricated zero or a log/transcript substitute.
 The backfill CLI prepares one registered SDK session before synchronous loops;
 registration failure stops before pass writes. Programmatic synchronous callers
-must prepare the session first. No persistent field or status changes.
+must prepare the session first. Historical backfill forwards explicit
+`adapterSessionKey`/`sessionKeys` from worker/job metadata and skips session
+observation when neither is present. Workspace paths grant no lookup authority.
+Valid observed sessions outside the accounting window return
+`no-session-in-window`, preserving the distinction from unavailable observation.
+No persistent field or status changes.
 
 Builder routing uses its existing `data/builder-routing/<repo>-<pr>-<head>.json`
 audit: `builder_class_inconclusive` records unavailable or successful-empty

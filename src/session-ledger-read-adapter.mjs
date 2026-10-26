@@ -1123,7 +1123,7 @@ export function readReviewerSessionUsageFromLedger(args = {}) {
     return (!args.endedAt || !startedAt || Date.parse(startedAt) <= Date.parse(args.endedAt))
       && (!args.startedAt || lastActiveAt !== null && Date.parse(lastActiveAt) >= Date.parse(args.startedAt));
   });
-  return rows.length ? {...result,rows,row:rows[0]} : {ok:false,reason:'worker-observation-unavailable'};
+  return rows.length ? {...result,rows,row:rows[0]} : {ok:false,reason:'no-session-in-window'};
 }
 
 // ROUTEPROV-01: latest PR build completion -> LRQ -> actual launch identity.

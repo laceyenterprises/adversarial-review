@@ -113,8 +113,10 @@ export function abandonedAmaCloserLeaseOutcome(lease, {
   isProcessAlive = isAmaCloserPidAlive, captureProcessImpl = captureCloserProcessSync,
 } = {}) {
   if (lease?.status !== PENDING || lease.lrqId) return null;
-  const local = lease.holderHost === host;
-  if ((!lease.holderHost || local) && Number(lease.watcherPid) === Number(livePid)) return null;
+  // Legacy hostless leases use the local PID namespace, as pending ownership
+  // and dispatch reclaim already do. Otherwise a dead watcher can retain them.
+  const local = !lease.holderHost || lease.holderHost === host;
+  if (local && Number(lease.watcherPid) === Number(livePid)) return null;
   const acquiredAt = Date.parse(lease.acquiredAt);
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
   const timeout = Number(lease.dispatchTimeoutMs);
@@ -625,8 +627,9 @@ export function acquireAmaCloserLease({
     // CLR-02 — `watcherPid` alone is not a usable liveness signal: a pid read on
     // host B says nothing about a process on host A, and pid namespaces collide.
     // Recording the acquiring host lets recovery ask "is this pid dead *here*?"
-    // and refuse the question everywhere else. Mirrors `ama/merge-lease.mjs`,
-    // which already gates its reclaim on `holderHost === hostname()`.
+    // and refuse it for foreign hosts. CLAIMPIDSTALE-01 treats older hostless
+    // leases as local in shared abandonment and pending ownership/reclaim;
+    // the reaper's separate short age tier still requires an explicit host.
     holderHost: host || hostname(),
     lrqId: null,
     status: PENDING,

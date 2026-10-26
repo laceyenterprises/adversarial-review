@@ -2237,8 +2237,13 @@ stateDiagram-v2
 
 CLOSERLEASEDEAD-01 records `abandoned-holder-dead` or `abandoned-timeout` for
 launch-less pending leases with a confirmed absent/reused same-host watcher PID
-or an elapsed dispatch timeout. Startup sweeps log releases; closure resumes
-normal next-action admission that pass. Uncertain probes cannot refresh the
+or an elapsed dispatch timeout. CLAIMPIDSTALE-01 includes legacy leases without
+holderHost in local PID checks; dead owners leave the terminal receipt and
+abandonment log at startup or the next closure evaluation, even without a
+dispatch timeout. Dead hostless owners also enter pre-receipt reconciliation
+before the intent deadline; existing ledger proof must settle absence before
+deferring the lease and refunding the intent retry once. Startup sweeps log
+releases; closure resumes normal next-action admission that pass. Uncertain probes cannot refresh the
 deadline. Existing submission fences, current-process leases, review handoffs,
 launch ownership and operator holds remain. Offline coverage is in the closer
 lease, finalclose, dispatch-priority and recovery-reaper suites; existing smoke
@@ -3337,10 +3342,11 @@ holds. The runtime owner must verify the merged SDK release record, deploy the
 producer, and run `npm ci` in this submodule before normal service deployment.
 Rollback removes the flag from both templates and redeploys, safely pausing
 reads and retaining ownership holds. SDK 0.9.0 is byte-verified against merged producer `f37c7489439a8b53eafecb38870f75fe9f07fa57`; runtime activation remains separate.
-SDK 0.9.0 cannot attest global absence: empty lookups and missing rows retain
-ownership instead of settling or reclaiming it. See the reader contract for the
-remaining producer completeness obligation and cancellation limits. Existing lifecycle states, transitions and smoke promises
-are unchanged. Focused offline regressions run with:
+Ordinary filtered empty lookups and missing rows retain ownership. Only the
+LAC-2120 exact-selector producer proof, under a separate expiring operator
+entitlement, can certify absence through the unchanged SDK transport. See the
+reader contract for proof validation and cancellation limits. Existing lifecycle
+states, transitions and smoke promises are unchanged. Focused offline regressions run with:
 
 ```bash
 node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
@@ -3398,3 +3404,14 @@ with matching connection identity, or an explicit existing session token. Synchr
 timeout changes reuse the cached session receipt; another endpoint cannot borrow
 the cached token. Cold sync reads remain unavailable until async registration.
 Partial worker accounting remains marked partial through reviewer capture.
+
+## Exact absence recovery (LAC-2120)
+
+The [recovery contract](docs/dispatch-absence-recovery.md) permits empty key or
+ticket evidence only with an exact, expiring operator entitlement and matching
+canonical producer proof. Ordinary filtered/partial/unreadable reads stay held.
+Existing states, locking, receipt adoption and retry accounting are unchanged.
+Focused SDK/intent tests and the producer's authenticated packaged-SDK/native
+settlement composition verify this on demand. Existing smoke promises remain
+unchanged; deployment/loaded generations and organic recovery need independent
+operator evidence. No live activation, grants or settlement are part of this PR.

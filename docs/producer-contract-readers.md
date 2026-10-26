@@ -401,14 +401,15 @@ unavailable evidence rather than preventing daemon module linking.
 
 The SDK release is pinned to merged producer revision
 `f37c7489439a8b53eafecb38870f75fe9f07fa57`; see `vendor/README.md`.
-SDK 0.9.0 `not_found` is scoped to authenticated grants, and its envelope
-has no authorization completeness field. The consumer therefore maps empty
-lookups and missing rows within positive snapshots to `dispatch-read-unavailable`
-with `dispatch absence scope unproven`. They never prove absence for terminal
-lease reclamation, missing-launch capacity settlement or pre-receipt settlement.
+SDK 0.9.0 forwards the producer envelope unchanged; its base validator does not
+interpret optional absence evidence. Ordinary grant-filtered `not_found` and
+missing rows within positive snapshots remain `dispatch-read-unavailable` with
+`dispatch absence scope unproven`. Only the separately validated LAC-2120
+exact-selector producer proof can certify complete absence for terminal lease
+reclamation, missing-launch capacity settlement or pre-receipt settlement.
 Positive authorized launch/retry observations remain available. Even a genuinely
-missing launch retains its hold until a coordinated producer contract can prove
-complete scope; provisioned grants alone cannot enable absence settlement.
+missing launch retains its hold without that proof; ordinary project/repository
+grants alone cannot enable absence settlement.
 `--ledger-target` is rejected by the settlement CLI so it cannot misrepresent
 which source was queried.
 
@@ -521,3 +522,11 @@ Programmatic synchronous backfill callers must await preparation using matching
 default connection settings. Direct synchronous observation readers can instead
 supply an explicit existing session token in `connectOptions`.
 Partial worker accounting remains marked partial through reviewer capture.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

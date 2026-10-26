@@ -826,11 +826,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 CLOSERLEASEDEAD-01: a launch-less pending closer lease transitions to terminal
-`abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID, or
+`abandoned-holder-dead` on a confirmed absent/reused same-host watcher PID
+(including legacy hostless leases, CLAIMPIDSTALE-01), or
 `abandoned-timeout` strictly after its recorded dispatch timeout. Startup and
 periodic sweeps record the outcome and released count; closure re-evaluates the
 next action that pass, including after an uncertain ownership probe crosses the
-deadline. Intent and lease mutation fences preserve unresolved submissions and
+deadline. Dead-PID proof also applies without a persisted timeout. A hostless
+dead watcher enters intent reconciliation before its deadline; existing ledger
+proof must establish absence before `no-dispatch`, lease deferral and the single
+retry refund. Intent and lease mutation fences preserve unresolved submissions and
 replacement owners. Current-process leases, review handoffs, launch ownership,
 operator holds and all current-head merge gates retain their handling. See the
 [lease contract](data-model/ama-closer-leases.md#abandoned-pending-holders-closerleasedead-01).
@@ -2335,3 +2339,11 @@ return it to ordinary closure evaluation with two-minute exponential backoff
 capped at thirty minutes. The third same-head launch pages through the existing
 closure-wait receipt without final-no-merge or automated-stop credit. Real refusals retain their terminal behavior, including an earlier
 deterministic stop. Queue-v2 and migrated closer transitions are unchanged.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

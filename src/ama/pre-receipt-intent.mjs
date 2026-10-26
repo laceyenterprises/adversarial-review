@@ -102,6 +102,7 @@ function queryEvidence(query, probe) {
     reason: rows === null ? probe?.reason || 'ledger-lookup-unreadable' : null,
     detail: rows === null ? probe?.detail || null : null,
     timeoutMs: query.timeoutMs, attempts: probe?.attempts || [],
+    ...(probe?.absenceProof ? { absenceProof: probe.absenceProof } : {}),
     launchRequestIds: rows?.map(row => row?.launch_request_id).filter(id => typeof id === 'string') || [] };
 }
 

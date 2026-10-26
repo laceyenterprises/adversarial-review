@@ -3078,6 +3078,82 @@ test('parseClaudeJsonOutput extracts the final verdict from stream events', () =
   assert.equal(parsed.tokenUsage.input, 42);
 });
 
+// REVIEWREPLYLAST-01: synthetic messages only; preserve one complete output.
+const SYNTHETIC_CLAUDE_REVIEW = [
+  '## Summary', 'The synthetic change is ready.', '',
+  '## Blocking issues', '- None.', '',
+  '## Non-blocking issues', '- None.', '',
+  '## Suggested fixes', '- None.', '',
+  '## Verdict', 'Approved', '',
+].join('\r\n');
+const SYNTHETIC_CLAUDE_FOLLOW_UP = 'The background search finished; the verdict is unchanged.';
+const claudeResultEvent = (result) => ({ type: 'result', result, usage: { output_tokens: 17 } });
+const claudeAssistantEvent = (text) => ({
+  type: 'assistant', message: { content: [{ type: 'text', text }] },
+});
+
+for (const { name, events, expected, selected, selectedType = 'result', valid = true } of [
+  { name: 'valid result before a short follow-up',
+    events: [claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW), claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP)],
+    expected: SYNTHETIC_CLAUDE_REVIEW, selected: 1 },
+  { name: 'only an invalid result', events: [claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP)],
+    expected: SYNTHETIC_CLAUDE_FOLLOW_UP, selected: 1, valid: false },
+  { name: 'one valid result unchanged', events: [claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW)],
+    expected: SYNTHETIC_CLAUDE_REVIEW, selected: 1 },
+  { name: 'the newest of two valid results',
+    events: [claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW),
+      claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW.replace('Approved', 'Request changes'))],
+    expected: SYNTHETIC_CLAUDE_REVIEW.replace('Approved', 'Request changes'), selected: 2 },
+  { name: 'a complete assistant reply before a short result',
+    events: [claudeAssistantEvent(SYNTHETIC_CLAUDE_REVIEW), claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP)],
+    expected: SYNTHETIC_CLAUDE_REVIEW, selected: 1, selectedType: 'assistant' },
+  { name: 'a newer assistant reply after a valid result',
+    events: [claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW),
+      claudeAssistantEvent(SYNTHETIC_CLAUDE_REVIEW.replace('Approved', 'Comment only')),
+      claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP)],
+    expected: SYNTHETIC_CLAUDE_REVIEW.replace('Approved', 'Comment only'), selected: 2, selectedType: 'assistant' },
+  { name: 'invalid turns are never joined',
+    events: [claudeAssistantEvent('## Summary\nThe synthetic change is ready.'),
+      claudeResultEvent('## Verdict'), claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP)],
+    expected: SYNTHETIC_CLAUDE_FOLLOW_UP, selected: 3, valid: false },
+]) {
+  test(`REVIEWREPLYLAST-01: parser selects ${name}`, () => {
+    const parsed = parseClaudeJsonOutput(events.map((event) => JSON.stringify(event)).join('\n'));
+    assert.equal(parsed.reviewText, expected);
+    assert.equal(parsed.tokenUsage.output, 17);
+    assert.deepEqual(parsed.replySelection, { candidateCount: events.length, selectedCandidate: selected,
+      selectedType, laterCandidates: events.length - selected, contractValid: valid });
+  });
+
+  test(`REVIEWREPLYLAST-01: live stream selects ${name}`, async () => {
+    const result = await reviewWithClaude('+synthetic diff\n', '', {
+      assertClaudeOAuthImpl: async () => ({ env: { PATH: process.env.PATH }, transport: 'keychain' }),
+      platform: 'linux',
+      spawnClaudeImpl: async (_args, { onStdoutData }) => {
+        const stream = events.map((event, index) => JSON.stringify({ ...event,
+          ...(event.type === 'result' ? { usage: { output_tokens: index + 1 } } : {}) })).join('\n');
+        // Split JSON records and omit the final newline. stdout alone has lost
+        // the earlier review, just as a bounded diagnostic tail can lose it.
+        for (let offset = 0; offset < stream.length; offset += 31) onStdoutData(stream.slice(offset, offset + 31));
+        return { stdout: JSON.stringify(events.at(-1)), stderr: '' };
+      },
+    });
+    assert.equal(result.reviewText, expected);
+    assert.equal(result.tokenUsage.output, events.length);
+    assert.deepEqual(result.execution.replySelection, { candidateCount: events.length, selectedCandidate: selected,
+      selectedType, laterCandidates: events.length - selected, contractValid: valid });
+  });
+}
+
+test('REVIEWREPLYLAST-01: nested assistant output cannot replace the reviewer reply', () => {
+  const parsed = parseClaudeJsonOutput([
+    { ...claudeAssistantEvent(SYNTHETIC_CLAUDE_REVIEW), parent_tool_use_id: 'synthetic-tool' },
+    claudeResultEvent(SYNTHETIC_CLAUDE_FOLLOW_UP),
+  ].map((event) => JSON.stringify(event)).join('\n'));
+  assert.equal(parsed.reviewText, SYNTHETIC_CLAUDE_FOLLOW_UP);
+  assert.equal(parsed.replySelection.contractValid, false);
+});
+
 test('parseClaudeJsonOutput extracts review text + exact usage (no transcript needed)', () => {
   const raw = JSON.stringify({
     type: 'result',
@@ -3631,17 +3707,20 @@ test('reviewWithClaude reuses broker auth env and skips launchctl', async () => 
   assert.equal(calls[0].options.env.ANTHROPIC_AUTH_TOKEN, 'broker-oauth-token');
 });
 
-test('reviewWithClaude parses a result after more than 10 MiB of stream events', async () => {
+test('reviewWithClaude retains a valid reply before more than 10 MiB of stream events and a follow-up', async () => {
   const result = await reviewWithClaude('+diff\n', '', {
     assertClaudeOAuthImpl: async () => ({ env: { PATH: process.env.PATH }, transport: 'keychain' }),
     platform: 'linux',
     spawnClaudeImpl: (_args, { uid: _uid, useLaunchctl: _useLaunchctl, ...options }) =>
       spawnCapturedProcessGroup(process.execPath, ['-e',
-        'const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(JSON.stringify({type:"result",result:"## Verdict\\nComment only",usage:{output_tokens:7}})+"\\n");',
+        'process.stdout.write(process.argv[1]+"\\n"); const line=JSON.stringify({type:"assistant",message:"x".repeat(1024)})+"\\n"; for(let i=0;i<11000;i++) process.stdout.write(line); process.stdout.write(process.argv[2]+"\\n");',
+        JSON.stringify(claudeResultEvent(SYNTHETIC_CLAUDE_REVIEW)),
+        JSON.stringify({ type: 'result', result: SYNTHETIC_CLAUDE_FOLLOW_UP, usage: { output_tokens: 7 } }),
       ], options),
   });
-  assert.equal(result.reviewText, '## Verdict\nComment only');
+  assert.equal(result.reviewText, SYNTHETIC_CLAUDE_REVIEW);
   assert.equal(result.tokenUsage.output, 7);
+  assert.equal(result.execution.replySelection.laterCandidates, 1);
 });
 
 test('reviewWithClaude retries one silent invocation on claude with freshly prepared auth', async () => {

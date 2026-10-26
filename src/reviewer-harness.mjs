@@ -62,7 +62,7 @@ import {
   sanitizeReviewPayloadBestEffort,
   sanitizeCodexReviewPayload,
 } from './kernel/verdict.mjs';
-import { assertReviewerReply } from './kernel/review-reply.mjs';
+import { assertReviewerReply, validateReviewerReply } from './kernel/review-reply.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   mintClaudeCodeRemediationBrokerToken,
@@ -856,7 +856,7 @@ async function reviewWithClaude(diff, extraContext = '', {
 
   let stdout, stderr;
   let streamRemainder = '';
-  let finalResultEvent = null;
+  const replySelector = createClaudeReplySelector();
   let sawStreamEvent = false;
   const noteStreamEvents = (chunk) => {
     streamRemainder += chunk;
@@ -869,7 +869,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         if (event && typeof event === 'object' && typeof event.type === 'string') {
           sawEvent = true;
           sawStreamEvent = true;
-          if (event.type === 'result') finalResultEvent = line;
+          replySelector.add(event);
           onProgress?.({ changedLines, effort: reviewerExecution.effort });
         }
       } catch { /* An incomplete or diagnostic line is not a heartbeat. */ }
@@ -952,39 +952,82 @@ async function reviewWithClaude(diff, extraContext = '', {
   }
   await tokenProxy?.close();
 
-  // The process helper retains only a bounded diagnostic tail. The final
-  // result event carries both review text and usage; earlier events are not
-  // needed for the verdict.
+  // The process helper retains only a bounded diagnostic tail. Keep the newest
+  // contract-valid reply independently, so a trailing follow-up cannot erase it.
   if (streamRemainder.trim()) {
     try {
       const event = JSON.parse(streamRemainder);
-      if (event?.type === 'result') finalResultEvent = streamRemainder;
+      replySelector.add(event);
     } catch { /* Leave malformed trailing output to the normal parser. */ }
   }
-  if (finalResultEvent) stdout = finalResultEvent;
+  const replySelection = replySelector.selection();
+  if (replySelection) stdout = replySelection.jsonText;
 
   if (!stdout?.trim()) {
     const hint = stderr?.trim() ? ` stderr: ${stderr.substring(0, 200)}` : '';
     throw new Error(`Claude CLI returned empty output.${hint}`);
   }
 
-  // The final stream-json result event wraps the response as {result, usage, ...}. Extract the
-  // review text (result) for downstream posting AND the exact usage block, so
+  // Select one intact reply and the final result's exact usage block, so
   // claude reviewers no longer depend on the flaky ~/.claude/projects transcript
   // scrape (which missed ~90% of passes -> token_source='unknown'). Fail closed:
   // malformed JSON or an invalid result must use the normal reviewer retry path,
   // not post a raw CLI payload as a GitHub review.
   const raw = stdout.trim();
-  const parsed = parseClaudeJsonOutput(raw);
+  const parsed = parseClaudeJsonOutput(raw, replySelection ?? undefined);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage,
-    execution: { harness: 'claude', model: reviewerExecution.model, effort: reviewerExecution.effort } };
+    execution: { harness: 'claude', model: reviewerExecution.model, effort: reviewerExecution.effort,
+      replySelection: parsed.replySelection } };
 }
 
-function parseClaudeJsonOutput(raw) {
+// Retain at most the latest result and latest valid reply, even for streams
+// larger than the diagnostic tail. Never join text across assistant messages.
+function createClaudeReplySelector() {
+  let candidateCount = 0;
+  let latestResult = null;
+  let newestValid = null;
+  return {
+    add(event) {
+      if (!event || typeof event !== 'object') return;
+      let text;
+      if (event.type === 'result' || (!event.type && typeof event.result === 'string')) {
+        text = event.result;
+        latestResult = { event, index: ++candidateCount };
+      } else if (event.type === 'assistant' && !event.parent_tool_use_id && Array.isArray(event.message?.content)) {
+        const blocks = event.message.content.filter((block) => block?.type === 'text' && typeof block.text === 'string');
+        if (blocks.length === 0) return;
+        text = blocks.map((block) => block.text).join('');
+        candidateCount += 1;
+      } else return;
+      if (typeof text === 'string' && validateReviewerReply(text).ok) {
+        newestValid = { text, index: candidateCount, type: event.type || 'result' };
+      }
+    },
+    selection() {
+      if (!latestResult && !newestValid) return null;
+      const index = newestValid?.index ?? latestResult.index;
+      return {
+        // Usage belongs to the invocation: preserve the final result's usage
+        // even when the reply came from an earlier result or assistant message.
+        jsonText: JSON.stringify(newestValid
+          ? { ...latestResult?.event, result: newestValid.text }
+          : latestResult.event),
+        replySelection: {
+          candidateCount,
+          selectedCandidate: index,
+          selectedType: newestValid?.type ?? 'result',
+          laterCandidates: candidateCount - index,
+          contractValid: Boolean(newestValid),
+        },
+      };
+    },
+  };
+}
+
+function parseClaudeJsonOutput(raw, selection = selectClaudeJsonOutput(raw)) {
   let doc;
-  const jsonText = extractClaudeJsonText(raw);
   try {
-    doc = JSON.parse(jsonText);
+    doc = JSON.parse(selection.jsonText);
   } catch (err) {
     throw new Error(`Failed to parse Claude JSON output: ${err.message}`);
   }
@@ -998,23 +1041,28 @@ function parseClaudeJsonOutput(raw) {
     throw new Error("Claude JSON output contains empty 'result' field");
   }
   const tokenUsage = mapClaudeJsonUsage(doc.usage);
-  return { reviewText: doc.result, tokenUsage: tokenUsage ? { ...tokenUsage, model: doc.model || null } : null };
+  return { reviewText: doc.result, tokenUsage: tokenUsage ? { ...tokenUsage, model: doc.model || null } : null,
+    replySelection: selection.replySelection };
+}
+
+function selectClaudeJsonOutput(raw) {
+  const text = String(raw ?? '').trim();
+  const selector = createClaudeReplySelector();
+  if (text.includes('\n')) {
+    for (const line of text.split(/\r?\n/)) {
+      try { selector.add(JSON.parse(line)); } catch { /* Diagnostic or incomplete line. */ }
+    }
+    const selection = selector.selection();
+    if (selection) return selection;
+  }
+  const jsonStart = text.indexOf('{');
+  const jsonText = jsonStart < 0 ? text : text.slice(jsonStart);
+  try { selector.add(JSON.parse(jsonText)); } catch { /* Keep the existing parse error. */ }
+  return selector.selection() ?? { jsonText, replySelection: null };
 }
 
 function extractClaudeJsonText(raw) {
-  const text = String(raw ?? '').trim();
-  if (text.includes('\n')) {
-    const events = text.split(/\r?\n/).map((line) => {
-      try { return JSON.parse(line); } catch { return null; }
-    });
-    const result = events.findLast((event) => event?.type === 'result' && typeof event.result === 'string');
-    if (result) return JSON.stringify(result);
-  }
-  const jsonStart = text.indexOf('{');
-  if (jsonStart < 0) {
-    return text;
-  }
-  return text.slice(jsonStart);
+  return selectClaudeJsonOutput(raw).jsonText;
 }
 
 function mapClaudeJsonUsage(usage) {

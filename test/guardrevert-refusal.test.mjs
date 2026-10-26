@@ -92,7 +92,8 @@ test('GUARDREVERT-01: failed refusal pages retry on the next tick before debounc
   const f = setup(t);
   const errors = [];
   let deliveries = 0;
-  const args = { ...f.args, logger: { ...logger, error: message => errors.push(JSON.parse(message)) },
+  const args = { ...f.args, now: '2026-01-01T00:01:00Z',
+    logger: { ...logger, error: message => errors.push(JSON.parse(message)) },
     deliverAlertImpl: async (text, options) => {
       deliveries++;
       if (deliveries === 1) throw new Error('Alert transport timeout');
@@ -109,7 +110,7 @@ test('GUARDREVERT-01: failed refusal pages retry on the next tick before debounc
   const retried = await evaluateHammerStopHold({ ...args, now });
   assert.equal(retried.hammerStop.paged, true);
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).heads[head].pagedAt, now);
-  await evaluateHammerStopHold(args);
+  await evaluateHammerStopHold({ ...args, now });
   assert.equal(deliveries, 2, 'only the failed delivery is retried');
   assert.equal(f.pages.length, 1);
   assert.equal(f.pages[0].options.event, 'ama_closer.hammer_stop_hold');

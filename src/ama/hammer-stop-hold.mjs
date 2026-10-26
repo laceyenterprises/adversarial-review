@@ -5,6 +5,9 @@ import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
+// CLOSERSTOPTRANSIENT-01: the historical input-change rule below applies only
+// to explicitly listed deterministic refusals. Other no-merge stops use a
+// durable five-minute backoff; ordinary retry and lifetime caps still apply.
 // NOOWNER-01 (SEV1) — after a hammer stops without merging, the next hammer
 // run on the same head waits for an input to change, and the operator is paged
 // once with the predicate the hammer named.
@@ -69,6 +72,8 @@ import { closureGateMergeability, isGithubMergeConflict } from '../github-mergea
 import { readAmaAuditEntry } from './audit.mjs';
 
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
+export const HAMMER_TRANSIENT_STOP_HOLD_REASON = 'hammer-stop-transient-backoff';
+export const HAMMER_TRANSIENT_STOP_BACKOFF_MS = 5 * 60_000;
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
@@ -81,6 +86,7 @@ export const HISTORY_READ_FAILURE_PAGE_GRACE_MS = 10 * 60_000;
 const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
+const STOP_REASON_WRAPPERS = new Set(['predicate-not-eligible', 'not-eligible', 'reason-not-recorded']);
 const INFRASTRUCTURE_STOP_REASONS = new Set([
   // Dispatch-owned scratch scripts disappeared; fresh dispatch renders them again.
   'missing-dispatch-phase-scripts',
@@ -101,9 +107,15 @@ export function isInfrastructureStop(stop) {
 
 const DETERMINISTIC_STOP_REASONS = new Set([
   'primary-change-reverted', 'primary-change-unknown', 'stale-review-head',
-  'verdict-not-eligible', 'verdict-not-settled-success', 'permanent-merge-rejection',
-  'protective-predecessor-open', 'protective-predecessor-malformed-trailer',
-  'builder-token-merge-refused', 'base-changed-file-overlap',
+  'verdict-not-eligible', 'verdict-not-settled-success',
+  'protective-predecessor-malformed-trailer', 'base-changed-file-overlap',
+  // These require changed review/content evidence, rather than elapsed time.
+  'blocking-findings-present', 'blocking-findings-unknown',
+  'non-blocking-findings-present', 'non-blocking-findings-unknown',
+  'review-currency-unproven',
+  // Auth, predecessor state, CI and opaque merge failures can recover on the
+  // same head. In particular permanent-merge-rejection includes HTTP 403 and
+  // required checks; its name is not evidence of a deterministic refusal.
 ]);
 // Process-local page debounce for a state file that cannot be written.
 const PAGED_IN_PROCESS = new Set();
@@ -127,19 +139,26 @@ function stable(value) {
 
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   if (isInfrastructureStop(attempt)) return null;
-  const reasons = stopReasons(attempt).filter(reason => !INFRASTRUCTURE_STOP_REASONS.has(reason));
-  if (DETERMINISTIC_STOP_REASONS.has(attempt.reason) && !reasons.includes(attempt.reason)) reasons.push(attempt.reason);
-  reasons.sort();
-  if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
+  const reasons = classifiedStopReasons(attempt);
+  if (!reasons.length || !reasons.every(reason => DETERMINISTIC_STOP_REASONS.has(reason))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
     || attempt.githubGate?.primaryChangeMissingEvidence || null);
   const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence })).digest('hex');
   const next = attempt.next || (reasons.includes('primary-change-reverted')
     ? 'Restore the uncited reverted regions, then push the repaired head.'
     : reasons.includes('stale-review-head') ? 'Revalidate the full range from the last reviewed head under a hammer lease.'
-      : reasons.includes('ci-not-green') ? 'Repair the named required check and rerun it on the current head.'
-        : `Supply the missing evidence for ${reasons[0]}.`);
+      : `Supply the missing evidence for ${reasons[0]}.`);
   return { key, reasons, missingEvidence, next };
+}
+
+function classifiedStopReasons(attempt) {
+  const reasons = stopReasons(attempt).filter(reason => !INFRASTRUCTURE_STOP_REASONS.has(reason));
+  // Structured reasons describe the failed predicates; the outer reason can
+  // be a wrapper such as predicate-not-eligible. Bare legacy stops still count.
+  const reason = attempt?.reason || attempt?.predicate;
+  if (reason && !INFRASTRUCTURE_STOP_REASONS.has(reason)
+    && (!reasons.length || !STOP_REASON_WRAPPERS.has(reason)) && !reasons.includes(reason)) reasons.push(reason);
+  return reasons.sort();
 }
 
 function stopReasons(attempt) {
@@ -285,6 +304,7 @@ export function readHammerStopForHead({
   }
   if (!STOP_OUTCOMES.has(latest.outcome)) return null;
   const { attempt } = latest;
+  const refusal = deterministicRefusal(attempt, { repo, prNumber, headSha });
   return {
     headSha,
     // Auditable stops in this review series let release refund multiple
@@ -302,7 +322,8 @@ export function readHammerStopForHead({
     failedChecks: recordedCiFailures(attempt),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     reasons: stopReasons(attempt),
-    refusal: deterministicRefusal(attempt, { repo, prNumber, headSha }),
+    refusal,
+    deterministic: Boolean(refusal),
     closingStatus: oneLine(attempt?.closingStatus, attempt?.reason === 'history-read-failed' ? HISTORY_READ_ERROR_LIMIT : TEXT_LIMIT),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason, HISTORY_READ_ERROR_LIMIT) } : {}),
@@ -468,12 +489,28 @@ export async function evaluateHammerStopHold({
     }
     return { action: 'release', hammerStop: stop, infrastructureStop: stop, changed };
   }
+  // Upgrade old catch-all refusals once, including when audit retention has
+  // removed the stop. Never use cleanup alone to authorize dispatch or refunds.
+  const priorReasons = prior && classifiedStopReasons({ ...prior, reasons: prior.refusal?.reasons || prior.reasons });
+  if (prior && !prior.releasedAt && !prior.retryAfter && priorReasons.length
+    && priorReasons.every(reason => !DETERMINISTIC_STOP_REASONS.has(reason))
+    && !isInfrastructureStop(prior) && !stop?.refusal && stop?.predicate !== 'history-read-failed') {
+    const changed = ['transient-stop-upgrade'];
+    const entry = { ...prior, refusal: null, mode: 'transient', reasons: priorReasons,
+      retryAfter: now, releasedAt: now, releasedBy: changed };
+    persist(entry);
+    logger?.log?.(JSON.stringify({ event: 'ama_closer.hammer_stop_hold_released',
+      repo, prNumber, headSha, stopKey: prior.stopKey, predicate: prior.predicate, reasons: priorReasons, changed }));
+    if (!stop) return { action: 'none' };
+    if (stop.stopKey === prior.stopKey) return { action: 'release', hammerStop: stop, changed };
+  }
   // STOPHOLDINFRA-01: packaging failures say nothing about the PR. Retire old
   // infrastructure holds once, without paging or refunding attempts. An incoming
   // packaging failure cannot release an unrelated refusal. Ordinary gates,
   // leases and retry caps still own re-dispatch; the audit may already be cleared.
   if (isInfrastructureStop(stop) || (!stop && isInfrastructureStop(prior))) {
-    if (prior?.refusal && !prior.releasedAt && !isInfrastructureStop(prior)) {
+    if (prior?.refusal && !prior.releasedAt && deterministicRefusal({ ...prior,
+      reasons: prior.refusal.reasons }, { repo, prNumber, headSha })) {
       const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
       const changed = changedHammerStopInputs(prior.inputs, inputs);
       const hammerStop = { headSha, predicate: prior.predicate,
@@ -516,7 +553,7 @@ export async function evaluateHammerStopHold({
     && !(prior.releasedAt && prior.stopKey !== stop.stopKey);
   if (!reuseEntry) state.refusalGeneration = (Number(state.refusalGeneration) || 0) + 1;
   let entry = reuseEntry
-    ? { ...prior, stopKey: stop.stopKey, ...(stop.refusal ? { refusal: stop.refusal } : {}) }
+    ? { ...prior, stopKey: stop.stopKey, refusal: stop.refusal }
     : {
       stopKey: stop.stopKey,
       refusalGeneration: state.refusalGeneration,
@@ -530,6 +567,11 @@ export async function evaluateHammerStopHold({
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
   let dirty = !reuseEntry || prior.stopKey !== stop.stopKey;
+  if (!stop.refusal && !entry.retryAfter) {
+    entry = { ...entry, mode: 'transient', reasons: classifiedStopReasons(stop),
+      retryAfter: new Date(Date.parse(now) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString() };
+    dirty = true;
+  }
   if (!entry.releasedAt) {
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
@@ -581,17 +623,22 @@ export async function evaluateHammerStopHold({
       }
     }
     if (changed.length === 0 && !stop.refusal && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
+    if (changed.length === 0 && !stop.refusal && Date.parse(now) >= Date.parse(entry.retryAfter)) changed.push('transient-stop-backoff');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
       dirty = true;
       logger?.log?.(JSON.stringify({
         event: 'ama_closer.hammer_stop_hold_released',
-        repo, prNumber, headSha, predicate: stop.predicate, changed,
+        repo, prNumber, headSha, stopKey: stop.stopKey, predicate: stop.predicate,
+        reasons: classifiedStopReasons(stop), changed,
       }));
     }
   }
   const hammerStop = {
     headSha,
+    stopKey: stop.stopKey,
+    deterministic: Boolean(stop.refusal),
+    ...(entry.retryAfter ? { retryAfter: entry.retryAfter } : {}),
     predicate: stop.predicate,
     ...(stop.refusal ? { refusal: stop.refusal } : {}),
     closingStatus: stop.closingStatus || null,
@@ -618,8 +665,9 @@ export async function evaluateHammerStopHold({
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
       + (stop.refusal ? `Reasons: ${stop.refusal.reasons.join(', ')}. Missing evidence: ${JSON.stringify(stop.refusal.missingEvidence)}. Action: ${stop.refusal.next} `
         : 'Closure recovery rechecks the stopped workflow on the scheduled cadence. ')
-      + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
-      + 'the watcher re-checks on its scheduled cadence and re-dispatches once when one does.';
+      + (stop.refusal
+        ? 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; the watcher re-checks on its scheduled cadence and re-dispatches once when one does.'
+        : `Transient stop; retry eligible at ${entry.retryAfter}, or sooner on changed inputs, within existing retry and lifetime caps.`);
     try {
       await deliverAlertImpl(text, {
         event: HAMMER_STOP_HOLD_PAGE_EVENT,

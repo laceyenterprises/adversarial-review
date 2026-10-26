@@ -703,3 +703,14 @@ test('infrastructure wait retains conflict repair ownership', () => {
   }));
   assert.deepEqual(pick(decision), ['hammer', 'hammer', 'conflict-rebase']);
 });
+
+test('CLOSERSTOPTRANSIENT-01 a transient stop permits retry ownership while existing caps still stop it', () => {
+  const transient = { controls: { stop: { ...STOP, deterministic: false } },
+    launches: { closer: { status: 'failed', headSha: HEAD, outcome: 'no-merge', retryable: true, attempt: 1 } } };
+  assert.deepEqual(pick(nextAction(snap(transient))), ['hammer', 'hammer', 'retry-no-merge']);
+  for (const hammerCap of [{ headSha: HEAD, retryExhausted: true }, { lifetimeExhausted: true }]) {
+    const decision = nextAction(snap({ ...transient, policy: { hammerCap } }));
+    assert.equal(decision.actor, 'closure-recovery');
+    assert.equal(decision.reason, hammerCap.lifetimeExhausted ? 'lifetime-exhausted' : 'retry-exhausted');
+  }
+});

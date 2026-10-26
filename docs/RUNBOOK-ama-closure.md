@@ -2525,8 +2525,21 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   resolution refused ...`, `hammer close could not provision a private branch
   ...`) is classified as a branch-holder block, so it no longer spends the
   redispatch budget at all.
+CLOSERSTOPTRANSIENT-01 restricts input-change holds to the explicit audited
+`DETERMINISTIC_STOP_REASONS` allowlist. Finding and review-evidence refusals
+remain held; CI, lane contention, auth/environment and unclassified merge
+failures use a durable five-minute transient backoff (`hammer-stop-transient-backoff`).
+Changed inputs may release sooner. Each new stop gets its own window, while
+repeated polls retain a released stop. Legacy transient-only holds release once
+on upgrade with `transient-stop-upgrade`; release audits name reasons and stop
+keys. Next-action carries the transient classification through both projections.
+Per-head, series and lifetime caps and terminal-PR guards still apply; no
+executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
+for the vocabulary audit and migration shape.
+
 - **Hammer stop hold** (`src/ama/hammer-stop-hold.mjs`). When the hammer's
-  latest terminal audit for the live head is `failed-without-merge`, the closer
+  latest terminal audit for the live head is `failed-without-merge` with an
+  explicitly deterministic refusal, the closer
   does not dispatch another hammer on that head until the head, base SHA,
   mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
   the hammer recorded in its terminal audit (falling back per missing input to
@@ -2603,7 +2616,7 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   holds return `none` without writing state on later ticks. Release write failures
   are logged and retain the in-memory decision for that tick. No attempts are
   refunded, so ordinary gates, leases and retry caps continue to bound recovery.
-  Other predicates retain their holds and page rules. Released stops return to ordinary backoff.
+  Other transient predicates use the five-minute hold described above. Released stops return to ordinary backoff.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence
   stops on the live head; an older head's no-merge does not terminate ownership

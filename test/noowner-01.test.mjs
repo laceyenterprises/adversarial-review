@@ -30,10 +30,11 @@ import {
   hammerStopInputs,
   hammerStopPrIsConflicting,
   isInfrastructureStop,
-  HAMMER_STOP_HOLD_REASON,
+  HAMMER_TRANSIENT_STOP_HOLD_REASON,
+  HAMMER_TRANSIENT_STOP_BACKOFF_MS,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
-import { readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
+import { HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import { recoverAmaAutomation } from '../src/ama/automated-recovery.mjs';
 import {
   closerHeadRereviewDeclinedReason,
@@ -241,7 +242,7 @@ for (const reason of INFRA_REASONS) {
     });
   }
 
-  for (const predicate of ['verdict-not-eligible', 'primary-change-reverted', 'permanent-merge-rejection']) {
+  for (const predicate of ['verdict-not-eligible', 'primary-change-reverted', 'review-currency-unproven']) {
     test(`STOPHOLDINFRA-01 ${reason}: preserves an existing ${predicate} refusal`, async t => {
       const f = infrastructureFixture(t, predicate);
       const deps = { deliverAlertImpl: async () => {},
@@ -735,8 +736,8 @@ test('own StatusContext is ignored while a same-name external CheckRun releases 
   const tick = (at, external, own) => maybeDispatchAmaCloser({
     ...podiumArgs(rootDir, { at, rollup: rollup(external, own) }), ...closerDeps(),
   });
-  assert.equal((await tick('2026-10-10T18:02:00Z', 'FAILURE', 'SUCCESS')).reason, HAMMER_STOP_HOLD_REASON);
-  assert.equal((await tick('2026-10-10T18:03:00Z', 'FAILURE', 'FAILURE')).reason, HAMMER_STOP_HOLD_REASON);
+  assert.equal((await tick('2026-10-10T18:02:00Z', 'FAILURE', 'SUCCESS')).reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
+  assert.equal((await tick('2026-10-10T18:03:00Z', 'FAILURE', 'FAILURE')).reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
   const released = await tick('2026-10-10T18:04:00Z', 'SUCCESS', 'FAILURE');
   assert.equal(released.dispatched, true, JSON.stringify(released));
 });
@@ -773,7 +774,7 @@ test('Case 4: UNKNOWN mergeability keeps the stop hold until a known reading all
   for (const at of ['2026-10-10T19:36:00Z', '2026-10-10T19:40:00Z']) {
     const held = closerDeps({ alerts });
     const result = await maybeDispatchAmaCloser({ ...args(at, 'UNKNOWN'), ...held });
-    assert.equal(result.reason, HAMMER_STOP_HOLD_REASON);
+    assert.equal(result.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
     assert.equal(hqLaunches(held).length, 0);
   }
   const statePath = join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'laceyenterprises-podium-pr-15.json');
@@ -810,7 +811,7 @@ test('Case 4: a second hammer run on podium#15 is not launched until an input ch
   const held = closerDeps({ alerts });
   const first = await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-10T19:36:37Z' }), ...held });
   assert.equal(hqLaunches(held).length, 0, 'the second run could not end differently; it must not launch');
-  assert.equal(first.reason, HAMMER_STOP_HOLD_REASON, JSON.stringify(first));
+  assert.equal(first.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON, JSON.stringify(first));
   assert.equal(first.recoveryWait, true);
   assert.equal(first.reasons, undefined, 'no reasons: orphan recovery and automated recovery read a wait');
   assert.equal(alerts.length, 1);
@@ -902,7 +903,7 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
   const alerts = [];
   const held = closerDeps({ alerts });
   const first = await maybeDispatchAmaCloser({ ...args('2026-10-10T18:36:00Z', '12badc0823fa'), ...held });
-  assert.equal(first.reason, HAMMER_STOP_HOLD_REASON, JSON.stringify(first));
+  assert.equal(first.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON, JSON.stringify(first));
   assert.equal(first.recoveryWait, true);
   assert.equal(first.reasons, undefined);
   assert.equal(hqLaunches(held).length, 0);
@@ -950,7 +951,7 @@ test('REMCONFLICT-01: a CONFLICTING PR is never held; the closer re-dispatches t
     }),
     ...deps,
   });
-  assert.notEqual(result.reason, HAMMER_STOP_HOLD_REASON, JSON.stringify(result));
+  assert.notEqual(result.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON, JSON.stringify(result));
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(hqLaunches(deps).length, 1, 'the conflict owner runs');
   assert.equal(alerts.filter((alert) => alert.options.event === 'ama_closer.hammer_stop_hold').length, 0,
@@ -960,7 +961,7 @@ test('REMCONFLICT-01: a CONFLICTING PR is never held; the closer re-dispatches t
   assert.deepEqual(state.heads[CLOSER_8022].releasedBy, ['conflicting']);
 });
 
-test('REMCONFLICT-01: the hold releases a conflicting stop (CONFLICTING or DIRTY) and still holds every non-conflict stop', async (t) => {
+test('REMCONFLICT-01: the hold releases a conflicting stop (CONFLICTING or DIRTY) and holds non-conflict stops until backoff', async (t) => {
   const stopDoc = { attempts: [{ outcome: 'failed-without-merge', reason: 'ci-not-green', head: PODIUM_HEAD, startedAt: '2026-10-10T19:25:52Z' }] };
   const evaluate = (rootDir, prMetadata, now) => evaluateHammerStopHold({
     rootDir, hqRoot: '/fixture', repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
@@ -971,7 +972,7 @@ test('REMCONFLICT-01: the hold releases a conflicting stop (CONFLICTING or DIRTY
     _resetHammerStopHoldPageDebounceForTests();
     const rootDir = tmpRoot(t, 'remconflict-hold-nonconflict-');
     assert.equal((await evaluate(rootDir, { mergeableState }, '2026-10-10T19:30:00Z')).action, 'hold', mergeableState);
-    assert.equal((await evaluate(rootDir, { mergeableState }, '2026-10-10T19:40:00Z')).action, 'hold', `${mergeableState}: next tick`);
+    assert.equal((await evaluate(rootDir, { mergeableState }, '2026-10-10T19:40:00Z')).action, 'release', `${mergeableState}: backoff elapsed`);
   }
   for (const prMetadata of [{ mergeableState: 'CONFLICTING' }, { mergeableState: 'DIRTY' }, { mergeable: 'CONFLICTING' }]) {
     const rootDir = tmpRoot(t, 'remconflict-hold-conflict-');
@@ -1000,7 +1001,7 @@ test('Case 3: a stale review on a worker-pushed head retains the hammer stop hol
     }),
     ...closerDeps(),
   });
-  assert.equal(result.reason, HAMMER_STOP_HOLD_REASON);
+  assert.equal(result.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
   assert.equal(result.dispatched, false);
 });
 
@@ -1536,4 +1537,127 @@ test('CIBLOCKINFRA-01 infrastructure stop classification rejects mixed and unpro
   assert.equal(isInfrastructureStop({ ...stop, githubGate: { reasons: ['ci-not-green'],
     badChecks: [...badChecks, { name: 'lint', conclusion: 'FAILURE', steps: [{ conclusion: 'failure' }] }] } }), false);
   assert.equal(isInfrastructureStop({ reason: 'ci-not-green' }), false);
+});
+
+for (const reason of ['unclassified-merge-failure', 'merge-lane-busy', 'actions-budget-blocked',
+  'environment-failure', 'ci-not-green', 'permanent-merge-rejection',
+  'builder-token-merge-refused', 'protective-predecessor-open']) {
+  test(`CLOSERSTOPTRANSIENT-01 ${reason} retries after durable backoff`, async t => {
+    const f = infrastructureFixture(t, reason);
+    const events = [];
+    const deps = { logger: { ...SILENT, log: line => events.push(JSON.parse(line)) } };
+    const first = await f.evaluate(deps);
+    assert.equal(first.action, 'hold');
+    assert.equal(first.hammerStop.deterministic, false);
+    assert.equal(first.hammerStop.refusal, undefined);
+    const retryAt = new Date(Date.parse(f.at) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString();
+    assert.equal(first.hammerStop.retryAfter, retryAt);
+    _resetHammerStopHoldPageDebounceForTests();
+    assert.equal((await f.evaluate({ ...deps, now: new Date(Date.parse(retryAt) - 1).toISOString() })).action, 'hold');
+    const released = await f.evaluate({ ...deps, now: retryAt });
+    assert.equal(released.action, 'release');
+    assert.deepEqual(released.changed, ['transient-stop-backoff']);
+    assert.equal((await f.evaluate({ ...deps, now: retryAt })).action, 'release');
+    const releases = events.filter(event => event.event === 'ama_closer.hammer_stop_hold_released');
+    assert.equal(releases.length, 1, 'one audit record for this retry admission');
+    assert.deepEqual(releases[0].reasons, [reason]);
+    f.recordStop(retryAt);
+    assert.equal((await f.evaluate({ ...deps, now: retryAt })).action, 'hold', 'a new stop starts a new backoff');
+  });
+}
+
+test('CLOSERSTOPTRANSIENT-01 deterministic classification is an explicit allowlist', async t => {
+  for (const reason of ['verdict-not-eligible', 'blocking-findings-present', 'blocking-findings-unknown',
+    'non-blocking-findings-present', 'non-blocking-findings-unknown', 'review-currency-unproven']) {
+    const f = infrastructureFixture(t, reason);
+    const first = await f.evaluate();
+    assert.equal(first.hammerStop.deterministic, true, reason);
+    assert.equal((await f.evaluate({ now: minutesAfter(f.at, 60) })).action, 'hold', reason);
+    assert.deepEqual((await f.evaluate({ prMetadata: { ...f.args.prMetadata, baseSha: 'c'.repeat(40) } })).changed, ['base']);
+  }
+  const f = infrastructureFixture(t, 'predicate-not-eligible');
+  f.recordStop();
+  const mixed = await f.evaluate({ readAuditImpl: () => ({ attempts: [{
+    outcome: 'failed-without-merge', reason: 'predicate-not-eligible', head: f.identity.headSha,
+    reasons: ['verdict-not-eligible', 'unclassified-merge-failure'],
+  }] }) });
+  assert.equal(mixed.hammerStop.deterministic, false, 'an unlisted co-reason cannot become a deterministic refusal');
+  for (const outerReason of ['predicate-not-eligible', 'unclassified-merge-failure']) {
+    const result = await f.evaluate({ readAuditImpl: () => ({ attempts: [{
+      outcome: 'no-merge', reason: outerReason, head: f.identity.headSha,
+      eligibilityTrace: { reasons: ['verdict-not-eligible'] },
+    }] }) });
+    assert.equal(result.hammerStop.deterministic, outerReason === 'predicate-not-eligible',
+      'only known wrappers can defer to structured reasons; actionable outer failures count');
+  }
+
+});
+
+for (const auditPresent of [true, false]) {
+  test(`CLOSERSTOPTRANSIENT-01 releases a legacy transient-only hold once (audit: ${auditPresent})`, async t => {
+    const f = infrastructureFixture(t, 'unclassified-merge-failure');
+    const stop = readHammerStopForHead({ ...f.identity, hqRoot: f.args.dispatchContext.hqRoot });
+    mkdirSync(dirname(f.statePath), { recursive: true });
+    writeFileSync(f.statePath, JSON.stringify({ currentHead: f.identity.headSha, heads: {
+      [f.identity.headSha]: { stopKey: stop.stopKey, predicate: stop.predicate, firstObservedAt: f.at,
+        refusal: { key: 'legacy-refusal', reasons: [stop.predicate] }, inputs: hammerStopInputs(f.args.prMetadata) },
+    } }));
+    const events = [];
+    const deps = { logger: { ...SILENT, log: line => events.push(JSON.parse(line)) },
+      ...(auditPresent ? {} : { readAuditImpl: () => null }) };
+    const released = await f.evaluate(deps);
+    assert.equal(released.action, auditPresent ? 'release' : 'none');
+    const state = readFileSync(f.statePath, 'utf8');
+    assert.deepEqual(JSON.parse(state).heads[f.identity.headSha].releasedBy, ['transient-stop-upgrade']);
+    _resetHammerStopHoldPageDebounceForTests();
+    await f.evaluate(deps);
+    assert.equal(readFileSync(f.statePath, 'utf8'), state);
+    assert.equal(events.length, 1, 'upgrade release audit is durable and emitted once');
+  });
+}
+
+test('CLOSERSTOPTRANSIENT-01 transient retries dispatch once and stop at the existing cap', async t => {
+  const f = infrastructureFixture(t, 'unclassified-merge-failure');
+  recordHammerRetryDispatch(f.rootDir, f.identity, { jobKey: f.identity.headSha,
+    headSha: f.identity.headSha, now: f.at });
+  const deps = closerDeps();
+  const first = await maybeDispatchAmaCloser({ ...f.args, ...deps });
+  assert.equal(first.reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
+  assert.equal(hqLaunches(deps).length, 0);
+  const retryAt = minutesAfter(f.at, HAMMER_TRANSIENT_STOP_BACKOFF_MS / 60_000);
+  const retryArgs = { ...f.args, dispatchContext: { ...f.args.dispatchContext, dispatchedAt: retryAt } };
+  assert.equal((await maybeDispatchAmaCloser({ ...retryArgs, ...deps })).dispatched, true);
+  await maybeDispatchAmaCloser({ ...retryArgs, ...deps });
+  assert.equal(hqLaunches(deps).length, 1, 'lease prevents duplicate retry dispatch');
+  assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).attemptCount, 2);
+  f.recordStop(minutesAfter(retryAt, 1));
+  // Observe the new stop before advancing its backoff.
+  const capped = closerDeps({ status: { status: 'succeeded' } });
+  assert.equal((await maybeDispatchAmaCloser({ ...f.args, dispatchContext: { ...f.args.dispatchContext, dispatchedAt: minutesAfter(retryAt, 1) }, ...capped })).reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
+  let result;
+  for (const minutes of [AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS / 60_000, AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS / 60_000 + 1]) {
+    result = await maybeDispatchAmaCloser({ ...f.args, dispatchContext: {
+      ...f.args.dispatchContext, dispatchedAt: minutesAfter(retryAt, minutes) }, ...capped });
+    if (result.reason !== 'stale-dispatched-lease-terminalized') break;
+  }
+  assert.equal(result.reason, 'hammer-retry-cap-exhausted', JSON.stringify(result));
+  assert.equal(hqLaunches(capped).length, 0);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).attemptCount, 2, 'transient release never refunds attempts');
+  assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).lifetimeAttemptCount, 2);
+});
+
+
+test('CLOSERSTOPTRANSIENT-01 transient release cannot reset the lifetime ceiling', async t => {
+  const f = infrastructureFixture(t, 'unclassified-merge-failure');
+  for (let i = 0; i < HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES; i++) {
+    const candidate = i === HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES - 1 ? f.identity.headSha : String(i).repeat(40);
+    recordHammerRetryDispatch(f.rootDir, f.identity, { jobKey: candidate, headSha: candidate, now: f.at });
+  }
+  const deps = closerDeps();
+  assert.equal((await maybeDispatchAmaCloser({ ...f.args, ...deps })).reason, HAMMER_TRANSIENT_STOP_HOLD_REASON);
+  const capped = await maybeDispatchAmaCloser({ ...f.args, dispatchContext: {
+    ...f.args.dispatchContext, dispatchedAt: minutesAfter(f.at, 5) }, ...deps });
+  assert.equal(capped.reason, 'hammer-lifetime-ceiling-reached', JSON.stringify(capped));
+  assert.equal(hqLaunches(deps).length, 0);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, f.identity).lifetimeAttemptCount, HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES);
 });

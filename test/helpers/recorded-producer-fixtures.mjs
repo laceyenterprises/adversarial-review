@@ -3,11 +3,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseProducerContracts } from '@agent-os/app-sdk';
 
 const root = new URL('../fixtures/producer-contracts/', import.meta.url);
 export const fixtureProvenance = JSON.parse(readFileSync(new URL('provenance.json', root), 'utf8'));
-export const sdkSnapshotBytes = readFileSync(new URL('./producer-contracts-v1.json', import.meta.resolve('@agent-os/app-sdk')));
+export const sdkSnapshotBytes = execFileSync('tar', ['-xOf', fileURLToPath(new URL('../../' + fixtureProvenance.recorded.sdk.file, import.meta.url)), 'package/src/producer-contracts-v1.json'], {maxBuffer: 2 * 1024 * 1024, timeout: 10000});
 export const sdkBundle = parseProducerContracts(sdkSnapshotBytes.toString('utf8'));
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 

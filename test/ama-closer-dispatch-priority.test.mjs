@@ -478,13 +478,11 @@ for (const unreadable of [false, true]) {
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
       logger: { ...deps.logger, info: line => events.push(JSON.parse(line)) },
       readLaunchRequestSnapshotImpl: input => readLaunchRequestSnapshotFromLedgerAsync({ ...input,
-        spawnSyncImpl: (command, _argv, opts) => {
+        dispatchSession: {dispatchLookup:async()=>{
           queries++;
-          assert.equal(command, 'psql');
-          assert.match(opts.input, /BEGIN READ ONLY;/);
-          return unreadable ? { status: 1, stderr: 'synthetic ledger outage' }
-            : { status: 0, stdout: rows.map(row => JSON.stringify(row)).join('\n') };
-        },
+          if(unreadable) throw Error('synthetic endpoint outage');
+          return {schema_version:1,status:'found',complete:true,roots:rows.map(row=>row.launch_request_id),items:rows,retry_edges:[]};
+        }},
       }),
     });
     assert.equal(queries, 1, 'the wrapped production reader must share a single snapshot');

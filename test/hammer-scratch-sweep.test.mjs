@@ -1,3 +1,4 @@
+import './helpers/dispatch-read-fixture.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';

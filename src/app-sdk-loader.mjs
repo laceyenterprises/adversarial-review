@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module';
+
 // Lazy loader for @agent-os/app-sdk.
 //
 // The SDK is consumed as a `file:` tarball dependency (ARC-24). A daemon that
@@ -31,4 +33,11 @@ export async function loadAppSdkConnect() {
       });
   }
   return _connectPromise;
+}
+
+// Node 22+ can load the synchronous ESM SDK on demand. Keep dispatch-only
+// exports out of daemon module linking when deployment still has an older SDK.
+const require = createRequire(import.meta.url);
+export function loadAppSdkSync() {
+  return require('@agent-os/app-sdk');
 }

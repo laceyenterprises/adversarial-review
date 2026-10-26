@@ -1,3 +1,4 @@
+import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -123,29 +124,8 @@ test('launch identity refuses missing, conflicting and non-LRQ owners', () => {
   }
 });
 
-test('controller canonical target requires a non-empty DSN and the configured postgres backend', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'ham-controller-config-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const config = join(dir, 'config.yaml');
-  writeFileSync(config, 'version: 1\nsession_ledger:\n  backend: postgres\n');
-  const env = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
-    AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger' };
-  for (const canonical of [undefined, '', '   ']) {
-    assert.equal(controllerLedgerTarget({ ...env, AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical }), undefined);
-  }
-  for (const base of [env, { AGENT_OS_CONFIG_PATH: config },
-    { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on' }]) {
-    assert.deepEqual(controllerLedgerTarget({ ...base,
-      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: ' postgres://runtime.example/ledger ' }),
-    { backend: 'postgres', dsn: 'postgres://runtime.example/ledger', source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' });
-  }
-  for (const base of [{ AGENT_OS_CONFIG_PATH: '/dev/null' },
-    { ...env, AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
-    { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off' },
-    { ...env, AGENT_OS_SESSION_LEDGER_BACKEND: 'invalid' }]) {
-    assert.equal(controllerLedgerTarget({ ...base,
-      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgres://runtime.example/ledger' }), undefined);
-  }
+test('controller database target compatibility shim never selects local state',()=>{
+  assert.equal(controllerLedgerTarget({AGENT_OS_SESSION_LEDGER_BACKEND:'postgres',AGENT_OS_SESSION_LEDGER_CANONICAL_DSN:'synthetic'}),undefined);
 });
 
 test('PID reuse or unknown group membership never authorizes a signal', () => {
@@ -239,50 +219,21 @@ test('Darwin native census returns the same members and births as legacy ps pars
     }
   });
 
-// LAC-2091 (agent-os#9186): the controller hands its own env and HAM_HQ_ROOT
-// to the shared reader. A stale SQLite-era HQ ledgerDbPath beside configured
-// Postgres must neither refuse bootstrap nor stand in for the canonical row.
-for (const [status, rows, outcome] of [
-  ['running', 1, /spawn-reached/],
-  ['succeeded', 1, /refusing controller start/],
-  ['missing', 0, /refusing controller start/],
-]) {
-  test(`LAC-2091: controller bootstrap reads the canonical postgres launch (${status}) past a stale legacy HQ ledger`, async t => {
-    const dir = mkdtempSync(join(tmpdir(), 'ham-controller-lac2091-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const hqRoot = join(dir, 'agent-os-hq'), staleLedger = join(dir, 'stale-legacy.db');
-    mkdirSync(join(hqRoot, '.hq'), { recursive: true });
-    writeFileSync(join(hqRoot, '.hq', 'config.json'), JSON.stringify({ ledgerDbPath: staleLedger }));
-    const db = new Database(staleLedger);
-    db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
-    db.close();
-    const reads = [], psql = [];
+// Public launch observations ignore local/standby database configuration.
+for (const [status, outcome] of [['running', /spawn-reached/], ['succeeded', /refusing controller start/], ['missing', /refusing controller start/]]) {
+  test(`controller bootstrap uses SDK launch evidence (${status})`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'controller-sdk-'));
+    t.after(() => rmSync(dir, { recursive:true, force:true }));
+    let reads=0;
     await assert.rejects(runHammerController('/does-not-run', [], {
-      env: { HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
-        HAM_HQ_ROOT: hqRoot, HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_CONFIG_PATH: '/dev/null',
-        AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres', AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger' },
-      readLaunchImpl: async args => {
-        const probe = await readLaunchRequestStatusFromLedgerAsync({ ...args, spawnAsyncImpl: async (command, argv) => {
-          psql.push({ command, dsn: argv.includes('postgres://ledger.example/agent_os_ledger') });
-          return { status: 0, stderr: '', stdout: rows ? `${JSON.stringify({ launch_request_id: 'lrq_controller-test',
-            status, updated_at: '2026-10-25T00:47:00Z', terminal_at: null, failure_class: null })}\n` : '' };
-        } });
-        reads.push({ hqRoot: args.hqRoot, probe });
-        return probe;
-      },
-      delayImpl: async () => {},
-      spawnImpl: () => { throw new Error('spawn-reached'); },
-    }), outcome);
-    // A missing row exhausts the bounded start reads before refusing.
-    const expectedReads = status === 'missing' ? LAUNCH_READ_ATTEMPTS : 1;
-    assert.deepEqual(psql, Array.from({ length: expectedReads }, () => ({ command: 'psql', dsn: true })));
-    assert.equal(reads.length, expectedReads);
-    for (const read of reads) {
-      assert.equal(read.hqRoot, hqRoot);
-      assert.equal(read.probe.target.backend, 'postgres');
-      if (rows) assert.equal(read.probe.row.status, status);
-      else assert.equal(read.probe.reason, 'missing-launch-request-row');
-    }
+      env: {HAM_RUN_DIR:dir,HAM_ROOT_DIR:dir,HAM_REPO:'example/repo',HAM_PR_NUMBER:'42',HQ_LAUNCH_REQUEST_ID:'lrq_controller-test'},
+      readLaunchImpl: args => readLaunchRequestStatusFromLedgerAsync({...args,dispatchSession:{dispatchLookup:async()=>{
+        reads++;
+        const items=status==='missing'?[]:[{launch_request_id:'lrq_controller-test',status}];
+        return {schema_version:1,status:items.length?'found':'not_found',complete:true,roots:items.map(row=>row.launch_request_id),items,retry_edges:[]};
+      }}}),delayImpl:async()=>{},spawnImpl:()=>{throw Error('spawn-reached');},
+    }),outcome);
+    assert.equal(reads,status==='missing'?LAUNCH_READ_ATTEMPTS:1);
   });
 }
 
@@ -671,7 +622,6 @@ for (const [backend, canonical] of [
     t.after(() => db.close());
     db.exec(`CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT);
       INSERT INTO launch_requests VALUES ('lrq_controller-test', 'running', NULL, NULL, NULL)`);
-    const useCanonical = backend === 'postgres' && Boolean(canonical);
     const sim = simulate(t, {
       env: { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_BACKEND: backend,
         AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: undefined,
@@ -681,11 +631,10 @@ for (const [backend, canonical] of [
         AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: canonical },
       reads: async (n, _sim, args) => {
         if (n > 1) db.exec("UPDATE launch_requests SET status = 'canceled'");
-        return readLaunchRequestStatusFromLedgerAsync({ ...args, spawnAsyncImpl: async (_command, argv) => {
-          assert.equal(backend, 'postgres', 'SQLite routing must never spawn psql');
-          assert.ok(argv.includes(useCanonical ? canonical : 'postgres://override.example/ledger'));
-          return { status: 0, stderr: '', stdout: JSON.stringify(launch(n === 1 ? 'running' : 'canceled').row) };
-        } });
+        return readLaunchRequestStatusFromLedgerAsync({ ...args, dispatchSession: {dispatchLookup:async()=>{
+          const row=launch(n===1?'running':'canceled').row;
+          return {schema_version:1,status:'found',complete:true,roots:[row.launch_request_id],items:[row],retry_edges:[]};
+        }} });
       },
     });
     const { status, receipt } = await sim.done;
@@ -693,12 +642,10 @@ for (const [backend, canonical] of [
     assert.equal(receipt.reason, 'launch-ended');
     assert.ok(sim.readCalls.length >= 2);
     for (const read of sim.readCalls) {
-      assert.deepEqual(read.ledgerTarget, useCanonical ? { backend: 'postgres', dsn: canonical,
-        source: 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN' } : undefined);
+      assert.equal(read.ledgerTarget, undefined);
       assert.equal(read.env.AGENT_OS_SESSION_LEDGER_DSN, 'postgres://test.example/ledger');
     }
-    assert.equal(receipt.launchReadSource, useCanonical ? 'env:AGENT_OS_SESSION_LEDGER_CANONICAL_DSN'
-      : backend === 'postgres' ? 'explicit-ledger-target' : 'env:AGENT_OS_SESSION_LEDGER_DB_PATH');
+    assert.equal(receipt.launchReadSource, 'app-sdk');
     for (const secret of ['runtime.example', 'test.example', 'override.example', sqlite]) {
       assert.ok(!JSON.stringify(receipt).includes(secret), 'registration must not retain connection details');
     }

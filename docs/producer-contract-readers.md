@@ -346,3 +346,71 @@ smoke promise changes; no service restart or configuration flip is performed.
 
 The [weekly evidence validation record](validation/weekly-evidence-policy.md)
 lists the complete helper-consumer commands, results and baseline limitations.
+
+## Dispatch lookup
+
+The pinned `vendor/agent-os-app-sdk-0.8.0.tgz` supplies `dispatchLookup` and the
+bounded `readDispatchLookupSync` compatibility reader. `dispatch-read-client.mjs`
+adapts the producer's `schema_version: 1`, `roots`, ordered `items`, `retry_edges`
+and completeness evidence. The historical launch-reader export names remain
+compatibility aliases; they contain no launch SQL or backend resolution.
+The controller also stops interpreting canonical/standby database settings.
+
+Operator-provisioned app grants must explicitly name each project and
+owner-qualified repository observed by CLI-origin review/closer launches.
+Activate the producer and grants before this consumer. Endpoint outage or
+incomplete traversal means unavailable, never absence or permission to retry.
+Successful reads carry `app-contract` / `app-sdk` transport provenance, without
+connection details. Settlement deadlines, lease mutation fences, parked work,
+rearm, cancellation and current-head merge authority remain caller policy.
+
+Consumer fixtures use synthetic transport replies. The committed
+`test/fixtures/dispatch-lookup-v1.json` is an actual producer serialization over
+synthetic disposable inputs, including an ordered cyclic retry tree and a
+blocked decision. Negative identity mutations are labelled in tests. Backend
+schema, claims, scope, malformed metadata and native index-plan regressions now
+run at the OS producer; clients need neither database tools nor OS source.
+
+The contained controller uses SDK `readHcpDispatchLookup` with its provisioned
+worker token to observe exactly its own LRQ. The watcher keeps app-scoped lookup
+for retries, leases and receipt recovery. Route selection occurs before the
+read; a transport failure never switches routes or opens local state.
+
+### Dispatch lookup activation and limits
+
+Runtime reads default off. After verifying the reviewed merged 0.8.0 producer
+release and its artifact hashes, deploy its endpoint and complete app grants.
+Run `npm ci` in the deployed adversarial-review submodule, then have the runtime
+owner set `ADVERSARIAL_DISPATCH_READS_ENABLED=1` in the watcher/follow-up and
+contained controller environments through the normal reviewed service deployment.
+Observe organic own-LRQ HCP reads and app receipt/retry reads. Disabled reads
+return unavailable with `dispatch lookup disabled`; they retain ownership holds
+and refuse hammer starts. Rollback removes the flag (or sets it to `0`) and
+uses the normal service deployment to pause observations safely; no SQL/file
+fallback is restored. Source publication does not authorize service activation.
+Dispatch-only SDK exports load at read time, so an older installed SDK produces
+unavailable evidence rather than preventing daemon module linking.
+
+The SDK release is pinned to merged producer revision
+`387fb06d5d8835e320f49388a2ebdf67f2249945`; see `vendor/README.md`.
+SDK 0.8.0 `not_found` is scoped to authenticated grants, and its envelope
+has no authorization completeness field. The consumer therefore maps empty
+lookups and missing rows within positive snapshots to `dispatch-read-unavailable`
+with `dispatch absence scope unproven`. They never prove absence for terminal
+lease reclamation, missing-launch capacity settlement or pre-receipt settlement.
+Positive authorized launch/retry observations remain available. Even a genuinely
+missing launch retains its hold until a coordinated producer contract can prove
+complete scope; provisioned grants alone cannot enable absence settlement.
+`--ledger-target` is rejected by the settlement CLI so it cannot misrepresent
+which source was queried.
+
+Session reuse is keyed by connection settings and caller timeout (8 seconds by
+default; receipt recovery supplies its load-aware 30-second budget). Every
+connection/read failure evicts the session. Results expose the shared transient
+classification and fixed secret-free diagnostics, allowing the existing receipt
+owner to retry at most three times with its 100/200ms backoff; no nested retry
+loop is added. A caller deadline or abort bounds settlement across registration
+and lookup. SDK 0.8.0 does not accept an abort signal: its outstanding HTTP work
+can outlive caller cancellation and follows SDK transport timeout handling. Full
+transport cancellation requires a producer SDK update. Sync compatibility reads
+are included in watcher latency summaries under `node`.

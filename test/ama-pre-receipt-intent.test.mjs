@@ -1,3 +1,4 @@
+import { readPolicyDispatchRows } from './helpers/dispatch-read-fixture.mjs';
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,6 +42,10 @@ function fixture(t, patch = {}, lease = true) {
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };
+  // These owner-policy fixtures supply authoritative synthetic absence through
+  // explicit owner seams; grant-scoped SDK behavior is tested separately.
+  options.readIntentReceiptImpl = args => readPolicyDispatchRows({ idempotency_key: args.idempotencyKey }, { ...options, ...args });
+  options.readLegacyIntentLaunchesImpl = args => readPolicyDispatchRows({ ticket_ref: args.ticketRef, requested_at_or_after: args.requestedAtOrAfter }, { ...options, ...args });
   // Older fixtures do not claim process-scan evidence. Pin unknown explicitly.
   options.processExecFileSyncImpl = () => { throw Error('synthetic process scan unavailable'); };
   return { rootDir, options, record,
@@ -209,20 +214,12 @@ test('dry-run changes no intent, lease or budget bytes', async t => {
   assert.equal(readHammerRetryCapLedger(f.rootDir, identity), null);
 });
 
-test('Postgres receipt lookup uses read-only parameterized bounded SQL', async () => {
-  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote", timeoutMs: 240_000,
-    ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
-    spawnSyncImpl(command, args, options) {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes("intent_key=key'quote"));
-      assert.equal(options.timeout, 240_000);
-      assert.match(options.input, /BEGIN READ ONLY/);
-      assert.match(options.input, /idempotency_key = :'intent_key' LIMIT 2/);
-      assert.match(options.input, /cardinality\(identity.tickets\) = 1 THEN identity.tickets\[1\] END AS ticket_ref/);
-      assert.match(options.input, /identity_ambiguous/);
-      assert.doesNotMatch(options.input, /key'quote/);
-      return { status: 0, stdout: JSON.stringify(receipt) + '\n' };
-    } });
+test('receipt recovery passes the exact idempotency key through the SDK', async () => {
+  const r = await readLaunchRequestByIdempotencyKeyAsync({ idempotencyKey: "key'quote",
+    dispatchSession: { dispatchLookup: async selector => {
+      assert.deepEqual(selector, {idempotency_key: "key'quote"});
+      return {schema_version:1,status:'found',complete:true,roots:[receipt.launch_request_id],items:[receipt],retry_edges:[]};
+    } } });
   assert.equal(r.ok, true);
   assert.equal(r.rows[0].launch_request_id, receipt.launch_request_id);
 });
@@ -339,7 +336,7 @@ for (const lease of [true, false]) test(`legacy empty ticket/time query settles 
   assert.deepEqual(f.read().preReceiptReconciliation.query, {
     kind: 'launch-requests-for-ticket-since', ticketRef: 'AMA-PR-8',
     requestedAtOrAfter: started, limit: 1, ok: true, rowCount: 0,
-    backend: 'sqlite', source: 'deprecated-ledger-db-path', reason: null, detail: null,
+    backend: 'synthetic-policy', source: 'fixture', reason: null, detail: null,
     timeoutMs: f.read().preReceiptReconciliation.query.timeoutMs,
     attempts: [{ ok: true, reason: null, detail: null }], launchRequestIds: [],
   });
@@ -403,7 +400,7 @@ test('legacy query yielding preserves a replacement owner', async t => {
 
 function operatorArgs(f, extra = []) {
   return ['--root-dir', f.rootDir, '--hq-root', join(f.rootDir, 'hq'),
-    '--ledger-target', f.options.ledgerDbPath, '--repo', identity.repo,
+    '--repo', identity.repo,
     '--pr', String(identity.prNumber), '--head', identity.headSha, ...extra];
 }
 
@@ -494,23 +491,15 @@ test('audit failure prevents operator settlement', async t => {
   assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
 });
 
-test('legacy Postgres query is read-only, bounded and parameterized across the whole ticket', async () => {
-  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started, timeoutMs: 240_000,
-    ledgerTarget: { backend: 'postgres', databaseName: 'fixture' }, env: {},
-    spawnSyncImpl(command, args, options) {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes("ticket_ref=AMA-PR-8'fixture"));
-      assert.equal(options.timeout, 240_000);
-      assert.ok(args.includes('since=2026-10-22T10:18:18.000Z'));
-      assert.match(options.input, /BEGIN READ ONLY/);
-      assert.match(options.input, /:'ticket_ref' = ANY\(identity.tickets\)/);
-      assert.match(options.input, /request.requested_at >= :'since'::timestamptz/);
-      assert.match(options.input, /LIMIT 1/);
-      assert.doesNotMatch(options.input, /AMA-PR-8|target_repo =|head_sha =/);
-      return { status: 0, stdout: '' };
-    } });
-  assert.equal(r.ok, true);
-  assert.deepEqual(r.rows, []);
+test('legacy intent passes the whole ticket window through the SDK', async () => {
+  const r = await readLaunchRequestsForTicketSinceAsync({ ticketRef: "AMA-PR-8'fixture", requestedAtOrAfter: started,
+    dispatchSession: { dispatchLookup: async selector => {
+      assert.deepEqual(selector, {ticket_ref: "AMA-PR-8'fixture", requested_at_or_after: new Date(started).toISOString()});
+      return {schema_version:1,status:'not_found',complete:true,roots:[],items:[],retry_edges:[]};
+    } } });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'dispatch-read-unavailable');
+  assert.equal(r.detail, 'dispatch absence scope unproven');
 });
 
 
@@ -1105,4 +1094,47 @@ for (const scenario of ['absent', 'receipt']) test(`CLOSERINTENTRECON-01 rekeyed
   assert.equal(f.record().retryCount, 2);
   assert.equal(f.lease().watcherPid, 434343);
   assert.equal(f.lease().status, 'pending');
+});
+
+test('operator settlement refuses retired ledger-target before any reconciliation', async () => {
+  await assert.rejects(settleLegacyIntent(['--ledger-target', '/synthetic/canonical']),
+    /--ledger-target is no longer supported/);
+});
+
+
+test('SDK transient classification reaches receipt-owner retries with safe persisted evidence', async t => {
+  const f = fixture(t);
+  let calls = 0;
+  const delays = [];
+  const result = await f.reconcile({
+    readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
+    dispatchSession: { dispatchLookup: async () => {
+      if (++calls === 1) throw Object.assign(new Error('secret endpoint token'), { code: 'ECONNRESET' });
+      return { schema_version: 1, status: 'not_found', complete: true, roots: [], items: [], retry_edges: [] };
+    } },
+    delayAsyncImpl: async ms => delays.push(ms),
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(f.read().retryCount, 2);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [100]);
+  assert.equal(result.evidence.attempts[0].detail, 'transient dispatch lookup failure');
+  assert.doesNotMatch(JSON.stringify(f.read().preReceiptReconciliation), /secret endpoint token/);
+});
+
+test('grant-scoped SDK emptiness cannot settle keyed or legacy ownership', async t => {
+  for (const legacy of [false, true]) {
+    const f = fixture(t, legacy ? { dispatchIdempotencyKey: null } : {});
+    const before = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({
+      readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
+      readLegacyIntentLaunchesImpl: readLaunchRequestsForTicketSinceAsync,
+    });
+    assert.equal(result.status, 'unknown');
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(f.read().retryCount, 2);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), before);
+  }
 });

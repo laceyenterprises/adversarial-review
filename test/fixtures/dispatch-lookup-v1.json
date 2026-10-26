@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "status": "found",
+  "roots": [
+    "root"
+  ],
+  "items": [
+    {
+      "launch_request_id": "leaf",
+      "idempotency_key": "leaf-key",
+      "status": "blocked_needs_decision",
+      "requested_at": "2026-01-01T00:00:00Z",
+      "updated_at": "03",
+      "terminal_at": null,
+      "failure_class": null,
+      "failure_detail": "synthetic detail",
+      "ticket_ref": "T-1",
+      "head_sha": "head",
+      "target_repo": "example/repo",
+      "identity_ambiguous": false
+    },
+    {
+      "launch_request_id": "retry",
+      "idempotency_key": "retry-key",
+      "status": "failed",
+      "requested_at": "2026-01-01T00:00:00Z",
+      "updated_at": "02",
+      "terminal_at": null,
+      "failure_class": null,
+      "failure_detail": "synthetic detail",
+      "ticket_ref": "T-1",
+      "head_sha": "head",
+      "target_repo": "example/repo",
+      "identity_ambiguous": false
+    },
+    {
+      "launch_request_id": "root",
+      "idempotency_key": "same-key",
+      "status": "superseded",
+      "requested_at": "2026-01-01T00:00:00Z",
+      "updated_at": "01",
+      "terminal_at": null,
+      "failure_class": null,
+      "failure_detail": "synthetic detail",
+      "ticket_ref": "T-1",
+      "head_sha": "head",
+      "target_repo": "example/repo",
+      "identity_ambiguous": false
+    }
+  ],
+  "retry_edges": [
+    {
+      "parent": "retry",
+      "child": "leaf"
+    },
+    {
+      "parent": "root",
+      "child": "retry"
+    },
+    {
+      "parent": "leaf",
+      "child": "root"
+    }
+  ],
+  "complete": true
+}

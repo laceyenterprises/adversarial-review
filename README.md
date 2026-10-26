@@ -3272,3 +3272,29 @@ and rejects conflicting alias/canonical values within one file. For example,
 These loader-contract details also belong in the parent Agent OS
 `projects/cfg/LOADER-CONTRACT.md`; that superproject document is outside this
 repository's remediation diff.
+
+### Public launch observations
+
+Launch status, retry descendants, capacity snapshots, exact idempotency receipts
+and legacy ticket-window observations use the pinned SDK 0.8.0 dispatch lookup.
+The OS authorizes every row using app receipts or explicit operator-owned
+project/repository grants. Unavailable reads retain ownership holds; they never
+fall back to SQLite, psql or OS files. Existing blocked-decision, cancellation,
+rearm and authoritative merged/closed policy remains in the app.
+See [the reader contract](docs/producer-contract-readers.md#dispatch-lookup).
+
+
+Dispatch lookup activation defaults off (`ADVERSARIAL_DISPATCH_READS_ENABLED=1`
+is required in each deployed reader environment). The runtime owner must verify
+the merged SDK release record, deploy the producer and complete grants, and run
+`npm ci` in this submodule before enabling it through normal service deployment.
+Removing the flag safely pauses reads and holds ownership. The SDK bytes are
+pinned to merged producer revision `387fb06d5d8835e320f49388a2ebdf67f2249945`.
+SDK 0.8.0 cannot attest global absence: empty lookups and missing rows retain
+ownership instead of settling or reclaiming it. See the reader contract for the
+remaining producer completeness obligation and cancellation limits. Existing lifecycle states, transitions and smoke promises
+are unchanged. Focused offline regressions run with:
+
+```bash
+node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
+```

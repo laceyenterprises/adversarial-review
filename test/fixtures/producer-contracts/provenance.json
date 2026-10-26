@@ -254,6 +254,14 @@
       "sha256": "5509f65066fb6cec00aacc89fb6a2c561a32219784db3ff45538afd3ddbfa2e5",
       "snapshotSha256": "d3c4fa95dc6be4990a955f6c3bd98d5c636c96a7c13bd7453e1738d2172634f7",
       "version": "0.4.0"
+    },
+    "dispatchLookupSdk": {
+      "version": "0.8.0",
+      "file": "vendor/agent-os-app-sdk-0.8.0.tgz",
+      "sha256": "4fd689c6e80cb9b620a3715ed9fe9474425d42fb00637193939f6b1a69b16a2e",
+      "integrity": "sha512-4VBLxqzsiwykQnMRN8PgCmRyu7hww8xFj83rKRBKb8DnlE+/3gDoalahCyb679e0/auAAGeYKPy0zFaSSJgVuQ==",
+      "releaseRevision": "387fb06d5d8835e320f49388a2ebdf67f2249945",
+      "releaseStatus": "merged"
     }
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

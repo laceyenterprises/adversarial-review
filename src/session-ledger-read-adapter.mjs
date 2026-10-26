@@ -1,3 +1,4 @@
+import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe } from './dispatch-read-client.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, spawnSync } from 'node:child_process';
@@ -866,259 +867,39 @@ function* readLatestWorkerRunStatusFromLedgerSteps({
   return { ok: true, row, target: queried.target };
 }
 
-// Catalog probes select only fixed SQL expressions, never row contents. Avoid
-// to_jsonb(request): even a one-row status lookup would detoast every payload.
-const postgresLaunchColumns = `
-  SELECT
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'failure_detail' AND NOT attisdropped)
-      THEN 'request.failure_detail' ELSE 'NULL::text' END AS launch_detail,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'ticket_ref' AND NOT attisdropped)
-      THEN 'request.ticket_ref' ELSE 'NULL::text' END AS launch_ticket,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'target_repo' AND NOT attisdropped)
-      THEN 'request.target_repo' ELSE 'NULL::text' END AS launch_repo,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'head_sha' AND NOT attisdropped)
-      THEN 'request.head_sha' ELSE 'NULL::text' END AS launch_head,
-    EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'metadata_json' AND NOT attisdropped) AS retry_has_metadata,
-    EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'metadata_json' AND atttypid = 'jsonb'::regtype AND NOT attisdropped) AS retry_jsonb
-  \\gset
-`;
-
-const postgresLaunchProjection = `json_build_object(
-  'launch_request_id', request.launch_request_id, 'status', request.status,
-  'updated_at', request.updated_at, 'terminal_at', request.terminal_at,
-  'failure_class', request.failure_class,
-  'failure_detail', :launch_detail, 'ticket_ref', :launch_ticket,
-  'target_repo', :launch_repo, 'head_sha', :launch_head`;
-
-// LAC-2096: ticket_ref/head_sha are not launch_requests columns in the
-// producer schema. Read the immutable request/lineage work-item identity and
-// linked logical jobs, never infer a ticket from an LRQ, key or branch name.
-// Catalog-selected expressions also support older/minimal offline ledgers.
-const postgresIdentityColumns = `
-  SELECT
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'request_payload_json' AND NOT attisdropped)
-      THEN 'request.request_payload_json::jsonb' ELSE '''{}''::jsonb' END AS identity_payload,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'launch_requests'::regclass
-      AND attname = 'lineage_json' AND NOT attisdropped)
-      THEN 'request.lineage_json::jsonb' ELSE '''{}''::jsonb' END AS identity_lineage,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('launch_request_logical_job_claims')
-      AND attname = 'ticket_ref' AND NOT attisdropped)
-      THEN 'ARRAY(SELECT ticket_ref FROM launch_request_logical_job_claims WHERE launch_request_id = request.launch_request_id)'
-      ELSE 'ARRAY[]::text[]' END AS identity_claims,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('worker_runs')
-      AND attname = 'task_key' AND NOT attisdropped)
-      THEN 'ARRAY(SELECT task_key FROM worker_runs WHERE launch_request_id = request.launch_request_id)'
-      ELSE 'ARRAY[]::text[]' END AS identity_tasks,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('launch_request_logical_job_claims')
-      AND attname = 'target_repo' AND NOT attisdropped)
-      THEN 'ARRAY(SELECT target_repo FROM launch_request_logical_job_claims WHERE launch_request_id = request.launch_request_id)'
-      ELSE 'ARRAY[]::text[]' END AS identity_claim_repos,
-    CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = to_regclass('worker_runs')
-      AND attname = 'target_repo' AND NOT attisdropped)
-      THEN 'ARRAY(SELECT target_repo FROM worker_runs WHERE launch_request_id = request.launch_request_id)'
-      ELSE 'ARRAY[]::text[]' END AS identity_worker_repos
-  \\gset
-`;
-
-function postgresIdentityValues(kind) {
-  const paths = kind === 'ticket' ? [['ticketRef'], ['taskKey'], ['launchProvenance', 'ticketId']]
-    : kind === 'head' ? [['launchProvenance', 'prHeadSha']] : [['launchProvenance', 'repoFullName'], ['launchProvenance', 'repo']];
-  const direct = kind === 'ticket' ? ':launch_ticket' : kind === 'head' ? ':launch_head' : ':launch_repo';
-  const values = [direct];
-  for (const doc of ['identity_payload_fields', 'identity_lineage_fields']) {
-    for (const path of paths) {
-      const selector = path.length === 1 ? `${doc}."${path[0]}"` : `${doc}."${path[0]}" #> '{${path.slice(1).join(',')}}'`;
-      values.push(`CASE WHEN jsonb_typeof(${selector}) = 'string' THEN (${selector}) #>> '{}' END`);
-    }
-  }
-  const jobs = kind === 'ticket' ? ' || :identity_claims || :identity_tasks'
-    : kind === 'repo' ? ' || :identity_claim_repos || :identity_worker_repos' : '';
-  return `ARRAY(SELECT DISTINCT value FROM unnest(ARRAY[${values.join(', ')}]::text[]${jobs}) value
-    WHERE value IS NOT NULL AND value != '' ORDER BY value)`;
+// The SDK transports producer-owned launch identity and retry evidence.
+export async function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
+  const ids = args.launchRequestIds ?? [];
+  if (!ids.length) return { ok: true, rows: [], roots: [], retryEdges: [] };
+  return readDispatchLaunches({ launch_request_ids: ids, include_retry_chain: true }, args);
 }
-
-const postgresIdentityJoin = `CROSS JOIN LATERAL jsonb_to_record(CASE WHEN jsonb_typeof(:identity_payload) = 'object' THEN :identity_payload ELSE '{}'::jsonb END)
-  AS identity_payload_fields("ticketRef" jsonb, "taskKey" jsonb, "launchProvenance" jsonb)
-  CROSS JOIN LATERAL jsonb_to_record(CASE WHEN jsonb_typeof(:identity_lineage) = 'object' THEN :identity_lineage ELSE '{}'::jsonb END)
-  AS identity_lineage_fields("ticketRef" jsonb, "taskKey" jsonb, "launchProvenance" jsonb)
-  CROSS JOIN LATERAL (SELECT
-  ${postgresIdentityValues('ticket')} AS tickets,
-  ${postgresIdentityValues('head')} AS heads,
-  ${postgresIdentityValues('repo')} AS repos
-) identity`;
-const postgresIdentityAmbiguous = `(cardinality(identity.tickets) > 1 OR cardinality(identity.heads) > 1
-  OR EXISTS (SELECT FROM unnest(identity.repos) a, unnest(identity.repos) b
-    WHERE lower(a) != lower(b) AND lower(a) != lower(regexp_replace(b, '^.*/', '')) AND lower(b) != lower(regexp_replace(a, '^.*/', ''))))`;
-// A basename projection must not hide an owner-qualified canonical repository.
-const postgresCanonicalRepo = `COALESCE((SELECT value FROM unnest(identity.repos) value
-  WHERE strpos(value, '/') > 0 ORDER BY value LIMIT 1), :launch_repo, identity.repos[1])`;
-const postgresIdentityProjection = `CASE WHEN cardinality(identity.tickets) = 1 THEN identity.tickets[1] END AS ticket_ref,
-  ${postgresCanonicalRepo} AS target_repo,
-  CASE WHEN cardinality(identity.heads) = 1 THEN identity.heads[1] END AS head_sha,
-  ${postgresIdentityAmbiguous} AS identity_ambiguous`;
-const postgresCanonicalLaunchProjection = postgresLaunchProjection
-  .replace(':launch_ticket', 'CASE WHEN cardinality(identity.tickets) = 1 THEN identity.tickets[1] END')
-  .replace(':launch_repo', postgresCanonicalRepo)
-  .replace(':launch_head', 'CASE WHEN cardinality(identity.heads) = 1 THEN identity.heads[1] END');
-const postgresIdentityDiagnostic = ` || CASE WHEN ${postgresIdentityAmbiguous}
-  THEN '{"identity_ambiguous":true}'::jsonb ELSE '{}'::jsonb END`;
-
-// Only text on pre-16 needs the historical application-side fallback. Native
-// jsonb always joins the indexed expression directly, on every server version.
-// LATERAL/OFFSET keeps lookups parameterized by the current parent: a flattened
-// join can choose a whole-table hash scan when it misestimates retry fan-out.
-function postgresRetryReadSql({ snapshot = false } = {}) {
-  const seed = snapshot ? "SELECT jsonb_array_elements_text(:'launch_ids'::jsonb)" : "SELECT :'lrq'::text";
-  const projection = `${postgresLaunchProjection
-    .replace(':launch_ticket', 'request.ticket_ref').replace(':launch_repo', 'request.target_repo')
-    .replace(':launch_head', 'request.head_sha')}${snapshot ? ", 'metadata_json', request.metadata_json" : ''})::jsonb
-    || CASE WHEN request.identity_ambiguous THEN '{"identity_ambiguous":true}'::jsonb ELSE '{}'::jsonb END`;
-  const recursive = edge => `
-    WITH RECURSIVE retry_chain(launch_request_id) AS (
-      ${seed}
-      UNION
-      SELECT child.launch_request_id FROM retry_chain parent
-      JOIN LATERAL (
-        SELECT child.launch_request_id FROM launch_requests child
-        WHERE ${edge}
-        OFFSET 0
-      ) child ON true
-    )
-    SELECT ${projection}
-    FROM retry_chain chain
-    JOIN LATERAL (
-      SELECT launch_request_id, status, updated_at, terminal_at, failure_class,
-        :launch_detail AS failure_detail, ${postgresIdentityProjection}${snapshot ? ', metadata_json' : ''}
-      FROM launch_requests request ${postgresIdentityJoin}
-      WHERE request.launch_request_id = chain.launch_request_id
-      LIMIT 1
-    ) request ON true
-    ${snapshot ? '' : "WHERE request.launch_request_id != :'lrq'"}
-    ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;`;
-  return `${postgresLaunchColumns}${postgresIdentityColumns}
-    \\if :retry_has_metadata
-      \\if :retry_jsonb
-        ${recursive("child.metadata_json ->> 'retryOf' = parent.launch_request_id\n        AND CASE WHEN child.metadata_json IS NULL THEN NULL::boolean ELSE true END\n        AND jsonb_typeof(child.metadata_json->'retryOf') = 'string'")}
-      \\else
-        SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
-        \\gset
-        \\if :retry_native_parser
-          ${recursive("CASE WHEN pg_input_is_valid(child.metadata_json::text, 'jsonb')\n        THEN CASE WHEN jsonb_typeof(child.metadata_json::jsonb->'retryOf') = 'string'\n          THEN child.metadata_json::jsonb->>'retryOf' END END = parent.launch_request_id")}
-        \\else
-          SELECT ${postgresCanonicalLaunchProjection}, 'metadata_json', request.metadata_json)::jsonb${postgresIdentityDiagnostic}
-          FROM launch_requests request ${postgresIdentityJoin}
-          ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;
-        \\endif
-      \\endif
-    \\else
-      ${snapshot ? `SELECT ${postgresCanonicalLaunchProjection})::jsonb${postgresIdentityDiagnostic}
-        FROM launch_requests request ${postgresIdentityJoin}
-        WHERE request.launch_request_id IN (${seed});` : 'SELECT NULL WHERE false;'}
-    \\endif`;
+export async function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
+  if (!normalizeText(args.idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
+  return readDispatchLaunches({ idempotency_key: args.idempotencyKey }, args);
 }
-
-// One read-only snapshot of the requested launches and descendants per capacity
-// scan. An empty request never means permission to dump the ledger.
-export function readLaunchRequestSnapshotFromLedgerAsync(args = {}) {
-  return runLedgerStepsAsync(readLaunchRequestSnapshotSteps(args), args);
-}
-
-// Empty key reads prove absence only after the caller fences the intent and
-// establishes that its dispatch deadline has expired.
-export function readLaunchRequestByIdempotencyKeyAsync(args = {}) {
-  return runLedgerStepsAsync(readLaunchRequestByIdempotencyKeySteps(args), args);
-}
-
-function* readLaunchRequestByIdempotencyKeySteps({ idempotencyKey, ledgerTarget, ledgerDbPath,
-  env = process.env, rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
-  if (!normalizeText(idempotencyKey)) return { ok: false, reason: 'missing-idempotency-key' };
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
-    rootDir, hqRoot, requiredTables: ['launch_requests'] });
-  if (!resolution.ok) return resolution;
-  let columns = 'launch_request_id, idempotency_key, status, requested_at';
-  if (resolution.target.backend === 'sqlite') {
-    for (const column of ['ticket_ref', 'target_repo', 'head_sha']) {
-      const probe = sqliteTableHasColumn(resolution.target, 'launch_requests', column);
-      if (!probe.ok) return probe;
-      columns += probe.exists ? `, ${column}` : `, NULL AS ${column}`;
-    }
-  } else {
-    columns += `, ${postgresIdentityProjection}`;
-  }
-  if (resolution.target.backend === 'sqlite') {
-    return querySqliteRows(resolution.target,
-      `SELECT ${columns} FROM launch_requests WHERE idempotency_key = @key LIMIT 2`,
-      { key: idempotencyKey });
-  }
-  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
-  return yield* queryPostgresRowsSteps(resolution.target,
-    `${postgresLaunchColumns}${postgresIdentityColumns}
-     SELECT row_to_json(receipt) FROM (SELECT ${columns} FROM launch_requests request
-       ${postgresIdentityJoin}
-       WHERE idempotency_key = :'intent_key' LIMIT 2) receipt`,
-    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['intent_key', idempotencyKey]] });
-}
-
-// Legacy intents lack an admission key. Query the whole ticket, without a repo
-// or head filter: even an unrelated row in this window must prevent settlement.
-export function readLaunchRequestsForTicketSinceAsync(args = {}) {
-  return runLedgerStepsAsync(readLaunchRequestsForTicketSinceSteps(args), args);
-}
-
-function* readLaunchRequestsForTicketSinceSteps({ ticketRef, requestedAtOrAfter,
-  ledgerTarget, ledgerDbPath, env = process.env, rootDir = process.cwd(), hqRoot,
-  spawnSyncImpl = spawnSync, timeoutMs = null } = {}) {
-  if (!normalizeText(ticketRef) || typeof requestedAtOrAfter !== 'string'
-    || !Number.isFinite(Date.parse(requestedAtOrAfter))) {
+export async function readLaunchRequestsForTicketSinceAsync(args = {}) {
+  if (!normalizeText(args.ticketRef) || typeof args.requestedAtOrAfter !== 'string'
+    || !Number.isFinite(Date.parse(args.requestedAtOrAfter))) {
     return { ok: false, reason: 'invalid-ticket-attempt-query' };
   }
-  const since = new Date(requestedAtOrAfter).toISOString();
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
-    rootDir, hqRoot, requiredTables: ['launch_requests'] });
-  if (!resolution.ok) return resolution;
-  const columns = 'launch_request_id, ticket_ref, target_repo, requested_at';
-  if (resolution.target.backend === 'sqlite') {
-    return querySqliteRows(resolution.target,
-      `SELECT ${columns} FROM launch_requests WHERE ticket_ref = @ticket
-        AND (julianday(requested_at) >= julianday(@since) OR julianday(requested_at) IS NULL) LIMIT 1`,
-      { ticket: ticketRef, since });
-  }
-  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
-  return yield* queryPostgresRowsSteps(resolution.target,
-    `${postgresLaunchColumns}${postgresIdentityColumns}
-     SELECT row_to_json(receipt) FROM (SELECT request.launch_request_id, request.requested_at,
-       ${postgresIdentityProjection}
-       FROM launch_requests request ${postgresIdentityJoin}
-       WHERE (:'ticket_ref' = ANY(identity.tickets) OR cardinality(identity.tickets) = 0)
-         AND (request.requested_at >= :'since'::timestamptz OR request.requested_at IS NULL) LIMIT 1) receipt`,
-    { spawnSyncImpl, readOnly: true, timeoutMs, psqlVars: [['ticket_ref', ticketRef], ['since', since]] });
+  return readDispatchLaunches({ ticket_ref: args.ticketRef,
+    requested_at_or_after: new Date(args.requestedAtOrAfter).toISOString() }, args);
 }
 
-function* readLaunchRequestSnapshotSteps({ ledgerTarget, ledgerDbPath, launchRequestIds = [], env = process.env,
-  rootDir = process.cwd(), hqRoot, spawnSyncImpl = spawnSync } = {}) {
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, ledgerDbPath, env,
-    rootDir, hqRoot, requiredTables: ['launch_requests'] });
-  if (!resolution.ok) return resolution;
-  if (resolution.target.backend === 'sqlite') return { ok: true, target: resolution.target };
-  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
-  const ids = [...new Set(launchRequestIds.map(normalizeText).filter(Boolean))];
-  if (!ids.length) return { ok: true, rows: [], target: resolution.target };
-  return yield* queryPostgresRowsSteps(resolution.target, postgresRetryReadSql({ snapshot: true }), {
-    spawnSyncImpl, readOnly: true, psqlVars: [['launch_ids', JSON.stringify(ids)]],
-  });
+// With includeRetryChain, incomplete traversal makes the whole read unavailable.
+// No base-row status or absence evidence escapes an incomplete SDK reply.
+export function readLaunchRequestStatusFromLedger(args = {}) {
+  if (!normalizeText(args.launchRequestId)) return { ok: false, reason: 'missing-launch-request-id' };
+  const result = args.launchSnapshot ?? readDispatchLaunchesSync({
+    launch_request_ids: [args.launchRequestId], include_retry_chain: !!args.includeRetryChain }, args);
+  return launchProbe(result, args.launchRequestId, args.includeRetryChain);
 }
-
-// With includeRetryChain, a traversal failure preserves the base status and
-// sets retryChainUnreadable. Ownership-changing callers must check that flag.
-export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
-export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLaunchRequestStatusFromLedgerSteps(args), args); }
+export async function readLaunchRequestStatusFromLedgerAsync(args = {}) {
+  if (!normalizeText(args.launchRequestId)) return { ok: false, reason: 'missing-launch-request-id' };
+  const result = args.launchSnapshot ?? await readDispatchLaunches({
+    launch_request_ids: [args.launchRequestId], include_retry_chain: !!args.includeRetryChain }, args);
+  return launchProbe(result, args.launchRequestId, args.includeRetryChain);
+}
 
 // Collection seam only. Reuse the existing bounded ledger target/retry reader;
 // terminal launch evidence outranks a stale worker projection. Neither process
@@ -1161,136 +942,6 @@ export async function readLaunchRequestObservationFromLedgerAsync({
       retryReadReason: launch?.retryChainFailure?.reason ?? null, workerRead: worker?.ok ?? null,
       workerReadReason: worker?.reason ?? null },
   };
-}
-
-function* readLaunchRequestStatusFromLedgerSteps({
-  launchRequestId,
-  includeRetryChain = false,
-  launchSnapshot = null,
-  ledgerTarget = null,
-  ledgerDbPath = null,
-  env = process.env,
-  rootDir = process.cwd(),
-  hqRoot = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  const normalizedLaunchRequestId = normalizeText(launchRequestId);
-  if (!normalizedLaunchRequestId) {
-    return { ok: false, reason: 'missing-launch-request-id' };
-  }
-  const resolution = launchSnapshot || resolveSessionLedgerReadTarget({
-    ledgerTarget,
-    ledgerDbPath,
-    requiredTables: ['launch_requests'],
-    env,
-    rootDir,
-    hqRoot,
-  });
-  if (!resolution.ok) return resolution;
-  let queried;
-  let sqliteLaunchProjection;
-  if (Array.isArray(launchSnapshot?.rows)) {
-    queried = { ...launchSnapshot, rows: launchSnapshot.rows
-      .filter(row => row.launch_request_id === normalizedLaunchRequestId)
-      .map(({ metadata_json: _metadata, ...row }) => row) };
-  } else if (resolution.target.backend === 'sqlite') {
-    // HAMREFUND-01: older offline ledgers may predate the detail column.
-    const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');
-    if (!detailColumn.ok) return detailColumn;
-    const detailSelect = detailColumn.exists ? 'failure_detail' : 'NULL AS failure_detail';
-    const ticketColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'ticket_ref');
-    if (!ticketColumn.ok) return ticketColumn;
-    const ticketSelect = ticketColumn.exists ? 'ticket_ref' : 'NULL AS ticket_ref';
-    const identityColumns = [];
-    for (const column of ['target_repo', 'head_sha']) {
-      const probe = sqliteTableHasColumn(resolution.target, 'launch_requests', column);
-      if (!probe.ok) return probe;
-      if (probe.exists) identityColumns.push(column);
-    }
-    sqliteLaunchProjection = `launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}${identityColumns.length ? ', ' + identityColumns.join(', ') : ''}`;
-    queried = querySqliteRows(
-      resolution.target,
-      `SELECT ${sqliteLaunchProjection}
-         FROM launch_requests
-        WHERE launch_request_id = @launchRequestId
-        LIMIT 1`,
-      { launchRequestId: normalizedLaunchRequestId },
-    );
-  } else if (resolution.target.backend === 'postgres') {
-    queried = yield* queryPostgresRowsSteps(
-      resolution.target,
-      `${postgresLaunchColumns}${postgresIdentityColumns}
-       SELECT ${postgresCanonicalLaunchProjection})::jsonb${postgresIdentityDiagnostic}
-       FROM launch_requests request ${postgresIdentityJoin}
-       WHERE request.launch_request_id = :'lrq'
-       LIMIT 1`,
-      {
-        spawnSyncImpl,
-        psqlVars: [['lrq', normalizedLaunchRequestId]],
-      },
-    );
-  } else {
-    return unsupportedBackend(resolution.target);
-  }
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  if (!row) {
-    return {
-      ok: false,
-      reason: 'missing-launch-request-row',
-      launchRequestId: normalizedLaunchRequestId,
-      target: queried.target,
-    };
-  }
-  if (!includeRetryChain) return { ok: true, row, target: queried.target };
-  const retryStarted = performance.now();
-  const unreadableRetryChain = failure => ({ ok: true, row, retryChainUnreadable: true,
-    retryChainFailure: { reason: failure.reason, detail: failure.detail,
-      elapsedMs: Math.round(performance.now() - retryStarted) }, target: queried.target });
-  // Follow dispatcher-owned retries with cycle-safe traversal on either backend.
-  let retries;
-  if (resolution.target.backend === 'sqlite') {
-    const metadataColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'metadata_json');
-    if (!metadataColumn.ok) return unreadableRetryChain(metadataColumn);
-    if (!metadataColumn.exists) return { ok: true, row, retryChain: [], target: queried.target };
-    retries = querySqliteRows(resolution.target, `
-      WITH RECURSIVE retry_chain(launch_request_id) AS (
-        SELECT @launchRequestId
-        UNION
-        SELECT child.launch_request_id FROM launch_requests child
-        JOIN retry_chain parent
-          ON CASE WHEN json_valid(child.metadata_json)
-            THEN json_extract(child.metadata_json, '$.retryOf') END = parent.launch_request_id
-      )
-      SELECT ${sqliteLaunchProjection} FROM launch_requests
-      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
-        AND launch_request_id != @launchRequestId
-      ORDER BY updated_at DESC, launch_request_id DESC`, { launchRequestId: normalizedLaunchRequestId });
-  } else {
-    retries = Array.isArray(launchSnapshot?.rows) ? { ...launchSnapshot }
-      : (yield* queryPostgresRowsSteps(resolution.target, postgresRetryReadSql(), {
-        spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true,
-      }));
-    if (retries.ok && (Array.isArray(launchSnapshot?.rows)
-      || retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json')))) {
-      const children = new Map();
-      for (const candidate of retries.rows) {
-        let metadata = candidate.metadata_json;
-        try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { continue; }
-        if (!metadata || typeof metadata.retryOf !== 'string') continue;
-        if (!children.has(metadata.retryOf)) children.set(metadata.retryOf, []);
-        children.get(metadata.retryOf).push(candidate.launch_request_id);
-      }
-      const descendants = new Set([normalizedLaunchRequestId]);
-      for (const id of descendants) {
-        for (const child of children.get(id) || []) descendants.add(child);
-      }
-      retries.rows = retries.rows.filter(candidate => candidate.launch_request_id !== normalizedLaunchRequestId
-        && descendants.has(candidate.launch_request_id)).map(({ metadata_json: _metadata, ...candidate }) => candidate);
-    }
-  }
-  if (!retries.ok) return unreadableRetryChain(retries);
-  return { ok: true, row, retryChain: retries.rows, target: queried.target };
 }
 
 // LIVEPACK-01: non-terminal dag_runs states. `parked` is non-terminal (a

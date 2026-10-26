@@ -165,17 +165,12 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+SDK launch replies now supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer no longer joins
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -191,7 +186,7 @@ identity conflicts log `ama_closer.launch_identity_mismatch`. A foreign lease sk
 the receipt lookup and records query reason `lookup-skipped-foreign-lease` with
 no query attempts.
 
-Receipt lookups use the ledger's load-aware 30-second nominal budget with at
+Receipt lookups use the app SDK's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded
 attempt results, adapter reason and detail, backend/source, row count and launch
@@ -268,11 +263,12 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. A Postgres launch with no
-readable ticket identity also blocks absence proof; the reader never substitutes
-`NULL = ticket` for a canonical lookup. The query includes the exact attempt
-boundary and null request timestamps and never filters repository, head or
-terminal status. An operator key read returning zero cannot bypass an unreadable
+that window refuses this ticket-based recovery. The SDK query is grant-scoped;
+it does not reproduce the deleted Postgres reader's global unidentified-row
+check. The consumer uses an inclusive UTC attempt boundary and adds no
+repository, head or terminal-status filter. Full grant coverage is an activation
+prerequisite; filtered emptiness is not independent proof of global absence.
+An operator key read returning zero cannot bypass an unreadable
 supplemental ticket query. A returned unidentified, conflicting or same-ticket
 wrong-head receipt remains ambiguous even when terminal; an empty ticket query
 cannot settle it. Dry-run remains the default;
@@ -282,6 +278,11 @@ completion audit. Audit evidence includes the recorded ID and both queries.
 A promoted lease can be removed only if the same successful key query proves
 its exact recorded ID belongs to a foreign ticket and the ticket query proves
 closer absence; removal compares the unchanged lease under its mutation lock.
+SDK query evidence records backend `app-contract` and source `app-sdk`.
+`--ledger-target` is rejected before reconciliation. Reads require the default-off
+`ADVERSARIAL_DISPATCH_READS_ENABLED=1` activation flag after verified producer
+release, full grants and submodule `npm ci`; see the
+[reader deployment contract](producer-contract-readers.md#dispatch-lookup-activation-and-limits).
 Source changes authorize no live recovery action.
 
 
@@ -4065,8 +4066,12 @@ sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-
 
 Pin `<hq-root>` and `<ledger-target>` to the values used by the watcher;
 `--ledger-target` accepts a SQLite path/`sqlite://` URI or Postgres DSN.
-This avoids environment loss under `sudo -H`. Both commands print the resolved
-ledger backend and source (without DSN credentials), plus scanned, terminal,
+This avoids environment loss under `sudo -H`. This legacy CLI still validates the target and prints its resolved label
+(without DSN credentials) for compatibility. SDK launch reads ignore that target;
+the printed `ledger` label does not certify a canonical launch read. Enable
+`ADVERSARIAL_DISPATCH_READS_ENABLED=1` only after release, producer and full-grant
+readiness, and inspect recorded `app-contract` / `app-sdk` evidence.
+Both commands also print scanned, terminal,
 missing, unreadable, changed, and active counts. Target resolution failure aborts
 before rewriting records. Verify the preview's ledger metadata before apply.
 Apply preserves original fields, writes `state: launch-terminal`, the
@@ -4075,7 +4080,7 @@ changes. The normal dispatch capacity scan reconciles only launches still within
 the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
-HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes, including in-process SQLite reads without snapshot rows, admit queries for at most one second. Unprobed, missing and unreadable receipted records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; pre-receipt intents never reserve fleet capacity; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch SDK probes admit queries for at most one second. Unprobed, missing and unreadable receipted records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; pre-receipt intents never reserve fleet capacity; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
 
@@ -4257,39 +4262,23 @@ required for a group signal after leader exit. Unknown process inspection refuse
 startup or retains `cleanup-unconfirmed` with status 125; it cannot establish
 absence or release a matching lease. An empty/malformed census fails closed.
 
-LAC-2091 (agent-os#9186): the controller hands its inherited env and
-`HAM_HQ_ROOT` to `resolveSessionLedgerReadTarget`. When `session_ledger.backend`
-is Postgres, a SQLite-era `.hq/config.json` `ledgerDbPath` is ignored, as in
-Python `session_ledger.db_path.resolve_ledger_target`; it no longer refuses
-bootstrap as `legacy-hq-config` / `postgres-configured-but-sqlite-resolved`.
-For generic adapter reads, an explicit
-`ledgerTarget`/`AGENT_OS_SESSION_LEDGER_TARGET` still wins.
-`--ledger-db`, `AGENT_OS_SESSION_LEDGER_DB_PATH` and `SESSION_LEDGER_DB_PATH`
-SQLite paths still fail closed under Postgres. A stale explicit target returns
-`missing-launch-request-row`; that is a correct refusal, not a routing defect.
+DOG-09 replaces the controller's earlier LAC-2091 ledger-target selection.
+Startup, poll and fresh-read gates use the SDK own-LRQ HCP route with provisioned
+worker credentials. `HAM_HQ_ROOT`, canonical/standby DSNs and disposable test
+ledger settings do not select live launch truth. There is no database fallback,
+including during rollback. `launchReadSource` records `app-sdk` on successful
+reads and null when unavailable, without credentials or paths. Generic non-launch
+ledger readers retain their separate backend-resolution rules.
 
-Inside a worker, when the configured `session_ledger.backend` is `postgres`,
-the controller's startup, poll and fresh-read gates pass an explicit Postgres
-`ledgerTarget` built by `controllerLedgerTarget(env)` from non-empty
-`AGENT_OS_SESSION_LEDGER_CANONICAL_DSN`. This controller-only target outranks
-`AGENT_OS_SESSION_LEDGER_TARGET`; the registration's `launchReadSource` names
-the latest read's resolved source without retaining its DSN or path (null when
-unavailable). With SQLite, the default backend, the canonical DSN is ignored
-and the existing SQLite resolution applies, including during rollback.
-The ordinary
-`AGENT_OS_SESSION_LEDGER_DSN` is the worker's disposable test ledger and must
-not supply live launch truth. Without the canonical DSN, resolution follows
-the existing adapter rules above. Generic implicit reads retain their existing
-precedence, including the test DSN; no global canonical override is applied.
-
-The canonical DSN must be fully qualified with runtime host, port, database
-and user, for example `postgresql://ledger-user@runtime.example:5432/ledger`;
-do not use an abbreviated DSN such as `postgresql:///ledger`. The `psql`
-child inherits the worker process's libpq `PG*` environment. Provision the DSN
-and worker environment together: remove disposable-ledger connection settings
-(including `PGHOSTADDR` and `PGSERVICE`) and supply runtime authentication and
-transport settings explicitly. A fully qualified DSN must not depend on test
-`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` or credentials to fill missing values.
+Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1` after the verified
+merged SDK release, producer/grants deployment and submodule `npm ci` described
+in the reader contract. Removing that flag pauses launch observations safely
+and retains ownership holds. SDK 0.8.0 empty lookups and missing snapshot rows
+are unavailable (`dispatch absence scope unproven`) and cannot settle intents
+or reclaim terminal leases. The pinned merged release is recorded in
+`vendor/README.md`; absence needs a coordinated producer completeness contract.
+A caller abort stops waiting; SDK 0.8.0 still owns
+outstanding HTTP work until its own transport completes.
 
 During cancellation the shell defers its trap release. Only after confirmed
 group drain may fallback cleanup release the exact acquisition receipt's local

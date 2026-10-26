@@ -1,3 +1,4 @@
+import './helpers/dispatch-read-fixture.mjs';
 import { launchRetryFixture as baseLaunchRetryFixture } from './helpers/launch-retry-fixture.mjs';
 import Database from 'better-sqlite3';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -524,17 +525,13 @@ test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispa
     dispatchContext: { ...args.dispatchContext, ledgerTarget },
     readLaunchRequestStatusImpl: probe => readLaunchRequestStatusFromLedgerAsync({ ...probe,
       includeRetryChain: true,
-      spawnSyncImpl: (_command, _argv, options) => {
-        if (options.input.includes('WITH RECURSIVE')) {
-          chainReads += 1;
-          assert.match(options.input, /SELECT :'lrq'::text/);
-          return { status: 0, stdout: ['succeeded', 'canceled'].map((status, index) => JSON.stringify({
-            launch_request_id: `synthetic-terminal-${index}`, status, ticket_ref: 'AMA-PR-42',
-          })).join('\n') };
-        }
-        return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq',
-          status: 'failed', ticket_ref: 'AMA-PR-42' }) };
-      },
+      dispatchSession: {dispatchLookup:async()=>{
+        chainReads++;
+        const items=[{launch_request_id:'synthetic-lrq',status:'failed',ticket_ref:'AMA-PR-42'},
+          ...['succeeded','canceled'].map((status,index)=>({launch_request_id:`synthetic-terminal-${index}`,status,ticket_ref:'AMA-PR-42'}))];
+        return {schema_version:1,status:'found',complete:true,roots:['synthetic-lrq'],items,
+          retry_edges:items.slice(1).map(row=>({parent:'synthetic-lrq',child:row.launch_request_id}))};
+      }},
     }),
     readPullRequestStateImpl: () => ({ state: 'OPEN' }),
     execFileImpl: async (_command, argv) => argv[0] === 'dispatch' && argv.includes('--prompt')
@@ -742,15 +739,8 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
   const path = amaCloserDispatchFilePath(root, identity);
   const before = readFileSync(path, 'utf8');
-  let reads = 0;
-  const probe = () => readLaunchRequestStatusFromLedgerAsync({ launchRequestId: 'synthetic-lrq',
-    includeRetryChain: true, ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
-    spawnSyncImpl: () => ++reads % 2 === 1
-      ? { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) }
-      : failureCode === 'malformed-output'
-        ? { status: 0, stdout: '{"launch_request_id":"synthetic-row-payload",' }
-        : { status: null, error: Object.assign(new Error('The operation was aborted\nDETAIL: synthetic-row-payload'), { code: failureCode }) },
-  });
+  const probe = async () => ({ok:true,row:{launch_request_id:'synthetic-lrq',status:'failed'},retryChainUnreadable:true,
+    retryChainFailure:{reason:'dispatch-read-unavailable',detail:'dispatch evidence unavailable',elapsedMs:0}});
   const events = [];
   const diagnosticLogger = { ...logger, warn: line => events.push(JSON.parse(line)) };
   assert.equal(reconcileAmaCloserLease({ rootDir: root, ...identity, logger,
@@ -761,9 +751,8 @@ test(`RETRYCHAIN-02: unreadable retry evidence logs ${failureCode} and preserves
   assert.equal(result.reason, 'dispatch-retry-chain-unreadable');
   const diagnostic = events.filter(event => event.event === 'ama_closer.retry_chain_unreadable');
   assert.equal(diagnostic.length, 1);
-  assert.equal(diagnostic[0].reason, 'ledger-read-failed');
-  assert.equal(diagnostic[0].detail, failureCode === 'ETIMEDOUT' ? 'psql timed out after 30000ms'
-    : failureCode === 'malformed-output' ? 'unparseable psql stdout' : 'The operation was aborted');
+  assert.equal(diagnostic[0].reason, 'dispatch-read-unavailable');
+  assert.equal(diagnostic[0].detail, 'dispatch evidence unavailable');
   assert.ok(diagnostic[0].elapsedMs >= 0);
   assert.equal(Object.hasOwn(diagnostic[0], 'row'), false);
   assert.equal(Object.hasOwn(diagnostic[0], 'target'), false);

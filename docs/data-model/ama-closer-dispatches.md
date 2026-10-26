@@ -26,17 +26,12 @@ cannot be adopted.
 Ledger repository metadata may be absent or null in older schemas; when present,
 it must match the full repository name or its basename. The exact closer ticket
 is always required, and an explicit head mismatch still refuses adoption.
-Postgres reads resolve ticket identity from optional launch columns,
-`request_payload_json` / `lineage_json` (`ticketRef`, `taskKey`, and
-`launchProvenance.ticketId`), linked `launch_request_logical_job_claims.ticket_ref`
-and `worker_runs.task_key`, all correlated by the exact LRQ. Head identity comes
-from an optional launch `head_sha` and `launchProvenance.prHeadSha`; repository
-identity includes the existing target projection, linked logical jobs and
-provenance `repoFullName` / `repo`. Owner-qualified evidence takes precedence
-over a basename projection. Conflicting nonempty sources carry `identity_ambiguous: true` and refuse
-adoption; null projections never override positive canonical evidence. Status,
-retry-chain and bounded snapshot readers use the same identity projection.
-SQLite keyed/status reads retain their optional-column compatibility.
+SDK launch replies now supply ticket, repository and head identity. The producer
+owns backend schema projection and compatibility; this consumer no longer joins
+launch columns, lineage, logical-job claims or worker rows. Returned
+`identity_ambiguous: true` refuses adoption. Status, retry-chain and snapshot
+readers share the same SDK evidence boundary; grant scope remains an activation
+prerequisite, not evidence of an unfiltered ledger query.
 
 An explicit foreign dispatch receipt ends only the new attempt as `no-dispatch`,
 reason `non-hammer-launch-not-adopted`: supersede its pending lease, restore the
@@ -52,7 +47,7 @@ identity conflicts log `ama_closer.launch_identity_mismatch`. A foreign lease sk
 the receipt lookup and records query reason `lookup-skipped-foreign-lease` with
 no query attempts.
 
-Receipt lookups use the ledger's load-aware 30-second nominal budget with at
+Receipt lookups use the app SDK's load-aware 30-second nominal budget with at
 most three attempts and 100/200ms backoff for adapter-marked transient failures.
 `preReceiptReconciliation.query` records key or ticket query, timeout, bounded
 attempt results, adapter reason and detail, backend/source, row count and launch
@@ -99,11 +94,12 @@ keyed recovery it additionally queries the entire closer ticket at or after
 `lastAttemptedAt`, without repo/head filtering. A successful empty ticket query
 proves absence even if a recorded predecessor ID names another worker or the
 key read is unreadable (`closer-ticket-no-launch-proven`). Any closer row in
-that window refuses this ticket-based recovery. A Postgres launch with no
-readable ticket identity also blocks absence proof; the reader never substitutes
-`NULL = ticket` for a canonical lookup. The query includes the exact attempt
-boundary and null request timestamps and never filters repository, head or
-terminal status. An operator key read returning zero cannot bypass an unreadable
+that window refuses this ticket-based recovery. The SDK query is grant-scoped;
+it does not reproduce the deleted Postgres reader's global unidentified-row
+check. The consumer uses an inclusive UTC attempt boundary and adds no
+repository, head or terminal-status filter. Full grant coverage is an activation
+prerequisite; filtered emptiness is not independent proof of global absence.
+An operator key read returning zero cannot bypass an unreadable
 supplemental ticket query. A returned unidentified, conflicting or same-ticket
 wrong-head receipt remains ambiguous even when terminal; an empty ticket query
 cannot settle it. Dry-run remains the default;
@@ -173,36 +169,36 @@ The native watcher and `bin/reconcile-ama-closer-dispatches.mjs` use the same re
 ### Legacy ticket/time evidence (LEGACYINTENT-01)
 
 A legacy `dispatching` intent has no `dispatchIdempotencyKey`. Under the same
-PR fence, query the canonical `launch_requests` ledger for
-`ticket_ref = AMA-PR-<number>` and `requested_at >= lastAttemptedAt` (inclusive,
-compared as timestamps). Do not filter by repository or head: any row in range
+PR fence, query SDK `dispatchLookup` with `ticket_ref: AMA-PR-<number>` and
+`requested_at_or_after: lastAttemptedAt` (inclusive, normalized to UTC ISO).
+The consumer adds no repository or head filter: any visible row in range
 keeps ownership held, including an exact PR/head match. This repair deliberately
 does not adopt unkeyed rows. Earlier launches, including a retained predecessor
 LRQ, do not prevent settlement. An invalid attempt timestamp, failed/unreadable
 query, or malformed/null launch timestamp cannot prove absence.
 
-A successful empty query settles `state: no-dispatch`,
-`reason: legacy-no-launch-proven`, clears launch IDs, refunds the intent retry
-increment once, and terminalizes a matching pending lease as `deferred`.
-Reconciliation resumes after a crash between lease and intent persistence.
-Missing leases are preserved; replaced owners or leases with launch receipts remain
-held. A matching pending legacy lease can settle even if its original watcher
-PID is still alive: the canonical ledger query supplies the proof.
-The next ordinary closer admission can proceed under the existing eligibility
-and retry rules. Keyed attempts also permit successful empty-key proof after their dispatch deadline.
+SDK 0.8.0 filters observations by grants and cannot attest global absence.
+Empty ticket or idempotency lookups therefore return unavailable with
+`dispatch absence scope unproven`; they preserve the pending lease, dispatch
+intent and charged retry. A missing launch in a positive snapshot also retains
+ownership. Positive receipts remain eligible for ordinary recovery. Complete
+grants remain a deployment prerequisite, but do not enable absence settlement.
+A coordinated producer completeness contract is required before empty reads can
+prove no launch; there is no canonical-ledger fallback.
 
 `preReceiptReconciliation.query` records the bounded query kind, ticket,
 inclusive attempt-time lower bound, limit (one row is sufficient to refuse),
 read success, row count, launch IDs and secret-free backend/source or failure
-reason. The result is recorded on automatic reconciliation as well as operator
-apply. No ledger DSN or credentials are stored in this evidence.
+reason. SDK evidence records backend `app-contract` and source `app-sdk`.
+The retired `--ledger-target` option is rejected before reconciliation; it can
+no longer imply a canonical ledger read or select a different evidence source.
+The result is recorded on automatic reconciliation as well as operator apply. No ledger DSN or credentials are stored in this evidence.
 
 For one PR and **dispatch-record head**, run as the dispatch directory owner:
 
 ```bash
 node bin/settle-legacy-closer-intent.mjs \
   --root-dir /path/to/review-root --hq-root /path/to/hq-root \
-  --ledger-target '<canonical-ledger-target>' \
   --repo sample/project --pr 42 --head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Repeat the same command with: --apply --reason 'incident evidence recovery'
 ```
@@ -225,7 +221,11 @@ legacy intents, reads authoritative PR state through the shared reconciler,
 and performs no GitHub mutation or dispatch.
 
 Run the existing reconciliation CLI **as the daemon owner**, with its explicit
-`--root-dir`, `--hq-root` and canonical `--ledger-target`, first with `--dry-run`.
+`--root-dir` and `--hq-root`, first with `--dry-run`. Unlike the settlement
+command, this older reconciliation CLI still accepts and validates `--ledger-target`
+and prints its resolved label for compatibility; SDK launch reads ignore that
+target. Its printed `ledger` label is not launch-query provenance. Check the
+recorded `app-contract` / `app-sdk` evidence and complete grants instead.
 Dry-run preserves intent, lease and budget bytes; a companion lock file may be
 created. `preReceipt` counts report recovered, no-launch, retired, unknown and held cases.
 A source-code change does not authorize production apply. Do not run apply
@@ -435,8 +435,10 @@ The LAC-2081 reconciliation contract above supersedes dead-owner/age rollback.
   classifier before retry/refund admission; the persisted observation remains
   `unverified-terminal-success` with raw `terminalLaunchStatus: succeeded`.
 - Manual reconciliation must run as the canonical daemon account for the runtime
-  root, pinning `--hq-root` and `--ledger-target` to match the watcher. The CLI
-  reports the resolved backend and source without exposing DSN credentials.
+  root, pinning `--hq-root` to match the watcher and enabling the SDK reader
+  only after producer/release/grant readiness. The reconciliation CLI retains
+  legacy ledger-target validation and output labels, but they do not select
+  the SDK launch evidence source or certify unfiltered absence.
   Atomic replacement takes the caller's ownership; see the owner-qualified
   commands in `docs/RUNBOOK-ama-closure.md`.
 - `workerId` is authoritative for scoped hammer cleanup when present. Legacy

@@ -1,5 +1,3 @@
-import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
-import { withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -16,34 +14,12 @@ import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
-  readLaunchRequestStatusFromLedger,
   readReviewerSessionUsageFromLedger,
   readWorkerRunUsageFromLedger,
   resolveSessionLedgerReadTarget,
 } from '../src/session-ledger-read-adapter.mjs';
 
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
-
-test('generic implicit launch reads retain the test DSN when a canonical runtime DSN is also set', () => {
-  let calls = 0;
-  const result = readLaunchRequestStatusFromLedger({
-    launchRequestId: 'lrq_fixture',
-    env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
-      AGENT_OS_SESSION_LEDGER_DSN: 'postgres://test.example/ledger',
-      AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgres://runtime.example/ledger' },
-    spawnSyncImpl: (command, args) => {
-      calls += 1;
-      assert.equal(command, 'psql');
-      assert.ok(args.includes('postgres://test.example/ledger'));
-      assert.ok(!args.includes('postgres://runtime.example/ledger'));
-      return { status: 0, stderr: '', stdout: JSON.stringify({ launch_request_id: 'lrq_fixture', status: 'running' }) };
-    },
-  });
-  assert.equal(calls, 1);
-  assert.equal(result.ok, true);
-  assert.equal(result.target.dsn, 'postgres://test.example/ledger');
-  assert.equal(result.row.status, 'running');
-});
 
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'session-ledger-adapter-'));
@@ -325,28 +301,6 @@ test('LAC-2091: postgres resolution never reads the legacy HQ config', (t) => {
   }
 });
 
-test('LAC-2091: launch status reads the canonical postgres row despite a stale legacy HQ ledger', () => {
-  const { hqRoot } = staleLegacyHqFixture();
-  const calls = [];
-  const result = readLaunchRequestStatusFromLedger({
-    launchRequestId: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6',
-    env: LAC2091_POSTGRES_ENV,
-    hqRoot,
-    spawnSyncImpl: (command, args) => {
-      calls.push(command);
-      assert.equal(command, 'psql');
-      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
-      return { status: 0, stderr: '', stdout: `${JSON.stringify({
-        launch_request_id: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6', status: 'succeeded',
-        updated_at: '2026-10-25T00:47:00Z', terminal_at: '2026-10-25T00:47:00Z', failure_class: null })}\n` };
-    },
-  });
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.target.backend, 'postgres');
-  assert.equal(result.row.status, 'succeeded');
-  assert.deepEqual(calls, ['psql']);
-});
-
 test('LAC-2091: postgres without a DSN binds the canonical database name, never the legacy sqlite', () => {
   const { hqRoot } = staleLegacyHqFixture();
   const result = resolveSessionLedgerReadTarget({
@@ -380,17 +334,6 @@ test('LAC-2091: explicit targets keep their policy beside a stale legacy HQ ledg
   assert.equal(explicit.ok, true);
   assert.equal(explicit.target.backend, 'sqlite');
   assert.equal(explicit.target.source, 'explicit-ledger-target');
-
-  // A deliberately chosen stale target fails closed on the absent row; the
-  // reader never substitutes the canonical backend or invents a launch.
-  const missing = readLaunchRequestStatusFromLedger({
-    launchRequestId: 'lrq_277e21ba-ac68-48de-8664-ce983a3948e6',
-    ledgerTarget: { backend: 'sqlite', path: staleLedger },
-    env,
-    spawnSyncImpl: () => assert.fail('explicit sqlite target must not query postgres'),
-  });
-  assert.equal(missing.ok, false);
-  assert.equal(missing.reason, 'missing-launch-request-row');
 
   for (const [label, args] of [
     ['deprecated alias', { ledgerDbPath: staleLedger, env }],
@@ -532,7 +475,7 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       assert.match(sql, /LEFT JOIN LATERAL/);
       assert.match(sql, /wp_latest\.pid/);
       assert.match(sql, /ORDER BY COALESCE\(wr\.updated_at::text, wr\.ended_at::text, wr\.started_at::text, ''\) DESC/);
-      assert.equal(options.timeout, 30_000);
+      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
       assert.equal(options.killSignal, 'SIGKILL');
       return {
         status: 0,
@@ -885,7 +828,7 @@ test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postg
       assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
       assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
       assert.match(sql, /'token_usage_guardrail', token_usage_guardrail/);
-      assert.equal(options.timeout, 30_000);
+      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
       return {
         status: 0,
         stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
@@ -1086,10 +1029,11 @@ test('queryPostgresRows enforces readOnly without variables and preserves the un
     ).replace("'./watcher-latency.mjs'", JSON.stringify(new URL('./watcher-latency.mjs', sourceUrl).href))
       .replace("'./load-aware-timeout.mjs'", JSON.stringify(new URL('./load-aware-timeout.mjs', sourceUrl).href))
       .replace("'./ama/launch-request-status.mjs'", JSON.stringify(new URL('./ama/launch-request-status.mjs', sourceUrl).href))
-      .replace("'./producer-contracts/launch-status.mjs'", JSON.stringify(new URL('./producer-contracts/launch-status.mjs', sourceUrl).href));
+      .replace("'./producer-contracts/launch-status.mjs'", JSON.stringify(new URL('./producer-contracts/launch-status.mjs', sourceUrl).href))
+      .replace("'./dispatch-read-client.mjs'", JSON.stringify(new URL('./dispatch-read-client.mjs', sourceUrl).href));
     const modulePath = path.join(root, 'adapter.mjs');
     writeFileSync(modulePath, `${source}\nexport { queryPostgresRows, spawnLedgerChild };\n`);
-    const { queryPostgresRows, spawnLedgerChild, readLaunchRequestStatusFromLedgerAsync } = await import(pathToFileURL(modulePath).href);
+    const { queryPostgresRows, spawnLedgerChild } = await import(pathToFileURL(modulePath).href);
     for (const readOnly of [true, false]) {
       let calls = 0;
       const result = queryPostgresRows(
@@ -1121,20 +1065,8 @@ test('queryPostgresRows enforces readOnly without variables and preserves the un
       assert.equal(result.ok, true);
       assert.deepEqual(result.rows, [{ state: 'running' }]);
     }
-    // Exercise execFile's real overflow result, not just a simulated error.
-    let calls = 0;
-    const row = { launch_request_id: 'synthetic-root', status: 'failed' };
-    const overflow = await readLaunchRequestStatusFromLedgerAsync({
-      launchRequestId: row.launch_request_id, includeRetryChain: true,
-      ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
-      spawnAsyncImpl: (_command, _args, options) => ++calls === 1
-        ? { status: 0, stdout: JSON.stringify(row) }
-        : spawnLedgerChild(process.execPath, ['-e', "process.stdout.write('x'.repeat(3 * 1024 * 1024))"], options),
-    });
-    assert.equal(calls, 2);
-    assert.equal(overflow.ok, true);
-    assert.deepEqual(overflow.row, row);
-    assert.equal(overflow.retryChainUnreadable, true);
+    const overflow = await spawnLedgerChild(process.execPath, ['-e', "process.stdout.write('x'.repeat(3 * 1024 * 1024))"], { maxBuffer: 1024 });
+    assert.equal(overflow.error.code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1287,227 +1219,9 @@ test('active DAG reads retry transient failures, stop on permanent errors, and f
 });
 
 
-for (const detail of ['worker process ended by SIGTERM (exit_code=143); a signal death is never a success', 'codex-tool-host-unavailable', null]) {
-  test(`HAMREFUND-01: SQLite projects the durable launch failure detail (${detail})`, (t) => {
-    const root = tempRoot();
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const dbPath = path.join(root, 'ledger.sqlite');
-    const db = new Database(dbPath);
-    db.exec(`CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT${detail === null ? '' : ', failure_detail TEXT'})`);
-    if (detail === null) db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?)').run('lrq_58bbdea0', 'failed', null, null, 'worker_killed');
-    else db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?, ?)').run('lrq_58bbdea0', 'failed', null, null, 'worker_killed', detail);
-    db.close();
-    const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'lrq_58bbdea0', ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
-    assert.equal(result.ok, true, JSON.stringify(result));
-    assert.equal(result.row.failure_detail, detail);
-  });
-}
-
-test('HAMREFUND-01: PostgreSQL projects failure detail without requiring a new schema column', () => {
-  const result = readLaunchRequestStatusFromLedger({
-    launchRequestId: 'lrq_58bbdea0',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    env: HERMETIC_CONFIG_ENV,
-    spawnSyncImpl: (_cmd, _args, options) => {
-      assert.match(options.input, /THEN 'request.failure_detail' ELSE 'NULL::text' END/);
-      assert.doesNotMatch(options.input, /to_jsonb/);
-      return { status: 0, stdout: JSON.stringify({ launch_request_id: 'lrq_58bbdea0', status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' }) + '\n', stderr: '' };
-    },
-  });
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.row.failure_detail, 'SIGTERM');
-});
-
-test('REBASEPROV-01 ledger status projects the actual launch ticket', t => {
-  const root = tempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const dbPath = path.join(root, 'ledger.sqlite');
-  const db = new Database(dbPath);
-  db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT, ticket_ref TEXT)');
-  db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL, ?)').run('foreign-launch', 'succeeded', 'CONFLICT-PR-42-REBASE');
-  db.close();
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'foreign-launch',
-    ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
-  assert.equal(result.ok, true);
-  assert.equal(result.row.ticket_ref, 'CONFLICT-PR-42-REBASE');
-});
-
-test('SCRATCHRACE-01: launch retry traversal includes all descendants and excludes unrelated live launches', t => {
-  const root = tempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const ledgerTarget = launchRetryFixture(root);
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
-    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.row.status, 'failed');
-  assert.deepEqual(result.retryChain.map(row => row.launch_request_id).sort(),
-    ['synthetic-retry', 'synthetic-retry-leaf', 'synthetic-terminal-sibling']);
-  const db = new Database(ledgerTarget.path);
-  db.prepare('UPDATE launch_requests SET metadata_json = ? WHERE launch_request_id = ?')
-    .run(JSON.stringify({ retryOf: 'synthetic-retry-leaf' }), 'synthetic-lrq');
-  db.close();
-  const cycle = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
-    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
-  assert.deepEqual(cycle.retryChain, result.retryChain, 'cycles terminate without duplicating the root');
-});
-
-test('RETRYCHAIN-01: PostgreSQL requests only the selected retry tree and projects status fields', () => {
-  let queries = 0;
-  const leaf = { launch_request_id: 'synthetic-leaf', status: 'requested', updated_at: '2026-01-02T02:00:00Z',
-    failure_class: null, failure_detail: null, terminal_at: null, ticket_ref: 'HAM' };
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
-    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
-    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
-    spawnSyncImpl: (_cmd, args, options) => {
-      queries += 1;
-      assert.equal(options.maxBuffer, 2 * 1024 * 1024);
-      if (queries === 1) return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) };
-      assert.ok(args.includes('lrq=synthetic-lrq'));
-      assert.ok(args.includes('-q'));
-      assert.match(options.input, /^BEGIN READ ONLY;/);
-      assert.match(options.input, /\\endif\nCOMMIT;\n$/);
-      assert.doesNotMatch(options.input, /CREATE FUNCTION|SET TRANSACTION|EXCEPTION|ROLLBACK/);
-      assert.match(options.input, /pg_input_is_valid/);
-      assert.match(options.input, /WHERE child.metadata_json ->> 'retryOf' = parent.launch_request_id/);
-      assert.match(options.input, /AND CASE WHEN child.metadata_json IS NULL THEN NULL::boolean ELSE true END/);
-      assert.doesNotMatch(options.input, /MATERIALIZED|to_jsonb/);
-      assert.match(options.input, /retry_chain\(launch_request_id\) AS \(\s+SELECT :'lrq'::text/);
-      assert.match(options.input, /UNION\s+SELECT child.launch_request_id/);
-      assert.doesNotMatch(options.input, /UNION ALL|IS JSON/);
-      assert.match(options.input, /pg_input_is_valid\(child.metadata_json::text, 'jsonb'\)/);
-      assert.match(options.input, /WHERE request.launch_request_id = chain.launch_request_id/);
-      assert.match(options.input, /WHERE request.launch_request_id != :'lrq'/);
-      const projection = options.input.slice(options.input.indexOf('SELECT json_build_object'), options.input.indexOf('\\else'));
-      assert.doesNotMatch(projection, /metadata_json/);
-      assert.match(projection, /ORDER BY request.updated_at DESC NULLS LAST, request.launch_request_id DESC;/);
-      return { status: 0, stdout: JSON.stringify(leaf) };
-    },
-  });
-  assert.equal(queries, 2);
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.deepEqual(result.retryChain, [leaf]);
-  assert.deepEqual(withLiveLaunchRetry(result).row, leaf);
-});
-
-test('RETRYCHAIN-01: legacy PostgreSQL snapshot parses metadata and keeps only cycle-safe descendants', () => {
-  let queries = 0;
-  const snapshot = [
-    { launch_request_id: 'synthetic-root', status: 'failed', metadata_json: '{"retryOf":"synthetic-leaf"}' },
-    { launch_request_id: 'synthetic-leaf', status: 'running', metadata_json: { retryOf: 'synthetic-child' } },
-    { launch_request_id: 'synthetic-child', status: 'failed', metadata_json: '{"retryOf":"synthetic-root"}' },
-    { launch_request_id: 'synthetic-unrelated', status: 'running', metadata_json: '{broken' },
-    { launch_request_id: 'synthetic-numeric', status: 'running', metadata_json: { retryOf: 123 } },
-    { launch_request_id: 'synthetic-empty', status: 'running', metadata_json: null },
-  ];
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-root', includeRetryChain: true,
-    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
-    spawnSyncImpl: () => ({ status: 0, stdout: ++queries === 1
-      ? JSON.stringify(snapshot[0]) : snapshot.map(row => JSON.stringify(row)).join('\n') }) });
-  assert.equal(result.retryChainUnreadable, undefined);
-  assert.deepEqual(result.retryChain, [
-    { launch_request_id: 'synthetic-leaf', status: 'running' },
-    { launch_request_id: 'synthetic-child', status: 'failed' },
-  ]);
-});
-
-test('RETRYCHAIN-01: a successful PostgreSQL read with no retries is an empty chain', () => {
-  let queries = 0;
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-root',
-    includeRetryChain: true, ledgerTarget: { backend: 'postgres', databaseName: 'synthetic' },
-    spawnSyncImpl: () => ({ status: 0, stdout: ++queries === 1
-      ? JSON.stringify({ launch_request_id: 'synthetic-root', status: 'failed' }) : '' }),
-  });
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.retryChain, []);
-  assert.equal(result.retryChainUnreadable, undefined);
-});
-
-test('SCRATCHRACE-01: SQLite promotes the latest live retry with its complete status fields', t => {
-  const root = tempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const ledgerTarget = launchRetryFixture(root, 'running');
-  const db = new Database(ledgerTarget.path);
-  db.exec('ALTER TABLE launch_requests ADD COLUMN failure_detail TEXT');
-  db.prepare('UPDATE launch_requests SET status = ?, updated_at = ?, failure_class = ?, failure_detail = ? WHERE launch_request_id = ?')
-    .run('running', '2026-10-17T01:00:00Z', 'older', 'older failure', 'synthetic-retry');
-  db.prepare('UPDATE launch_requests SET updated_at = ? WHERE launch_request_id = ?')
-    .run('2026-10-17T02:00:00Z', 'synthetic-retry-leaf');
-  db.close();
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
-    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
-  const promoted = withLiveLaunchRetry(result);
-  assert.equal(promoted.liveRetryLaunchRequestId, 'synthetic-retry-leaf');
-  assert.deepEqual(promoted.row, { launch_request_id: 'synthetic-retry-leaf', status: 'running',
-    updated_at: '2026-10-17T02:00:00Z', terminal_at: null, failure_class: null, failure_detail: null, ticket_ref: 'HAM' });
-});
-
-for (const failure of [
-  { status: 1, stderr: 'synthetic retry query unavailable' },
-  { status: null, error: Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }) },
-  { status: null, error: Object.assign(new Error('synthetic overflow'), { code: 'ENOBUFS' }) },
-  { status: null, error: Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' }) },
-]) test(`RETRYCHAIN-01: unreadable PostgreSQL retry traversal retains base status (${failure.error?.code || 'query error'})`, () => {
-  let queries = 0;
-  const row = { launch_request_id: 'synthetic-lrq', status: 'failed' };
-  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
-    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic' },
-    spawnSyncImpl: () => ++queries === 1 ? { status: 0, stdout: JSON.stringify(row) }
-      : failure,
-  });
-  assert.equal(queries, 2);
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.row, row);
-  assert.equal(result.retryChainUnreadable, true);
-  assert.equal(result.retryChainFailure.reason, 'ledger-read-failed');
-  assert.equal(result.retryChainFailure.detail, failure.error?.code === 'ETIMEDOUT'
-    ? 'psql timed out after 30000ms' : failure.error?.message || failure.stderr);
-  assert.ok(result.retryChainFailure.elapsedMs >= 0);
-});
-
-test('HAMRETRY-01: one read-only snapshot reconciles every launch and its live retry descendants', async t => {
-  const { readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestStatusFromLedgerAsync } =
-    await import('../src/session-ledger-read-adapter.mjs');
-  const root = tempRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const rows = [
-    { launch_request_id: 'synthetic-ended', status: 'succeeded' },
-    { launch_request_id: 'synthetic-ancestor', status: 'failed' },
-    { launch_request_id: 'synthetic-retry', status: 'running', metadata_json: { retryOf: 'synthetic-ancestor' } },
-    { launch_request_id: 'synthetic-malformed', status: 'failed', metadata_json: '{broken' },
-  ];
-  let reads = 0;
-  const options = { launchRequestIds: rows.map(row => row.launch_request_id),
-    ledgerTarget: { backend: 'postgres', databaseName: 'synthetic_ledger' },
-    env: HERMETIC_CONFIG_ENV, rootDir: root,
-    spawnSyncImpl: (command, _argv, opts) => {
-      reads++;
-      assert.equal(command, 'psql');
-      assert.match(opts.input, /BEGIN READ ONLY;/);
-      assert.match(opts.input, /\\endif\nCOMMIT;\n$/);
-      assert.match(opts.input, /FROM launch_requests/);
-      assert.ok(_argv.includes(`launch_ids=${JSON.stringify(options.launchRequestIds)}`));
-      assert.doesNotMatch(opts.input, /synthetic-ended|to_jsonb|MATERIALIZED/);
-      return { status: 0, stdout: rows.map(r => JSON.stringify(r)).join('\n') };
-    },
-  };
-  const launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync(options);
-  assert.equal(launchSnapshot.ok, true);
-  for (const row of rows) {
-    const result = withLiveLaunchRetry(await readLaunchRequestStatusFromLedgerAsync({ ...options,
-      launchSnapshot, launchRequestId: row.launch_request_id, includeRetryChain: true }));
-    assert.equal(result.ok, true);
-    assert.equal(Object.hasOwn(result.row, 'metadata_json'), false);
-    assert.equal(result.row.status, row.launch_request_id === 'synthetic-ancestor' ? 'running' : row.status);
-    if (row.launch_request_id === 'synthetic-ancestor') assert.equal(result.liveRetryLaunchRequestId, 'synthetic-retry');
-    const syncResult = withLiveLaunchRetry(readLaunchRequestStatusFromLedger({ ...options,
-      launchSnapshot, launchRequestId: row.launch_request_id, includeRetryChain: true }));
-    assert.deepEqual(syncResult, result, 'sync and async readers both reuse the supplied snapshot');
-  }
-  assert.deepEqual(launchSnapshot.rows, rows, 'individual reads cannot mutate the shared snapshot');
-  assert.equal(reads, 1, 'all terminal and live statuses share the same bounded query');
-});
-
+// Launch identity, retry ordering, scope and backend regressions now live at
+// the producer and dispatch-read-client boundary; this file retains the other
+// ledger readers until their separate migrations.
 test('RETRYCHAIN-02: an empty capacity census never requests an unfiltered launch snapshot', async () => {
   const { readLaunchRequestSnapshotFromLedgerAsync } = await import('../src/session-ledger-read-adapter.mjs');
   const result = await readLaunchRequestSnapshotFromLedgerAsync({

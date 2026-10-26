@@ -18,9 +18,13 @@ test('recorded fixtures verify release, snapshot, capture and byte hashes offlin
   assert.equal(sha256(sdkSnapshotBytes), sdk.snapshotSha256);
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   const dependency = lock.packages['node_modules/@agent-os/app-sdk'];
-  assert.equal(dependency.version, sdk.version);
-  assert.equal(dependency.resolved, `file:${sdk.file}`);
-  assert.equal(dependency.integrity, `sha512-${createHash('sha512').update(readFileSync(new URL(`../${sdk.file}`, import.meta.url))).digest('base64')}`);
+  const runtime = fixtureProvenance.recorded.dispatchLookupSdk;
+  const bytes = readFileSync(new URL(`../${runtime.file}`, import.meta.url));
+  assert.equal(dependency.version, runtime.version);
+  assert.equal(dependency.resolved, `file:${runtime.file}`);
+  assert.equal(sha256(bytes), runtime.sha256);
+  assert.equal(`sha512-${createHash('sha512').update(bytes).digest('base64')}`, runtime.integrity);
+  assert.equal(dependency.integrity, runtime.integrity);
   for (const name of Object.keys(fixtureProvenance.recorded.producers)) recordedFixture(name);
 });
 

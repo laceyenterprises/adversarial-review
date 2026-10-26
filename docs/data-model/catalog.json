@@ -503,6 +503,7 @@
         "src/ama/closer-pass-attempt.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
+      "claudeReplySelectionFields": ["candidateCount", "selectedCandidate", "selectedType", "laterCandidates", "contractValid"],
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "owner": "reviewer spawn, settle, and token attribution"
     },

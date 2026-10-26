@@ -15,7 +15,7 @@ import {
   validateReviewerReply,
 } from '../src/kernel/review-reply.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
-import { dispatchReviewerModel, reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
+import { dispatchReviewerModel, reviewAgyOversizedInChunks, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { extractReviewVerdict, sanitizeCodexReviewPayload } from '../src/kernel/verdict.mjs';
 import { reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -81,6 +81,28 @@ const VALID_REPLY = [
   '## Verdict',
   'Request changes',
 ].join('\n');
+
+test('REVIEWREPLYLAST-01: no valid candidate preserves the newest rejection and forensic evidence', async () => {
+  const newest = 'The synthetic background search finished; the verdict is unchanged.';
+  for (const replies of [[newest], ['An earlier incomplete reply.', newest]]) {
+    const parsed = harness.parseClaudeJsonOutput(replies.map((result) => JSON.stringify({ type: 'result', result })).join('\n'));
+    const dispatch = await dispatchReviewerModel('claude', '+synthetic diff', '', {
+      reviewWithClaudeImpl: async () => parsed,
+    });
+    const captured = [];
+    assert.throws(() => assertReviewerReply(dispatch.rawReviewText, {
+      onRejected: (evidence) => captured.push(evidence),
+    }), (error) => {
+      assert.ok(error instanceof ReviewerReplyRejectedError);
+      assert.deepEqual(error.reasons, ['no required heading']);
+      assert.equal(error.failureClass, 'reviewer-output');
+      assert.equal(classifyReviewerFailure(error.message, reviewerExecutionFailureExitCode(error)), 'reviewer-output');
+      return true;
+    });
+    assert.deepEqual(captured, [{ rawReviewText: newest,
+      rejectionReason: '[reviewer-output] reviewer reply rejected: no required heading' }]);
+  }
+});
 
 function withoutLeadingHeader(text) {
   return text.split('\n').slice(2).join('\n');

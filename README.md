@@ -1539,10 +1539,12 @@ unavailable when all declared pool selections are held; those holds still reach
 account admission. Runtime adapters with no declared ID hold leased accounts just
 like other unsupported runtimes. These repairs retain the existing smoke promises;
 the offline reviewer-account consumer tests cover these refusal paths.
-ITP-14 uses the same selection owner for declared hammer/remediator pools. Unknown
-evidence uses the existing pre-launch deferral or budget-neutral claim release;
-pooled local remediation holds until managed dispatch is available. There are no
-new lifecycle states or live smoke promises. Offline acceptance is in
+ITP-14 uses the same selection owner for declared hammer/remediator pools.
+ITPREMEDHOLD-01 keeps remediators on the legacy class path when their pool is
+undeclared or has no usable evidence; a selected account takes managed dispatch
+even when config or health routing selects local execution. Only positive pool
+exhaustion holds a pooled remediator. Hammer unknown-evidence deferral is unchanged.
+There are no new lifecycle states or live smoke promises. Offline acceptance is in
 `test/worker-token-pool.test.mjs` and `test/verify-reviewer-token-owner.py`.
 Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
 review's commit ID. Settlement requires a non-empty recovered head and retains
@@ -2347,17 +2349,24 @@ role budgets and merge capabilities attached to the canonical role.
 The Node result is a proposal only. Managed `hq dispatch` revalidates admission
 and acquires/binds the account under its existing global semaphore. It emits no
 automatic harness or account pin. The proposal uses the role's coding/merge task
-policy, while reviewers retain their stricter reviewer reserve policy. Unknown,
-stale or unreadable evidence holds before fallback. Fresh pool exhaustion reaches
+policy, while reviewers retain their stricter reviewer reserve policy. Hammer
+unknown, stale or unreadable evidence holds before fallback. Remediators instead
+retain legacy class routing when their own identity has no declaration or usable
+evidence (including selector errors); declaring only `codex` does not enroll
+`remediator-codex`. A declared remediator pool with a usable account takes
+precedence over the legacy account policy. Fresh pool exhaustion reaches
 only the existing declared eligible cross-family role, retaining `hammer-claude`
 and remediation reviewer-family exclusions. Typed infrastructure repair retains
 its declared cross-family edge. Recovery reselects on the next new attempt;
 running/resumed leases remain dispatcher-owned and unchanged.
 
 Managed remediation bypasses daemon-local OAuth preflight only for pooled
-privileged roles. A local runtime selection holds before workspace preparation;
-the retry deadline is a full 60 seconds from the hold decision, independent of
-claim age. It cannot spawn with an unleased proposal. `accountProposal` in existing
+privileged roles. A selected pooled remediator always takes managed dispatch,
+including when config, a previous round or health routing selected local mode.
+The dispatcher reselects and binds the account at admission, so the proposal
+cannot spawn as an unleased local worker. Positive all-account exhaustion with
+no eligible available fallback holds budget neutral; its log and retry record
+retain the pool refusal reason. `accountProposal` in existing
 job and AMA audit evidence records non-secret selection metadata, never a bound lease.
 The dispatcher's launch/run provenance remains authoritative for the account that
 actually ran. Undeclared pools and explicit legacy corporate requests retain

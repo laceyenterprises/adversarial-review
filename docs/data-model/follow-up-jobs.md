@@ -591,9 +591,13 @@ round removed, `remediationPlan.retryAfter` set to the hold end and a
 
 - `source`: `"remediator-fallback-resolution"`.
 - `capSource`: what proved the cap, for example a fleet quota state or
-  `"provider-reset-past-hold-window"`.
+  `"provider-reset-past-hold-window"`. For pooled holds this carries the pool
+  refusal reason (such as `"accounts-unavailable"`); when a cap source is absent,
+  hold formatting and this field use the routing reason, then pool status.
+  Neither the hold message nor the retry record prints `undefined`.
 - `fallbackReason`: `"no-available-fallback"`, `"no-fallback-configured"` or
-  `"primary-resets-within-hold-window"`.
+  `"primary-resets-within-hold-window"`; absent a routing reason, the pool status
+  or resolved hold reason is retained.
 - `skipped[]`: `{ workerClass, reason }` for each declared fallback class passed
   over (`provider-untracked`, `reviews-next-round:<reviewer>`,
   `capped:<capSource>`, `resets-within-hold-window`, `unavailable:<state>`).

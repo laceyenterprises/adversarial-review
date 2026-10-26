@@ -212,8 +212,7 @@ export async function resolveRemediationWorkerClassWithFallback({
         && ['codex', 'remediator-codex'].includes(primaryClass))));
   const pooled = await resolvePooledWorkerRouting({ primary: primaryClass, fallbackWorkerClasses: fallbacks,
     kind: 'remediator', env, modelForClass, reviewerModels, selectAccountImpl, preferCrossFamily,
-    infrastructureReason: lastInfrastructureRetry?.retryMetadata?.reason,
-    legacyAccountPinned: primaryClass === 'codex' && codexAccountPolicy === 'pinned' });
+    infrastructureReason: lastInfrastructureRetry?.retryMetadata?.reason });
   if (pooled) return { ...pooled, ...(pooled.hold ? { holdUntil: holdUntilFor(null, nowMs) } : {}) };
 
   if (!primaryClass) {

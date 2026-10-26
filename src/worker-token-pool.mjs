@@ -47,8 +47,8 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
       brokerProvider: oauth.token_accounts[selection.account_id].broker_provider,
       evidenceGeneration: selection.generation, selection };
   } catch {
-    // Config and transport failures cannot enroll a role in legacy fail-open
-    // routing. No credential reads or diagnostics are emitted here.
+    // Report evidence failures explicitly; callers own hold/compatibility
+    // policy. No credential reads or diagnostics are emitted here.
     return { ...base, hold: true, status: 'held', reason: 'evidence-unknown' };
   }
 }
@@ -66,13 +66,22 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
   if (!Object.hasOwn(FAMILIES, identity)
     || (kind === 'hammer' ? !identity.startsWith('hammer') : !identity.startsWith('remediator-'))) return null;
   const select = async role => {
-    try { return await selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options }); }
-    catch { return { identity: role, workerClass: role, pooled: true,
+    let account;
+    try { account = await selectAccountImpl({ identity: role, model: modelForClass?.(role), env, ...options }); }
+    catch { account = { identity: role, workerClass: role, pooled: true,
       hold: true, status: 'held', reason: 'evidence-unknown' }; }
+    return account;
   };
   const account = await select(identity);
   if (!account) return null; // Undeclared installations retain compatibility.
-  const base = { ...account, workerClass: identity, fellBack: false };
+  // Remediator proposals are optional preflight evidence. Only a selected
+  // account or a positive all-accounts refusal replaces legacy class routing.
+  // A pool for `codex` does not enroll `remediator-codex`; unknown/failed
+  // proposals cannot ground that role. Dispatch still owns account admission.
+  if (kind === 'remediator' && account.status !== 'selected'
+    && !(account.status === 'unavailable' && account.reason === 'accounts-unavailable')) return null;
+  const base = { ...account, workerClass: identity, fellBack: false,
+    ...(kind === 'remediator' && account.status === 'unavailable' ? { capSource: account.reason } : {}) };
   if (account.status !== 'unavailable' && (!preferCrossFamily || account.hold)) return base;
   const skipped = [];
   for (const candidate of [...new Set(fallbackWorkerClasses.map(canonical))]) {
@@ -83,6 +92,10 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       continue;
     }
     const fallback = await select(candidate);
+    if (kind === 'remediator' && (!fallback || fallback.status !== 'selected')) {
+      skipped.push({ workerClass: candidate, reason: fallback?.reason || fallback?.status || 'pool-undeclared' });
+      continue;
+    }
     if (!fallback || fallback.status === 'unavailable') continue;
     if (fallback.hold) return { ...base, hold: true, status: 'held', reason: fallback.reason, skipped };
     return { ...fallback, workerClass: candidate, fellBack: true, from: identity, to: candidate,

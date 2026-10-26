@@ -84,15 +84,20 @@ test('ITP-14 exhausted hammer pool retains only declared cross-family hammer edg
   assert.equal(result.fellBack, true);
 });
 
-test('ITP-14 unknown primary holds before any fallback; remediation family exclusion precedes account read', async () => {
+test('ITPREMEDHOLD-01 unknown primary uses legacy routing; exhausted pools retain reviewer-family exclusion', async () => {
   const seen = [];
   const run = status => resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+    codexAccountPolicy: 'pinned',
     fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'], reviewerModels: ['claude'], env: {},
     selectAccountImpl: async ({ identity }) => {
       seen.push(identity);
-      return { pooled: true, identity, workerClass: identity, hold: true, status, reason: 'evidence-unknown' };
-    }, execFileImpl: () => assert.fail('no legacy quota read') });
-  assert.equal((await run('held')).hold, true);
+      return { pooled: true, identity, workerClass: identity, hold: true, status,
+        reason: status === 'held' ? 'evidence-unknown' : 'accounts-unavailable' };
+    }, execFileImpl: async () => ({ stdout: '{}' }) });
+  const unknown = await run('held');
+  assert.equal(unknown.hold, false);
+  assert.equal(unknown.workerClass, 'codex');
+  assert.equal(unknown.pooled, undefined);
   assert.deepEqual(seen, ['remediator-codex']);
   seen.length = 0;
   assert.equal((await run('unavailable')).hold, true);
@@ -106,14 +111,14 @@ test('ITP-14 default Codex worker order is corporate-first and unknown preferred
   assert.equal(selectCodexWorkerAccount(fixture).hold, true);
 });
 
-for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) test(`${experiment ? 'OSG-14 assigned arm' : 'ITP-14'} real ${family} remediation claim account ${index} dispatches remediator without local credentials`, async t => {
+for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const experiment of [false, true]) for (const local of (experiment ? [false] : [false, true])) test(`${experiment ? 'OSG-14 assigned arm' : 'ITPREMEDHOLD-01'} ${family} remediation claim account ${index} local=${local} dispatches remediator without local credentials`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'itp14-claim-'));
   const hqRoot = join(rootDir, 'hq');
   const workspaceDir = join(rootDir, 'worker');
   mkdirSync(hqRoot); mkdirSync(workspaceDir);
   const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
     ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
-    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '1',
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: local ? '0' : '1',
     HQ_ROOT: hqRoot, HQ_PARENT_SESSION: 'synthetic-parent', HQ_PROJECT: 'synthetic-project',
     CODEX_BROKER_PROVIDER: 'codex-corp',
     CODEX_AUTH_PATH: join(rootDir, 'absent-auth.json') };
@@ -130,6 +135,9 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
   const identity = `remediator-${family}`;
   const wire = wireFor(identity, index);
   const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
+    // An OSG assignment is reached only on the existing OS path. A pooled
+    // default must override both local config and a local health-router result.
+    ...(local && !experiment ? { healthRouter: { getMode: () => 'local' } } : {}),
     guardStackedBaseImpl: async () => null, resolvePRLifecycleImpl: async () => null,
     ...(experiment ? { resolveOsgRemediatorRouteImpl: options => {
       assert.equal(options.current.pooled, false);
@@ -167,6 +175,7 @@ for (const family of ['codex', 'claude']) for (const index of [0, 1]) for (const
   assert.equal(process.env.CODEX_BROKER_PROVIDER, 'codex-corp', 'claim environment is isolated');
   assert.equal(result.job.remediationWorker.workerClass, identity);
   assert.equal(result.job.remediationWorker.accountProposal.tokenAccountId, wire.selection.account_id);
+  assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0][dispatches[0].indexOf('--worker-class') + 1], identity);
   assert.equal(dispatches[0].includes('--harness'), false);
@@ -282,37 +291,90 @@ test('direct pooled Codex resolver preserves the job non-blocking model', async 
   assert.equal(result.hold, false);
 });
 
-test('local pooled remediation defers a full minute after an aged claim without spending a round', async t => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'itp14-local-hold-'));
-  const overrides = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_ROLES_REMEDIATOR: 'adversarial',
-    ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: undefined,
-    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native', ADV_WITH_HQ_INTEGRATION: '0' };
-  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
-  const apply = values => { for (const [key, value] of Object.entries(values)) {
-    if (value === undefined) delete process.env[key]; else process.env[key] = value;
-  } };
-  apply(overrides);
-  t.after(() => { apply(previous); rmSync(rootDir, { recursive: true, force: true }); });
-  createFollowUpJob({ branch: 'fixture/remediation', rootDir, repo: 'sample/project', prNumber: 42, builderTag: 'claude-code',
-    reviewerModel: 'gemini', reviewBody: '## Verdict\nRequest changes', critical: true,
-    reviewPostedAt: '2026-10-19T00:00:00Z' });
-  let clockMs = Date.parse('2026-10-21T10:00:00Z');
-  const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic remediation prompt.',
-    now: () => new Date(clockMs).toISOString(),
-    resolvePRLifecycleImpl: async () => null,
-    resolveRemediationWorkerClassImpl: async () => {
-      clockMs += 5 * 60_000;
-      return { pooled: true, workerClass: 'remediator-codex', hold: false };
-    },
-    execFileImpl: () => assert.fail('must hold before workspace preparation'),
-    spawnImpl: () => assert.fail('must not spawn an unleased proposal'),
-    log: { info() {}, warn() {}, log() {}, error() {} } });
-  assert.equal(result.consumed, false);
-  assert.equal(result.reason, 'remediator-capped-hold');
-  assert.equal(result.job.status, 'pending');
-  assert.equal(result.job.remediationPlan.currentRound, 0);
-  assert.equal(result.job.remediationPlan.retryAfter, new Date(clockMs + 60_000).toISOString());
-  assert.equal(result.job.pendingAt, new Date(clockMs).toISOString());
-  assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.fallbackReason,
-    'pooled-remediation-requires-dispatch');
+test('ITPREMEDHOLD-01 a codex-only declaration leaves an undeclared remediator on the legacy class path', async () => {
+  const wire = wireFor('remediator-codex');
+  wire.oauth.identity_token_pools = { codex: wire.oauth.identity_token_pools.codex };
+  let legacyReads = 0;
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+    codexAccountPolicy: 'pinned', modelForClass: () => 'gpt-6',
+    selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
+      ownerImpl: () => assert.fail('undeclared identity must not request evidence') }),
+    execFileImpl: async () => { legacyReads++; return { stdout: '{}' }; } });
+  assert.equal(legacyReads, 1);
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.pooled, undefined);
+  assert.equal(result.hold, false);
+});
+
+for (const failure of ['transport', 'malformed', 'unknown', 'stale', 'generation', 'undeclared']) {
+  test(`ITPREMEDHOLD-01 ${failure} remediator pool evidence takes the legacy path`, async () => {
+    const wire = wireFor('remediator-codex');
+    if (failure === 'malformed') wire.selection.version = 2;
+    if (['unknown', 'stale', 'generation', 'undeclared'].includes(failure)) {
+      const reasons = { unknown: 'evidence-unknown', stale: 'evidence-stale',
+        generation: 'evidence-generation-mismatch', undeclared: 'pool-undeclared' };
+      wire.selection = { ...wire.selection, account_id: null, considered: [],
+        status: failure === 'undeclared' ? 'unavailable' : 'held', reason: reasons[failure] };
+    }
+    let legacyReads = 0;
+    const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+      codexAccountPolicy: 'pinned', modelForClass: () => 'gpt-6',
+      selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
+        ownerImpl: async () => {
+          if (failure === 'transport') throw new Error('synthetic owner unavailable');
+          return wire;
+        } }),
+      execFileImpl: async () => { legacyReads++; return { stdout: '{}' }; } });
+    assert.equal(legacyReads, 1);
+    assert.equal(result.workerClass, 'codex');
+    assert.equal(result.pooled, undefined);
+    assert.equal(result.hold, false);
+  });
+}
+
+test('ITPREMEDHOLD-01 selector exceptions keep legacy remediation routing', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+    codexAccountPolicy: 'pinned', selectAccountImpl: async () => { throw new Error('synthetic failure'); },
+    execFileImpl: async () => ({ stdout: '{}' }) });
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.pooled, undefined);
+  assert.equal(result.hold, false);
+});
+
+test('ITPREMEDHOLD-01 all accounts unavailable produces a hold with the pool reason', async t => {
+  const wire = wireFor('remediator-codex');
+  wire.selection = { ...wire.selection, status: 'unavailable', account_id: null,
+    reason: 'accounts-unavailable',
+    considered: wire.oauth.identity_token_pools['remediator-codex'].map(account_id => ({
+      account_id, reason: 'quota-exhausted', component: 'quota',
+    })) };
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex', env: {},
+    codexAccountPolicy: 'pinned', fallbackWorkerClasses: [], modelForClass: () => 'gpt-6',
+    nowMs: Date.parse('2026-10-20T10:00:00Z'),
+    selectAccountImpl: request => pool.selectWorkerTokenAccount({ ...request, oauth: wire.oauth,
+      ownerImpl: async () => wire }),
+    execFileImpl: () => assert.fail('positive pool exhaustion must not take the legacy path') });
+  assert.equal(result.hold, true);
+  assert.equal(result.pooled, true);
+  assert.equal(result.capSource, 'accounts-unavailable');
+  assert.equal(result.holdUntil, '2026-10-20T11:00:00.000Z');
+  const rootDir = mkdtempSync(join(tmpdir(), 'pool-exhaustion-claim-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  createFollowUpJob({ rootDir, branch: 'fixture/remediation', repo: 'sample/project',
+    prNumber: 42, builderTag: 'claude-code', reviewerModel: 'gemini',
+    reviewBody: '## Verdict\nRequest changes', critical: true,
+    reviewPostedAt: '2026-10-20T09:00:00Z' });
+  const lines = [];
+  const held = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Synthetic prompt.',
+    now: () => '2026-10-20T10:00:00.000Z', resolvePRLifecycleImpl: async () => null,
+    resolveRemediationWorkerClassImpl: async () => result,
+    execFileImpl: () => assert.fail('exhausted pool must hold before dispatch'),
+    spawnImpl: () => assert.fail('exhausted pool must not spawn'),
+    log: { log: line => lines.push(line), info() {}, warn() {}, error() {} } });
+  assert.equal(held.reason, 'remediator-capped-hold');
+  assert.equal(held.job.status, 'pending');
+  assert.equal(held.job.remediationPlan.currentRound, 0);
+  assert.equal(held.job.remediationPlan.retryHistory.at(-1).retryMetadata.capSource, 'accounts-unavailable');
+  assert.match(lines.join('\n'), /pool unavailable \(accounts-unavailable\)/);
+  assert.doesNotMatch(lines.join('\n'), /undefined/);
 });

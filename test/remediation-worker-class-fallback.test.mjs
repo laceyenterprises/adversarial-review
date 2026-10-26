@@ -18,6 +18,37 @@ function fleetStatusStub(rows) {
   return async () => ({ stdout });
 }
 
+test('ITPREMEDHOLD-01 available remediator pools take precedence over legacy personal-class policy', async () => {
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+    codexAccountPolicy: 'pinned', env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+    selectAccountImpl: async request => {
+      assert.equal(request.identity, 'remediator-codex');
+      assert.notEqual(request.legacyAccountPinned, true);
+      return { identity: request.identity, pooled: true, hold: false,
+        status: 'selected', reason: 'fallback-ready', tokenAccountId: 'synthetic-secondary' };
+    }, execFileImpl: () => assert.fail('a selected pool must not use legacy quota routing') });
+  assert.equal(result.hold, false);
+  assert.equal(result.workerClass, 'remediator-codex');
+  assert.equal(result.tokenAccountId, 'synthetic-secondary');
+});
+
+test('ITPREMEDHOLD-01 an exhausted pool with unknown fallback evidence retains its positive hold reason', async () => {
+  const seen = [];
+  const result = await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
+    fallbackWorkerClasses: ['remediator-claude'], env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+    selectAccountImpl: async ({ identity }) => {
+      seen.push(identity);
+      return { pooled: true, hold: true,
+        status: identity === 'remediator-codex' ? 'unavailable' : 'held',
+        reason: identity === 'remediator-codex' ? 'accounts-unavailable' : 'evidence-unknown' };
+    }, execFileImpl: () => assert.fail('confirmed exhaustion must not use legacy routing') });
+  assert.deepEqual(seen, ['remediator-codex', 'remediator-claude']);
+  assert.equal(result.hold, true);
+  assert.equal(result.capSource, 'accounts-unavailable');
+  assert.equal(result.reason, 'no-available-fallback');
+  assert.deepEqual(result.skipped, [{ workerClass: 'remediator-claude', reason: 'evidence-unknown' }]);
+});
+
 const CODEX_EXHAUSTED_CLAUDE_OK = [
   { provider: 'openai', authPath: 'oauth', state: 'exhausted' },
   { provider: 'anthropic', authPath: 'oauth', state: 'ok' },

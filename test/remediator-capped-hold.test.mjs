@@ -5,7 +5,7 @@
 // claim that would only re-hold it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -50,6 +50,39 @@ const CAPPED_NO_FALLBACK = Object.freeze({
   resetAt: '2026-10-04T12:52:00.000Z',
   skipped: [{ workerClass: 'claude-code', reason: 'capped:afh-soft-grounded' }],
 });
+
+for (const detail of [
+  { reason: 'accounts-unavailable' },
+  { capSource: 'quota-exhausted', reason: 'no-available-fallback' },
+  { status: 'unavailable' },
+]) {
+  test(`ITPREMEDHOLD-01 pooled hold persists and prints ${JSON.stringify(detail)}`, t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'pool-hold-reason-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    createFollowUpJob({ rootDir, branch: 'fixture/remediation', repo: 'sample/project',
+      prNumber: 42, builderTag: 'claude-code', reviewerModel: 'gemini',
+      reviewBody: '## Verdict\nRequest changes', critical: true,
+      reviewPostedAt: '2026-10-20T09:00:00Z' });
+    const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-10-20T10:00:00Z' });
+    const lines = [];
+    const routing = { pooled: true, workerClass: 'remediator-codex', hold: true,
+      holdUntil: '2026-10-20T11:00:00Z', ...detail };
+    const held = holdClaimedJobForCappedRemediator({ rootDir, jobPath: claimed.jobPath,
+      heldAt: claimed.job.claimedAt, routing, log: { log: line => lines.push(line) } });
+    const expected = detail.capSource || detail.reason || detail.status;
+    const stored = readFollowUpJob(held.jobPath);
+    const entry = stored.remediationPlan.retryHistory.at(-1);
+    assert.ok(lines[0].includes(expected));
+    assert.match(lines[0], /pool unavailable/);
+    assert.ok(entry.retryReason.includes(expected));
+    assert.ok(stored.remediationPlan.nextAction.reason.includes(expected));
+    assert.equal(entry.retryMetadata.capSource, expected);
+    assert.equal(entry.retryMetadata.fallbackReason, detail.reason || detail.status || expected);
+    assert.doesNotMatch(lines[0] + JSON.stringify(stored), /undefined/);
+    assert.equal(stored.remediationPlan.currentRound, 0);
+    assert.equal(stored.remediationPlan.transientRetries, 0);
+  });
+}
 
 test('requeueInProgressFollowUpJobForRetry can hold without spending the retry budget', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'remfallback-hold-'));

@@ -1,0 +1,1721 @@
+{
+  "roles": {
+    "__keys": {
+      "claude-code": {
+        "__keys": {
+          "litellm_base_url": {
+            "__type": "string",
+            "__default": "http://127.0.0.1:4000"
+          }
+        }
+      },
+      "oss-local": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "litellm_base_url": {
+            "__type": "string",
+            "__default": "http://127.0.0.1:4030"
+          }
+        }
+      },
+      "patch": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "litellm_base_url": {
+            "__type": "string",
+            "__default": "http://127.0.0.1:4030"
+          }
+        }
+      },
+      "hermes": {
+        "__keys": {
+          "fallback_path": {
+            "__type": "string",
+            "__default": "none",
+            "__enum": [
+              "none",
+              "litellm-vk",
+              "litellm-vk-then-deferral"
+            ]
+          }
+        }
+      },
+      "gemini": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "fallback_path": {
+            "__type": "string",
+            "__default": "none",
+            "__enum": [
+              "none",
+              "litellm-vk",
+              "litellm-vk-then-deferral"
+            ]
+          }
+        }
+      },
+      "opencode": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "fallback_path": {
+            "__type": "string",
+            "__default": "none",
+            "__enum": [
+              "none",
+              "litellm-vk",
+              "litellm-vk-then-deferral"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "worker_pool": {
+    "__keys": {
+      "scope": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "restricted_paths": {
+            "__description": "Sensitive paths flagged for review in the PR body; file expansions do not require approval.",
+            "__type": "list",
+            "__default": [
+              "*:.github/**",
+              "agent-os:scripts/ci-mirror/**",
+              "agent-os:hooks/**",
+              "agent-os:.git-hooks/**",
+              "agent-os:scripts/repo-guards*",
+              "agent-os:scripts/pre-push*",
+              "agent-os:platform/oauth-broker/**",
+              "agent-os:modules/oauth-broker/**",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/credential_resolver_cli.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/secret_provider.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/env_file_materializer.py",
+              "*:**/.env*",
+              "*:**/.secrets/**",
+              "*:**/.secrets",
+              "agent-os:scripts/*sudo*",
+              "agent-os:tools/workstation-setup/scripts/*sudo*",
+              "agent-os:scripts/sudoers/**",
+              "agent-os:scripts/install-*-privilege.sh",
+              "agent-os:scripts/install-agent-os-runtime*.sh",
+              "agent-os:scripts/install-keychain-bridge.sh",
+              "agent-os:scripts/setup-reviewer-os-user.sh",
+              "agent-os:scripts/os-startup.sh",
+              "agent-os:scripts/os-restart.sh",
+              "agent-os:scripts/os-restart.d/**",
+              "agent-os:runtime/launchd/*os-startup.plist.template",
+              "agent-os:modules/main-catchup/launchd/*privileged-runner.plist.template",
+              "agent-os:modules/main-catchup/launchd/*hq-tmp-cleanup.plist.template",
+              "agent-os:modules/main-catchup/lib/python/main_catchup/privileged_runner*.py",
+              "agent-os:bootstrap/install.sh",
+              "agent-os:tools/adversarial-review/.github/**",
+              "agent-os:tools/adversarial-review",
+              "adversarial-review:package*.json",
+              "agent-os:tools/adversarial-review/package*.json",
+              "adversarial-review:src/ama/**",
+              "agent-os:tools/adversarial-review/src/ama/**",
+              "adversarial-review:src/ama-closure-orchestration.mjs",
+              "agent-os:tools/adversarial-review/src/ama-closure-orchestration.mjs",
+              "adversarial-review:src/daemon-clean-merge.mjs",
+              "agent-os:tools/adversarial-review/src/daemon-clean-merge.mjs",
+              "adversarial-review:src/follow-up-*.mjs",
+              "agent-os:tools/adversarial-review/src/follow-up-*.mjs",
+              "adversarial-review:src/hammer-procedure.mjs",
+              "agent-os:tools/adversarial-review/src/hammer-procedure.mjs",
+              "adversarial-review:src/finalization/**",
+              "agent-os:tools/adversarial-review/src/finalization/**",
+              "adversarial-review:bin/ama-*",
+              "agent-os:tools/adversarial-review/bin/ama-*",
+              "adversarial-review:bin/hammer-*",
+              "agent-os:tools/adversarial-review/bin/hammer-*",
+              "adversarial-review:bin/merge-lease.mjs",
+              "agent-os:tools/adversarial-review/bin/merge-lease.mjs",
+              "adversarial-review:templates/hammer-*.md",
+              "agent-os:tools/adversarial-review/templates/hammer-*.md",
+              "adversarial-review:src/*attestation*.mjs",
+              "agent-os:tools/adversarial-review/src/*attestation*.mjs",
+              "adversarial-review:src/adapters/sor/attestation-log/**",
+              "agent-os:tools/adversarial-review/src/adapters/sor/attestation-log/**",
+              "adversarial-review:src/watcher*.mjs",
+              "agent-os:tools/adversarial-review/src/watcher*.mjs",
+              "adversarial-review:src/reviewer*.mjs",
+              "agent-os:tools/adversarial-review/src/reviewer*.mjs",
+              "adversarial-review:src/review-cancel.mjs",
+              "agent-os:tools/adversarial-review/src/review-cancel.mjs",
+              "adversarial-review:src/review-state*.mjs",
+              "agent-os:tools/adversarial-review/src/review-state*.mjs",
+              "adversarial-review:src/process-group-*.mjs",
+              "agent-os:tools/adversarial-review/src/process-group-*.mjs",
+              "adversarial-review:src/kernel/**",
+              "agent-os:tools/adversarial-review/src/kernel/**",
+              "adversarial-review:src/adapters/**",
+              "agent-os:tools/adversarial-review/src/adapters/**",
+              "adversarial-review:src/adversarial-gate*.mjs",
+              "agent-os:tools/adversarial-review/src/adversarial-gate*.mjs",
+              "adversarial-review:src/pr-title-tagging.mjs",
+              "agent-os:tools/adversarial-review/src/pr-title-tagging.mjs",
+              "adversarial-review:src/pr-comments.mjs",
+              "agent-os:tools/adversarial-review/src/pr-comments.mjs",
+              "adversarial-review:src/review-verdict.mjs",
+              "agent-os:tools/adversarial-review/src/review-verdict.mjs",
+              "adversarial-review:src/argus-security-verdict.mjs",
+              "agent-os:tools/adversarial-review/src/argus-security-verdict.mjs",
+              "adversarial-review:src/review-statuses.mjs",
+              "agent-os:tools/adversarial-review/src/review-statuses.mjs",
+              "adversarial-review:src/domain-*.mjs",
+              "agent-os:tools/adversarial-review/src/domain-*.mjs",
+              "adversarial-review:domains/**",
+              "agent-os:tools/adversarial-review/domains/**",
+              "adversarial-review:scripts/adversarial-*",
+              "agent-os:tools/adversarial-review/scripts/adversarial-*",
+              "adversarial-review:launchd/**",
+              "agent-os:tools/adversarial-review/launchd/**",
+              "adversarial-review:deploy/launchd/**",
+              "agent-os:tools/adversarial-review/deploy/launchd/**",
+              "adversarial-review:src/fleet-stop.mjs",
+              "agent-os:tools/adversarial-review/src/fleet-stop.mjs",
+              "adversarial-review:src/secret-source/**",
+              "agent-os:tools/adversarial-review/src/secret-source/**",
+              "adversarial-review:src/github-auth-recovery.mjs",
+              "agent-os:tools/adversarial-review/src/github-auth-recovery.mjs",
+              "adversarial-review:src/codex-per-worker-auth.mjs",
+              "agent-os:tools/adversarial-review/src/codex-per-worker-auth.mjs",
+              "adversarial-review:src/agy-reviewer-auth.mjs",
+              "agent-os:tools/adversarial-review/src/agy-reviewer-auth.mjs",
+              "adversarial-review:src/codex-oauth-responses.mjs",
+              "agent-os:tools/adversarial-review/src/codex-oauth-responses.mjs",
+              "adversarial-review:src/remediation-oauth-preflight.mjs",
+              "agent-os:tools/adversarial-review/src/remediation-oauth-preflight.mjs",
+              "adversarial-review:src/claude-reviewer-oauth-transport.mjs",
+              "agent-os:tools/adversarial-review/src/claude-reviewer-oauth-transport.mjs",
+              "adversarial-review:src/claude-reviewer-token-proxy.mjs",
+              "agent-os:tools/adversarial-review/src/claude-reviewer-token-proxy.mjs",
+              "adversarial-review:src/daemon-worker-identity.mjs",
+              "agent-os:tools/adversarial-review/src/daemon-worker-identity.mjs",
+              "adversarial-review:frontend/server/src/broker/**",
+              "agent-os:tools/adversarial-review/frontend/server/src/broker/**",
+              "adversarial-review:frontend/server/src/github/token.mjs",
+              "agent-os:tools/adversarial-review/frontend/server/src/github/token.mjs",
+              "adversarial-review:scripts/lib/reviewer-broker.sh",
+              "agent-os:tools/adversarial-review/scripts/lib/reviewer-broker.sh",
+              "agent-os:modules/worker-pool/lib/hq-adjudicate*",
+              "agent-os:modules/worker-pool/lib/*merge-authority*",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/auto_merge*.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/post_merge_gate.py",
+              "agent-os:platform/session-ledger/alembic/**",
+              "agent-os:platform/session-ledger/src/session_ledger/migrations/**",
+              "agent-os:platform/session-ledger/src/session_ledger/alembic_postgres_revisions/**",
+              "agent-os:modules/email-archive/migrations/**",
+              "agent-os:platform/mcp-auth-broker/src/mcp_auth_broker/migrations/**",
+              "agent-os:modules/agent-control/vendor/agent-control/server/alembic/**",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/decision_policy.json",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/dag_scope_policy.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/repo_scope.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/scope_envelope.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/decision_lifecycle.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/worker_decisions.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/cli_decision.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/decision_telegram.py",
+              "agent-os:config*.yaml",
+              "agent-os:modules/worker-pool/config.yaml",
+              "agent-os:modules/worker-pool/lib/agent-os-config-loader.sh",
+              "agent-os:platform/agent-os-config/src/agent_os_config/schema_v1/worker_pool.py",
+              "agent-os:runtime/acpx-runtime/sandbox/**",
+              "agent-os:runtime/acpx-runtime/bin/acpx-openclaw-sandbox-exec",
+              "agent-os:platform/agent-os-config/src/agent_os_config/containment.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/spawn_worker.py",
+              "agent-os:modules/worker-pool/lib/python/cwp_dispatch/worker_signals.py",
+              "agent-os:scripts/setup-worker-os-user-boundary.sh"
+            ],
+            "__item": {
+              "__type": "string",
+              "__pattern": "(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\\*):[^\\s\\x00-\\x1f:]+",
+              "__pattern_description": "repo:glob (or *:glob for every repo)"
+            }
+          }
+        }
+      },
+      "secrets": {
+        "__keys": {
+          "shared_vaults": {
+            "__type": "list",
+            "__default": [],
+            "__item": {
+              "__type": "string"
+            }
+          }
+        }
+      },
+      "feature_flags": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "live_steer_allow_unvetted": {
+            "__type": "bool",
+            "__default": false
+          },
+          "codex_health_allow_cross_user": {
+            "__type": "bool",
+            "__default": false
+          },
+          "auto_merge_adjudication_sync": {
+            "__type": "bool",
+            "__default": false
+          },
+          "test_mode": {
+            "__type": "bool",
+            "__default": false
+          },
+          "resume_context_envelope": {
+            "__type": "bool",
+            "__default": true
+          },
+          "claude_code_hijack_probe_disable": {
+            "__type": "bool",
+            "__default": false
+          },
+          "merge_agent_failure_recovery_disable": {
+            "__type": "bool",
+            "__default": false
+          }
+        }
+      },
+      "claude_code": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "enforce_profile_model": {
+            "__type": "bool",
+            "__default": true
+          },
+          "oss_run_key_max_budget_usd": {
+            "__type": "float",
+            "__default": 2.0
+          },
+          "oss_run_key_ttl_seconds": {
+            "__type": "int",
+            "__default": 14400
+          },
+          "bash_timeout_seconds": {
+            "__type": "int",
+            "__default": 2700,
+            "__min": 600,
+            "__allow_zero": true,
+            "__max": 3600,
+            "__enforceMax": true
+          }
+        }
+      },
+      "adapter": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "debug_verbose": {
+            "__type": "bool",
+            "__default": false
+          }
+        }
+      },
+      "network_profile": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "default": {
+            "__type": "string",
+            "__default": null,
+            "__nullable": true,
+            "__enum": [
+              "airgapped",
+              "restricted",
+              "full"
+            ]
+          },
+          "worker_classes": {
+            "__type": "dict",
+            "__strict": false,
+            "__default": {},
+            "__extra_keys_schema": {
+              "__type": "string",
+              "__enum": [
+                "airgapped",
+                "restricted",
+                "full"
+              ]
+            }
+          }
+        }
+      },
+      "policy": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "dedup": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "uncommitted_line_threshold": {
+                "__type": "int",
+                "__default": 30,
+                "__min": 10,
+                "__max": 1000
+              }
+            }
+          }
+        }
+      },
+      "pid_wait": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "iterations": {
+            "__type": "int",
+            "__default": 50
+          },
+          "sleep_seconds": {
+            "__type": "float",
+            "__default": 0.1
+          }
+        }
+      },
+      "submodule_update": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "timeout_seconds": {
+            "__type": "int",
+            "__default": 60
+          },
+          "max_attempts": {
+            "__type": "int",
+            "__default": 3
+          }
+        }
+      },
+      "auto_dag_walk": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "timeout_seconds": {
+            "__type": "int",
+            "__default": 7200
+          }
+        }
+      },
+      "post_merge_actions": {
+        "__keys": {
+          "gate": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "strictness": {
+                "__type": "string",
+                "__default": "advisory",
+                "__enum": [
+                  "advisory",
+                  "enforcing"
+                ]
+              }
+            }
+          },
+          "exercise": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "required_by_tier": {
+                "__type": "dict",
+                "__strict": false,
+                "__default": {},
+                "__extra_keys_schema": {
+                  "__type": "bool"
+                }
+              }
+            }
+          }
+        }
+      },
+      "dag": {
+        "__keys": {
+          "launching_grace_seconds": {
+            "__type": "int",
+            "__default": 1800,
+            "__min": 60,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "zombie_step_ttl_seconds": {
+            "__type": "int",
+            "__default": 21600,
+            "__min": 300,
+            "__max": 604800,
+            "__enforceMax": true
+          },
+          "autowalk": {
+            "__keys": {
+              "recover_cancelled_runs": {
+                "__type": "bool",
+                "__default": false
+              },
+              "reconcile_timeout_seconds": {
+                "__type": "float",
+                "__default": 900.0,
+                "__min": 1.0,
+                "__max": 7200.0,
+                "__enforceMax": true
+              },
+              "parallelism": {
+                "__type": "int",
+                "__default": 8,
+                "__min": 1,
+                "__max": 256,
+                "__enforceMax": true
+              },
+              "reconcile_prewarm_parallelism": {
+                "__type": "int",
+                "__default": 8,
+                "__min": 1,
+                "__max": 32,
+                "__enforceMax": true
+              },
+              "infra_retry_hard_stop_threshold": {
+                "__type": "int",
+                "__default": 8,
+                "__min": 4,
+                "__max": 1000,
+                "__enforceMax": true
+              },
+              "infra_retry_outage_window_minutes": {
+                "__type": "int",
+                "__default": 30,
+                "__min": 1,
+                "__max": 1440,
+                "__enforceMax": true
+              },
+              "infra_retry_outage_min_launches": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "infra_retry_outage_ratio": {
+                "__type": "float",
+                "__default": 0.5,
+                "__min": 0.0,
+                "__max": 1.0,
+                "__enforceMax": true
+              },
+              "inconclusive_alert_threshold": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 0,
+                "__max": 1000,
+                "__enforceMax": true
+              }
+            }
+          }
+        }
+      },
+      "provision": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "branch_cleanup_archive_unreachable": {
+            "__type": "bool",
+            "__default": true
+          },
+          "stale_git_lock_seconds": {
+            "__type": "int",
+            "__default": 600,
+            "__min": 1,
+            "__max": 86400,
+            "__enforceMax": true
+          }
+        }
+      },
+      "hhw": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "terminal_webhook": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "subscribers": {
+                "__type": "dict",
+                "__strict": false,
+                "__default": {},
+                "__keys": {},
+                "__extra_keys_schema": {
+                  "__type": "dict",
+                  "__strict": true,
+                  "__keys": {
+                    "url": {
+                      "__type": "string",
+                      "__default": null,
+                      "__nullable": true
+                    },
+                    "url_ref": {
+                      "__type": "string",
+                      "__default": null,
+                      "__nullable": true
+                    },
+                    "enabled": {
+                      "__type": "bool",
+                      "__default": true
+                    }
+                  }
+                }
+              },
+              "signing_secret_ref": {
+                "__type": "string",
+                "__default": null,
+                "__nullable": true
+              }
+            }
+          },
+          "replay_webhook": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "subscribers": {
+                "__type": "dict",
+                "__strict": false,
+                "__default": {},
+                "__keys": {},
+                "__extra_keys_schema": {
+                  "__type": "dict",
+                  "__strict": true,
+                  "__keys": {
+                    "url": {
+                      "__type": "string",
+                      "__default": null,
+                      "__nullable": true
+                    },
+                    "url_ref": {
+                      "__type": "string",
+                      "__default": null,
+                      "__nullable": true
+                    },
+                    "enabled": {
+                      "__type": "bool",
+                      "__default": true
+                    }
+                  }
+                }
+              },
+              "signing_secret_ref": {
+                "__type": "string",
+                "__default": null,
+                "__nullable": true
+              }
+            }
+          },
+          "auto_replay": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "max_attempts_per_lrq": {
+                "__type": "int",
+                "__default": 3,
+                "__min": 1,
+                "__max": 20,
+                "__enforceMax": true
+              },
+              "batch_size": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 100,
+                "__enforceMax": true
+              },
+              "sweep_interval_seconds": {
+                "__type": "float",
+                "__default": 30.0,
+                "__min": 1.0,
+                "__max": 3600.0,
+                "__enforceMax": true
+              },
+              "max_sweep_seconds": {
+                "__type": "float",
+                "__default": 1.0,
+                "__min": 0.05,
+                "__max": 30.0,
+                "__enforceMax": true
+              }
+            }
+          }
+        }
+      },
+      "comms": {
+        "__keys": {
+          "responder": {
+            "__keys": {
+              "one_tap_affordance_enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "kill_switch_enabled": {
+                "__type": "bool",
+                "__default": false
+              },
+              "dedup_cooldown_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 0,
+                "__max": 604800,
+                "__enforce_min": true,
+                "__enforceMax": true
+              },
+              "per_incident_token_budget": {
+                "__type": "int",
+                "__default": 60000,
+                "__min": 1,
+                "__max": 1000000,
+                "__enforce_min": true,
+                "__enforceMax": true
+              },
+              "daily_token_budget": {
+                "__type": "int",
+                "__default": 240000,
+                "__min": 1,
+                "__max": 10000000,
+                "__enforce_min": true,
+                "__enforceMax": true
+              },
+              "max_live_runs": {
+                "__type": "int",
+                "__default": 3,
+                "__min": 1,
+                "__max": 50,
+                "__enforce_min": true,
+                "__enforceMax": true
+              }
+            }
+          }
+        }
+      },
+      "auto_merge": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "poll_seconds": {
+            "__type": "int",
+            "__default": null,
+            "__nullable": true
+          },
+          "max_attempts_per_pr": {
+            "__type": "int",
+            "__default": 3,
+            "__min": 1,
+            "__max": 100,
+            "__enforceMax": true
+          }
+        }
+      },
+      "capture_coverage": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "min_coverage_ratio": {
+            "__type": "float",
+            "__default": 0.9,
+            "__min": 0.0,
+            "__max": 1.0,
+            "__enforceMax": true
+          },
+          "max_live_floor_ratio": {
+            "__type": "float",
+            "__default": 0.1,
+            "__min": 0.0,
+            "__max": 1.0,
+            "__enforceMax": true
+          }
+        }
+      },
+      "mesh": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "stale_peer_threshold_seconds": {
+            "__type": "int",
+            "__default": 600,
+            "__min": 1,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "route_reap_ttl_seconds": {
+            "__type": "int",
+            "__default": 21600,
+            "__min": 1,
+            "__max": 604800,
+            "__enforceMax": true
+          }
+        }
+      },
+      "admission": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "file_overlap_recent_merged_window_hours": {
+            "__type": "int",
+            "__default": 168,
+            "__min": 0
+          },
+          "readiness_inconclusive_grace_seconds": {
+            "__type": "int",
+            "__default": 300,
+            "__min": 0,
+            "__max": 3600,
+            "__enforceMax": true
+          },
+          "priority_lane": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "capacity": {
+                "__type": "int",
+                "__default": 1,
+                "__min": 0
+              },
+              "max_capacity": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 0
+              },
+              "worker_rss_estimate_mb": {
+                "__type": "int",
+                "__default": 200,
+                "__min": 0
+              },
+              "occupant_progress_stale_seconds": {
+                "__type": "int",
+                "__default": 1800,
+                "__min": 0,
+                "__max": 604800,
+                "__enforceMax": true
+              },
+              "occupant_reclaim_seconds": {
+                "__type": "int",
+                "__default": 5400,
+                "__min": 0,
+                "__max": 604800,
+                "__enforceMax": true
+              },
+              "max_occupancy_seconds": {
+                "__type": "int",
+                "__default": 14400,
+                "__min": 0,
+                "__max": 2592000,
+                "__enforceMax": true
+              }
+            }
+          },
+          "normal_priority_worker_rss_estimate_mb": {
+            "__type": "int",
+            "__default": 4000,
+            "__min": 0
+          }
+        }
+      },
+      "memory": {
+        "__keys": {
+          "pool_total_rss_cap_mb": {
+            "__type": "int",
+            "__default": null,
+            "__nullable": true,
+            "__min": 0
+          },
+          "reserved_external_mb": {
+            "__type": "int",
+            "__default": 0,
+            "__min": 0,
+            "__max": 1048576,
+            "__enforceMax": true
+          },
+          "pressure": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "projected_headroom_floor_mb": {
+                "__type": "int",
+                "__default": 1024,
+                "__min": 0,
+                "__max": 65536,
+                "__enforceMax": true
+              },
+              "critical_recovery_available_mb": {
+                "__type": "int",
+                "__default": 2048,
+                "__min": 0,
+                "__max": 131072,
+                "__enforceMax": true
+              },
+              "elevated_available_mb": {
+                "__type": "int",
+                "__default": 2048,
+                "__min": 0,
+                "__max": 131072,
+                "__enforceMax": true
+              },
+              "critical_available_mb": {
+                "__type": "int",
+                "__default": 1024,
+                "__min": 0,
+                "__max": 131072,
+                "__enforceMax": true
+              },
+              "hysteresis_stuck_log_threshold": {
+                "__type": "int",
+                "__default": 30,
+                "__min": 1,
+                "__max": 100000,
+                "__enforceMax": true
+              }
+            }
+          },
+          "shed": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": false
+              },
+              "idle_yield_enabled": {
+                "__type": "bool",
+                "__default": false
+              }
+            }
+          }
+        }
+      },
+      "dispatch": {
+        "__keys": {
+          "mode": {
+            "__type": "string",
+            "__default": "normal",
+            "__enum": [
+              "hot",
+              "normal",
+              "throttled",
+              "background",
+              "paused"
+            ]
+          },
+          "codex_exec_steer_enabled": {
+            "__type": "bool",
+            "__default": false
+          },
+          "substrate": {
+            "__keys": {
+              "swap_breach_max_ram_avail_mb": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true,
+                "__min": 0
+              },
+              "mem_pressure_jetsam_level": {
+                "__type": "int",
+                "__default": 4,
+                "__min": 1,
+                "__max": 4,
+                "__enforceMax": true
+              }
+            }
+          },
+          "boot_failure_alerts": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "threshold_fraction": {
+                "__type": "float",
+                "__default": 0.5,
+                "__min": 0.01,
+                "__max": 1.0,
+                "__enforceMax": true
+              },
+              "min_sample_size": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "window_seconds": {
+                "__type": "int",
+                "__default": 900,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "cooldown_seconds": {
+                "__type": "int",
+                "__default": 1800,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "zero_success_enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "zero_success_min_sample_size": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "zero_success_window_seconds": {
+                "__type": "int",
+                "__default": 43200,
+                "__min": 60,
+                "__max": 604800,
+                "__enforceMax": true
+              }
+            }
+          },
+          "retry": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "pre_meaningful_max_attempts": {
+                "__type": "int",
+                "__default": 1,
+                "__min": 0,
+                "__max": 5,
+                "__enforceMax": true
+              },
+              "reclaim_predecessor_worktree": {
+                "__type": "bool",
+                "__default": false
+              }
+            }
+          },
+          "admit_refusal_alerts": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "min_refusal_count": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "min_stuck_seconds": {
+                "__type": "int",
+                "__default": 600,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "cooldown_seconds": {
+                "__type": "int",
+                "__default": 1800,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "dynamic_memory_min_stuck_seconds": {
+                "__type": "int",
+                "__default": 300,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "dynamic_subthreshold_min_refusals": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "dynamic_subthreshold_window_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "cross_surface_disagreement_min_refusals": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "cross_surface_disagreement_window_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "cross_surface_disagreement_ratio_threshold_percent": {
+                "__type": "int",
+                "__default": 50,
+                "__min": 1,
+                "__max": 100,
+                "__enforceMax": true
+              },
+              "additional_benign_reasons": {
+                "__type": "any",
+                "__default": []
+              }
+            }
+          },
+          "rollup_transcript_archive": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "retention_days": {
+                "__type": "int",
+                "__default": 7,
+                "__min": 1,
+                "__max": 365,
+                "__enforceMax": true
+              },
+              "sweep_interval_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "max_total_bytes": {
+                "__type": "int",
+                "__default": 274877906944,
+                "__min": 1,
+                "__max": 1099511627776,
+                "__enforceMax": true
+              },
+              "warn_total_bytes": {
+                "__type": "int",
+                "__default": 68719476736,
+                "__min": 0,
+                "__max": 1099511627776,
+                "__enforceMax": true
+              },
+              "alert_total_bytes": {
+                "__type": "int",
+                "__default": 137438953472,
+                "__min": 0,
+                "__max": 1099511627776,
+                "__enforceMax": true
+              },
+              "warn_dir_count": {
+                "__type": "int",
+                "__default": 500,
+                "__min": 0,
+                "__max": 1000000,
+                "__enforceMax": true
+              },
+              "alert_dir_count": {
+                "__type": "int",
+                "__default": 750,
+                "__min": 0,
+                "__max": 1000000,
+                "__enforceMax": true
+              }
+            }
+          },
+          "launch_context_budget": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "default_budget_tokens": {
+                "__type": "int",
+                "__default": 40000,
+                "__min": 1000,
+                "__max": 10000000,
+                "__enforceMax": true
+              },
+              "warn_fraction": {
+                "__type": "float",
+                "__default": 0.8,
+                "__min": 0.05,
+                "__max": 1.0,
+                "__enforceMax": true
+              },
+              "worker_classes": {
+                "__type": "dict",
+                "__strict": false,
+                "__default": {},
+                "__extra_keys_schema": {
+                  "__type": "int",
+                  "__min": 1,
+                  "__max": 10000000,
+                  "__enforceMax": true
+                }
+              },
+              "window_seconds": {
+                "__type": "int",
+                "__default": 86400,
+                "__min": 300,
+                "__max": 2592000,
+                "__enforceMax": true
+              },
+              "min_sample_size": {
+                "__type": "int",
+                "__default": 5,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "growth_threshold_fraction": {
+                "__type": "float",
+                "__default": 0.25,
+                "__min": 0.01,
+                "__max": 100.0,
+                "__enforceMax": true
+              },
+              "trend_window_seconds": {
+                "__type": "int",
+                "__default": 604800,
+                "__min": 3600,
+                "__max": 7776000,
+                "__enforceMax": true
+              },
+              "trend_min_sample_size": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 10000,
+                "__enforceMax": true
+              },
+              "cooldown_seconds": {
+                "__type": "int",
+                "__default": 86400,
+                "__min": 300,
+                "__max": 604800,
+                "__enforceMax": true
+              },
+              "min_interval_seconds": {
+                "__type": "int",
+                "__default": 900,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              }
+            }
+          },
+          "dirty_backlog_alerts": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "threshold": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 1000000,
+                "__enforceMax": true
+              },
+              "cooldown_seconds": {
+                "__type": "int",
+                "__default": 3600,
+                "__min": 60,
+                "__max": 86400,
+                "__enforceMax": true
+              }
+            }
+          },
+          "hq_root_default": {
+            "__type": "string",
+            "__default": null,
+            "__nullable": true
+          },
+          "worker_teardown_timeout_seconds": {
+            "__type": "float",
+            "__default": 300.0,
+            "__min": 1.0,
+            "__max": 86400.0,
+            "__enforceMax": true
+          },
+          "claude_code_session_bind_timeout_seconds": {
+            "__type": "int",
+            "__default": 10,
+            "__min": 1,
+            "__max": 300,
+            "__enforceMax": true
+          },
+          "teardown_pr_autosalvage_enabled": {
+            "__type": "bool",
+            "__default": true
+          },
+          "command_timeout_seconds": {
+            "__type": "float",
+            "__default": 3300.0,
+            "__min": 1.0,
+            "__max": 86400.0,
+            "__enforceMax": true
+          },
+          "max_concurrent_in_flight": {
+            "__type": "int",
+            "__default": 12,
+            "__min": 1,
+            "__max": 64,
+            "__enforceMax": true
+          },
+          "dynamic_load_cap": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": false
+              },
+              "target_load_per_core": {
+                "__type": "float",
+                "__default": 1.0,
+                "__min": 0.01,
+                "__max": 64.0,
+                "__enforceMax": true
+              },
+              "hard_load_per_core": {
+                "__type": "float",
+                "__default": 2.5,
+                "__min": 0.01,
+                "__max": 128.0,
+                "__enforceMax": true
+              },
+              "min_running": {
+                "__type": "int",
+                "__default": 2,
+                "__min": 0,
+                "__max": 64,
+                "__enforceMax": true
+              },
+              "ramp_backlog_threshold": {
+                "__type": "int",
+                "__default": 12,
+                "__min": 0,
+                "__max": 256,
+                "__enforceMax": true
+              },
+              "ramp_admits_per_pass": {
+                "__type": "int",
+                "__default": 2,
+                "__min": 0,
+                "__max": 64,
+                "__enforceMax": true
+              },
+              "shadow_log": {
+                "__type": "bool",
+                "__default": true
+              },
+              "cpu_unavailable_fallback": {
+                "__type": "string",
+                "__default": "fail_open",
+                "__enum": [
+                  "fail_open",
+                  "confirm_saturation"
+                ]
+              }
+            }
+          },
+          "boot_stagger": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "enabled": {
+                "__type": "bool",
+                "__default": true
+              },
+              "max_load_per_core": {
+                "__type": "float",
+                "__default": 1.0,
+                "__min": 0.25,
+                "__max": 64.0,
+                "__enforceMax": true
+              },
+              "max_boots_per_pass": {
+                "__type": "int",
+                "__default": 2,
+                "__min": 1,
+                "__max": 256,
+                "__enforceMax": true
+              }
+            }
+          },
+          "recovery_lease_reap_grace_seconds": {
+            "__type": "int",
+            "__default": 86400,
+            "__min": 300,
+            "__max": 2592000,
+            "__enforceMax": true
+          },
+          "recovery_lease_reap_batch_size": {
+            "__type": "int",
+            "__default": 500,
+            "__min": 1,
+            "__max": 10000,
+            "__enforceMax": true
+          },
+          "lease_anomaly_dedup_window_seconds": {
+            "__type": "int",
+            "__default": 3600,
+            "__min": 0,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "transient_provision_failure_max_attempts": {
+            "__type": "int",
+            "__default": 5,
+            "__min": 1,
+            "__max": 100,
+            "__enforceMax": true
+          },
+          "lease_acquisition_timeout_seconds": {
+            "__type": "int",
+            "__default": 14400,
+            "__min": 900,
+            "__max": 604800,
+            "__enforceMax": true
+          },
+          "first_sign_of_life_timeout_seconds": {
+            "__type": "int",
+            "__default": 900,
+            "__min": 60,
+            "__allow_zero": true,
+            "__max": 7200,
+            "__enforceMax": true
+          },
+          "never_registered_worker_run_reap_seconds": {
+            "__type": "int",
+            "__default": 900,
+            "__min": 0,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "first_sign_of_life_progress_grace_seconds": {
+            "__type": "int",
+            "__default": 300,
+            "__min": 0,
+            "__max": 3600,
+            "__enforceMax": true
+          },
+          "first_sign_of_life_progress_max_total_seconds": {
+            "__type": "int",
+            "__default": 3600,
+            "__min": 600,
+            "__max": 14400,
+            "__enforceMax": true
+          },
+          "pre_spawn_reap_timeout_seconds": {
+            "__type": "int",
+            "__default": 1800,
+            "__min": 60,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "spawn_progress_hard_cap_seconds": {
+            "__type": "int",
+            "__default": 600,
+            "__min": 1,
+            "__max": 7200,
+            "__enforceMax": true
+          },
+          "min_disk_free_gb": {
+            "__type": "int",
+            "__default": 15,
+            "__min": 1,
+            "__max": 500,
+            "__enforceMax": true
+          },
+          "stuck_requested": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "reap_threshold_seconds": {
+                "__type": "int",
+                "__default": 1800,
+                "__min": 600,
+                "__max": 86400,
+                "__enforceMax": true
+              },
+              "retry_slack_seconds": {
+                "__type": "int",
+                "__default": 600,
+                "__min": 60,
+                "__max": 3600,
+                "__enforceMax": true
+              },
+              "admit_slack_seconds": {
+                "__type": "int",
+                "__default": 300,
+                "__min": 60,
+                "__max": 1800,
+                "__enforceMax": true
+              },
+              "reap_tick_seconds": {
+                "__type": "int",
+                "__default": 60,
+                "__min": 15,
+                "__max": 600,
+                "__enforceMax": true
+              },
+              "reap_batch_size": {
+                "__type": "int",
+                "__default": 10,
+                "__min": 1,
+                "__max": 50,
+                "__enforceMax": true
+              },
+              "reap_main_pass_budget_ms": {
+                "__type": "int",
+                "__default": 200,
+                "__min": 50,
+                "__max": 2000,
+                "__enforceMax": true
+              }
+            }
+          },
+          "post_resume_autowalk_retry_budget": {
+            "__type": "int",
+            "__default": 5,
+            "__min": 1,
+            "__max": 20,
+            "__enforceMax": true
+          },
+          "post_resume_autowalk_timeout_seconds": {
+            "__type": "int",
+            "__default": 3600,
+            "__min": 1800,
+            "__max": 7200,
+            "__enforceMax": true
+          },
+          "status_stuck_threshold_seconds": {
+            "__type": "int",
+            "__default": 300,
+            "__min": 1
+          },
+          "drain_zombie_lrq_threshold_seconds": {
+            "__type": "int",
+            "__default": 180,
+            "__min": 1
+          },
+          "drain_exempt_resident_classes": {
+            "__type": "bool",
+            "__default": true
+          },
+          "drain_max_age_seconds": {
+            "__type": "int",
+            "__default": 600,
+            "__min": 60,
+            "__max": 86400,
+            "__enforceMax": true
+          },
+          "claim_abandoned_auto_retry_max": {
+            "__type": "int",
+            "__default": 8,
+            "__min": 0,
+            "__max": 10,
+            "__enforceMax": true
+          }
+        }
+      },
+      "watchdog": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "log_max_stale_s": {
+            "__type": "float",
+            "__default": 180.0,
+            "__min": 0
+          },
+          "db_max_stale_s": {
+            "__type": "float",
+            "__default": 180.0,
+            "__min": 0
+          },
+          "heartbeat_max_stale_s": {
+            "__type": "float",
+            "__default": 120.0,
+            "__min": 0
+          },
+          "startup_deadline_s": {
+            "__type": "float",
+            "__default": 300.0,
+            "__min": 1
+          },
+          "kick_cooldown_s": {
+            "__type": "float",
+            "__default": 60.0,
+            "__min": 0
+          },
+          "tick_interval_s": {
+            "__type": "float",
+            "__default": 30.0,
+            "__min": 0
+          },
+          "db_read_failure_alert_threshold": {
+            "__type": "int",
+            "__default": 4,
+            "__min": 1
+          }
+        }
+      },
+      "merge_agent": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "conflict_resolver": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "timeout_seconds": {
+                "__type": "int",
+                "__default": 900
+              },
+              "progress_seconds": {
+                "__type": "int",
+                "__default": 30
+              }
+            }
+          },
+          "followups_worker_class": {
+            "__type": "string",
+            "__default": "codex",
+            "__enum": [
+              "codex",
+              "codex-corp",
+              "stub"
+            ]
+          },
+          "failure_recovery_worker_class": {
+            "__type": "string",
+            "__default": "codex",
+            "__alias_of": "roles.merge_agent_failure_recovery.worker_class",
+            "__enum": [
+              "codex",
+              "codex-corp",
+              "claude-code"
+            ]
+          }
+        }
+      },
+      "health": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "codex": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "timeout_seconds": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              },
+              "live_probe_interval_seconds": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              },
+              "live_probe_blocking": {
+                "__type": "bool",
+                "__default": false
+              },
+              "history_retention_months": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              }
+            }
+          },
+          "claude": {
+            "__type": "dict",
+            "__strict": true,
+            "__keys": {
+              "timeout_seconds": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              },
+              "live_probe_interval_seconds": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              },
+              "live_probe_blocking": {
+                "__type": "bool",
+                "__default": false
+              },
+              "history_retention_months": {
+                "__type": "int",
+                "__default": null,
+                "__nullable": true
+              }
+            }
+          }
+        }
+      },
+      "codex_acp_reaper": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "tick_interval_s": {
+            "__type": "int",
+            "__default": 60
+          },
+          "term_grace_s": {
+            "__type": "int",
+            "__default": 5
+          },
+          "registered_grace_s": {
+            "__type": "int",
+            "__default": 120
+          }
+        }
+      }
+    }
+  },
+  "session_ledger": {
+    "__keys": {
+      "node_identity": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "canonical_node_id": {
+            "__type": "string",
+            "__nullable": false
+          },
+          "canonical_hostnames": {
+            "__type": "list",
+            "__item": {
+              "__type": "string"
+            },
+            "__default": []
+          }
+        }
+      }
+    }
+  }
+}

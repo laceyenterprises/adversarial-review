@@ -82,6 +82,63 @@ const VALID_REPLY = [
   'Request changes',
 ].join('\n');
 
+const EMPTY_FINDINGS_REPLY = VALID_REPLY.replace(
+  /## Blocking issues\n[\s\S]*?(?=## Non-blocking issues)/,
+  '## Blocking issues\n- None.\n\n',
+);
+
+test('REVIEWVERDICTEMPTY-01: request changes requires a blocking finding for every accepted spelling', () => {
+  for (const verdict of ['Request changes', 'REQUEST CHANGES', '**Request changes**',
+    '- Request changes', 'request_changes', 'Request   changes',
+    'Request changes\nComment only', 'Request changes\nApproved']) {
+    assert.deepEqual(validateReviewerReply(EMPTY_FINDINGS_REPLY.replace(/Request changes$/, verdict)), {
+      ok: false, reasons: ['request-changes-without-findings'],
+    }, verdict);
+    assert.deepEqual(validateReviewerReply(VALID_REPLY.replace(/Request changes$/, verdict)), {
+      ok: true, reasons: [],
+    }, verdict);
+  }
+});
+
+test('REVIEWVERDICTEMPTY-01: empty, missing, fenced and non-blocking findings cannot satisfy request changes', () => {
+  for (const reply of [
+    EMPTY_FINDINGS_REPLY,
+    EMPTY_FINDINGS_REPLY.replace('## Blocking issues\n- None.', '## Blocking issues'),
+    EMPTY_FINDINGS_REPLY.replace('## Blocking issues\n- None.\n\n', ''),
+    EMPTY_FINDINGS_REPLY.replace('- None.', '```markdown\n- **Example finding**\n```'),
+    EMPTY_FINDINGS_REPLY.replace('## Non-blocking issues\n- None.',
+      '## Non-blocking issues\n- **Consider a clearer helper name**'),
+  ]) {
+    assert.deepEqual(validateReviewerReply(reply), {
+      ok: false, reasons: ['request-changes-without-findings'],
+    });
+  }
+});
+
+test('REVIEWVERDICTEMPTY-01: comment-only and approved replies with no findings remain valid', () => {
+  for (const verdict of ['Comment only', 'Approved',
+    'Request changes from the prior round are now resolved.\nApproved']) {
+    assert.deepEqual(validateReviewerReply(EMPTY_FINDINGS_REPLY.replace(/Request changes$/, verdict)), {
+      ok: true, reasons: [],
+    }, verdict);
+  }
+});
+
+test('REVIEWVERDICTEMPTY-01: rejection preserves raw evidence and the existing reviewer-output class', () => {
+  const captured = [];
+  assert.throws(() => assertReviewerReply(EMPTY_FINDINGS_REPLY, {
+    onRejected: (evidence) => captured.push(evidence),
+  }), (error) => {
+    assert.ok(error instanceof ReviewerReplyRejectedError);
+    assert.deepEqual(error.reasons, ['request-changes-without-findings']);
+    assert.equal(error.failureClass, 'reviewer-output');
+    assert.equal(classifyReviewerFailure(error.message, reviewerExecutionFailureExitCode(error)), 'reviewer-output');
+    return true;
+  });
+  assert.deepEqual(captured, [{ rawReviewText: EMPTY_FINDINGS_REPLY,
+    rejectionReason: '[reviewer-output] reviewer reply rejected: request-changes-without-findings' }]);
+});
+
 test('REVIEWREPLYLAST-01: no valid candidate preserves the newest rejection and forensic evidence', async () => {
   const newest = 'The synthetic background search finished; the verdict is unchanged.';
   for (const replies of [[newest], ['An earlier incomplete reply.', newest]]) {
@@ -252,61 +309,68 @@ test('REVIEWVALID-01: a rejection carries the reviewer-output tag and evidence f
   assert.doesNotThrow(() => assertReviewerReply(VALID_REPLY, { onRejected: () => assert.fail('valid reply') }));
 });
 
-test('REVIEWVALID-01: a template-echo chunk is rejected, retried as reviewer-output, and never posted', async () => {
-  const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n'
-    + '+synthetic content\n'.repeat(9000);
-  const rejected = [];
-  let calls = 0;
-  let error = null;
-  try {
-    await reviewAgyOversizedInChunks(diff, '', {
-      // Keep this rejection fixture independent of host-load-scaled defaults.
-      env: {
-        AGENT_OS_REVIEWER_TIMEOUT_MS: '1000',
-        AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1000',
-      },
-      maxBytes: 60000,
-      onRejectedCodexOutput: (value) => rejected.push(value),
-      reviewWithGeminiImpl: async () => {
-        calls += 1;
-        return { reviewText: calls === 1 ? VALID_REPLY : TEMPLATE_ECHO_REPLY };
-      },
-    });
-  } catch (err) {
-    error = err;
-  }
-  assert.ok(error instanceof ReviewerReplyRejectedError, `expected a rejection, got ${error?.message}`);
-  assert.equal(calls, 2, 'the merge stops at the first rejected chunk');
-  assert.deepEqual(rejected.map((value) => value.chunkIndex), [2]);
+for (const [name, invalidReply, reason] of [
+  ['REVIEWVALID-01: template-echo', TEMPLATE_ECHO_REPLY, 'template placeholders'],
+  ['REVIEWVERDICTEMPTY-01: empty request-changes', EMPTY_FINDINGS_REPLY, 'request-changes-without-findings'],
+]) {
+  test(`${name} chunk is rejected, retried as reviewer-output, and never posted`, async () => {
+    const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n'
+      + '+synthetic content\n'.repeat(9000);
+    const rejected = [];
+    let calls = 0;
+    let error = null;
+    try {
+      await reviewAgyOversizedInChunks(diff, '', {
+        // Keep this rejection fixture independent of host-load-scaled defaults.
+        env: {
+          AGENT_OS_REVIEWER_TIMEOUT_MS: '1000',
+          AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1000',
+        },
+        maxBytes: 60000,
+        onRejectedCodexOutput: (value) => rejected.push(value),
+        reviewWithGeminiImpl: async () => {
+          calls += 1;
+          return { reviewText: calls === 1 ? VALID_REPLY : invalidReply };
+        },
+      });
+    } catch (err) {
+      error = err;
+    }
+    assert.ok(error instanceof ReviewerReplyRejectedError, `expected a rejection, got ${error?.message}`);
+    assert.equal(calls, 2, 'the merge stops at the first rejected chunk');
+    assert.deepEqual(rejected.map((value) => value.chunkIndex), [2]);
+    assert.equal(rejected[0].rawReviewText, invalidReply);
+    assert.ok(rejected[0].rejectionReason.includes(reason));
 
-  // The reviewer process prints the message and exits; the watcher classifies
-  // that stderr onto the bounded reviewer-output retry.
-  const stderr = `[reviewer] AI review failed for example/project#7: ${error.message}`;
-  const failureClass = classifyReviewerFailure(stderr, reviewerExecutionFailureExitCode(error));
-  assert.equal(failureClass, 'reviewer-output');
+    // The reviewer process prints the message and exits; the watcher classifies
+    // that stderr onto the bounded reviewer-output retry.
+    const stderr = `[reviewer] AI review failed for example/project#7: ${error.message}`;
+    const failureClass = classifyReviewerFailure(stderr, reviewerExecutionFailureExitCode(error));
+    assert.equal(failureClass, 'reviewer-output');
 
-  const rootDir = mkdtempSync(join(tmpdir(), 'reviewvalid-'));
-  const writes = [];
-  try {
-    settleReviewerAttempt({
-      rootDir, repoPath: 'example/project', prNumber: 7,
-      result: { ok: false, failureClass, error: error.message },
-      failureAt: '2026-10-23T00:00:00.000Z', maxRemediationRounds: 1,
-      statements: {
-        markPosted: { run: () => assert.fail('a rejected reply is never posted') },
-        markFailed: { run: () => assert.fail('a rejected reply is retried, not charged as terminal') },
-        markCascadeFailed: { run: () => assert.fail('first rejection is within the infra cap') },
-        markPendingUpstream: { run: (...args) => writes.push(args) },
-        getReviewRow: { get: () => ({ infra_auto_recover_attempts: 0, review_attempts: 0 }) },
-      },
-      log: { warn() {}, error() {}, info() {} },
-    });
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-  assert.equal(writes.length, 1);
-  assert.match(writes[0][1], /^\[reviewer-output\] .*reviewer reply rejected: template placeholders/);
-});
+    const rootDir = mkdtempSync(join(tmpdir(), 'reviewvalid-'));
+    const writes = [];
+    try {
+      settleReviewerAttempt({
+        rootDir, repoPath: 'example/project', prNumber: 7,
+        result: { ok: false, failureClass, error: error.message },
+        failureAt: '2026-10-23T00:00:00.000Z', maxRemediationRounds: 1,
+        statements: {
+          markPosted: { run: () => assert.fail('a rejected reply is never posted') },
+          markFailed: { run: () => assert.fail('a rejected reply is retried, not charged as terminal') },
+          markCascadeFailed: { run: () => assert.fail('first rejection is within the infra cap') },
+          markPendingUpstream: { run: (...args) => writes.push(args) },
+          getReviewRow: { get: () => ({ infra_auto_recover_attempts: 0, review_attempts: 0 }) },
+        },
+        log: { warn() {}, error() {}, info() {} },
+      });
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0][1].startsWith(`[reviewer-output] ${error.message}`));
+  });
+}
 
 test('REVIEWVALID-01: the finding parser refuses placeholder findings', () => {
   const body = withoutLeadingHeader(TEMPLATE_ECHO_REPLY);

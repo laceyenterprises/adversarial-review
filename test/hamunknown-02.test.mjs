@@ -202,7 +202,8 @@ function heldFixture(t, { predicate = 'github-gate-not-green', reasons = ['pr-me
   const statePath = join(rootDir, 'data/follow-up-jobs/hammer-stop-hold/fixture-repo-pr-1.json');
   mkdirSync(join(rootDir, 'data/follow-up-jobs/hammer-stop-hold'), { recursive: true });
   writeFileSync(statePath, JSON.stringify({ currentHead: head, heads: {
-    [head]: { stopKey, predicate, firstObservedAt: recordedAt, inputs, pagedAt: recordedAt },
+    [head]: { stopKey, predicate, firstObservedAt: recordedAt, inputs, pagedAt: recordedAt,
+      mode: 'transient', retryAfter: '2026-01-01T00:05:00Z' },
   } }));
   const args = { rootDir, hqRoot: rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head, prMetadata, excludeContexts,
     readAuditImpl: () => ({ attempts: [{ head, outcome: 'failed-without-merge', reason: predicate,

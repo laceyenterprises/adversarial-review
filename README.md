@@ -1607,6 +1607,18 @@ Retryable UNKNOWN deferral requires an open PR at the validated head; moved
 heads and closed PRs retain their terminal refusal. A shared CI deadline reached
 before the next snapshot retains that classification from the last exact-head
 UNKNOWN snapshot; real hold reasons still receive their ordinary refusal.
+CLOSERSTOPTRANSIENT-01 restricts input-change holds to the explicit audited
+`DETERMINISTIC_STOP_REASONS` allowlist. Finding and review-evidence refusals
+remain held; CI, lane contention, auth/environment and unclassified merge
+failures use a durable five-minute transient backoff (`hammer-stop-transient-backoff`).
+Changed inputs may release sooner. Each new stop gets its own window, while
+repeated polls retain a released stop. Legacy transient-only holds release once
+on upgrade with `transient-stop-upgrade`; release audits name reasons and stop
+keys. Next-action carries the transient classification through both projections.
+Per-head, series and lifetime caps and terminal-PR guards still apply; no
+executed attempts are refunded. See [the hold-store contract](docs/data-model/hammer-stop-hold.md)
+for the vocabulary audit and migration shape.
+
 Packaging stops and deferrals retain earlier deterministic hammer refusals until
 success. Packaging-only audit history also reasserts an unreleased persisted
 refusal before all dispatch routes, including ownerless recovery, without state

@@ -779,7 +779,8 @@ for (const predicate of ['primary-change-unknown', 'primary-change-read-failed']
       });
       assert.equal(result.dispatched, repaired, JSON.stringify(result));
       assert.equal(deps.launches.length, repaired ? 1 : 0);
-      if (!repaired) assert.equal(result.reason, 'hammer-stop-awaiting-input-change');
+      if (!repaired) assert.equal(result.reason, predicate === 'primary-change-unknown'
+        ? 'hammer-stop-awaiting-input-change' : 'hammer-stop-transient-backoff');
       const hold = JSON.parse(readFileSync(join(rootDir, 'data', 'follow-up-jobs',
         'hammer-stop-hold', 'laceyenterprises-agent-os-pr-7956.json'), 'utf8')).heads[REMEDIATED_HEAD];
       assert.equal(hold.firstObservedAt, firstObservedAt);

@@ -855,7 +855,8 @@ test('HAMNOREREVIEW-01 a legacy handoff stop releases before SQLite review recon
     },
     logger: { log() {}, warn() {} },
   };
-  await maybeDispatchAmaClosureFor(args);
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(holds.length, 1, JSON.stringify(result));
   assert.equal(liveReads, 1, 'the pending-row pass resolved the live review body');
   assert.equal(holds[0].action, 'release', 'hammer responsibility needs no later review receipt');
   reviewStateRow.review_status = 'posted';

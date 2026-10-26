@@ -102,7 +102,7 @@ test('stop evaluation returns the same recovery generation that its page reports
   const result = await evaluateHammerStopHold({ rootDir: root(t), hqRoot: 'unused', ...identity,
     sharedNextAction: shared, prMetadata: { headSha: HEAD }, now: AT,
     readAuditImpl: () => ({ attempts: [{ head: HEAD, path: 'hammer', outcome: 'failed-without-merge',
-      reason: 'synthetic-stop', startedAt: AT }] }),
+      reason: 'verdict-not-eligible', startedAt: AT }] }),
     deliverAlertImpl: async (_text, options) => pages.push(options), logger: quiet });
   assert.equal(result.action, 'hold');
   assert.equal(result.nextActionShared.decision.actor, 'closure-recovery');
@@ -732,4 +732,18 @@ test('closure infrastructure observer invokes the shared rerun owner', async t =
   assert.equal(calls, 1);
   assert.equal(result.nextAction.action, 'wait-for-CI');
   assert.ok(!f.effects.some(([kind]) => kind === 'closer' || kind === 'daemon'));
+});
+
+
+test('CLOSERSTOPTRANSIENT-01 transient stops never project a permanent automated stop', async () => {
+  const hammerStop = { headSha: HEAD, predicate: 'unclassified-merge-failure', deterministic: false };
+  const shared = await resolveClosureNextAction({ input: { currentHead: HEAD, reviewState: clean,
+    hammerStop, lease: null, roundsLeft: false, checks: 'SUCCESS' },
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true, observedAt: AT });
+  assert.equal(shared.snapshot.observations.controls.value.stop.deterministic, false);
+  assert.notEqual(shared.decision.reason, 'automated-stop');
+  const observed = observeClosureResult(shared, { hammerStop });
+  assert.equal(observed.snapshot.observations.controls.value.stop.deterministic, false);
+  assert.notEqual(observed.decision.reason, 'automated-stop');
 });

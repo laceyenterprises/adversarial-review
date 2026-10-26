@@ -191,6 +191,7 @@ import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
+  HAMMER_TRANSIENT_STOP_HOLD_REASON,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
@@ -4660,7 +4661,8 @@ async function maybeDispatchAmaCloserAttempt({
       });
       sharedNextAction = selectShared(evidenceStopHold.nextActionShared || sharedNextAction);
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
-        skipMergeAgent: true, recoveryWait: true, reason: HAMMER_STOP_HOLD_REASON,
+        skipMergeAgent: true, recoveryWait: true, reason: evidenceStopHold.hammerStop.deterministic === false
+          ? HAMMER_TRANSIENT_STOP_HOLD_REASON : HAMMER_STOP_HOLD_REASON,
         hammerStop: evidenceStopHold.hammerStop, nextActionShared: sharedNextAction });
       if (evidenceStopHold.action === 'release') {
         hammerStopRelease = evidenceStopHold;

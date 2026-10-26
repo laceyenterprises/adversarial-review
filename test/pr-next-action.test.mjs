@@ -64,10 +64,11 @@ test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a r
     launches: { closer: { headSha: HEAD, status: 'failed', outcome: 'no-merge', retryable: true } } }));
   assert.equal(retry.row, 'R08-retry');
   assert.equal(retry.actor, 'hammer');
-  attempts.push({ outcome: 'failed-without-merge', reason: 'permanent-merge-rejection', head: HEAD,
+  attempts.push({ outcome: 'failed-without-merge', reason: 'blocking-findings-present', head: HEAD,
     startedAt: '2026-01-01T00:00:03Z', attemptPhase: 'hammer-gh-pr-merge' });
   const stop = readStop();
-  assert.equal(stop.refusal.reasons[0], 'permanent-merge-rejection');
+  assert.equal(stop.deterministic, true);
+  assert.equal(stop.refusal.reasons[0], 'blocking-findings-present');
   const held = nextAction(snap({ controls: { stop: { deterministic: true, headSha: HEAD,
     recordedAt: stop.recordedAt, fingerprint: stop.refusal.key } } }));
   assert.equal(held.row, 'R07-stop');
@@ -702,4 +703,15 @@ test('infrastructure wait retains conflict repair ownership', () => {
     checks: { conclusion: 'FAILURE', rollup: [{ name: 'unit', conclusion: 'FAILURE', steps: [] }] },
   }));
   assert.deepEqual(pick(decision), ['hammer', 'hammer', 'conflict-rebase']);
+});
+
+test('CLOSERSTOPTRANSIENT-01 a transient stop permits retry ownership while existing caps still stop it', () => {
+  const transient = { controls: { stop: { ...STOP, deterministic: false } },
+    launches: { closer: { status: 'failed', headSha: HEAD, outcome: 'no-merge', retryable: true, attempt: 1 } } };
+  assert.deepEqual(pick(nextAction(snap(transient))), ['hammer', 'hammer', 'retry-no-merge']);
+  for (const hammerCap of [{ headSha: HEAD, retryExhausted: true }, { lifetimeExhausted: true }]) {
+    const decision = nextAction(snap({ ...transient, policy: { hammerCap } }));
+    assert.equal(decision.actor, 'closure-recovery');
+    assert.equal(decision.reason, hammerCap.lifetimeExhausted ? 'lifetime-exhausted' : 'retry-exhausted');
+  }
 });

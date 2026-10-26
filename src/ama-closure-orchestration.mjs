@@ -10,7 +10,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
-import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop } from './ama/hammer-stop-hold.mjs';
+import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
 import { bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
@@ -1615,7 +1615,10 @@ async function dispatchAmaClosureFor({
         && Number(job.prNumber) === Number(prNumber)
         && (job.headSha || job.revisionRef) === currentPrHeadSha)
       .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0] || null,
-    roundsLeft: !reviewCycleExhausted && !finalPush && gateSnapshot.settledReview?.commentOnlyFinalRoundPush !== true, ciBlockedHammerOwner,
+    // A legacy review handoff remains Hammer responsibility even though it is
+    // no longer a deterministic refusal. Route it through release, not remediation.
+    roundsLeft: !isLegacyReviewHandoffStop(recordedStop) && !reviewCycleExhausted && !finalPush
+      && gateSnapshot.settledReview?.commentOnlyFinalRoundPush !== true, ciBlockedHammerOwner,
     finalPush: remediationHandoff ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };

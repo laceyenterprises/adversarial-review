@@ -1099,6 +1099,18 @@ Before routing another hammer, the closer holds an unchanged deterministic
 refusal keyed by head, sorted reasons and full missing evidence, and pages once
 with the unblock action. A changed head, review, check status or verified missing
 authority releases the hold through the existing stop-store path.
+CLOSERSTOPTRANSIENT-01 restricts input-change holds to the explicit audited
+`DETERMINISTIC_STOP_REASONS` allowlist. Finding and review-evidence refusals
+remain held; CI, lane contention, auth/environment and unclassified merge
+failures use a durable five-minute transient backoff (`hammer-stop-transient-backoff`).
+Changed inputs may release sooner. Each new stop gets its own window, while
+repeated polls retain a released stop. Legacy transient-only holds release once
+on upgrade with `transient-stop-upgrade`; release audits name reasons and stop
+keys. Next-action carries the transient classification through both projections.
+Per-head, series and lifetime caps and terminal-PR guards still apply; no
+executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
+for the vocabulary audit and migration shape.
+
 STOPHOLDINFRA-01 skips holds and hold pages for missing dispatch phase scripts
 and unrendered phase-script placeholders. Existing infrastructure holds release
 once with `infrastructure-stop`; packaging failures preserve unrelated

@@ -34,8 +34,10 @@ unchanged.
 
 ## Purpose
 
-After a hammer stops without merging, the closer holds another attempt until
-an input changes, and pages once per head with the recorded predicate. Daemon
+After a hammer stops without merging, explicitly deterministic refusals wait
+for an input change. Other stops become eligible for retry after a five-minute backoff,
+subject to ordinary gates and existing per-head, series and lifetime caps. Holds
+page once per head with the recorded predicate and recovery action. Daemon
 failures do not create hammer holds. The producer and legacy compatibility
 rules are defined in the [AMA audit contract](ama-audit.md).
 
@@ -54,14 +56,56 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].refusalGeneration` | integer | Page generation for this hold. Persisted page receipts survive restart. A different refusal or a new stop after input release receives a new generation. |
 | `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify the latest observed stop. Legacy stops use this identity; structured deterministic refusals use `refusal.key` across attempts. |
 | `heads[sha].predicate` | string | Recorded stop reason, normalized to one line and capped at 120 characters, or `reason-not-recorded`. |
+| `heads[sha].mode` | optional `transient` | Timed recovery instead of an input-change refusal. Deterministic entries retain their existing shape. |
+| `heads[sha].reasons` | optional string array | Sorted transient stop predicates, retained for recovery audit. |
+| `heads[sha].retryAfter` | optional ISO timestamp | Five minutes after first observation of a new transient stop; durable across restart. Upgrade release uses the upgrade observation time. |
 | `heads[sha].firstObservedAt` | ISO timestamp | First closer observation of this stop. |
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`; comparable terminal audit head/base/mergeability readings take precedence, with first-observation or prior-release inputs filling unrecorded dimensions. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical closer review evidence fingerprint described below, never reconstructed from an eligibility trace. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
-| `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02), `infrastructure-stop` (STOPHOLDINFRA-01). |
+| `heads[sha].releasedAt` | optional ISO timestamp | First release observation (changed inputs, timed backoff or upgrade). A released stop remains released across ticks and restarts. |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02), `infrastructure-stop` (STOPHOLDINFRA-01), `ci-infrastructure-recovered` (CIBLOCKINFRA-01), `transient-stop-backoff`, `transient-stop-upgrade` (CLOSERSTOPTRANSIENT-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
+
+CLOSERSTOPTRANSIENT-01 makes `DETERMINISTIC_STOP_REASONS` the allowlist:
+all actionable reasons must be listed after packaging reasons are stripped.
+Structured predicate reasons take precedence over generic outer wrappers such
+as `predicate-not-eligible`; bare legacy stops use their recorded predicate.
+The audited deterministic vocabulary is `primary-change-reverted`,
+`primary-change-unknown`, `stale-review-head`, `verdict-not-eligible`,
+`verdict-not-settled-success`, `protective-predecessor-malformed-trailer`,
+`base-changed-file-overlap`, `blocking-findings-present`,
+`blocking-findings-unknown`, `non-blocking-findings-present`,
+`non-blocking-findings-unknown` and `review-currency-unproven`.
+The five finding/review evidence reasons are added by this change.
+`permanent-merge-rejection` (which includes auth and required-check errors),
+`builder-token-merge-refused` and `protective-predecessor-open` are removed:
+their causes can clear externally on the same head. CI, lane contention,
+environment failures, unknown and mixed transient reasons are transient.
+Legacy review-handoff and packaging exceptions below remain intact.
+
+A transient hold returns `hammer-stop-transient-backoff` with `recoveryWait`
+and a `retryAfter` deadline. Changed inputs and existing recovery probes can
+release sooner; otherwise the next scheduled evaluation at or after the deadline
+records `transient-stop-backoff` and releases. A new terminal stop starts a new
+five-minute window on first observation, even when an unreleased transient hold
+has the same predicate but a different `stopKey`. Only the same transient
+`stopKey` reuses its deadline; repeat evaluation of an already released stop neither
+re-arms its timer nor emits another release audit. Next-action projections carry
+`deterministic: false`, preventing R07 from turning a transient stop into a
+permanent automated stop. Ordinary launch/lease checks and retry/lifetime caps
+remain authoritative; release refunds no executed attempt.
+
+On upgrade, an unreleased entry without `retryAfter` whose recorded reasons
+are all transient releases immediately with `transient-stop-upgrade`, clears
+its old refusal and logs the predicate, reasons, stop key and release cause.
+The persisted release prevents repeat upgrade grants across restarts. Cleanup
+also retires orphaned transient-only state without audit history, returning
+`none` so cleanup alone cannot widen admission. A different current stop gets
+its own hold; deterministic holds remain unchanged. Ordinary timed and
+input-change releases also log their stop reasons. Existing caps still bound
+upgrade retry admission.
 
 STOPHOLDINFRA-01 excludes dispatch packaging failures from deterministic
 refusals and holds: `missing-dispatch-phase-scripts`,
@@ -79,6 +123,7 @@ audit history remains, an unreleased persisted deterministic refusal returns
 `hold` without a state write or another page when inputs are unchanged, including
 before ownerless recovery. Changed base, mergeability, checks or review inputs
 release that refusal with `releasedAt`, `releasedBy` and `releasedInputs`.
+Both synthetic hold and release results explicitly carry `hammerStop.deterministic: true`.
 Closer preflight evaluates cleanup even when audit history is absent. Unknown
 or transient predicates prevent classification as a pure infrastructure stop.
 Mixed reasons strip packaging reasons from the computed deterministic refusal;
@@ -129,7 +174,7 @@ CAPROUTE-01 includes legacy `primary-change-unknown` stops and
 with one of these stops on the live head, a read-only primary-change probe runs
 before ordinary eligibility, including on CYCLECAPHAM-01 / CIBLOCKHAM-01
 hammer-owner routes and stale-review heads that are not closer-authored.
-While the answer remains unknown or unreadable, the hold remains active. Once
+While the answer remains unknown or unreadable, a deterministic unknown hold remains active; a transient read-failure hold can also release at its backoff deadline. Once
 the answer is computable, the store persists `primary-change-evidence` in
 `releasedBy`, even if the computable answer refuses merge (for example,
 `primary-change-reverted`). Release clears the evidence wait, not the merge
@@ -151,7 +196,7 @@ Only `history-read-failed` defers its page: a failed probe must remain unresolve
 for ten minutes from `firstObservedAt`, allowing two default five-minute polling
 intervals for recovery. The probe runs before the page decision, so success at
 the deadline releases without paging. The durable timestamp preserves the
-deadline across restarts. Other predicates retain immediate paging. A terminal
+deadline across restarts. Other predicates retain immediate paging, with timed recovery stated for transient stops. A terminal
 retryable HQ status is persisted before the launch-capacity scan, so an old
 running record cannot delay redispatch when its lease is gone and its ledger
 read is unavailable. Live launch, lease, eligibility and retry limits still

@@ -1354,6 +1354,7 @@ test('LABELGATE-01: evidence-stop releases persist before label paging', async t
   assert.equal(pages, 1);
   assert.equal(observedStop?.releasedAt, args.dispatchContext.dispatchedAt);
   assert.deepEqual(observedStop?.releasedBy, ['primary-change-evidence']);
+  assert.equal(observedStop?.retryAfter, undefined, 'deterministic evidence holds retain their input-change contract');
 });
 
 

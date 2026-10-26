@@ -3,11 +3,16 @@
 
 ## Actions billing/quota infrastructure (CIBLOCKINFRA-01)
 
-CI-only failures with zero executed steps or a billing/quota not-started
-annotation select the bounded CI observer, including after remediation or
+CI-only failures with zero executed steps (including billing/quota annotations
+only when corroborated by zero-step evidence) select the bounded CI observer, including after remediation or
 hammer budget exhaustion. They remain red for merge eligibility.
 Remediation keeps an uncharged in-progress wait, then requeues the same round
-after checks execute. Existing all-infrastructure failed/stopped records
+after checks execute. Proven publications complete first; legacy published waits
+complete on green without a new worker. Unpublished commits keep publication
+stops. Head movement/terminal PRs clear waits under lock. The existing CI
+recovery owner revalidates current jobs, reruns each workflow/head once, and
+pages once on a repeated block; conflicts retain rebase priority. Max-rounds
+stops never refund. Existing all-infrastructure failed/stopped records
 recover on successful current-head replacement checks, with an audited round
 refund. Closure uses `isInfrastructureStop`, creates no hold/page for these
 failures, and retires old infrastructure-only holds with matching dispatch

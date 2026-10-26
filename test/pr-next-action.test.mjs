@@ -695,3 +695,11 @@ test('CIBLOCKINFRA-01 current green evidence supersedes old infrastructure flags
   }));
   assert.equal(decision.action, 'daemon-merge');
 });
+
+test('infrastructure wait retains conflict repair ownership', () => {
+  const decision = nextAction(snap({
+    pr: { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' },
+    checks: { conclusion: 'FAILURE', rollup: [{ name: 'unit', conclusion: 'FAILURE', steps: [] }] },
+  }));
+  assert.deepEqual(pick(decision), ['hammer', 'hammer', 'conflict-rebase']);
+});

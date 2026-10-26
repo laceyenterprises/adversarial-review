@@ -4,17 +4,28 @@
 ## Actions infrastructure waits (CIBLOCKINFRA-01)
 
 The shared `src/ci-infrastructure.mjs` classifier requires failed jobs with
-zero executed steps or an Actions billing/quota not-started annotation.
-Missing evidence stays unknown. Readers reuse attached job steps; otherwise
-one three-second, 100-job page per inspection can supply exact-job/head steps.
+zero executed steps; billing/quota annotations classify only with that same
+zero-step proof. Missing evidence stays unknown. Readers reuse attached job
+steps; otherwise one 100-job page per inspection uses a load-aware nominal
+three-second timeout and one transient retry with 100ms backoff.
 
-An exited worker observing only these failures keeps its existing
+Proven worker publications complete before infrastructure holds, retaining
+the reply and existing re-review/final-handoff decision. A legacy wait with
+a proven published head completes on green without another worker or refund.
+Committed-unpublished work retains its ordinary publication stop and workspace.
+An exited worker without either kind of retained work observing these failures keeps its existing
 `in_progress` job and artifacts, without a completed round or transient retry
 charge. `ciInfrastructureWait` records `reason`, `headSha`,
 `failedChecks`, `firstObservedAt`, `deadline`, `nextProbeAt`, `evidencePending` and `parked`.
 Probes run at five-minute intervals; after one hour the visible wait is parked
 and subsequent probes remain bounded. Pending/unreadable evidence cannot
-complete or stop the job. Ordinary terminal/moved-head lifecycle gates remain.
+complete or stop the job. Authoritative terminal/moved-head observations delete
+the wait under the job lock before ordinary lifecycle reconciliation. The
+wait snapshot is compared so cleanup cannot erase a replacement wait.
+
+The CI recovery owner revalidates the latest exact-head jobs and requests one
+failed-job rerun per workflow/head using the existing durable CI reservations;
+a repeated block pages the operator once. See [CI recovery reservations](ci-recovery-reservations.md).
 
 Once checks execute again, `in_progress -> pending` reuses the same round:
 `currentRound` decreases by one, retry budget stays unchanged, and
@@ -32,7 +43,10 @@ repository/PR identity must match the requested subject under the
 queue writer lock; a filename prefix alone is insufficient. An existing
 pending/in-progress owner supersedes historical recovery. Missing, mixed, real,
 skipped-only, unrelated or moved-head evidence never releases a stop. Historical missing steps can use the same bounded reader; narrative
-alone is insufficient. Recovery examines at most 20 records per bucket for each selected subject.
+alone is insufficient. Max-rounds stops never qualify for refunds. Recovery
+filters by current head, then examines the newest 20 records per terminal
+bucket. Subjects without matching terminal records skip live-owner bucket
+reads. The two terminal directory listings remain per-subject observations.
 Multiple workflows reuse an executor-scoped, 512-entry exact-head/job cache;
 one missing workflow page is read per observation. A tentative wait records
 `evidencePending` until all failures are proven. If later evidence shows an

@@ -58,6 +58,17 @@ export async function resumeCiInfrastructureRound({ rootDir, jobPath, ciGate, no
   });
 }
 
+export function clearCiInfrastructureWait({ rootDir, jobPath, expectedWait }) {
+  return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+    const job = readFollowUpJob(jobPath);
+    if (JSON.stringify(job.ciInfrastructureWait) === JSON.stringify(expectedWait)) {
+      delete job.ciInfrastructureWait;
+      writeFollowUpJob(jobPath, job);
+    }
+    return job;
+  });
+}
+
 export function deferCiInfrastructureProbe({ rootDir, jobPath, now }) {
   return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
     const job = readFollowUpJob(jobPath);
@@ -74,26 +85,36 @@ export async function recoverInfrastructureCiStops({ rootDir, repo, prNumber, he
   if (!headSha || ciGate?.headSha !== headSha || ciGate.state !== 'green') return [];
   const sameSubject = job => String(job.repo || '').toLowerCase() === String(repo || '').toLowerCase()
     && Number(job.prNumber) === Number(prNumber);
-  // A newer live owner supersedes historical recovery; never create a second
-  // pending owner from an old stop while that PR is already being repaired.
+  // Narrow to terminal records before scanning live buckets. An unrelated PR
+  // does not pay the two live-owner reads on every closure pass.
+  const candidates = ['stopped', 'failed'].flatMap(key => listFollowUpJobsInDir(rootDir, key,
+    { repo, prNumber, caseInsensitiveRepo: true })
+    .filter(({ job }) => sameSubject(job) && infrastructureStopHead(job) === headSha)
+    .sort((a, b) => String(b.job.stoppedAt || b.job.failedAt || b.job.createdAt || '').localeCompare(
+      String(a.job.stoppedAt || a.job.failedAt || a.job.createdAt || '')) || b.jobPath.localeCompare(a.jobPath))
+    .slice(0, 20));
+  if (!candidates.length) return [];
+  // A newer live owner supersedes historical recovery.
   if (['pending', 'inProgress'].some(key => listFollowUpJobsInDir(rootDir, key,
     { repo, prNumber, caseInsensitiveRepo: true }).some(({ job }) => sameSubject(job)))) return [];
   const recovered = [];
-  for (const key of ['stopped', 'failed']) {
-    for (const { job, jobPath } of listFollowUpJobsInDir(rootDir, key, { repo, prNumber, caseInsensitiveRepo: true }).slice(0, 20)) {
-      if (!sameSubject(job)) continue;
-      const code = job.remediationPlan?.stop?.code || job.failure?.code;
-      const head = job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha
-        || job.completion?.workerPushedHeadSha || job.revisionRef;
-      if (head !== headSha || ![...CI_INFRASTRUCTURE_STOP_REASONS, 'max-rounds-reached'].includes(code)
-        || (job.failure?.code && !CI_INFRASTRUCTURE_STOP_REASONS.has(job.failure.code))) continue;
-      const recordedFailures = recordedCiFailures(job);
-      const failedChecks = await enrichCiInfrastructureEvidence({ rollup: recordedFailures, repo, headSha, execFileImpl });
-      if (!infrastructureOnlyFailures(failedChecks) || !checksExecutedAgain(ciGate.rollup, failedChecks)) continue;
-      const result = releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now,
-        recordedFailures, failedChecks });
-      if (result) recovered.push(result);
-    }
+  for (const { job, jobPath } of candidates) {
+    if (!sameSubject(job)) continue;
+    const code = job.remediationPlan?.stop?.code || job.failure?.code;
+    const head = infrastructureStopHead(job);
+    if (head !== headSha || !CI_INFRASTRUCTURE_STOP_REASONS.has(code)
+      || (job.failure?.code && !CI_INFRASTRUCTURE_STOP_REASONS.has(job.failure.code))) continue;
+    const recordedFailures = recordedCiFailures(job);
+    const failedChecks = await enrichCiInfrastructureEvidence({ rollup: recordedFailures, repo, headSha, execFileImpl });
+    if (!infrastructureOnlyFailures(failedChecks) || !checksExecutedAgain(ciGate.rollup, failedChecks)) continue;
+    const result = releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, headSha, now,
+      recordedFailures, failedChecks });
+    if (result) recovered.push(result);
   }
   return recovered;
+}
+
+function infrastructureStopHead(job) {
+  return job.failure?.ciGate?.headSha || job.failure?.ciRegression?.headSha || job.ciGate?.headSha
+    || job.completion?.workerPushedHeadSha || job.revisionRef;
 }

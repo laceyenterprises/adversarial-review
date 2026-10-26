@@ -215,7 +215,7 @@
       "path": "docs/data-model/ci-recovery-reservations.md",
       "store": "<watcher rootDir>/data/ci-recovery/",
       "schemaSurface": "src/ci-recovery.mjs",
-      "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/follow-up-merge-agent.mjs", "src/merge-agent-candidate.mjs", "src/reviewer-ci-admission.mjs", "src/reviewer-timeout-exhausted-dispatch.mjs"],
+      "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/follow-up-merge-agent.mjs", "src/merge-agent-candidate.mjs", "src/reviewer-ci-admission.mjs", "src/reviewer-timeout-exhausted-dispatch.mjs", "src/ama-closure-orchestration.mjs", "src/follow-up-remediation.mjs"],
       "owner": "adversarial-review watcher CI recovery",
       "reservationEvidenceFields": ["reservedAt", "state", "runId", "attempt"]
     },
@@ -349,7 +349,8 @@
         "src/remediation-infrastructure-refund.mjs",
         "src/remediation-quota-evidence.mjs",
         "src/review-mode-selection.mjs",
-        "src/github-auth-recovery.mjs"
+        "src/github-auth-recovery.mjs",
+        "src/remediation-ci-infrastructure.mjs"
       ],
       "owner": "follow-up remediation queue",
       "publicationFailureCommitField": "localCommit",

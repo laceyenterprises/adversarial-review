@@ -1,3 +1,5 @@
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { checkItemState, latestCheckRollupItems, isAdversarialOwnStatusContext } from './checks-summary.mjs';
 
 const attachedSteps = new WeakMap();
@@ -20,15 +22,16 @@ export function checkInfrastructureReason(check) {
   const annotations = Array.isArray(rawAnnotations) ? rawAnnotations : [];
   const messages = [check?.output?.summary, check?.output?.text,
     ...annotations.map(item => typeof item === 'string' ? item : item?.message)];
-  if (messages.some(message => /(?:job|workflow).*(?:not started|not run).*(?:budget|billing|quota|spending limit)|(?:budget|billing|quota).*(?:preventing further use|not started)/i.test(String(message || '')))) {
-    return 'actions-billing-quota';
-  }
   const steps = checkSteps(check);
-  if (Array.isArray(steps) && steps.every(step =>
+  const zeroSteps = Array.isArray(steps) && steps.every(step =>
     step && (String(step.conclusion || '').toLowerCase() === 'skipped'
       || (!step.started_at && !step.startedAt && !step.completed_at && !step.completedAt
         && !['completed', 'in_progress'].includes(String(step.status || '').toLowerCase())
-        && !step.conclusion)))) return 'actions-zero-step';
+        && !step.conclusion)));
+  if (zeroSteps && messages.some(message => /(?:job|workflow).*(?:not started|not run).*(?:budget|billing|quota|spending limit)|(?:budget|billing|quota).*(?:preventing further use|not started)/i.test(String(message || '')))) {
+    return 'actions-billing-quota';
+  }
+  if (zeroSteps) return 'actions-zero-step';
   return null;
 }
 
@@ -63,7 +66,7 @@ export function infrastructureEvidencePending(checks) {
 }
 
 // Reuse job evidence already attached by another reader. Otherwise ONE read,
-// one page, no retries, no authentication refresh. Exact job/head matching keeps
+// one page, one transient retry under a load-aware bound. Exact job/head matching keeps
 // a historical run or a sibling workflow from lending zero-step evidence.
 export async function enrichCiInfrastructureEvidence({ rollup, repo, headSha, execFileImpl, env = process.env, signal } = {}) {
   if (!Array.isArray(rollup)) return rollup;
@@ -82,9 +85,11 @@ export async function enrichCiInfrastructureEvidence({ rollup, repo, headSha, ex
     .find(({ match }) => match && match[1] === repo);
   if (!candidate || !headSha || !execFileImpl || signal?.aborted) return rollup;
   try {
-    const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/runs/${candidate.match[2]}/jobs?filter=latest&per_page=100`],
-      { env, timeout: 3000, maxBuffer: 2 * 1024 * 1024,
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000) });
+    const timeoutMs = loadAwareTimeoutMs(3000);
+    const { stdout } = await execGhWithRetry({ execFileImpl,
+      args: ['api', `repos/${repo}/actions/runs/${candidate.match[2]}/jobs?filter=latest&per_page=100`],
+      env, signal, timeoutMs, totalTimeoutMs: timeoutMs * 2 + 100, retries: 1, backoffMs: 100,
+      refreshGhAuthImpl: async () => ({ reminted: false }), log: null });
     const jobs = JSON.parse(stdout).jobs;
     if (!Array.isArray(jobs)) return rollup;
     return rollup.map(item => {

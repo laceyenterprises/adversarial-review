@@ -3,6 +3,10 @@
 
 ## Actions infrastructure recovery (CIBLOCKINFRA-01)
 
+Closure preflight calls the evaluator only for stops already classified as
+infrastructure. Ordinary executed CI and refusal-bearing stops retain the
+closer's complete review baseline; preflight cannot seed or release that hold.
+
 `isInfrastructureStop` also recognizes CI-only stop reasons when every
 recorded failure has shared zero-step or billing/quota evidence. Unknown or
 real failures and non-CI refusal reasons retain the ordinary hold. The audit

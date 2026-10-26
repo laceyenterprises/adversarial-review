@@ -1,3 +1,5 @@
+import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
+import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { deriveNextActionSnapshot, hasLiveRemediationJob, nextAction } from './pr-next-action.mjs';
@@ -918,6 +920,7 @@ async function dispatchAmaClosureFor({
   closerLeaseLivenessOptions = {},
   observeClosureWaitImpl = observeClosureWait,
   readHammerStopForHeadImpl = readHammerStopForHead,
+  recoverInfrastructureChecksImpl = recoverInfrastructureChecks,
   fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
   mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
   now = () => Date.now(),
@@ -988,6 +991,12 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   if (candidate?.headSha && String(candidate.prState).toLowerCase() === 'open') {
     const summary = summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig });
+    if (cfg.autonomousMergeExecutionEnabled !== false && infrastructureOnlyFailures(summary.failedChecks)) {
+      try {
+        await recoverInfrastructureChecksImpl({ rootDir, repo: repoPath, prNumber, headSha: candidate.headSha,
+          failedChecks: summary.failedChecks, pendingChecks: summary.pendingChecks, env, signal, execFileImpl: execFileAsync });
+      } catch (error) { logger?.warn?.(`[watcher] Infrastructure CI recovery unavailable: ${error.message}`); }
+    }
     await recoverInfrastructureCiStops({ rootDir, repo: repoPath, prNumber, headSha: candidate.headSha,
       ciGate: { ...summary, rollup: candidate.statusCheckRollup, headSha: candidate.headSha,
         state: summary.conclusion === 'SUCCESS' ? 'green' : 'pending' }, now: new Date(now()).toISOString(), execFileImpl: execFileAsync });
@@ -1568,7 +1577,7 @@ async function dispatchAmaClosureFor({
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
-  if (isInfrastructureStop(recordedStop) || recordedStop?.failedChecks?.length) {
+  if (isInfrastructureStop(recordedStop)) {
     const evaluatedStop = await evaluateHammerStopHold({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
       excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),

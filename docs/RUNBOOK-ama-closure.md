@@ -3,22 +3,32 @@
 
 ## Actions billing/quota blocks (CIBLOCKINFRA-01)
 
-A failed Actions job that executed zero steps, or has GitHub's billing/quota
-not-started annotation, is infrastructure. The shared classifier reuses job
-steps or performs at most one bounded job-page read per inspection. No
+A failed Actions job with proven zero executed steps is infrastructure;
+billing/quota annotations require that same zero-step proof. The shared classifier reuses job
+steps or performs at most one job-page read per inspection with a load-aware
+three-second nominal timeout and one transient retry. No
 configuration or label is added; required checks still must become green to
 merge.
 
-During a block, remediation records `ciInfrastructureWait`, preserves its
+Proven worker publications complete before holds; committed-unpublished work
+retains its publication stop and workspace. A legacy published-head wait
+completes on green without another worker. During a block, other remediation records `ciInfrastructureWait`, preserves its
 artifacts and round, and probes every five minutes. At one hour it visibly
 parks while retaining bounded probes. It does not stop as no-progress or
 final CI red. When checks execute again it requeues the same refunded round.
 The watcher defers reviewer admission rather than spending another round or
-handing infrastructure red to a hammer.
+handing infrastructure red to a hammer. Confirmed conflicts retain their rebase
+owner before the infrastructure observer. Closure, reviewer admission and the
+remediation probe share one durable failed-job rerun per workflow/head, after
+fresh exact-head zero-step job and workflow reads. If that attempt is also
+blocked, `required-checks-infrastructure-again` pages the operator once; after
+restoring billing, rerun those jobs manually if the automatic attempt was
+already consumed. There is no unbounded rerun loop. Merge still requires green
+checks. Head movement or terminal lifecycle clears stale wait evidence.
 
 Deployment automatically re-evaluates failed/stopped remediation records and
 hammer CI stops using fresh open-PR/current-head evidence. Every recorded
-failure must be infrastructure-only, and every failed check must have a
+failure must be infrastructure-only (max-rounds stops are excluded), and every failed check must have a
 successful replacement before an old stop releases. Recovery clears the
 stop, refunds the round or positively identified dispatch charge once, and
 retains `checks-executed-again` audit evidence. Mixed, real, unreadable,
@@ -28,7 +38,9 @@ blanket stop resets are required.
 After deployment, verify synthetically that zero-step red records an
 uncharged wait and no hammer hold/page; successful replacements record
 `ci-infrastructure-refund` / `ci-infrastructure-recovered` once. Confirm
-an executed failing step and mixed refusal remain charged/held. See the
+an executed failing step, max-rounds stop and mixed refusal remain charged/held.
+Verify one failed-job rerun, repeated-block paging, and retained publication
+completion without a second remediation worker. See the
 [queue](data-model/follow-up-jobs.md#actions-infrastructure-waits-ciblockinfra-01),
 [hold](data-model/hammer-stop-hold.md#actions-infrastructure-recovery-ciblockinfra-01)
 and [retry ledger](data-model/hammer-retry-cap.md#actions-infrastructure-refunds-ciblockinfra-01)

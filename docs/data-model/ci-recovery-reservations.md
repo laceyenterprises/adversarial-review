@@ -3,7 +3,7 @@
 **Owner:** adversarial-review watcher CI recovery
 **Store:** `<watcher rootDir>/data/ci-recovery/`
 **Source of truth:** `src/ci-recovery.mjs`
-**Runtime surface:** `src/reviewer-ci-admission.mjs`, `src/daemon-clean-merge.mjs`, `src/merge-agent-candidate.mjs` (re-exported by `src/follow-up-merge-agent.mjs`), `src/reviewer-timeout-exhausted-dispatch.mjs`
+**Runtime surface:** `src/reviewer-ci-admission.mjs`, `src/daemon-clean-merge.mjs`, `src/merge-agent-candidate.mjs` (re-exported by `src/follow-up-merge-agent.mjs`), `src/reviewer-timeout-exhausted-dispatch.mjs`, `src/ama-closure-orchestration.mjs`, `src/follow-up-remediation.mjs`
 
 ## Identity and records
 
@@ -15,9 +15,21 @@ Without a watcher root, recovery and paging do nothing.
 
 | Identity | Fields | Contract |
 |---|---|---|
-| `rerun:<lowercase repo>:<headSha>:<runId>:<trimmed lowercase check>` | `runId`, `attempt`, `headSha`, `check`, `requestedAt` | Records the first observed cancelled run/attempt for a check/head. This observation alone does not consume the POST budget. |
-| `workflow-rerun:<lowercase repo>:<headSha>:<runId>` | `runId`, `attempt`, `state`, `reservedAt` | Deduplicates cancelled checks in one workflow. `reserved` holds an in-flight request; `posted` means the POST succeeded. |
+| `rerun:<lowercase repo>:<headSha>:<runId>:<trimmed lowercase check>` | `runId`, `attempt`, `headSha`, `check`, `requestedAt` | Records the first observed cancelled or infrastructure-failed run/attempt for a check/head. This observation alone does not consume the POST budget. |
+| `workflow-rerun:<lowercase repo>:<headSha>:<runId>` | `runId`, `attempt`, `state`, `reservedAt` | Deduplicates cancelled and infrastructure-failed checks in one workflow. `reserved` holds an in-flight request; `posted` means the POST succeeded. |
 | `page:<lowercase repo>:<prNumber>:<headSha>:<dedupeKey>` | `reason`, `state`, `reservedAt` | `reserved` holds delivery; `posted` means the shared operator-decision alert path accepted delivery. |
+
+`recoverInfrastructureChecks` admits only all-zero-step failed Actions checks,
+with no pending/missing contexts. It re-reads the latest jobs page and requires
+every targeted job ID and head still match the recorded zero-step failure.
+The ordinary workflow snapshot and open/current-head read then guard the POST.
+Closure owns the request while selecting the CI observer; reviewer admission
+and the remediation wait's five-minute probe use the same reservations. A
+second infrastructure failure on a higher attempt pages once with
+`required-checks-infrastructure-again`; it never authorizes repeated reruns or
+merge. Restored billing may still need an operator rerun after this one
+recovery attempt was consumed during the outage. Conflict repair takes
+precedence over the infrastructure observer, subject to existing safety gates.
 
 A rejected POST or alert delivery removes its exclusive action reservation.
 A later tick re-reads the PR head and workflow before retrying. Read calls use
@@ -30,7 +42,7 @@ Successful state updates use a sibling `.json.posted` temporary file and atomic
 rename. If persistence fails after an accepted action, the original reservation
 remains held. Legacy records with no `state` remain consumed for compatibility.
 Reserved actions older than 60 seconds are resumable. A workflow retry requires
-fresh exact-head evidence that the original attempt remains cancelled. Queued
+fresh exact-head evidence that the original attempt remains cancelled or infrastructure-failed. Queued
 or higher attempts never receive a duplicate POST. Page retries use the shared
 durable, debounced alert path. Exclusive minute-scoped resume claims serialize
 concurrent ticks, including after interrupted recovery. Invalid legacy records

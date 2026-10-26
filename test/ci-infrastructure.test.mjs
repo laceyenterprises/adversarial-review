@@ -10,12 +10,13 @@ import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs'
 import { bindClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { recoverAmaAutomation } from '../src/ama/automated-recovery.mjs';
 import { checkInfrastructureReason, enrichCiInfrastructureEvidence, infrastructureOnlyFailures } from '../src/ci-infrastructure.mjs';
-import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } from '../src/remediation-ci-infrastructure.mjs';
+import { clearCiInfrastructureWait, holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } from '../src/remediation-ci-infrastructure.mjs';
 import { buildFollowUpJob, createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned,
   markFollowUpJobStopped, readFollowUpJob, writeFollowUpJob, summarizePRRemediationLedger } from '../src/follow-up-jobs.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { evaluateHammerStopHold, isInfrastructureStop, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 
 const repo = 'example/fixture', head = 'a'.repeat(40), prNumber = 42;
@@ -47,9 +48,13 @@ for (const [name, check, expected] of [
   ['missing evidence', { name: 'unit', conclusion: 'FAILURE' }, null],
   ['green with no steps', { ...green, steps: [] }, null],
   ['pending with stale failure', { ...failed, status: 'IN_PROGRESS' }, null],
-  ['billing annotation', { name: 'unit', conclusion: 'FAILURE', annotations: [
+  ['billing annotation', { name: 'unit', conclusion: 'FAILURE', steps: [], annotations: [
     { message: 'The job was not started because an Actions budget is preventing further use.' },
   ] }, 'actions-billing-quota'],
+  ['executed billing text', { ...failed, steps: [{ conclusion: 'failure' }],
+    output: { summary: 'billing worker not started' } }, null],
+  ['missing steps with billing text', { name: 'unit', conclusion: 'FAILURE',
+    output: { summary: 'billing worker not started' } }, null],
   ['unrelated budget test output', { name: 'unit', conclusion: 'FAILURE',
     output: { summary: 'Budget assertion failed.' } }, null],
 ]) test('CIBLOCKINFRA-01 classifier: ' + name, () => {
@@ -65,7 +70,7 @@ test('CIBLOCKINFRA-01 missing evidence reads one bounded page and verifies job a
       reads++;
       assert.equal(bin, 'gh');
       assert.deepEqual(args, ['api', 'repos/example/fixture/actions/runs/10/jobs?filter=latest&per_page=100']);
-      assert.equal(options.timeout, 3000);
+      assert.ok(options.timeout >= 3000 && options.timeout <= loadAwareTimeoutMs(3000));
       return { stdout: JSON.stringify({ jobs: [
         { id: 1, head_sha: head, conclusion: 'failure', steps: [] },
         { id: 2, head_sha: 'b'.repeat(40), conclusion: 'failure', steps: [] },
@@ -357,4 +362,60 @@ test('CIBLOCKINFRA-01 historical recovery validates record identity and retains 
     assert.equal(recovered.length, 0, scenario);
     assert.equal(readFileSync(stopped.jobPath, 'utf8'), before, scenario);
   }
+});
+
+for (const transient of [true, false]) test('evidence reader retries only transient failures: ' + transient, async () => {
+  let calls = 0;
+  const result = await enrichCiInfrastructureEvidence({ repo, headSha: head,
+    rollup: [{ name: 'unit', conclusion: 'FAILURE', detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` }],
+    execFileImpl: async () => {
+      if (++calls === 1) throw new Error(transient ? 'HTTP 503 Service Unavailable' : 'HTTP 404 Not Found');
+      return { stdout: JSON.stringify({ jobs: [{ id: 1, head_sha: head, conclusion: 'failure', steps: [] }] }) };
+    } });
+  assert.equal(calls, transient ? 2 : 1);
+  assert.equal(infrastructureOnlyFailures(result), transient);
+});
+
+for (const prState of ['open', 'closed', 'merged']) test('stale wait clears on authoritative lifecycle: ' + prState, async t => {
+  const rootDir = root(t), current = active(rootDir);
+  const held = holdRemediationForCiInfrastructure({ rootDir, jobPath: current.jobPath, ciGate: redGate, now });
+  const job = { ...held.job, remediationWorker: null };
+  writeFollowUpJob(held.jobPath, job);
+  await reconcileFollowUpJob({ rootDir, job, jobPath: held.jobPath, now: () => later,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState, headSha: 'b'.repeat(40) }),
+    execFileImpl: async () => assert.fail('no CI read on stale wait'), log: logger });
+  assert.equal(readFollowUpJob(held.jobPath).ciInfrastructureWait, undefined);
+});
+
+test('wait cleanup preserves a concurrently replaced wait', t => {
+  const rootDir = root(t), current = active(rootDir);
+  const held = holdRemediationForCiInfrastructure({ rootDir, jobPath: current.jobPath, ciGate: redGate, now });
+  const expectedWait = held.job.ciInfrastructureWait;
+  const replaced = holdRemediationForCiInfrastructure({ rootDir, jobPath: current.jobPath, ciGate: redGate, now: later });
+  assert.deepEqual(clearCiInfrastructureWait({ rootDir, jobPath: current.jobPath, expectedWait }).ciInfrastructureWait,
+    replaced.job.ciInfrastructureWait);
+});
+
+test('historical recovery selects newest matching-head stops before the bounded window; caps stay charged', async t => {
+  const rootDir = root(t), current = active(rootDir);
+  const stopped = markFollowUpJobStopped({ rootDir, jobPath: current.jobPath, stoppedAt: now,
+    stopCode: 'max-rounds-reached', stopReason: 'Round completed at cap.', failure: { ciGate: redGate },
+    commentDeliveryExemption: 'synthetic-fixture' });
+  const cappedBytes = readFileSync(stopped.jobPath, 'utf8');
+  for (let i = 0; i < 50; i++) {
+    const job = structuredClone(stopped.job);
+    job.jobId += '-history-' + String(i).padStart(2, '0');
+    job.failure.ciGate.headSha = i % 2 ? head : 'b'.repeat(40);
+    if (i % 2) job.failure.ciGate.failedChecks = [{ ...failed, steps: [{ conclusion: 'failure' }] }];
+    job.remediationPlan.stop.code = 'no-progress';
+    writeFollowUpJob(join(rootDir, 'data/follow-up-jobs/stopped', job.jobId + '.json'), job);
+  }
+  const newest = structuredClone(stopped.job);
+  newest.jobId += '-zz-newest'; newest.stoppedAt = later;
+  newest.remediationPlan.stop.code = 'no-progress';
+  writeFollowUpJob(join(rootDir, 'data/follow-up-jobs/stopped', newest.jobId + '.json'), newest);
+  const result = await recoverInfrastructureCiStops({ rootDir, repo, prNumber, headSha: head, ciGate: greenGate, now: later });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].job.jobId, newest.jobId);
+  assert.equal(readFileSync(stopped.jobPath, 'utf8'), cappedBytes);
 });

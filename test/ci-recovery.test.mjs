@@ -4,7 +4,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { recoverCancelledChecks, confirmNoCi, inspectCiBootstrap,
+import { recoverInfrastructureChecks, recoverCancelledChecks, confirmNoCi, inspectCiBootstrap,
   verifyManagedCiRecord, readGreenManagedCi, pageCiOnce, ciRecoveryStateDir } from '../src/ci-recovery.mjs';
 import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
@@ -334,4 +334,47 @@ test('stale and malformed page reservations recover through durable alert delive
   const args = { rootDir, repo, prNumber: 2, headSha, reason: 'repo has no CI', deliverAlertImpl: async () => { pages++; } };
   await Promise.all([pageCiOnce(args), pageCiOnce(args)]);
   assert.equal(pages, 1);
+});
+
+test('infrastructure recovery revalidates jobs, deduplicates reruns and pages a repeated block', async t => {
+  const rootDir = fixture(t);
+  let attempt = 1, posts = 0, pages = 0, steps = [];
+  const failed = { name: 'unit', state: 'FAILURE', steps: [],
+    detailsUrl: `https://github.com/${repo}/actions/runs/1/job/10` };
+  const execFileImpl = async (_bin, args) => {
+    if (args.includes('POST')) { posts++; return { stdout: '' }; }
+    if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+    if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [
+      { id: 10, head_sha: headSha, conclusion: 'failure', steps },
+    ] }) };
+    return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: attempt, conclusion: 'failure', status: 'completed' }) };
+  };
+  const recover = () => recoverInfrastructureChecks({ rootDir, repo, prNumber: 2, headSha,
+    failedChecks: [failed], execFileImpl, deliverAlertImpl: async () => { pages++; return { queued: true }; } });
+  await Promise.all([recover(), recover()]);
+  await recover();
+  assert.equal(posts, 1);
+  attempt = 2;
+  await recover(); await recover();
+  assert.equal(posts, 1);
+  assert.equal(pages, 1);
+  steps = [{ conclusion: 'failure', started_at: '2026-01-01T00:00:00Z' }];
+  assert.equal(await recover(), false, 'stale zero-step evidence cannot rerun executed jobs');
+});
+
+test('review admission owns infrastructure rerun while retaining the CI wait', async t => {
+  const rootDir = fixture(t);
+  let posts = 0;
+  const check = { name: 'unit', state: 'FAILURE', steps: [], detailsUrl: `https://github.com/${repo}/actions/runs/1/job/10` };
+  const result = await guardRereviewCiBeforeReviewer({ rootDir, repo, prNumber: 2, passKind: 'rereview', reviewerHeadSha: headSha,
+    inspectCiImpl: async () => ({ state: 'infrastructure', headSha, failedChecks: [check] }), log: quiet,
+    execFileImpl: async (_bin, args) => {
+      if (args.includes('POST')) { posts++; return { stdout: '' }; }
+      if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+      if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [{ id: 10, head_sha: headSha, conclusion: 'failure', steps: [] }] }) };
+      return { stdout: JSON.stringify({ head_sha: headSha, run_attempt: 1, conclusion: 'failure', status: 'completed' }) };
+    } });
+  assert.equal(result.reason, 'ci-infrastructure');
+  assert.equal(result.proceed, false);
+  assert.equal(posts, 1);
 });

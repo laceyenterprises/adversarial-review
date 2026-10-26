@@ -1078,10 +1078,31 @@ if (scenario === 'clean') {
   const { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } =
     await import('../../src/remediation-ci-infrastructure.mjs');
   const { isInfrastructureStop } = await import('../../src/ama/hammer-stop-hold.mjs');
+  const { recoverInfrastructureChecks } = await import('../../src/ci-recovery.mjs');
+  const { checkInfrastructureReason } = await import('../../src/ci-infrastructure.mjs');
   const ciRoot = join(rootDir, 'ci-infrastructure');
   const infraFailure = { name: 'synthetic-ci', state: 'FAILURE', steps: [] };
   const infraGate = { state: 'infrastructure', headSha, failedChecks: [infraFailure] };
   const greenGate = { state: 'green', headSha, rollup: [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }] };
+  assert.equal(checkInfrastructureReason({ ...infraFailure, output: { summary: 'billing worker not started' },
+    steps: [{ conclusion: 'failure' }] }), null);
+  let infraAttempt = 1, infraPosts = 0, infraPages = 0;
+  const rerunArgs = { rootDir: ciRoot, repo, prNumber: 51, headSha,
+    failedChecks: [{ ...infraFailure, detailsUrl: `https://github.com/${repo}/actions/runs/10/job/1` }],
+    deliverAlertImpl: async () => { infraPages++; return { queued: true }; },
+    execFileImpl: async (_bin, args) => {
+      if (args.includes('POST')) { infraPosts++; return { stdout: '' }; }
+      if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+      if (args[1].includes('/jobs?')) return { stdout: JSON.stringify({ jobs: [{ id: 1,
+        head_sha: headSha, conclusion: 'failure', steps: [] }] }) };
+      return { stdout: JSON.stringify({ head_sha: headSha, status: 'completed', conclusion: 'failure', run_attempt: infraAttempt }) };
+    } };
+  await recoverInfrastructureChecks(rerunArgs); await recoverInfrastructureChecks(rerunArgs);
+  assert.equal(infraPosts, 1);
+  infraAttempt = 2;
+  await recoverInfrastructureChecks(rerunArgs); await recoverInfrastructureChecks(rerunArgs);
+  assert.equal(infraPosts, 1); assert.equal(infraPages, 1);
+
   const ciJob = buildFollowUpJob({ repo, prNumber: 51, revisionRef: headSha, reviewBody: '## Verdict\nRequest changes' });
   ciJob.status = 'in_progress';
   ciJob.remediationPlan.currentRound = 1;
@@ -1098,14 +1119,15 @@ if (scenario === 'clean') {
   const ciResume = await resumeCiInfrastructureRound({ rootDir: ciRoot, jobPath: ciPath,
     ciGate: greenGate, now: '2026-01-01T00:05:00Z' });
   assert.equal(ciResume.job.remediationPlan.currentRound, 0);
-  for (const status of ['failed', 'stopped']) {
+  for (const status of ['failed', 'stopped', 'max-rounds-reached']) {
     const recoveryRoot = join(ciRoot, status);
-    const stopped = { ...ciJob, status, failure: { code: 'ci-failed', ciGate: infraGate },
-      remediationPlan: { ...ciJob.remediationPlan, stop: { code: 'ci-failed', reason: 'Synthetic CI failure.' } } };
-    const stoppedPath = join(recoveryRoot, 'data/follow-up-jobs', status, stopped.jobId + '.json');
+    const bucket = status === 'max-rounds-reached' ? 'stopped' : status;
+    const stopped = { ...ciJob, status: bucket, failure: { code: 'ci-failed', ciGate: infraGate },
+      remediationPlan: { ...ciJob.remediationPlan, stop: { code: status === 'max-rounds-reached' ? status : 'ci-failed', reason: 'Synthetic CI failure.' } } };
+    const stoppedPath = join(recoveryRoot, 'data/follow-up-jobs', bucket, stopped.jobId + '.json');
     mkdirSync(dirname(stoppedPath), { recursive: true }); writeFollowUpJob(stoppedPath, stopped);
     assert.equal((await recoverInfrastructureCiStops({ rootDir: recoveryRoot, repo, prNumber: 51,
-      headSha, ciGate: greenGate, now: '2026-01-01T00:05:00Z' })).length, 1);
+      headSha, ciGate: greenGate, now: '2026-01-01T00:05:00Z' })).length, status === 'max-rounds-reached' ? 0 : 1);
   }
 
   const { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } = await import('../../src/load-aware-timeout.mjs');
@@ -1233,7 +1255,7 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { ciInfrastructureWaitUncharged: true, ciInfrastructureStopRecovered: true, realCiFailureRetained: true, packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
+  evidence = { ciInfrastructureRerunOnce: true, ciInfrastructureRepeatedBlockPaged: true, maxRoundsRefundRefused: true, ciInfrastructureWaitUncharged: true, ciInfrastructureStopRecovered: true, realCiFailureRetained: true, packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
     fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
     exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');

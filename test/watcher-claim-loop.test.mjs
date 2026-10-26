@@ -117,6 +117,7 @@ function buildLoaderSource({
     ...(process.env.FIXTURE_THROW_HELDHEAD_REQUEST === '1' ? { [fileUrl('src', 'comment-only-final-round.mjs')]: 'fixture:heldhead' } : {}),
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
     [fileUrl('src', 'remediation-published-head.mjs')]: 'fixture:remediation-published-head',
+    [fileUrl('src', 'remediation-ci-infrastructure.mjs')]: 'fixture:remediation-ci-infrastructure',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
     [fileUrl('src', 'follow-up-merge-agent.mjs')]: 'fixture:follow-up-merge-agent',
     [fileUrl('src', 'follow-up-retrigger-label.mjs')]: 'fixture:follow-up-retrigger-label',
@@ -339,6 +340,7 @@ export async function load(url, context, nextLoad) {
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
     'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
+    'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",

@@ -3537,7 +3537,7 @@ export function releaseInfrastructureCiStop({ rootDir, jobPath, repo, prNumber, 
     if (String(job.repo || '').toLowerCase() !== String(repo || '').toLowerCase()
       || Number(job.prNumber) !== Number(prNumber)
       || !['stopped', 'failed'].includes(job.status) || recordedHead !== headSha
-      || ![...CI_INFRASTRUCTURE_STOP_REASONS, 'max-rounds-reached'].includes(code)
+      || !CI_INFRASTRUCTURE_STOP_REASONS.has(code)
       || (job.failure?.code && !CI_INFRASTRUCTURE_STOP_REASONS.has(job.failure.code))
       || JSON.stringify(recordedFailures) !== JSON.stringify(recordedCiFailures(job))
       || !infrastructureOnlyFailures(failedChecks)) return null;

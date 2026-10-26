@@ -1,5 +1,12 @@
 # Follow-Up Remediation Runbook
 
+CIBLOCKINFRA-01: infrastructure holds follow proven-publication completion and
+committed-unpublished detection. A published legacy wait completes on green
+without requeuing a worker; moved/terminal heads clear its wait under lock.
+The CI recovery owner revalidates zero-step jobs, reruns each workflow/head
+once, then pages on a repeated infrastructure block. Max-rounds stops do not
+qualify for historical refunds. See the [closure recovery contract](RUNBOOK-ama-closure.md#actions-billingquota-blocks-ciblockinfra-01).
+
 Pending or unreadable CI at non-final closeout completes the worker round and
 registers durable re-review intent with the watcher. `reReview.nextAction` stays
 `wait-for-CI`; the `pending` review row supplies the active observer after the

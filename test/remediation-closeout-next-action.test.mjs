@@ -277,7 +277,7 @@ for (const policy of [{ drain: { active: true } }, { capacity: { hammer: { inFli
 }
 
 for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null, 1]]) {
-  for (const state of (finalRound ? ['pending', 'green', 'failed'] : ['pending', 'green', 'failed', 'head-moved'])) test(`normal completion delegate: ${finalRound || 'blocking'} round ${currentRound} / ${state}`, async t => {
+  for (const state of (finalRound ? ['pending', 'green', 'held-green', 'failed', 'infrastructure'] : ['pending', 'green', 'held-green', 'failed', 'infrastructure', 'head-moved'])) test(`normal completion delegate: ${finalRound || 'blocking'} round ${currentRound} / ${state}`, async t => {
     const f = fixture(t, finalRound);
     const originalDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
     process.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.rootDir, 'fixture-deploy-checkout');
@@ -316,6 +316,8 @@ for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null,
     f.job.remediationWorker = { ...f.job.remediationWorker, processId: 98765,
       outputPath: 'workspace/result.md', replyPath, logPath: 'workspace/worker.log' };
     f.job.remediationReply = { path: replyPath };
+    if (state === 'held-green') f.job.ciInfrastructureWait = { headSha: head, nextProbeAt: AT,
+      failedChecks: [{ name: 'unit', state: 'FAILURE', steps: [] }] };
     writeFileSync(f.jobPath, JSON.stringify(f.job));
     let lifecycleReads = 0;
     const result = await reconcileFollowUpJob({ rootDir: f.rootDir, jobPath: f.jobPath,
@@ -323,7 +325,8 @@ for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open',
         headSha: state === 'head-moved' && ++lifecycleReads > 1 ? OTHER : head }),
       auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
-      inspectRemediationCiRegressionImpl: async () => ({ headSha: head, state: state === 'head-moved' ? 'green' : state }),
+      inspectRemediationCiRegressionImpl: async () => ({ headSha: head, state: ['head-moved', 'held-green'].includes(state) ? 'green' : state,
+        ...(state === 'infrastructure' ? { failedChecks: [{ name: 'unit', state: 'FAILURE', steps: [] }] } : {}) }),
       requestReviewRereviewImpl: () => { f.effects.push('review'); return { triggered: true, status: 'pending' }; },
       requestRereviewWakeImpl: ({ headSha }) => {
         assert.equal(headSha, state === 'head-moved' ? OTHER : head);
@@ -343,7 +346,7 @@ for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null,
     });
     assert.equal(result.outcome, 'completed', JSON.stringify(result.job.failure || result.reason));
     const next = result.job.reReview.nextAction;
-    assert.equal(next.action, ['pending', 'head-moved'].includes(state) ? 'wait-for-CI'
+    assert.equal(next.action, ['pending', 'head-moved', 'infrastructure'].includes(state) ? 'wait-for-CI'
       : currentRound === 1 ? state === 'failed' ? 'remediate' : 'review' : 'hammer');
     assert.equal(next.head, state === 'head-moved' ? OTHER : head);
     if (state === 'head-moved') {
@@ -351,10 +354,15 @@ for (const [finalRound, currentRound] of [[null, 2], ['comment-only', 2], [null,
       assert.equal(f.decide({ job: result.job, headSha: OTHER, workerPushedHeadSha: head,
         ciGate: { headSha: OTHER, state: 'green' } }).decision.action, 'review');
     }
+    assert.equal(result.job.ciInfrastructureWait, undefined);
     assert.equal(result.job.completion.workerPushedHeadSha, head);
     assert.equal(result.job.remediationPlan.currentRound, currentRound);
     assert.equal(result.job.remediationPlan.maxRounds, 2);
     assert.deepEqual(f.effects, currentRound === 1 ? ['review', 'rereview-wake'] : ['watcher-wake']);
+    if (state === 'held-green') {
+      assert.equal(result.job.completion.source, 'worker-published-head-recovery');
+      assert.equal(result.job.remediationWorker.state, 'completed');
+    }
     if (currentRound === 1) {
       assert.equal(result.job.reReview.wake.requested, true);
       assert.deepEqual(JSON.parse(readFileSync(result.jobPath, 'utf8')).reReview,

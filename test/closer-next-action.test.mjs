@@ -16,6 +16,7 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
 
@@ -699,3 +700,36 @@ for (const jobStatus of ['failed', 'stopped']) {
     assert.ok(!f.effects.some(([kind]) => kind === 'closer'));
   });
 }
+
+test('real executed CI stop keeps its review baseline through closure preflight and closer evaluation', async t => {
+  const f = closureFixture(t);
+  const badCheck = { name: 'unit', conclusion: 'FAILURE', steps: [{ conclusion: 'failure' }] };
+  f.args.candidate.statusCheckRollup = [badCheck];
+  f.args.env = { ...process.env, HQ_ROOT: f.args.rootDir };
+  writeAmaAuditEntry({ hqRoot: f.args.rootDir, ...identity, now: AT,
+    attempt: { path: 'hammer', head: HEAD, outcome: 'failed-without-merge', reason: 'github-gate-not-green',
+      startedAt: AT, githubGate: { reasons: ['ci-not-green'], badChecks: [badCheck] } } });
+  const options = { rootDir: f.args.rootDir, hqRoot: f.args.rootDir, ...identity,
+    prMetadata: { isOpen: true, headSha: HEAD, mergeableState: 'MERGEABLE', statusCheckRollup: [badCheck] },
+    reviewState: clean, now: AT, logger: quiet, deliverAlertImpl: async () => ({ queued: true }) };
+  assert.equal((await evaluateHammerStopHold(options)).action, 'hold');
+  await maybeDispatchAmaClosureFor(f.args);
+  assert.equal((await evaluateHammerStopHold(options)).action, 'hold');
+});
+
+test('closure infrastructure observer invokes the shared rerun owner', async t => {
+  const f = closureFixture(t);
+  f.args.candidate.statusCheckRollup = [{ name: 'unit', conclusion: 'FAILURE', steps: [],
+    detailsUrl: `https://github.com/${identity.repo}/actions/runs/10/job/1` }];
+  let calls = 0;
+  f.args.recoverInfrastructureChecksImpl = async args => {
+    calls++;
+    assert.equal(args.headSha, HEAD);
+    assert.equal(args.failedChecks[0].name, 'unit');
+    return true;
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(calls, 1);
+  assert.equal(result.nextAction.action, 'wait-for-CI');
+  assert.ok(!f.effects.some(([kind]) => kind === 'closer' || kind === 'daemon'));
+});

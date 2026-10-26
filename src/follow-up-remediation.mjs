@@ -1,4 +1,5 @@
-import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe } from './remediation-ci-infrastructure.mjs';
+import { recoverInfrastructureChecks } from './ci-recovery.mjs';
+import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
@@ -1445,6 +1446,22 @@ async function reconcileFollowUpJob({
       && lifecycle.headSha === job.ciInfrastructureWait.headSha) {
       const ciGate = await inspectRemediationCiRegressionImpl({ repo: job.repo, prNumber: job.prNumber, execFileImpl, log });
       if (ciGate.headSha === lifecycle.headSha) {
+        if (ciGate.state === 'green') {
+          const proof = findWorkerPublishedHead({ rootDir, job, headSha: lifecycle.headSha });
+          if (proof) {
+            job = clearCiInfrastructureWait({ rootDir, jobPath, expectedWait: job.ciInfrastructureWait });
+            if (job.ciInfrastructureWait) return { action: 'active', reason: 'ci-infrastructure', job, jobPath };
+            const completed = completeKnownWorkerPublish({ proof, rootDir, jobPath, ciGate, lifecycle,
+              completedAt: now(), requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+            if (completed) return completed;
+          }
+        }
+        if (ciGate.state === 'infrastructure') {
+          try {
+            await recoverInfrastructureChecks({ rootDir, repo: job.repo, prNumber: job.prNumber,
+              headSha: ciGate.headSha, failedChecks: ciGate.failedChecks, pendingChecks: ciGate.pendingChecks, execFileImpl });
+          } catch (error) { log.warn?.(`[follow-up-remediation] Infrastructure CI recovery unavailable: ${error.message}`); }
+        }
         const held = holdRemediationForCiInfrastructure({ rootDir, jobPath, ciGate, now: now() });
         if (held) return held;
         const resumed = await resumeCiInfrastructureRound({ rootDir, jobPath, ciGate, now: now(), execFileImpl });
@@ -1455,6 +1472,10 @@ async function reconcileFollowUpJob({
         deferCiInfrastructureProbe({ rootDir, jobPath, now: now() });
         return { action: 'active', reason: 'ci-infrastructure-evidence-pending', job, jobPath };
       }
+    }
+    if (lifecycle.prState !== 'open' || (lifecycle.headSha && lifecycle.headSha !== job.ciInfrastructureWait?.headSha)) {
+      job = clearCiInfrastructureWait({ rootDir, jobPath, expectedWait: job.ciInfrastructureWait });
+      if (job.ciInfrastructureWait) return { action: 'active', reason: 'ci-infrastructure', job, jobPath };
     }
     // Ordinary authoritative lifecycle gates still own closed/moved heads.
   }
@@ -2232,7 +2253,9 @@ async function reconcileFollowUpJob({
         closeoutCiGate = await inspectRemediationCiRegressionImpl({
           repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
         });
-        if (closeoutCiGate.headSha === lifecycle?.headSha) {
+        if (!workerPublishedHead && closeoutCiGate.state === 'infrastructure'
+          && closeoutCiGate.headSha === lifecycle?.headSha
+          && !await findCommittedUnpublishedWork({ reply: parsedReply, job, workspaceDir: paths.workspaceDir, execFileImpl })) {
           const held = holdRemediationForCiInfrastructure({ rootDir, jobPath, ciGate: closeoutCiGate, now: completedAt });
           if (held) return held;
         }
@@ -2241,7 +2264,7 @@ async function reconcileFollowUpJob({
         completionLifecycle = await resolveJobPRLifecycleSafe({
           rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
         });
-        if (closeoutCiGate.state === 'failed'
+        if (['failed', 'infrastructure'].includes(closeoutCiGate.state)
           && (!closeoutCiGate.headSha || closeoutCiGate.headSha === workerPublishedHead?.headSha)
           && (completionLifecycle?.source !== 'live' || completionLifecycle.headSha === workerPublishedHead?.headSha)) {
           const published = completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath,
@@ -2423,7 +2446,9 @@ async function reconcileFollowUpJob({
       worker, liveness, workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
-    if (finalRound.ciGate?.headSha === lifecycle?.headSha) {
+    if (!workerPublishedHead && !finalRound.workerPushedHeadSha
+      && finalRound.ciGate?.state === 'infrastructure' && finalRound.ciGate.headSha === lifecycle?.headSha
+      && !await findCommittedUnpublishedWork({ reply: parsedReply, job, workspaceDir: paths.workspaceDir, execFileImpl })) {
       const held = holdRemediationForCiInfrastructure({ rootDir, jobPath, ciGate: finalRound.ciGate, now: completedAt });
       if (held) return held;
     }
@@ -2436,7 +2461,9 @@ async function reconcileFollowUpJob({
       closeoutCiGate = finalRound.ciGate || await inspectRemediationCiRegressionImpl({
         repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
       });
-      if (closeoutCiGate.headSha === completionLifecycle?.headSha) {
+      if (!workerPublishedHead && !finalRound.workerPushedHeadSha
+        && closeoutCiGate.state === 'infrastructure' && closeoutCiGate.headSha === completionLifecycle?.headSha
+        && !await findCommittedUnpublishedWork({ reply: parsedReply, job, workspaceDir: paths.workspaceDir, execFileImpl })) {
         const held = holdRemediationForCiInfrastructure({ rootDir, jobPath, ciGate: closeoutCiGate, now: completedAt });
         if (held) return held;
       }
@@ -2544,7 +2571,8 @@ async function reconcileFollowUpJob({
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
       });
       if (resumed) return resumed;
-      if (lifecycle?.source === 'live' && lifecycle.prState === 'open') {
+      const unpublishedWork = await findCommittedUnpublishedWork({ reply: parsedReply || { summary: finalMessage.text }, job, workspaceDir: paths.workspaceDir, execFileImpl });
+      if (!unpublishedWork && lifecycle?.source === 'live' && lifecycle.prState === 'open') {
         const ciGate = closeoutCiGate || await inspectRemediationCiRegressionImpl({
           repo: job.repo, prNumber: job.prNumber, execFileImpl, log });
         if (ciGate.headSha === lifecycle.headSha) {
@@ -2554,7 +2582,6 @@ async function reconcileFollowUpJob({
       }
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
-      const unpublishedWork = await findCommittedUnpublishedWork({ reply: parsedReply || { summary: finalMessage.text }, job, workspaceDir: paths.workspaceDir, execFileImpl });
       const stopCode = unpublishedWork ? 'committed-unpublished' : maxRounds > 0 && currentRound >= maxRounds
         ? 'max-rounds-reached'
         : 'no-progress';

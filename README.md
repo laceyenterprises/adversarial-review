@@ -1073,9 +1073,12 @@ records the evidence/admission truth table and public export fixture refresh.
 
 CIBLOCKINFRA-01 keeps zero-step and Actions billing/quota failures in a bounded,
 visible CI wait without spending remediation rounds or arming automated stops.
+One durable workflow/head rerun has a CI recovery owner; repeated blocks page
+the operator. Proven publications and unpublished commits precede holds; stale
+waits clear under lock and max-rounds stops stay charged.
 Successful current-head replacements release only infrastructure-only old stops,
 with one-time audit refunds; real and mixed failures keep their normal handling.
-The existing disposable `smv-refusals` smoke covers the wait, recovery and real
+The existing disposable `smv-refusals` smoke covers the wait, bounded rerun, recovery and real
 failure distinction. Focused offline evidence is in
 `test/ci-infrastructure.test.mjs`; runtime owners verify the recorded wait and
 refund reasons after normal deployment using the
@@ -2090,20 +2093,20 @@ stateDiagram-v2
     s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds
     s0 --> s3: follow-up-job.04 claim failure
     s0 --> s5: follow-up-job.05 operator cancellation
-    s1 --> s2: follow-up-job.06 validated worker reply
+    s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
     s1 --> s3: follow-up-job.07 worker failure
     s1 --> s4: follow-up-job.08 lifecycle, budget or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
-    s1 --> s0: follow-up-job.10 transient retry or proven infrastructure-only CI execution recovery without round charge
+    s1 --> s0: follow-up-job.10 transient retry or unpublished infrastructure-only CI execution recovery without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger or all-infrastructure CI stop with successful current-head replacement checks
-    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts; all-infrastructure CI stops recover on successful current-head replacements
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
     s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s0 --> s0: follow-up-job.18 branch-unresolved remediation: up to three delayed head lookups without worker or round charge
-    s1 --> s1: follow-up-job.19 infrastructure-only CI: bounded visible wait retains artifacts without round charge
+    s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]

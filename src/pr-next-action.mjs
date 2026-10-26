@@ -420,6 +420,10 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       deadlineKind: 'recovery', queue: 'reconcile',
       refs: [stop ? `stop:${text(stop.fingerprint) || 'unfingerprinted'}` : `label:${automatedHold.name}:automation`] };
   }
+  if ((checks.infrastructureOnly || checks.infrastructurePending)
+    && (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY')) {
+    return { row: 'R10-conflict', action: 'hammer', actor: 'hammer', reason: 'conflict-rebase', deadlineKind: 'admission', queue: 'dispatch' };
+  }
   if (checks.infrastructureOnly || checks.infrastructurePending) return { row: 'R11-pending', action: 'wait-for-CI', actor: 'ci',
     reason: checks.infrastructureOnly ? 'ci-infrastructure' : 'ci-infrastructure-evidence-pending', deadlineKind: 'observer', queue: 'observe' };
   const cap = plain(policy?.hammerCap);

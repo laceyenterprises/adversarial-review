@@ -19,13 +19,18 @@ record expecting automatic approval. No package or first-party whitelist exists.
 
 The collector reads both sides at exact PR refs, reads the producer PR through
 GitHub's authoritative pull endpoint, checks merged state and exact merge
-commit, and reads producer bytes at that commit. It never uses a checkout,
+commit, requires the PR's `base.ref` to match the repository endpoint's current
+`default_branch`, and reads producer bytes at that commit. Missing branch
+metadata or a merge into another branch supplies no proof. The head's producer
+repository must match the base record. It never uses a checkout,
 release label, npm installation, or an external URL from a record. It accepts
-only confined relative paths and inline GitHub contents up to 4 MiB, for at
+only confined relative paths and inline GitHub contents up to 1 MiB, for at
 most four changed local releases per manifest. Excess entries lack proof and
 retain their source high. Larger
-artifacts need separate policy review. Absent/invalid proof retains the source
-high; failed reads hold/retry instead of deciding without evidence.
+artifacts need separate policy review. Missing PRs/repositories/artifacts (404),
+directory responses, absent inline base64, size mismatches and over-budget files
+are absent/invalid proof and retain the source high. Failed reads (for example
+5xx, timeouts or TLS errors) hold/retry instead of deciding without evidence.
 
 Python compares producer/consumer bytes, record SHA-256, lock SHA-512, archive
 name/version, manifest route and both old/new producer and consumer directories.
@@ -43,10 +48,13 @@ normalizer and severity ceilings. Summaries use composed findings, with the
 actual evidence/ceiling downgrade reason rendered beside a demotion.
 
 On retry/CI deferral the collector runs again. `evidenceFingerprint` binds
-base/head, repo/PR, diff, artifact digests, authoritative proof and rubric facts;
-CI-only changes may reuse model work. Legacy fingerprint-less cached reviews
-rerun. Completed historical results are preserved. No live record migration or
-queue state transition changes are required.
+head, repo/PR, diff, lockfile facts, artifact digests, authoritative proof and
+rubric facts. Raw base SHA, CI, best-effort release notes and local-checkout
+usage text are excluded: base movement reuses model work when these bound
+security facts remain identical. Deterministic collection, including the rubric
+and artifact reads, still runs on every retry. Older fingerprint generations
+rerun model review once. Completed historical results are preserved. No live
+record migration or queue state transition changes are required.
 
 Deploy the reviewed Agent OS Python owner before or with this collector, then
 use the established operator service rollout and loaded-build verification.

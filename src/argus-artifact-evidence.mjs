@@ -5,7 +5,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, posix } from 'node:path';
 
 export const ARTIFACT_RECORD_PATH = 'vendor/argus-artifacts.json';
-export const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
+// GitHub's contents JSON endpoint only supplies inline base64 up to 1 MiB.
+export const MAX_ARTIFACT_BYTES = 1024 * 1024;
 
 function relativePath(value) {
   return typeof value === 'string' && value.length > 0 && !value.includes('\\')
@@ -42,12 +43,15 @@ export async function gatherArtifactEvidence({ job, pr, dir, treeRoot, files, io
       const local = String(locks[side][path]?.resolved || '').slice(5);
       // Invalid or unavailable claims yield no proof, hence the existing high.
       if (!record || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/u.test(record.producerRepo || '')
+          || (side === 'head' && record.producerRepo !== claims.base[name]?.producerRepo)
           || !/^[a-f0-9]{40}$/u.test(record.producerCommit || '')
           || !Number.isSafeInteger(record.producerPr) || record.producerPr <= 0
           || !relativePath(record.producerPath) || !relativePath(local)
           || typeof io.fetchArtifactAtRef !== 'function' || typeof io.fetchProducerPullRequest !== 'function') continue;
       const producer = await io.fetchProducerPullRequest({ repo: record.producerRepo, prNumber: record.producerPr });
-      if (!producer?.merged || producer.mergeCommit !== record.producerCommit) continue;
+      if (producer?.merged !== true || producer.mergeCommit !== record.producerCommit
+          || typeof producer.defaultBranch !== 'string' || !producer.defaultBranch
+          || producer.baseRef !== producer.defaultBranch) continue;
       const consumer = await io.fetchArtifactAtRef({ repo: job.repo, path: dir ? `${dir}/${local}` : local, ref: refs[side] });
       const upstream = await io.fetchArtifactAtRef({ repo: record.producerRepo, path: record.producerPath, ref: record.producerCommit });
       if (!Buffer.isBuffer(consumer) || !Buffer.isBuffer(upstream)

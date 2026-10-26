@@ -296,15 +296,21 @@ test('LAC-2117: protocol-only finding reconciles only against exact deterministi
   assert.doesNotMatch(body, /Blocked because|not a reserved-high category/u);
 });
 
-test('LAC-2117: changed base, head, artifact or provenance invalidates cached model work; CI alone does not', async () => {
+test('LAC-2117: content-bound evidence invalidates model work; base SHA, CI and best-effort context do not', async () => {
   let artifact = 'a';
   let baseSha = 'b'.repeat(40);
   let headSha = HEAD;
   let ci = 'PENDING';
+  let notes = 'release notes', usage = 'import x', lockFacts = 'old lock';
+  let producer = 'main', rubricVerdict = 'approve';
   const { deps: d, calls } = deps({
     fetchPullRequest: async () => ({ state: 'OPEN', headSha, baseSha }),
-    gatherEvidence: async () => ({ sections: [{ title: 'CI on this head', body: ci }],
-      rubricFindings: [], artifactBindings: [{ consumerSha256: artifact }] }),
+    gatherEvidence: async () => ({ sections: [{ title: 'CI on this head', body: ci },
+      { title: 'Upstream release notes (1 → 2)', body: notes },
+      { title: "This repository's usage of the package", body: usage },
+      { title: 'Lockfile facts (repository root)', body: lockFacts }],
+      rubricFindings: [], rubric: { results: [{ verdict: rubricVerdict }] },
+      artifactBindings: [{ consumerSha256: artifact, producer }] }),
     assessVerification: () => ci === 'PENDING' ? { defer: true } : { required: true, satisfied: true },
   });
   let previous;
@@ -321,15 +327,26 @@ test('LAC-2117: changed base, head, artifact or provenance invalidates cached mo
   await run();
   assert.equal(calls.models.length, 2);
   baseSha = 'a'.repeat(40);
+  notes = 'Not obtained';
+  usage = 'checkout moved';
+  await run();
+  assert.equal(calls.models.length, 2, 'base movement and best-effort reads preserve model work');
+  lockFacts = 'changed base lock facts';
   await run();
   assert.equal(calls.models.length, 3);
-  headSha = 'e'.repeat(40);
+  producer = 'changed authority';
   await run();
   assert.equal(calls.models.length, 4);
+  rubricVerdict = 'needs_verification';
+  await run();
+  assert.equal(calls.models.length, 5);
+  headSha = 'e'.repeat(40);
+  await run();
+  assert.equal(calls.models.length, 6);
   ci = 'SUCCESS';
   const completed = await run();
   assert.equal(completed.result.verdict, 'approve');
-  assert.equal(calls.models.length, 4);
+  assert.equal(calls.models.length, 6);
   assert.equal(completed.result.headSha, headSha);
   assert.equal(completed.result.baseSha, baseSha);
   assert.equal(completed.result.artifactBindings[0].consumerSha256, 'changed');

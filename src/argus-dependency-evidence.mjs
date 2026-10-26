@@ -565,26 +565,41 @@ export function createDefaultArgusEvidenceIo({
       }
     },
     async fetchProducerPullRequest({ repo, prNumber }) {
-      const { stdout } = await execGhWithRetryImpl({
-        args: ['api', `repos/${repo}/pulls/${prNumber}`], env,
-        timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
-      });
-      const doc = JSON.parse(stdout);
-      return { merged: doc.merged === true, mergeCommit: doc.merge_commit_sha };
+      try {
+        const { stdout } = await execGhWithRetryImpl({
+          args: ['api', `repos/${repo}/pulls/${prNumber}`], env,
+          timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
+        });
+        const doc = JSON.parse(stdout);
+        const { stdout: repository } = await execGhWithRetryImpl({
+          args: ['api', `repos/${repo}`], env,
+          timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
+        });
+        return { merged: doc.merged === true, mergeCommit: doc.merge_commit_sha,
+          baseRef: doc.base?.ref, defaultBranch: JSON.parse(repository).default_branch };
+      } catch (err) {
+        if (/\b404\b|Not Found/iu.test(`${err?.message || ''} ${err?.stderr || ''}`)) return null;
+        throw err;
+      }
     },
     async fetchArtifactAtRef({ repo, path, ref }) {
       const encoded = path.split('/').map(encodeURIComponent).join('/');
-      const { stdout } = await execGhWithRetryImpl({
-        args: ['api', `repos/${repo}/contents/${encoded}?ref=${ref}`], env,
-        timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
-      });
-      const doc = JSON.parse(stdout);
-      if (doc.encoding !== 'base64' || !Number.isSafeInteger(doc.size) || doc.size > MAX_ARTIFACT_BYTES) {
-        throw new Error('artifact missing inline base64 or exceeds byte budget');
+      try {
+        const { stdout } = await execGhWithRetryImpl({
+          args: ['api', `repos/${repo}/contents/${encoded}?ref=${ref}`], env,
+          timeoutMs: loadAwareTimeoutMs(60_000), log: logger,
+        });
+        const doc = JSON.parse(stdout);
+        // Deterministic absence/invalid proof keeps the rubric's source high.
+        // Transport failures still throw so the caller holds/retries the read.
+        if (doc?.type !== 'file' || doc.encoding !== 'base64' || typeof doc.content !== 'string'
+            || !Number.isSafeInteger(doc.size) || doc.size < 0 || doc.size > MAX_ARTIFACT_BYTES) return null;
+        const data = Buffer.from(doc.content, 'base64');
+        return data.length === doc.size ? data : null;
+      } catch (err) {
+        if (/\b404\b|Not Found/iu.test(`${err?.message || ''} ${err?.stderr || ''}`)) return null;
+        throw err;
       }
-      const data = Buffer.from(doc.content || '', 'base64');
-      if (data.length !== doc.size) throw new Error('artifact size mismatch');
-      return data;
     },
     async runRubric({ requestPath, pythonPath }) {
       try {

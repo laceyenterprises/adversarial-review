@@ -411,10 +411,12 @@ function supersededOutcome({ pr, nowIso }) {
   };
 }
 
-export function argusEvidenceFingerprint({ job, pr, diff, evidence }) {
+export function argusEvidenceFingerprint({ job, diff, evidence }) {
   return createHash('sha256').update(JSON.stringify({
-    contractVersion: 2, repo: job.repo, prNumber: job.prNumber, headSha: job.headSha, baseSha: pr.baseSha, diff,
-    sections: (evidence.sections || []).filter((section) => section.title !== 'CI on this head'),
+    contractVersion: 3, repo: job.repo, prNumber: job.prNumber, headSha: job.headSha, diff,
+    // Best-effort network/local-checkout context is not immutable evidence.
+    sections: (evidence.sections || []).filter(({ title }) => title !== 'CI on this head'
+      && title !== "This repository's usage of the package" && !title.startsWith('Upstream release notes')),
     rubricFindings: evidence.rubricFindings, rubric: evidence.rubric, artifactBindings: evidence.artifactBindings,
     verifiedArtifactSources: evidence.verifiedArtifactSources,
   })).digest('hex');
@@ -475,7 +477,7 @@ export async function reviewArgusJob({
   }
 
   // Re-read deterministic facts on retries. Only model work is cached: a changed
-  // base, artifact, producer proof or rubric must never reuse an old approval.
+  // base security facts, artifact, producer proof or rubric invalidate approval.
   let diff;
   try {
     diff = await deps.fetchDiff({ repo: job.repo, prNumber: job.prNumber, headSha: job.headSha });

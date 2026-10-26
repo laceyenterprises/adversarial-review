@@ -84,7 +84,7 @@ Directory: `data/argus-security-jobs/`
 | `mergeWithheldRecovery` | object or absent | Once-only recovery marker `{headSha, reopenedAt, inputs}`. `headSha` references this job's exact head; `inputs` retains the original approved dependency evidence. Persisted before returning a completed merge-withheld job to pending, and retained across retries and later completion. |
 | `result.autoadjudication` | object or absent | Dependency-bot result metadata `{schemaVersion, decision, reason, inputs, completedAt, mergeDisposition?, mergeReasons?}`. A withheld merge records `decision: "route-for-review"`, a `merge-withheld-*` reason, and the daemon's disposition and reasons. |
 | `routedForReview` | object or absent | ARGUSDRAIN-01. Set when the dependency-bot auto-adjudicator declines to approve a bump on its own (for example semver-major): `{schemaVersion, source: "dependency-bot-autoadjudication", decision: "route-for-review", reason, inputs, routedAt}`. The job stays in `pending/` and the drain claims it without waiting out the bot-adjudication grace. Legacy completions reopened by backlog retirement also carry `requeuedFrom: "legacy-route-for-review-completion"` and `requeuedAt`. |
-| `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review bound to `headSha`, `baseSha` and `evidenceFingerprint`, reused within its max age only after re-reading matching deterministic evidence; cleared on completion or failure). |
+| `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review bound to `headSha` and `evidenceFingerprint`, with observed `baseSha` retained for audit, reused within its max age only after re-reading matching deterministic evidence; cleared on completion or failure). |
 | `priorResult` | object or absent | The `result` a job carried before it was moved back to `pending/` (a revived `superseded` retirement or a reopened legacy `route-for-review` completion), kept for the record. |
 | `revivedAt` | string or absent | ISO time the route revived a `superseded` job whose PR is open at the same head again. |
 
@@ -181,14 +181,20 @@ erDiagram
 
 `drain.cachedReview` additionally carries `baseSha`, `evidenceFingerprint`,
 `artifactBindings` and `verifiedArtifactSources`. The SHA-256 fingerprint covers
-contract generation 2, repo/PR/base/head/diff, non-CI evidence sections, rubric
-findings/results, verified entries and artifact bindings. Each binding contains
+contract generation 3, repo/PR/head/diff, deterministic evidence sections, rubric
+findings/results, verified entries and artifact bindings. Raw base SHA, CI,
+best-effort upstream release notes and local-checkout usage text are excluded;
+base-dependent lockfile and security facts remain bound. Each binding contains
 manifest `dir` and per-lock-entry `artifactEvidence` with base/head `record`,
-authoritative `producer` merged receipt, relative materialized filenames and
+authoritative `producer` receipt (`merged`, `mergeCommit`, `baseRef`,
+`defaultBranch`), relative materialized filenames and
 `consumerSha256`/`producerSha256`. Filenames are audit references, never later
 read as durable authority. Reuse re-materializes and verifies the current facts.
-Missing fingerprints, changed proof/base/head/artifact/rubric or age expiry rerun
-model review; CI-only changes preserve it.
+Proof requires the exact merged commit and a nonempty `baseRef` matching the
+producer repository's current default branch; the head cannot change producer
+repository. Missing/invalid inline artifacts supply no proof. Missing or older
+fingerprints, changed proof/head/artifact/rubric/security facts or age expiry
+rerun model review; base SHA, CI and best-effort context alone preserve it.
 
 New drain results retain `headSha`, `baseSha`, `evidenceFingerprint` and
 `artifactBindings`. Schema version remains 1: fields are additive, legacy

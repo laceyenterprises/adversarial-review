@@ -24,9 +24,10 @@ function commonJsFixtureDir(prefix) {
   return dir;
 }
 function fixtureEnv(env = {}) {
-  // Fake gh fixtures must never inherit a worker's live credentials or refresh commands.
+  // Fake gh fixtures must never inherit live credentials or a worker launch identity.
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !key.startsWith('HAM_')
+    && !['HQ_LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
     && !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
   return { ...cleanEnv, ...env };
 }
@@ -1144,6 +1145,8 @@ case "$1" in
     elif [ "$2" = status ]; then echo '{"holder":{"leaseId":"fixture-lease","holderPr":42,"pastDeadline":false,"ageSeconds":0}}';
     else echo '{}'; fi ;;
   */ama-audit.mjs|*/merge-action-receipt.mjs|*/watcher-wake.mjs) echo '{}' ;;
+  # Use the real CLI entrypoint: the fixture bin symlink otherwise skips its main guard.
+  */legacy-lane-write.mjs) shift; exec "$REAL_NODE" ${JSON.stringify(join(root, 'bin/legacy-lane-write.mjs'))} "$@" ;;
   *) exec "$REAL_NODE" "$@" ;;
 esac
 `, { mode: 0o755 });

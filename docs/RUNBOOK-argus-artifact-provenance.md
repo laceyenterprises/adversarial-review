@@ -8,8 +8,10 @@ For each manifest directory, `vendor/argus-artifacts.json` has schema version 1
 and a `packages` map keyed by package name. Each entry names `producerRepo`
 (`owner/repo`), `producerPr` (positive number), `producerCommit` (full merged
 40-hex commit), `producerPath` (relative `.tgz` path) and `sha256`. See the
-committed 0.8.0 record for the existing SDK. This seeds that release only; it
-does not consume the incident's 0.9.0 artifact.
+reviewed base's 0.8.0 record and this upgrade's 0.9.0 record for the existing SDK.
+The 0.8.0 enrollment reached main independently in PR #1554; the later record
+names the immutable release merged in Agent OS PR #9435. Neither record alone
+approves a dependency or authorizes runtime activation.
 
 The base must already establish the file dependency and producer record. A
 normal independently reviewed enrollment may add the record for an existing

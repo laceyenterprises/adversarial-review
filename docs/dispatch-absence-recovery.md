@@ -23,9 +23,10 @@ Public SDK 0.8.0 and 0.9.0 transports forward the JSON envelope unchanged.
 `readDispatchLookupResult` still validates the base envelope; the consumer
 validates this additive optional evidence. No SDK source, types, dependency,
 lockfile, installed package or immutable archive changes are required. This
-consumer remains pinned to its existing 0.8.0 artifact; the separately owned
-DOG-10/LAC-2118 0.9.0 migration is independent. If typed SDK interpretation is
-added later, release a new producer artifact and adopt its merged public bytes.
+consumer now uses the independently released immutable 0.9.0 artifact through
+DOG-10/LAC-2118; absence evidence needs no artifact modification. If typed SDK
+interpretation is added later, release a new producer artifact and adopt its
+merged public bytes.
 
 The dispatch directory owner continues to run the documented single-PR
 `bin/settle-legacy-closer-intent.mjs` command, dry-run first. For expired keyed

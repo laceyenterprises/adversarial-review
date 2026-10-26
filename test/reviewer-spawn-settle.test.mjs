@@ -1,3 +1,4 @@
+import './helpers/worker-observation-fixture.mjs';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';

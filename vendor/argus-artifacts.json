@@ -3,10 +3,10 @@
   "packages": {
     "@agent-os/app-sdk": {
       "producerRepo": "laceyenterprises/agent-os",
-      "producerPr": 9419,
-      "producerCommit": "387fb06d5d8835e320f49388a2ebdf67f2249945",
-      "producerPath": "platform/app-sdk/node/agent-os-app-sdk-0.8.0.tgz",
-      "sha256": "4fd689c6e80cb9b620a3715ed9fe9474425d42fb00637193939f6b1a69b16a2e"
+      "producerPr": 9435,
+      "producerCommit": "f37c7489439a8b53eafecb38870f75fe9f07fa57",
+      "producerPath": "platform/app-sdk/node/agent-os-app-sdk-0.9.0.tgz",
+      "sha256": "6882b99962cd7319ed858d0a15ee84f9384a566474359085153aef2b615f2cf9"
     }
   }
 }

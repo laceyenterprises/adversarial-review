@@ -108,9 +108,9 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       const cacheKey = JSON.stringify([rootDir, record.hqRoot || '', launchRequestId]);
       let probe = includeOwnerEvidence ? null : terminalLaunches.get(cacheKey);
       try {
-        probe ||= await readStatusImpl({ launchRequestId, rootDir, hqRoot: record.hqRoot, signal,
+        probe ||= await readStatusImpl({ launchRequestId, rootDir, env, hqRoot: record.hqRoot, signal,
           includeRetryChain: true,
-          // Yield while psql runs, retaining the remaining ownership-probe budget.
+          // Retain the remaining SDK ownership-observation budget.
           timeoutMs: Math.max(1, deadline - Date.now()) });
       } catch { uncertain('ledger-read-failed'); continue; }
       if (launchRequestMeaning(record.lastObservedStatus).parked

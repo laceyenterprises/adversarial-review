@@ -13,9 +13,6 @@ import {
   readActiveDagRunsForPlan,
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
-  readLatestWorkerRunStatusFromLedger,
-  readReviewerSessionUsageFromLedger,
-  readWorkerRunUsageFromLedger,
   resolveSessionLedgerReadTarget,
 } from '../src/session-ledger-read-adapter.mjs';
 
@@ -356,256 +353,6 @@ test('LAC-2091: explicit targets keep their policy beside a stale legacy HQ ledg
   assert.equal(malformedEnv.reason, 'malformed-ledger-target');
 });
 
-test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newest timestamped row', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
-  const db = new Database(ledgerDb);
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_old', 'lrq_1', 'rs_1', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:03:00.000Z');
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_new', 'lrq_1', 'rs_2', 'cancelled', 3, 4, 0.2, 'session-ledger', '2026-06-04T00:04:00.000Z', null, null);
-  db.close();
-
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_1',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.run_id, 'wr_new');
-  assert.equal(result.row.status, 'cancelled');
-});
-
-test('readLatestWorkerRunStatusFromLedger breaks timestamp ties deterministically without sqlite rowid ordering', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
-  const db = new Database(ledgerDb);
-  for (const [runId, status] of [['wr_a', 'running'], ['wr_z', 'succeeded']]) {
-    db.prepare(
-      `INSERT INTO worker_runs (
-         run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-         token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(runId, 'lrq_tie', 'rs_1', status, 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, null);
-  }
-  db.close();
-
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_tie',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.run_id, 'wr_z');
-  assert.equal(result.row.status, 'succeeded');
-});
-
-test('readLatestWorkerRunStatusFromLedger includes the latest worker_process pid when available', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
-  const db = new Database(ledgerDb);
-  db.exec(`
-    CREATE TABLE worker_processes (
-      worker_process_id INTEGER PRIMARY KEY,
-      launch_request_id TEXT,
-      pid INTEGER,
-      process_status TEXT,
-      started_at TEXT,
-      exited_at TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
-  `);
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_live', 'lrq_pid', 'rs_pid', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:03:00.000Z');
-  db.prepare(
-    `INSERT INTO worker_processes (
-       worker_process_id, launch_request_id, pid, process_status, started_at, exited_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(1, 'lrq_pid', 111, 'exited', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
-  db.prepare(
-    `INSERT INTO worker_processes (
-       worker_process_id, launch_request_id, pid, process_status, started_at, exited_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(2, 'lrq_pid', 4242, 'running', '2026-06-04T00:02:00.000Z', null, '2026-06-04T00:02:00.000Z', '2026-06-04T00:04:00.000Z');
-  db.close();
-
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pid',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.status, 'running');
-  assert.equal(result.row.pid, 4242);
-  assert.equal(result.row.process_status, 'running');
-});
-
-test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader path with deterministic ordering', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (command, args, options) => {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
-      assert.ok(args.includes('-v'));
-      assert.ok(args.includes('lrq=lrq_pg'));
-      const sql = String(options.input);
-      assert.doesNotMatch(sql, /\\set/);
-      assert.match(sql, /FROM worker_runs/);
-      assert.match(sql, /WHERE wr\.launch_request_id = :'lrq'/);
-      assert.match(sql, /LEFT JOIN LATERAL/);
-      assert.match(sql, /wp_latest\.pid/);
-      assert.match(sql, /ORDER BY COALESCE\(wr\.updated_at::text, wr\.ended_at::text, wr\.started_at::text, ''\) DESC/);
-      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
-      assert.equal(options.killSignal, 'SIGKILL');
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.run_id, 'wr_pg');
-  assert.equal(result.row.status, 'cancelled');
-  assert.equal(result.target.backend, 'postgres');
-});
-
-test('readLatestWorkerRunStatusFromLedger strips a password-bearing postgres DSN out of argv', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger-user:s3cret@ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (_command, args, options) => {
-      assert.ok(args.includes('postgres://ledger-user@ledger.example/agent_os_ledger'));
-      assert.ok(!args.some((arg) => String(arg).includes('s3cret')));
-      assert.equal(options.env.PGPASSWORD, 's3cret');
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-});
-
-test('readLatestWorkerRunStatusFromLedger strips a password-bearing libpq DSN out of argv', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: {
-      backend: 'postgres',
-      dsn: "host=ledger.example user=ledger-user password='s3 cret' dbname=agent_os_ledger",
-    },
-    spawnSyncImpl: (_command, args, options) => {
-      assert.ok(args.includes('host=ledger.example user=ledger-user dbname=agent_os_ledger'));
-      assert.ok(!args.some((arg) => String(arg).includes('s3 cret')));
-      assert.equal(options.env.PGPASSWORD, 's3 cret');
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-});
-
-test('readLatestWorkerRunStatusFromLedger supports databaseName-only postgres targets', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
-    spawnSyncImpl: (_command, args, options) => {
-      assert.deepEqual(args.slice(0, 3), ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1']);
-      assert.ok(args.includes('-d'));
-      assert.ok(args.includes('agent_os_ledger'));
-      assert.ok(!args.some((arg) => String(arg).startsWith('postgres://')));
-      assert.notEqual(options.env, process.env);
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"succeeded","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.status, 'succeeded');
-});
-
-test('readLatestWorkerRunStatusFromLedger reports unparseable psql stdout with context', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: () => ({
-      status: 0,
-      stdout: 'NOTICE: extension already exists\n{"run_id":"wr_pg"}\n',
-      stderr: '',
-    }),
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'ledger-read-failed');
-  assert.match(result.detail, /unparseable psql stdout/);
-  assert.match(result.detail, /NOTICE: extension already exists/);
-});
-
-test('readLatestWorkerRunStatusFromLedger fails closed when psql is terminated by signal', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: () => ({
-      status: null,
-      signal: 'SIGKILL',
-      stdout: '',
-      stderr: '',
-    }),
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'ledger-read-failed');
-  assert.match(result.detail, /SIGKILL/);
-});
-
-test('readLatestWorkerRunStatusFromLedger returns a timeout failure when psql exceeds the spawn timeout', () => {
-  const result = readLatestWorkerRunStatusFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: () => ({
-      status: null,
-      signal: 'SIGKILL',
-      stdout: '',
-      stderr: '',
-      error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }),
-    }),
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'ledger-read-failed');
-  assert.match(result.detail, /timed out after 30000ms/);
-});
-
 test('readBuildCompletionSignalForPr reads merge-commit signals without a reviewed-head filter', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');
@@ -781,242 +528,6 @@ test('readBuildCompletionSignalForPr uses the canonical postgres reader path', (
   assert.equal(result.row.completion_id, 'bcmp_pg');
 });
 
-test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded to the newest row', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
-  const db = new Database(ledgerDb);
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-       source_path, started_at, ended_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('rs_old', 'session-1', 10, 11, 1, 2, 0.1, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-       source_path, started_at, ended_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('rs_new', 'session-1', 20, 21, 3, 4, 0.2, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:02:00.000Z');
-  db.close();
-
-  const result = readReviewerSessionUsageFromLedger({
-    adapterSessionKey: 'session-1',
-    workspacePath: '/tmp/review-workspace',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.session_id, 'rs_new');
-  assert.equal(result.row.total_input_tokens, 20);
-});
-
-test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postgres backend', () => {
-  const result = readWorkerRunUsageFromLedger({
-    workerRunId: 'wr_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (command, args, options) => {
-      assert.equal(command, 'psql');
-      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
-      assert.ok(args.includes('worker_run_id=wr_pg'));
-      const sql = String(options.input);
-      assert.doesNotMatch(sql, /\\set/);
-      assert.match(sql, /FROM worker_runs wr/);
-      assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
-      assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
-      assert.match(sql, /'token_usage_guardrail', token_usage_guardrail/);
-      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
-          + '"token_usage_input":120,"token_usage_output":45,"token_usage_guardrail":165,'
-          + '"token_usage_cost_usd":0.35,"token_usage_source":"session-ledger",'
-          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
-          + '"updated_at":"2026-06-04T00:02:00.000Z",'
-          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.target.backend, 'postgres');
-  assert.equal(result.row.run_id, 'wr_pg');
-  assert.equal(result.row.token_usage_input, 120);
-  assert.equal(result.row.token_usage_output, 45);
-  assert.equal(result.row.token_usage_guardrail, 165);
-  assert.equal(result.row.total_cache_read_tokens, 11);
-  assert.equal(result.row.total_cache_write_tokens, 7);
-});
-
-test('readWorkerRunUsageFromLedger falls back to the postgres launch-request selector', () => {
-  const selectors = [];
-  const result = readWorkerRunUsageFromLedger({
-    launchRequestId: 'lrq_pg',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (_command, args, options) => {
-      const sql = String(options.input);
-      selectors.push(sql);
-      assert.ok(args.includes('launch_request_id=lrq_pg'));
-      assert.doesNotMatch(sql, /\\set/);
-      assert.match(sql, /WHERE wr\.launch_request_id = :'launch_request_id'/);
-      return {
-        status: 0,
-        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
-          + '"token_usage_input":10,"token_usage_output":4,"token_usage_guardrail":null,'
-          + '"token_usage_cost_usd":0.05,"token_usage_source":"session-ledger",'
-          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:01:00.000Z",'
-          + '"updated_at":"2026-06-04T00:01:00.000Z",'
-          + '"total_cache_read_tokens":null,"total_cache_write_tokens":null}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.launch_request_id, 'lrq_pg');
-  assert.equal(result.row.token_usage_input, 10);
-  assert.equal(result.row.token_usage_guardrail, null);
-  assert.equal(selectors.length, 1);
-});
-
-test('readReviewerSessionUsageFromLedger reads runtime-session token rollups from the postgres backend', () => {
-  const result = readReviewerSessionUsageFromLedger({
-    adapterSessionKey: 'session-1',
-    workspacePath: '/tmp/review-workspace',
-    startedAt: '2026-06-04T00:00:00.000Z',
-    endedAt: '2026-06-04T00:02:00.000Z',
-    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (command, args, options) => {
-      assert.equal(command, 'psql');
-      const sql = String(options.input);
-      assert.ok(args.includes('key0=session-1'));
-      assert.doesNotMatch(sql, /\\set/);
-      assert.match(sql, /FROM runtime_sessions/);
-      assert.match(sql, /adapter_session_key IN \(:'key0'\)/);
-      // TIMESTAMPTZ-safe window bounds, never COALESCE(<timestamptz>, '').
-      assert.match(sql, /:'window_end'::timestamptz/);
-      assert.match(sql, /:'window_start'::timestamptz/);
-      assert.doesNotMatch(sql, /COALESCE\(started_at, ''\)/);
-      return {
-        status: 0,
-        stdout: '{"session_id":"rs_pg","adapter_session_key":"session-1",'
-          + '"total_input_tokens":120,"total_output_tokens":45,'
-          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7,"total_cost_usd":0.35,'
-          + '"source_path":"/tmp/review-workspace",'
-          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
-          + '"updated_at":"2026-06-04T00:02:00.000Z"}\n',
-        stderr: '',
-      };
-    },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.target.backend, 'postgres');
-  assert.equal(result.row.session_id, 'rs_pg');
-  assert.equal(result.row.total_input_tokens, 120);
-  assert.equal(result.row.total_output_tokens, 45);
-  assert.equal(result.row.total_cache_read_tokens, 11);
-});
-
-test('adapter exposes the same ledger target contract to worker-run and runtime-session readers', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
-  const db = new Database(ledgerDb);
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-       total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-       source_path, started_at, ended_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('rs_1', 'session-1', 120, 45, 11, 7, 0.35, '/tmp/review-workspace', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_1', 'lrq_1', 'rs_1', 'succeeded', 120, 45, 0.35, 'session-ledger', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
-  db.close();
-
-  const ledgerTarget = { backend: 'sqlite', path: ledgerDb };
-  const workerUsage = readWorkerRunUsageFromLedger({
-    workerRunId: 'wr_1',
-    ledgerTarget,
-    env: HERMETIC_CONFIG_ENV,
-  });
-  const sessionUsage = readReviewerSessionUsageFromLedger({
-    adapterSessionKey: 'session-1',
-    workspacePath: '/tmp/review-workspace',
-    startedAt: '2026-06-04T00:00:00.000Z',
-    endedAt: '2026-06-04T00:02:00.000Z',
-    ledgerTarget,
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(workerUsage.ok, true);
-  assert.equal(workerUsage.target.path, ledgerDb);
-  assert.equal(workerUsage.row.token_usage_guardrail, null);
-  assert.equal(sessionUsage.ok, true);
-  assert.equal(sessionUsage.target.path, ledgerDb);
-});
-
-test('readWorkerRunUsageFromLedger treats historical sqlite ledgers without guardrail column as null guardrail usage', () => {
-  const rootDir = tempRoot();
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  mkdirSync(path.dirname(ledgerDb), { recursive: true });
-  const db = new Database(ledgerDb);
-  db.exec(`
-    CREATE TABLE runtime_sessions (
-      session_id TEXT PRIMARY KEY,
-      total_cache_read_tokens INTEGER,
-      total_cache_write_tokens INTEGER
-    );
-    CREATE TABLE worker_runs (
-      run_id TEXT PRIMARY KEY,
-      launch_request_id TEXT,
-      session_id TEXT,
-      status TEXT,
-      token_usage_input INTEGER,
-      token_usage_output INTEGER,
-      token_usage_cost_usd REAL,
-      token_usage_source TEXT,
-      started_at TEXT,
-      ended_at TEXT,
-      updated_at TEXT
-    );
-  `);
-  db.prepare(
-    `INSERT INTO runtime_sessions (
-       session_id, total_cache_read_tokens, total_cache_write_tokens
-     ) VALUES (?, ?, ?)`
-  ).run('rs_old', 3, 2);
-  db.prepare(
-    `INSERT INTO worker_runs (
-       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
-       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('wr_old', 'lrq_old', 'rs_old', 'succeeded', 10, 4, 0.05, 'session-ledger', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
-  db.close();
-
-  const result = readWorkerRunUsageFromLedger({
-    workerRunId: 'wr_old',
-    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-    env: HERMETIC_CONFIG_ENV,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.row.run_id, 'wr_old');
-  assert.equal(result.row.token_usage_input, 10);
-  assert.equal(result.row.token_usage_output, 4);
-  assert.equal(result.row.token_usage_guardrail, null);
-  assert.equal(result.row.total_cache_read_tokens, 3);
-  assert.equal(result.row.total_cache_write_tokens, 2);
-});
-
 test('queryPostgresRows enforces readOnly without variables and preserves the unguarded fast path', async () => {
   // Expose the private helper in a temporary module, without expanding the
   // production adapter's public interface just for this regression test.
@@ -1118,11 +629,6 @@ test('postgres query values stay in argv for quotes, backslashes and control cha
       ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
       spawnSyncImpl,
     }), 'plan_id'],
-    [(value, spawnSyncImpl) => readLatestWorkerRunStatusFromLedger({
-      launchRequestId: value,
-      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
-      spawnSyncImpl,
-    }), 'lrq'],
   ]) {
     let baselineScript;
     for (const value of values) {
@@ -1276,4 +782,119 @@ test('RCV-08 PostgreSQL verdict export uses bounded read-only canonical adapter 
     spawnSyncImpl: () => ({ status: 1, stderr: 'synthetic-secret-driver-error' }) });
   assert.equal(failed.ok, false);
   assert.equal(JSON.stringify(failed).includes('synthetic-secret'), false);
+});
+
+test('readActiveDagRunsForPlan strips a password-bearing postgres DSN out of argv', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger-user:s3cret@ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (_command, args, options) => {
+      assert.ok(args.includes('postgres://ledger-user@ledger.example/agent_os_ledger'));
+      assert.ok(!args.some((arg) => String(arg).includes('s3cret')));
+      assert.equal(options.env.PGPASSWORD, 's3cret');
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('readActiveDagRunsForPlan strips a password-bearing libpq DSN out of argv', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: {
+      backend: 'postgres',
+      dsn: "host=ledger.example user=ledger-user password='s3 cret' dbname=agent_os_ledger",
+    },
+    spawnSyncImpl: (_command, args, options) => {
+      assert.ok(args.includes('host=ledger.example user=ledger-user dbname=agent_os_ledger'));
+      assert.ok(!args.some((arg) => String(arg).includes('s3 cret')));
+      assert.equal(options.env.PGPASSWORD, 's3 cret');
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"cancelled","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('readActiveDagRunsForPlan supports databaseName-only postgres targets', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+    spawnSyncImpl: (_command, args, options) => {
+      assert.deepEqual(args.slice(0, 3), ['--no-psqlrc', '-v', 'ON_ERROR_STOP=1']);
+      assert.ok(args.includes('-d'));
+      assert.ok(args.includes('agent_os_ledger'));
+      assert.ok(!args.some((arg) => String(arg).startsWith('postgres://')));
+      assert.notEqual(options.env, process.env);
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","status":"succeeded","updated_at":"2026-06-04T00:04:00.000Z","ended_at":null,"started_at":"2026-06-04T00:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.runs[0].run_id, 'wr_pg');
+});
+
+test('readActiveDagRunsForPlan reports unparseable psql stdout with context', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => ({
+      status: 0,
+      stdout: 'NOTICE: extension already exists\n{"run_id":"wr_pg"}\n',
+      stderr: '',
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'ledger-read-failed');
+  assert.match(result.detail, /unparseable psql stdout/);
+  assert.match(result.detail, /NOTICE: extension already exists/);
+});
+
+test('readActiveDagRunsForPlan fails closed when psql is terminated by signal', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => ({
+      status: null,
+      signal: 'SIGKILL',
+      stdout: '',
+      stderr: '',
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'ledger-read-failed');
+  assert.match(result.detail, /SIGKILL/);
+});
+
+test('readActiveDagRunsForPlan returns a timeout failure when psql exceeds the spawn timeout', () => {
+  const result = readActiveDagRunsForPlan({
+    planId: 'synthetic-plan',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => ({
+      status: null,
+      signal: 'SIGKILL',
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }),
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'ledger-read-failed');
+  assert.match(result.detail, /timed out after 30000ms/);
 });

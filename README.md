@@ -1097,15 +1097,28 @@ store. Findings move from pending to applied or dropped with a reason; daily
 batches move from prepared to launched to completed, with one active batch per
 repository/area. Strict-off reviews require durable capture before merge, and
 handed-off non-blocking-only reviews follow the same daemon policy. Current-head
-review, checks, leases and execution switches remain required. The daily worker
-re-checks current main and opens one normal-review PR per area. Collection reads
+review, checks, leases and execution switches remain required. The daily
+decision-only worker
+re-checks current main and pushes tested fixes. FINDINGSSHAPE-01 leaves all-declined
+batches complete without a PR; provisional applied outcomes trigger one PR-shaped
+publication follow-up on the same pushed branch, batch ID and idempotency key.
+The publisher opens one normal-review PR through `hq pr open --spec-ref none`.
+Existing marked PRs, including terminal PRs, are recovered before dispatch; the
+launch ledger, a per-batch lock and durable submission intent fence duplicate
+publishers after restarts or lost receipts. Uncertain/failed publication retains
+its fence for recovery of that same launch. The outcome schema and merge-bound
+settlement stay unchanged. See the
+[batch recovery contract](docs/data-model/review-findings.md#non-blocking-backlog-findingsbatch-01).
+Collection reads
 the batch PR's body and merge state through the retrying GitHub transport;
 plain, bold or HTML-comment marker lines may include surrounding whitespace.
 A failed sweep startup or fleet-stop interruption retries on the next poll
 without advancing the daily deadline; claimed batches retain their dispatch keys
 and concurrent polls cannot overlap a sweep. Valid batch PR evidence clears any
-prior batch error while outcomes remain pending until merge. Hourly settlement-only passes collect worker outcomes and
-observe batch PR merges without claiming new batches or dispatching workers.
+prior batch error while outcomes remain pending until merge. Hourly collection
+passes collect worker outcomes, dispatch publication follow-ups
+when needed, and observe batch PR merges without claiming new batches or repeating
+preparation launches.
 Dropped findings retain no result PR reference. Simplicity advice is a separate
 snapshot ledger with unassigned, dropped, assigned and completed applied/declined
 states. Only the final posted review of a source PR merged at or after the

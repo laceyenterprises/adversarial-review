@@ -547,3 +547,240 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   await ticker.tick(Date.parse('2026-01-03T00:00:00Z'));
   assert.equal(launches, 2);
 });
+
+async function publicationFixture(t, { advice = false } = {}) {
+  const f = fixture(t);
+  f.pass(1, advice ? adviceOnly : body);
+  f.db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const { runFindingBatches } = await import('../src/findings-batch.mjs');
+  const env = { HQ_ROOT: f.rootDir };
+  const dispatches = [];
+  await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args) => {
+    dispatches.push(args);
+    return { stdout: '{"launchRequestId":"fixture-initial"}' };
+  } });
+  const batch = f.db.prepare('SELECT * FROM finding_batches').get();
+  const outputPath = join(f.rootDir, 'data', 'finding-batches', batch.batch_id, 'outcomes.json');
+  const result = { batchId: batch.batch_id, prNumber: null, headSha: head,
+    findings: f.db.prepare('SELECT finding_id FROM finding_backlog').all()
+      .map(r => ({ findingId: r.finding_id, outcome: 'applied', reason: 'Documented return value' })),
+    simplicityNotes: f.db.prepare('SELECT note_id FROM finding_batch_notes').all()
+      .map(n => ({ noteId: n.note_id, simplicityNoteApplied: true, reason: 'Removed duplicate helper' })) };
+  writeFileSync(outputPath, JSON.stringify(result));
+  const status = { launchRequestId: batch.launch_id, repo, branch: 'fixture/findings',
+    status: 'blocked_needs_decision', terminal: true, succeeded: false,
+    milestones: { branch_pushed: { status: 'done' } } };
+  const key = `findings-batch-${batch.batch_id}`;
+  const launch = { launch_request_id: batch.launch_id, idempotency_key: key,
+    ticket_ref: `FINDINGS-${batch.batch_id}`, target_repo: repo, status: 'blocked_needs_decision' };
+  const launches = [launch];
+  const publication = { prs: [], headSha: head };
+  const options = { ...f, env, resolutionOnly: true, logger: { warn() {} },
+    fetchPublication: async (_repo, branch) => {
+      assert.equal(_repo, repo);
+      assert.equal(branch, status.branch);
+      return publication;
+    },
+    readLaunches: async args => {
+      assert.equal(args.idempotencyKey, key);
+      assert.equal(args.timeoutMs, 15_000);
+      return { ok: true, rows: launches };
+    },
+    execFileImpl: async (bin, args) => {
+      assert.equal(bin, 'hq');
+      if (args[1] === 'status') {
+        assert.deepEqual(args, ['dispatch', 'status', batch.launch_id, '--json', '--root', f.rootDir]);
+        return { stdout: JSON.stringify(status) };
+      }
+      dispatches.push(args);
+      launches.push({ ...launch, launch_request_id: 'fixture-publish', status: 'running' });
+      return { stdout: '{"launchRequestId":"fixture-publish"}' };
+    } };
+  const pr = { number: 81, state: 'OPEN', headRefOid: head, headRefName: status.branch,
+    isCrossRepository: false, body: `Finding-Batch: ${batch.batch_id}` };
+  return { ...f, batch, outputPath, result, status, dispatches, launches, publication, options, pr,
+    run: overrides => runFindingBatches({ ...options, ...overrides }) };
+}
+
+test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped publisher on the pushed branch', async t => {
+  for (const advice of [false, true]) await t.test(`advice-only=${advice}`, async t => {
+    const f = await publicationFixture(t, { advice });
+    const initial = f.dispatches[0];
+    assert.equal(initial[initial.indexOf('--completion-shape') + 1], 'decision-only');
+    assert.equal(initial.includes('--branch'), false);
+    const preparePrompt = readFileSync(initial[initial.indexOf('--prompt') + 1], 'utf8');
+    assert.match(preparePrompt, /Do not run hq pr open in this launch/);
+    assert.match(preparePrompt, /Write applied outcomes only after the push succeeds/);
+    await f.run();
+    assert.equal(f.dispatches.length, 2);
+    const publish = f.dispatches[1];
+    assert.equal(publish[publish.indexOf('--completion-shape') + 1], 'pr');
+    assert.equal(publish[publish.indexOf('--branch') + 1], f.status.branch);
+    for (const flag of ['--idempotency-key', '--ticket', '--repo']) {
+      assert.equal(publish[publish.indexOf(flag) + 1], initial[initial.indexOf(flag) + 1]);
+    }
+    const prompt = readFileSync(publish[publish.indexOf('--prompt') + 1], 'utf8');
+    assert.match(prompt, /hq pr open --spec-ref none/);
+    assert.ok(prompt.includes(`Finding-Batch: ${f.batch.batch_id}`));
+    assert.match(prompt, /never open a second PR/);
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    await f.run(); // A restart/next hourly pass sees the existing publisher.
+    assert.equal(f.dispatches.length, 2);
+    f.publication.prs = [f.pr];
+    await f.run();
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    f.publication.prs[0] = { ...f.pr, state: 'MERGED', headRefOid: 'b'.repeat(40) };
+    await f.run(); // PR publication succeeded before the final outcome rewrite.
+    const stored = f.db.prepare('SELECT * FROM finding_batches').get();
+    assert.ok(stored.completed_at);
+    assert.equal(stored.launch_id, f.batch.launch_id);
+    assert.equal(JSON.parse(stored.result_json).prNumber, 81);
+    assert.equal(JSON.parse(stored.result_json).headSha, 'b'.repeat(40));
+    assert.equal(f.dispatches.length, 2);
+  });
+});
+
+test('FINDINGSSHAPE-01 decline-only outcomes finish without PR, push, status probe or publisher', async t => {
+  const f = await publicationFixture(t);
+  f.result.headSha = null;
+  f.result.findings.forEach(outcome => { outcome.outcome = 'dropped'; outcome.reason = 'Already fixed on main'; });
+  writeFileSync(f.outputPath, JSON.stringify(f.result));
+  const unexpected = async () => assert.fail('declines require no external command');
+  await f.run({ execFileImpl: unexpected, fetchPublication: unexpected, readLaunches: unexpected });
+  const stored = f.db.prepare('SELECT * FROM finding_batches').get();
+  assert.ok(stored.completed_at);
+  assert.equal(JSON.parse(stored.result_json).prNumber, null);
+  assert.equal(JSON.parse(stored.result_json).headSha, null);
+  assert.equal(f.dispatches.length, 1);
+});
+
+test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispatch a second publisher', async t => {
+  for (const enqueued of [false, true]) await t.test(`enqueued=${enqueued}`, async t => {
+    const f = await publicationFixture(t);
+    await f.run({ execFileImpl: async (bin, args) => {
+      if (args[1] === 'status') return f.options.execFileImpl(bin, args);
+      if (enqueued) await f.options.execFileImpl(bin, args);
+      throw Error('lost publish receipt');
+    } });
+    if (enqueued) f.launches[1].status = 'failed';
+    await f.run();
+    await f.run();
+    assert.equal(f.dispatches.length, enqueued ? 2 : 1);
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error,
+      enqueued ? 'batch-publish-ended-without-pr: failed' : 'batch-publish-receipt-pending');
+    f.publication.prs = [{ ...f.pr, state: 'MERGED' }];
+    await f.run();
+    assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+  });
+});
+
+test('FINDINGSSHAPE-01 publication holds on invalid manifests, live preparation and uncertain evidence', async t => {
+  const cases = [
+    ['foreign manifest', f => { f.result.batchId = 'foreign'; }],
+    ['missing finding', f => { f.result.findings = []; }],
+    ['blank reason', f => { f.result.findings[0].reason = ''; }],
+    ['missing pushed head', f => { f.result.headSha = null; }],
+    ['live preparation', f => { f.status.status = 'running'; f.status.terminal = false; }],
+    ['explicit nonterminal', f => { f.status.terminal = false; }],
+    ['foreign launch', f => { f.status.launchRequestId = 'foreign'; }],
+    ['foreign repo', f => { f.status.repo = 'other/service'; }],
+    ['missing branch', f => { f.status.branch = null; }],
+    ['no push milestone', f => { f.status.milestones = {}; }],
+    ['remote head mismatch', f => { f.publication.headSha = 'c'.repeat(40); }],
+    ['missing ledger receipt', f => { f.launches.length = 0; }],
+    ['foreign receipt', f => { f.launches[0].idempotency_key = 'foreign'; }],
+    ['foreign ticket', f => { f.launches[0].ticket_ref = 'foreign'; }],
+    ['foreign receipt repo', f => { f.launches[0].target_repo = 'other/service'; }],
+    ['unmarked PR', f => { f.publication.prs = [{ ...f.pr, body: 'unrelated' }]; }],
+    ['multiple PRs', f => { f.publication.prs = [f.pr, f.pr]; }],
+    ['fork PR', f => { f.publication.prs = [{ ...f.pr, isCrossRepository: true }]; }],
+    ['other branch PR', f => { f.publication.prs = [{ ...f.pr, headRefName: 'other' }]; }],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async t => {
+    const f = await publicationFixture(t);
+    mutate(f);
+    writeFileSync(f.outputPath, JSON.stringify(f.result));
+    await f.run();
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+  });
+});
+
+test('FINDINGSSHAPE-01 concurrent collectors fence publisher submission', async t => {
+  const f = await publicationFixture(t);
+  let unblock, entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const held = f.run({ fetchPublication: async () => {
+    entered();
+    await new Promise(resolve => { unblock = resolve; });
+    return f.publication;
+  } });
+  await ready;
+  await f.run();
+  assert.equal(f.dispatches.length, 1);
+  unblock();
+  await held;
+  assert.equal(f.dispatches.length, 2);
+});
+
+test('FINDINGSSHAPE-01 default publication reader uses stubbed commands and recovers terminal PRs before deleted refs', async t => {
+  const f = await publicationFixture(t);
+  const ghCalls = [];
+  const execFileImpl = async (bin, args, opts) => {
+    if (bin === 'hq') return f.options.execFileImpl(bin, args, opts);
+    assert.equal(bin, 'gh');
+    assert.equal(opts.timeout, 15_000);
+    ghCalls.push(args);
+    return { stdout: JSON.stringify(args[0] === 'pr' ? f.publication.prs : { object: { sha: head } }) };
+  };
+  // Omit the injected reader to exercise the production transport with stubs.
+  const { runFindingBatches } = await import('../src/findings-batch.mjs');
+  const options = { ...f.options };
+  delete options.fetchPublication;
+  await runFindingBatches({ ...options, execFileImpl });
+  assert.deepEqual(ghCalls, [
+    ['pr', 'list', '--repo', repo, '--head', f.status.branch, '--state', 'all', '--limit', '100',
+      '--json', 'number,state,mergedAt,body,headRefOid,headRefName,isCrossRepository'],
+    ['api', `repos/${repo}/git/ref/heads/fixture%2Ffindings`],
+  ]);
+  for (const state of ['CLOSED', 'MERGED']) {
+    f.publication.prs = [{ ...f.pr, state }];
+    await runFindingBatches({ ...options, execFileImpl });
+    assert.equal(ghCalls.at(-1)[0], 'pr');
+    assert.equal(f.dispatches.length, 2);
+    assert.equal(Boolean(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at), state === 'MERGED');
+  }
+  assert.equal(ghCalls.filter(args => args[0] === 'api').length, 1);
+});
+
+test('FINDINGSSHAPE-01 hourly collection publishes a prepared batch without a new daily claim', async t => {
+  const f = await publicationFixture(t);
+  const { createFindingBatchTicker } = await import('../src/findings-batch.mjs');
+  rmSync(f.outputPath);
+  const ticker = createFindingBatchTicker(f.options);
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  await ticker.tick(now);
+  writeFileSync(f.outputPath, JSON.stringify(f.result));
+  await ticker.tick(now + 3600000);
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batches').get().n, 1);
+  await ticker.tick(now + 7200000);
+  assert.equal(f.dispatches.length, 2);
+});
+
+test('FINDINGSSHAPE-01 unreadable command or ledger evidence preserves unresolved outcomes', async t => {
+  for (const boundary of ['status', 'branch/PR', 'ledger']) await t.test(boundary, async t => {
+    const f = await publicationFixture(t);
+    const fail = async () => { throw Error('fixture evidence unavailable'); };
+    const overrides = boundary === 'status' ? { execFileImpl: fail }
+      : boundary === 'branch/PR' ? { fetchPublication: fail } : { readLaunches: fail };
+    await f.run(overrides);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'fixture evidence unavailable');
+    assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
+    assert.equal(f.dispatches.length, 1);
+    await f.run();
+    assert.equal(f.dispatches.length, 2, 'a read failure must not persist a submission intent');
+  });
+});

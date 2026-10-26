@@ -1462,3 +1462,25 @@ test('queue infrastructure cause deduplicates enqueue across lost receipt and de
   assert.notEqual(distinct.id, first.id);
   await drainPendingAlerts(options); assert.equal(sent, 2);
 });
+
+test('HOLDOWNER-01: STUCK pages deduplicate the durable outbox per PR head after a lost receipt', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let sent = 0;
+  const options = { env, event: 'adversarial_review.pr_progress_stalled',
+    payload: { repo: 'example/project', prNumber: 1, headSha: 'synthetic-head-a' },
+    fsImpl: { readFileSync: () => 'synthetic-hooks-token', existsSync: () => true },
+    requestText: async () => { sent++; return '{}'; } };
+  const first = await deliverAlert('ownerless: review suppressed; no live closer; no hold', options);
+  const repeat = await deliverAlert('retry after lost tracker receipt', options);
+  assert.equal(first.id, repeat.id);
+  assert.equal(repeat.queued, false);
+  assert.equal(alertPresentationForDoc({ event: options.event, text: 'ownerless', payload: options.payload }).severity, 'SEV1');
+  await drainPendingAlerts(options);
+  assert.equal(sent, 1);
+  const delivered = await deliverAlert('retry after delivery', options);
+  assert.equal(delivered.id, first.id);
+  await deliverAlert('new head', { ...options, payload: { ...options.payload, headSha: 'synthetic-head-b' } });
+  await drainPendingAlerts(options);
+  assert.equal(sent, 2);
+});

@@ -2104,6 +2104,9 @@ for (const suppressionReason of ['same-head-review-in-flight', 'other-suppressio
           assert.equal(row.review_status, 'pending');
           assert.equal(row.review_attempts, 0);
           assert.ok(!claims.some(claim => claim.prNumber === 101));
+          const ownerObservation = db.prepare('SELECT * FROM ttm_owner_state WHERE pr_number = 101').get();
+          assert.equal(ownerObservation.review_suppressed, 1);
+          assert.equal(ownerObservation.review_reason, '${suppressionReason}');
           const archived = db.prepare('SELECT row_json FROM review_failure_archive WHERE pr_number = 101').get();
           assert.equal(JSON.parse(archived.row_json).review_attempts, 3);
           assert.equal(JSON.parse(archived.row_json).failure_message, 'Command failed with code 1');

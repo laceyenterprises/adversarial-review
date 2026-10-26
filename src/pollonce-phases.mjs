@@ -1,3 +1,4 @@
+import { observeTtmReviewLane } from './ttm-owner.mjs';
 import { maybeRunDocsFastPath } from './docs-fast-path.mjs';
 import { applyReviewerArm, applyReviewerArmEffectiveRoute, reviewerArmExecution } from './osg-reviewer-arm.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -796,6 +797,10 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         return;
       }
+      const observeReviewLane = decision => observeTtmReviewLane(db, {
+        repo: repoPath, prNumber, headSha: subject.headSha, ...decision,
+      });
+      if (!subject.terminal) observeReviewLane({});
       // Drafts are intentional waits. Persist discovery evidence so they do
       // not inflate either spill lane, including a PR converted back to draft.
       const draft = subject.isDraft ?? subject.draft;
@@ -1487,6 +1492,7 @@ export async function processReviewSubject(entry, ctx) {
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
         try {
           hammerSuppression = await resolveHeadCloserCommitSuppression();
+          observeReviewLane(hammerSuppression);
           if (hammerHeadOwnership(hammerSuppression, subject.headSha)) {
             restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
               reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }), headSha: subject.headSha });
@@ -1588,6 +1594,9 @@ export async function processReviewSubject(entry, ctx) {
             db,
           })
           : { suppressed: false, reason: null };
+      const observedSuppression = [stalePostedReviewSuppression, stalePostedReviewCloserSuppression,
+        stalePostedReviewBudgetSuppression].find(decision => decision.suppressed);
+      if (postedReviewHeadMoved && observedSuppression) observeReviewLane(observedSuppression);
       if (postedReviewHeadMoved && stalePostedReviewSuppression.suppressed) {
         console.log(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
@@ -2945,6 +2954,7 @@ export async function processReviewSubject(entry, ctx) {
         if ((await routeReviewCycleCapToHammer(current)).handled) return;
         const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
+          observeReviewLane(closerSpawnSuppression);
           console.log(
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
               `${closerSpawnSuppression.reason} on head ${String(subject.headSha || '').slice(0, 12) || 'unknown'}`
@@ -2991,6 +3001,7 @@ export async function processReviewSubject(entry, ctx) {
               `${firstPassBudgetSuppression.reason}: verified FSR-06B trailer-only re-review request`
           );
         } else if (firstPassBudgetSuppression.suppressed) {
+          observeReviewLane(firstPassBudgetSuppression);
           const budgetDetail =
             firstPassBudgetSuppression.reason === 'remediation-round-budget-exhausted'
               ? ` (${firstPassBudgetSuppression.completedRoundsForPR}/${firstPassBudgetSuppression.roundBudget} rounds, ` +
@@ -3293,6 +3304,7 @@ export async function processReviewSubject(entry, ctx) {
             // duplicate consumes no attempt budget and no re-review ceiling.
             const reviewedHeadDedup = await readPreflight('dedup');
             if (reviewedHeadDedup.alreadyReviewed) {
+              observeReviewLane({ suppressed: true, reason: 'same-head-already-reviewed' });
               console.log(buildDuplicateReviewSkipAudit({
                 repoPath,
                 prNumber,
@@ -3337,6 +3349,7 @@ export async function processReviewSubject(entry, ctx) {
               return { dispatched: false, reason: 'memory-admission-deferred' };
             }
 
+            observeReviewLane({ suppressed: false });
             const attemptAt = new Date().toISOString();
             let reviewerSessionUuid = randomUUID();
             // After ARA-06's operator-surface carve, the per-PR loop iterates

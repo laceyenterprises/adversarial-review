@@ -1586,7 +1586,8 @@ async function pollOnceWithinBudget(
     // per-PR status — whenever no review has posted within the freshness window
     // while open PRs still await one. Fail-open: a pager fault never breaks the
     // tick.
-    runTtmTrackerWatcherTick({ db, logger: console });
+    await runTtmTrackerWatcherTick({ db, rootDir: ROOT, hqRoot: resolveHqRoot(process.env),
+      logger: console, deliverAlertFn: defaultDeliverAlert });
     try {
       await maybeFireReviewStalledAlert({
         deliverAlertFn: defaultDeliverAlert,

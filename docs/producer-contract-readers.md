@@ -422,3 +422,20 @@ and lookup. SDK 0.8.0 does not accept an abort signal: its outstanding HTTP work
 can outlive caller cancellation and follows SDK transport timeout handling. Full
 transport cancellation requires a producer SDK update. Sync compatibility reads
 are included in watcher latency summaries under `node`.
+
+### Worker observations
+
+SDK 0.9.0 supplies `readWorkerObservations` and its synchronous HTTP bridge.
+Worker/run/session IDs are opaque. The adapter consumes producer ordering,
+collects up to ten pages within a bounded read budget, and treats unavailable
+scope or incomplete reads as holds. It preserves null/zero usage and strips no
+producer ownership requirements. Daemon identity and builder routing use the
+same public provenance projection, including separate current-head and
+head-independent build identity reads. Review/merge authority still requires
+its existing exact-head evidence; observed process success never supplies it.
+No SQL, OS config, worker-file or workspace-path fallback is permitted.
+
+An explicit OS worker/run selector keeps usage unknown when the public read is
+unavailable; accounting does not fall through to a worker log or transcript.
+Local reviews without an OS worker selector retain their app-owned provider
+evidence policy. Deprecated ledger-target arguments do not select a database.

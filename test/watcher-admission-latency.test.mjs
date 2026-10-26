@@ -109,11 +109,9 @@ test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executo
   const monitor = createWatcherLatencyMonitor({ logger: quiet });
   t.after(() => monitor.stop());
   const cases = [
-    ['readLatestWorkerRunStatusFromLedger', { launchRequestId: 'lrq_synthetic' }],
     ['readBuildCompletionSignalForPr', { repo: 'example/review-fixture', prNumber: 1, signalKind: 'merged' }],
     ['readBuildCompletionProducerEvidence', { repo: 'example/review-fixture', signalKind: 'merged' }],
     ['readActiveDagRunsForPlan', { planId: 'synthetic-plan' }],
-    ['readPrBuilderProvenance', { repo: 'example/review-fixture', prNumber: 1 }],
   ];
   for (const [name, selectors] of cases) {
     for (const result of [ok, { status: 1, stderr: 'permanent synthetic failure', stdout: '' }, { error: { code: 'ENOENT' } }]) {
@@ -140,17 +138,16 @@ test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executo
   assert.equal(monitor.summary().children.psql?.count ?? 0, 0, 'fixtures must not start real async children');
 });
 
-test('WATCHERLAG-01: transient retry backoff yields to other admission work and stays bounded', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let calls = 0, complete = false;
-  const lookup = ledger.readPrBuilderProvenanceAsync({ repo: 'example/review-fixture', prNumber: 1,
-    ledgerTarget: target, env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-    spawnAsyncImpl: async () => { calls++; return { error: { code: 'ETIMEDOUT' } }; },
-  }).then(result => { complete = true; return result; });
-  await flush(); assert.equal(calls, 1); assert.equal(complete, false);
-  t.mock.timers.tick(100); await flush(); assert.equal(calls, 2);
-  t.mock.timers.tick(200); await flush(); assert.equal(calls, 3);
-  assert.equal((await lookup).deferClaim, true);
+test('WATCHERLAG-01: pending public provenance read yields to admission and failure retains the claim', async () => {
+  let release;
+  const pending=new Promise(resolve=>{release=resolve;});
+  let calls=0, complete=false;
+  const lookup=ledger.readPrBuilderProvenanceAsync({repo:'example/review-fixture',prNumber:1,
+    dispatchSession:{dispatchLookup:async()=>{calls++;await pending;throw new Error('synthetic outage');}},
+  }).then(result=>{complete=true;return result;});
+  await flush();assert.equal(calls,1);assert.equal(complete,false);
+  release();
+  assert.equal((await lookup).deferClaim,true);
 });
 
 for (const evidence of ['merged', 'unreadable', 'replacement-owner', 'replacement-status-owner']) {

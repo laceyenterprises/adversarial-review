@@ -32,7 +32,6 @@ import { appendAmaAuditAttempt, readAmaAuditEntry } from './ama/audit.mjs';
 import { clobberGuardBlocks, evaluateMovedHeadClobberGuard } from './ama/clobber-guard.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
 import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation } from './ama/merge-lease.mjs';
-import { readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestRollup,
@@ -424,7 +423,8 @@ async function runDaemonCleanMergeAttemptInner({
   recoverCancelledChecksImpl = recoverCancelledChecks,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
-  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
+  readBuildCompletionSignalForPrImpl,
+  dispatchSession,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   resolveOperatorMergeAccountabilityImpl = resolveOperatorMergeAccountability,
   autonomousMergeAccountability = null,
@@ -679,6 +679,7 @@ async function runDaemonCleanMergeAttemptInner({
     env,
     readBuildCompletionSignalForPrImpl,
     readHeadAttestationChainForPrImpl,
+    dispatchSession,
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
     logger,
   });

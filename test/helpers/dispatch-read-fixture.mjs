@@ -1,3 +1,4 @@
+import {workerObservationFixture} from './worker-observation-fixture.mjs';
 // Synthetic consumer policy fixtures at the SDK transport boundary. These
 // disposable test databases are fixture builders, never application fallbacks.
 import { mock } from 'node:test';
@@ -5,6 +6,7 @@ import Database from 'better-sqlite3';
 import { dispatchReadTransport } from '../../src/dispatch-read-client.mjs';
 
 function fixture(selector, args) {
+  if(selector.observation) return workerObservationFixture(selector,args);
   if(args.dispatchSession) return args.dispatchSession.dispatchLookup(selector);
   if(args.dispatchLookupSyncImpl) return args.dispatchLookupSyncImpl(selector);
   const path=args.ledgerTarget?.path ?? args.ledgerDbPath;

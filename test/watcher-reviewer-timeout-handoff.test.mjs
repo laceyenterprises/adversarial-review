@@ -54,6 +54,7 @@ function buildLoaderSource() {
     [fileUrl('src', 'ama-closure-orchestration.mjs')]: 'fixture:closure-orchestration',
     [fileUrl('src', 'merge-agent-candidate.mjs')]: 'fixture:merge-agent-candidate',
     [fileUrl('src', 'ama', 'orphan-watchdog.mjs')]: 'fixture:orphan-watchdog',
+    [fileUrl('src', 'builder-provenance-routing.mjs')]: 'fixture:builder-provenance',
     [fileUrl('src', 'ama', 'closure-wait.mjs')]: 'fixture:closure-wait',
   };
 
@@ -119,6 +120,9 @@ export async function load(url, context, nextLoad) {
         });
       }
     `)} };
+  }
+  if (url === 'fixture:builder-provenance') {
+    return {format:'module',shortCircuit:true,source:'export function resolveBuilderProvenanceRouting(subject){return {subject,deferClaim:false};} export const resolveBuilderProvenanceRoutingAsync=async subject=>({subject,deferClaim:false});'};
   }
   if (url === 'fixture:orphan-watchdog') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`

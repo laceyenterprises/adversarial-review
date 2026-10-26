@@ -1,11 +1,7 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
-import * as yaml from 'js-yaml';
-import { readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
+import { readWorkerObservation } from './dispatch-read-client.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -25,122 +21,10 @@ const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
 // raises HCPHeadAttestationConfigurationError) — the 2026-07-15 outage class.
 const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-failed']);
 
-// 2026-07-29: The daemon identity reader MUST bind the Postgres ledger. In the
-// long-running watcher, resolveSessionLedgerReadTarget's env/root sqlite fallback
-// could resolve a stale sqlite target on a Postgres deploy
-// (`postgres-configured-but-sqlite-resolved`) — the reader never queried
-// Postgres, found no `pr_opened` row, and `worker-identity-unresolved`
-// fail-closed EVERY clean daemon merge (fresh #4395 with a valid current-head
-// pr_opened row still parked). Build an explicit Postgres ledger target before
-// calling the reader so resolveSessionLedgerReadTarget honors it first. This is
-// deliberately NOT implemented by importing loadConfig: config-loader imports
-// watcher-adjacent modules in enough tests that doing so creates an init cycle.
-// Env wins; Agent OS YAML config is the owner-lane fallback when launchd/sudo
-// gives the resolver a scrubbed env. Non-Postgres/unconfigured deploys return
-// null and keep the reader's auto-resolution (e.g. sqlite dev).
-export function postgresLedgerTargetFromEnv(env = {}) {
-  const dsn = String(
-    env.AGENT_OS_SESSION_LEDGER_DSN
-      || env.AGENT_OS_CFG_SESSION_LEDGER_DSN
-      || env.AGENT_OS_SESSION_LEDGER_TARGET
-      || '',
-  ).trim();
-  const databaseName =
-    String(env.AGENT_OS_CFG_SESSION_LEDGER_DATABASE_NAME || '').trim() || null;
-  if (/^postgres(ql)?:\/\//i.test(dsn)) {
-    return { backend: 'postgres', dsn, databaseName, source: 'daemon-identity:env-dsn' };
-  }
-  const backend = String(
-    env.AGENT_OS_CFG_SESSION_LEDGER_BACKEND || env.AGENT_OS_SESSION_LEDGER_BACKEND || '',
-  ).toLowerCase();
-  if (backend === 'postgres' && databaseName) {
-    return { backend: 'postgres', dsn: null, databaseName, source: 'daemon-identity:env-dbname' };
-  }
-  return null;
-}
-
-function localYamlSibling(path) {
-  const dir = dirname(path);
-  const name = basename(path);
-  if (name.endsWith('.yaml')) return join(dir, `${name.slice(0, -'.yaml'.length)}.local.yaml`);
-  if (name.endsWith('.yml')) return join(dir, `${name.slice(0, -'.yml'.length)}.local.yml`);
-  return null;
-}
-
-function readYamlObject(path) {
-  try {
-    if (!path || !existsSync(path)) return null;
-    const doc = yaml.load(readFileSync(path, 'utf8'));
-    return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
-  } catch {
-    return null;
-  }
-}
-
-function sessionLedgerConfigFromTopPath(topPath) {
-  const merged = {};
-  for (const path of [topPath, localYamlSibling(topPath)]) {
-    const doc = readYamlObject(path);
-    const section = doc?.session_ledger;
-    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
-    if (Object.hasOwn(section, 'backend')) merged.backend = section.backend;
-    if (Object.hasOwn(section, 'dsn')) merged.dsn = section.dsn;
-    if (Object.hasOwn(section, 'database_name')) merged.databaseName = section.database_name;
-  }
-  return Object.keys(merged).length > 0 ? merged : null;
-}
-
-function uniquePaths(paths) {
-  return [...new Set(paths.filter(Boolean))];
-}
-
-function agentOsConfigPathCandidates({ env = {}, rootDir = null } = {}) {
-  const explicitConfigPath = String(env.AGENT_OS_CONFIG_PATH || '').trim();
-  if (explicitConfigPath) return [resolve(explicitConfigPath)];
-
-  const candidates = [];
-  const deployCheckout = String(env.AGENT_OS_DEPLOY_CHECKOUT || env.AGENT_OS_ROOT || '').trim();
-  if (deployCheckout) candidates.push(resolve(deployCheckout, 'config.yaml'));
-
-  const resolvedRoot = String(rootDir || '').trim() ? resolve(String(rootDir)) : '';
-  if (resolvedRoot) {
-    candidates.push(resolve(resolvedRoot, 'config.yaml'));
-    const suffix = `${sep}tools${sep}adversarial-review`;
-    if (resolvedRoot.endsWith(suffix)) {
-      candidates.push(resolve(resolvedRoot, '..', '..', 'config.yaml'));
-    }
-  }
-
-  const home = String(env.HOME || '').trim();
-  if (home) candidates.push(resolve(home, 'agent-os', 'config.yaml'));
-  return uniquePaths(candidates);
-}
-
-export function postgresLedgerTargetFromAgentOsConfig({ env = {}, rootDir = null } = {}) {
-  for (const path of agentOsConfigPathCandidates({ env, rootDir })) {
-    const cfg = sessionLedgerConfigFromTopPath(path);
-    if (!cfg) continue;
-
-    const dsn = String(cfg.dsn || '').trim();
-    const databaseName = String(cfg.databaseName || '').trim() || null;
-    const backend = String(cfg.backend || '').trim().toLowerCase();
-    if (/^postgres(ql)?:\/\//i.test(dsn)) {
-      return { backend: 'postgres', dsn, databaseName, source: 'daemon-identity:config-dsn' };
-    }
-    if (backend === 'postgres' && databaseName) {
-      return {
-        backend: 'postgres',
-        dsn: null,
-        databaseName,
-        source: 'daemon-identity:config-dbname',
-      };
-    }
-  }
-  return null;
-}
-
-export function postgresLedgerTargetForDaemon({ env = {}, rootDir = null } = {}) {
-  return postgresLedgerTargetFromEnv(env) || postgresLedgerTargetFromAgentOsConfig({ env, rootDir });
+async function readDaemonBuildIdentity(args) {
+  const result = await readWorkerObservation({observation:'provenance',repo:args.repo,
+    pr_number:Number(args.prNumber),head_sha:args.headSha || undefined,limit:100}, args);
+  return result.ok ? result : {...result,reason:result.reason || 'missing-build-completion-signal'};
 }
 
 export async function resolveDaemonWorkerIdentityForPr({
@@ -152,7 +36,8 @@ export async function resolveDaemonWorkerIdentityForPr({
   rootDir,
   env = process.env,
   ledgerTarget = null,
-  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
+  dispatchSession = null,
+  readBuildCompletionSignalForPrImpl = readDaemonBuildIdentity,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   consumeHeadAttestations = null,
   logger = console,
@@ -247,7 +132,6 @@ export async function resolveDaemonWorkerIdentityForPr({
   // headMovedAfterBuildCompletion. Authorizing the moved head is NOT identity's
   // job — the verdict pinned to commit_id===head, CI-green-at-head, the live-head
   // re-read before merge, and the LHA attestation chain police it downstream.
-  const resolvedLedgerTarget = ledgerTarget || postgresLedgerTargetForDaemon({ env, rootDir });
   const strictArgs = {
     repo,
     prNumber,
@@ -256,7 +140,7 @@ export async function resolveDaemonWorkerIdentityForPr({
     hqRoot,
     rootDir,
     env,
-    ledgerTarget: resolvedLedgerTarget,
+    ledgerTarget, dispatchSession,
   };
   let resolved;
   try {
@@ -295,7 +179,7 @@ export async function resolveDaemonWorkerIdentityForPr({
       prNumber,
       currentHeadSha: currentHead,
       currentBranch,
-      hqRoot,
+      env, rootDir, dispatchSession,
     });
     if (launchProvenance.ok) {
       return stamp({
@@ -307,7 +191,7 @@ export async function resolveDaemonWorkerIdentityForPr({
         resolvedBy: 'launch-provenance',
         headMovedAfterBuildCompletion: false,
         buildCompletionReason: resolved?.reason || 'missing-build-completion-signal',
-        launchProvenancePath: launchProvenance.path,
+        launchProvenanceSource: 'app-sdk',
       });
     }
     return stamp({
@@ -449,134 +333,16 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
   };
 }
 
-function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
-  const record = String(recordRepo || '').trim().toLowerCase();
-  const expected = String(expectedRepo || '').trim().toLowerCase();
-  if (!record || !expected) return false;
-  // Launch provenance is merge-authority identity, so the repo string must carry
-  // the same owner/name identity GitHub reports for the PR. A short `<name>`
-  // record is ambiguous across forks and must fail closed until the producer
-  // writes canonical `<owner>/<name>` provenance.
-  return record === expected;
-}
-
-function daemonLaunchProvenancePayload(doc) {
-  return doc?.launchProvenance && typeof doc.launchProvenance === 'object'
-    ? doc.launchProvenance
-    : doc;
-}
-
-async function readJsonFileBestEffort(path) {
-  try {
-    return JSON.parse(await readFileAsync(path, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function worker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
-  return results;
-}
-
-async function listDaemonWorkerLaunchProvenanceCandidates(hqRoot) {
-  const workersDir = join(String(hqRoot || ''), 'workers');
-  let entries;
-  try {
-    entries = await readdir(workersDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const paths = entries
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => [
-      join(workersDir, entry.name, 'launch-provenance.json'),
-      join(workersDir, entry.name, 'run.json'),
-      join(workersDir, entry.name, 'workspace.json'),
-    ]);
-  const candidates = await mapWithConcurrency(paths, 32, async (path) => {
-    try {
-      return { path, mtimeMs: (await stat(path)).mtimeMs };
-    } catch {
-      return null;
-    }
-  });
-  return candidates.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs);
-}
-
-async function readDaemonWorkerLaunchProvenanceForPr({
-  repo,
-  prNumber,
-  currentHeadSha = '',
-  currentBranch = '',
-  hqRoot,
-} = {}) {
-  const expectedRepo = String(repo || '').trim();
-  const expectedBranch = String(currentBranch || '').trim();
-  const expectedHead = String(currentHeadSha || '').trim();
-  const numericPrNumber = Number(prNumber);
-  if (!expectedRepo || !Number.isInteger(numericPrNumber) || numericPrNumber <= 0) {
-    return { ok: false, reason: 'missing-pr-identity' };
-  }
-  if (!expectedBranch) {
-    return { ok: false, reason: 'missing-pr-branch' };
-  }
-  const candidates = (await listDaemonWorkerLaunchProvenanceCandidates(hqRoot)).slice(0, 2000);
-  for (const candidate of candidates) {
-    const doc = await readJsonFileBestEffort(candidate.path);
-    const payload = daemonLaunchProvenancePayload(doc);
-    if (!payload || typeof payload !== 'object') continue;
-    // Prefer the owner-qualified GitHub identity (producer #665 remediation:
-    // `<owner>/<name>`) so the exact-match against the full `expectedRepo` from
-    // the live GitHub rollup succeeds. The short `prRepo`/`repo` fields remain a
-    // fallback ONLY for their exact-match semantics — a short-form record like
-    // `agent-os` still fails closed against `laceyenterprises/agent-os`, and a
-    // same-name fork's `attacker/agent-os` still never matches. This is purely
-    // additive qualification; it never bridges short↔full or across owners.
-    const recordRepo =
-      payload.prRepoFullName || payload.repoFullName || payload.prRepo || payload.repo;
-    const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
-    const recordPrNumberRaw = payload.prNumber ?? payload.pr_number ?? payload.pr;
-    const recordPrNumber = Number(recordPrNumberRaw);
-    const recordHasPrNumber = recordPrNumberRaw != null
-      && recordPrNumberRaw !== ''
-      && Number.isInteger(recordPrNumber)
-      && recordPrNumber > 0;
-    if (!daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo)) continue;
-    // Identity is anchored on repo + the PR's LIVE head branch: the branch hq
-    // dispatched this worker to build is the same branch GitHub reports as the PR
-    // head, so a repo-scoped exact branch match attributes the merge to the
-    // launching worker exactly as the pr_opened ledger row would. PR number is an
-    // OPTIONAL secondary check — hq's canonical launch-provenance seed omits it for
-    // the overwhelming majority of records (only ~5% on this host carry one), so
-    // REQUIRING it fail-closed the fallback for every normal worker. When a record
-    // DOES carry a PR number we still enforce it, so a record explicitly tagged to
-    // a different PR can never be misattributed to this one.
-    if (recordHasPrNumber && recordPrNumber !== numericPrNumber) continue;
-    if (recordBranch !== expectedBranch) continue;
-    const launchRequestId = String(
-      payload.launchRequestId || payload.launch_request_id || doc?.launchRequestId || doc?.launch_request_id || '',
-    ).trim();
-    const workerClass = String(
-      payload.workerClass || payload.worker_class || payload.workerSpec?.workerClass || doc?.workerClass || '',
-    ).trim();
-    if (!launchRequestId || !workerClass) continue;
-    return {
-      ok: true,
-      launchRequestId,
-      workerClass,
-      headSha: String(payload.prHeadSha || payload.headSha || payload.head_sha || expectedHead || '').trim() || null,
-      branch: recordBranch,
-      path: candidate.path,
-    };
-  }
-  return { ok: false, reason: 'missing-launch-provenance' };
+async function readDaemonWorkerLaunchProvenanceForPr({ repo, prNumber, currentBranch,
+  env, rootDir, dispatchSession, timeoutMs } = {}) {
+  if (!repo || !Number.isInteger(Number(prNumber)) || Number(prNumber) <= 0) return {ok:false,reason:'missing-pr-identity'};
+  if (!currentBranch) return {ok:false,reason:'missing-pr-branch'};
+  const result = await readWorkerObservation({observation:'provenance',repo,branch:currentBranch,limit:100},
+    {env,rootDir,dispatchSession,timeoutMs});
+  if (!result.ok) return result;
+  const row = result.rows.find(row => row.repo?.toLowerCase() === repo.toLowerCase()
+    && row.branch === currentBranch && (!row.pr_number || Number(row.pr_number) === Number(prNumber))
+    && row.launch_request_id && row.worker_class);
+  return row ? {ok:true,launchRequestId:row.launch_request_id,workerClass:row.worker_class,
+    headSha:row.head_sha} : {ok:false,reason:'missing-launch-provenance'};
 }

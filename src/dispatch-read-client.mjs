@@ -31,6 +31,11 @@ export const dispatchReadTransport = {
     const session = args.dispatchSession ?? await cachedSession.promise;
     return session.dispatchLookup(selector);
   },
+  observationSync(selector, args = {}) {
+    if (!args.workerObservationSyncImpl) assertReadsEnabled(args.env ?? process.env);
+    return observeSynchronousChild('node', () =>
+      (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, options(args)));
+  },
   lookupSync(selector, args = {}) {
     if (!args.dispatchLookupSyncImpl) assertReadsEnabled(args.env ?? process.env);
     return observeSynchronousChild('node', () =>
@@ -97,4 +102,54 @@ function assertReadsEnabled(env) {
 
 function unprovenAbsence() {
   return { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
+}
+
+
+export async function readWorkerObservation(selector, args = {}) {
+  try {
+    const rows = [];
+    let offset = 0;
+    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    for (let page = 0; page < 10; page++) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};
+      const reply = await boundedLookup({...selector, offset}, {...args,timeoutMs:remaining});
+      const evidence = checkedObservation(reply, selector, offset);
+      if (!evidence.ok) return evidence;
+      rows.push(...evidence.rows);
+      if (reply.complete) return observationRows(rows);
+      offset = reply.next_offset;
+    }
+    return {ok:false,reason:'worker-observation-unavailable'};
+  } catch (error) { cachedSession = null; return unavailable(error); }
+}
+export function readWorkerObservationSync(selector, args = {}) {
+  try {
+    const rows = [];
+    let offset = 0;
+    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    for (let page = 0; page < 10; page++) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return {ok:false,reason:'worker-observation-unavailable'};
+      const reply = dispatchReadTransport.observationSync({...selector,offset}, {...args,timeoutMs:remaining});
+      const evidence = checkedObservation(reply, selector, offset);
+      if (!evidence.ok) return evidence;
+      rows.push(...evidence.rows);
+      if (reply.complete) return observationRows(rows);
+      offset = reply.next_offset;
+    }
+    return {ok:false,reason:'worker-observation-unavailable'};
+  } catch (error) { return unavailable(error); }
+}
+function observationRows(rows) {
+  if (!rows.length || new Set(rows.map(row => row.run_id ?? row.session_id ?? row.launch_request_id)).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
+  return {ok:true,rows,row:rows[0],target:{backend:'app-contract',source:'app-sdk'}};
+}
+function checkedObservation(reply, selector, offset) {
+  const evidence = dispatchReadTransport.sdk().readWorkerObservations(reply);
+  if (!evidence.available || reply.observation !== selector.observation
+    || !reply.complete && (reply.next_offset !== offset + evidence.items.length || !evidence.items.length)) {
+    return {ok:false, reason:'worker-observation-unavailable'};
+  }
+  return {ok:true,rows:evidence.items};
 }

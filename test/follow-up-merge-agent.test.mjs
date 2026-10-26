@@ -1,3 +1,4 @@
+import './helpers/worker-observation-fixture.mjs';
 // Must stay the first import: it isolates this file's state before any production module loads.
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
@@ -97,9 +98,11 @@ const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 // A secondary limit may leave the measured primary budget healthy; include
 // those synthetic response headers so unrelated cases never sleep for a reset.
 function syntheticLabelRateLimitError(message = 'rate limited') {
-  const reset = Math.ceil(Date.now() / 1000) + 60;
+  // Keep a known short synthetic retry window instead of the unknown-reset
+  // floor. These label-error cases do not exercise provider quota patience.
+  const reset = Math.ceil(Date.now() / 1000) + 1;
   return Object.assign(new Error(message), {
-    stderr: `* Request at fixture\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Resource: graphql\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: ${reset}\n* Request took 1ms\n`,
+    stderr: `* Request at fixture\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Resource: graphql\n< X-Ratelimit-Remaining: 4900\n< Retry-After: 0.2\n< X-Ratelimit-Reset: ${reset}\n* Request took 1ms\n`,
   });
 }
 
@@ -4140,7 +4143,7 @@ test('lookupOriginalWorkerRunStatus ignores cwd-rooted ledger candidates during 
       env: { ...HERMETIC_CONFIG_ENV, HOME: path.join(rootDir, 'empty-home') },
     });
     assert.equal(result.found, false);
-    assert.equal(result.reason, 'missing-ledger-db');
+    assert.equal(result.reason, 'worker-run-lookup-failed');
   } finally {
     process.chdir(previousCwd);
   }
@@ -4218,7 +4221,7 @@ test('resolveSessionLedgerReadTarget prefers AGENT_OS_DEPLOY_CHECKOUT/.agent-os/
     + 'deploy-checkout DB before the managed-service-root HOME fallback.');
 });
 
-test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkout DB even when a stale managed-service-root DB exists alongside (regression: 2026-05-18 false original-worker-run-row-missing-but-worktree-present)', async () => {
+test('lookupOriginalWorkerRunStatus holds during public outage despite deploy and standby files', async () => {
   const { default: Database } = await import('better-sqlite3');
   const deployCheckout = mkdtempSync(path.join(tmpdir(), 'agent-os-deploy-'));
   const homeDir = mkdtempSync(path.join(tmpdir(), 'agent-os-home-stale-'));
@@ -4263,14 +4266,8 @@ test('lookupOriginalWorkerRunStatus finds a worker_run row in the deploy-checkou
     env: { ...HERMETIC_CONFIG_ENV, AGENT_OS_DEPLOY_CHECKOUT: deployCheckout, HOME: homeDir },
   });
 
-  assert.equal(result.found, true,
-    'Pre-fix: lookup hit the stale managed-service-root DB and returned '
-    + '`missing-worker-run-row`, causing merge-agent to defer dispatch on '
-    + 'every newly-provisioned worker. Post-fix: the deploy-checkout DB '
-    + 'is read first and the row IS found.');
-  assert.equal(result.status, 'succeeded');
-  assert.equal(result.launchRequestId, 'lrq_f80d593f-44b5-4cf2-9bbf-fd7cfdf002be');
-  assert.equal(result.runId, 'wrun_2e08dd49-ce66-43cf-9c5f-6acac8bbc227');
+  assert.equal(result.found, false, 'SDK outage never falls back to a deploy or standby file');
+  assert.equal(result.reason, 'worker-run-lookup-failed');
 });
 
 test('lookupOriginalWorkerRunStatus defers when launchRequestId is missing even if run.json has a runId', async () => {
@@ -4308,7 +4305,7 @@ test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-s
 
   const cases = [
     {
-      reason: 'missing-ledger-db',
+      reason: 'worker-run-lookup-failed',
       options: {
         env: { ...HERMETIC_CONFIG_ENV, HOME: mkdtempSync(path.join(tmpdir(), 'agent-os-empty-home-')) },
         rootDir: missingLedgerRoot,
@@ -4333,7 +4330,7 @@ test('lookupOriginalWorkerRunStatus maps adapter failure reasons onto teardown-s
       },
     },
     {
-      reason: 'malformed-ledger-target',
+      reason: 'worker-run-lookup-failed',
       options: {
         ledgerTarget: { backend: 'postgres' },
         env: { ...HERMETIC_CONFIG_ENV },

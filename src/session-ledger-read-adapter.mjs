@@ -1,4 +1,4 @@
-import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe } from './dispatch-read-client.mjs';
+import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe, readWorkerObservation, readWorkerObservationSync } from './dispatch-read-client.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, spawnSync } from 'node:child_process';
@@ -388,76 +388,8 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
-const SQLITE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SQLITE_SCHEMA_PROBE_ATTEMPTS = 3;
-const SQLITE_SCHEMA_PROBE_BASE_DELAY_MS = 25;
-
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
-}
-
-function isTransientSqliteError(err) {
-  const code = String(err?.code || '').toUpperCase();
-  const message = String(err?.message || err || '').toLowerCase();
-  return code === 'SQLITE_BUSY'
-    || code === 'SQLITE_LOCKED'
-    || message.includes('database is locked')
-    || message.includes('database is busy');
-}
-
-function sqliteTableHasColumn(target, tableName, columnName) {
-  if (!SQLITE_IDENTIFIER_RE.test(tableName) || !SQLITE_IDENTIFIER_RE.test(columnName)) {
-    return {
-      ok: false,
-      reason: 'ledger-read-failed',
-      detail: `unsafe sqlite identifier in schema probe: ${tableName}.${columnName}`,
-      target,
-    };
-  }
-  if (!existsSync(target.path)) {
-    return {
-      ok: false,
-      reason: 'missing-ledger-target',
-      detail: `sqlite ledger path does not exist: ${target.path}`,
-      target,
-    };
-  }
-  const loaded = loadBetterSqlite3();
-  if (!loaded.ok) return loaded;
-  let lastError = null;
-  for (let attempt = 1; attempt <= SQLITE_SCHEMA_PROBE_ATTEMPTS; attempt += 1) {
-    let db = null;
-    try {
-      db = new loaded.Database(target.path, { readonly: true, fileMustExist: true });
-      db.pragma('busy_timeout = 5000');
-      const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
-      return {
-        ok: true,
-        exists: rows.some((column) => column.name === columnName),
-        target,
-      };
-    } catch (err) {
-      lastError = err;
-      if (attempt < SQLITE_SCHEMA_PROBE_ATTEMPTS && isTransientSqliteError(err)) {
-        sleepSync(SQLITE_SCHEMA_PROBE_BASE_DELAY_MS * attempt);
-        continue;
-      }
-      return {
-        ok: false,
-        reason: 'ledger-read-failed',
-        detail: err?.message || String(err),
-        target,
-      };
-    } finally {
-      if (db) db.close();
-    }
-  }
-  return {
-    ok: false,
-    reason: 'ledger-read-failed',
-    detail: lastError?.message || String(lastError || 'sqlite schema probe failed'),
-    target,
-  };
 }
 
 function truncateForDetail(value, limit = 200) {
@@ -756,115 +688,17 @@ function unsupportedBackend(target) {
   };
 }
 
-export function readLatestWorkerRunStatusFromLedger(args) { return runLedgerStepsSync(readLatestWorkerRunStatusFromLedgerSteps(args)); }
-export function readLatestWorkerRunStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLatestWorkerRunStatusFromLedgerSteps(args), args); }
-
-function* readLatestWorkerRunStatusFromLedgerSteps({
-  launchRequestId,
-  ledgerTarget = null,
-  ledgerDbPath = null,
-  env = process.env,
-  rootDir = process.cwd(),
-  hqRoot = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  const normalizedLaunchRequestId = normalizeText(launchRequestId);
-  if (!normalizedLaunchRequestId) {
-    return { ok: false, reason: 'missing-launch-request-id' };
-  }
-  const resolution = resolveSessionLedgerReadTarget({
-    ledgerTarget,
-    ledgerDbPath,
-    requiredTables: ['worker_runs'],
-    env,
-    rootDir,
-    hqRoot,
-  });
-  if (!resolution.ok) return resolution;
-  let queried;
-  if (resolution.target.backend === 'sqlite') {
-    const hasWorkerProcesses = sessionLedgerDbHasTables(resolution.target.path, ['worker_processes']);
-    const processSelect = hasWorkerProcesses ? ', wp.pid AS pid, wp.process_status AS process_status' : '';
-    const processJoin = hasWorkerProcesses
-      ? `LEFT JOIN worker_processes wp
-           ON wp.worker_process_id = (
-             SELECT wp_latest.worker_process_id
-               FROM worker_processes wp_latest
-              WHERE wp_latest.launch_request_id = wr.launch_request_id
-              ORDER BY COALESCE(wp_latest.updated_at, wp_latest.exited_at, wp_latest.started_at, wp_latest.created_at, '') DESC,
-                       COALESCE(wp_latest.started_at, wp_latest.created_at, '') DESC,
-                       wp_latest.worker_process_id DESC
-              LIMIT 1
-           )`
-      : '';
-    queried = querySqliteRows(
-      resolution.target,
-      `SELECT wr.run_id, wr.launch_request_id, wr.status, wr.updated_at, wr.ended_at, wr.started_at
-              ${processSelect}
-         FROM worker_runs wr
-         ${processJoin}
-        WHERE wr.launch_request_id = @launchRequestId
-        ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC,
-                 COALESCE(wr.ended_at, wr.started_at, '') DESC,
-                 COALESCE(wr.started_at, '') DESC,
-                 wr.run_id DESC,
-                 wr.launch_request_id DESC
-        LIMIT 1`,
-      { launchRequestId: normalizedLaunchRequestId },
-    );
-  } else if (resolution.target.backend === 'postgres') {
-    queried = yield* queryPostgresRowsSteps(
-      resolution.target,
-      `SELECT json_build_object(
-          'run_id', run_id,
-          'launch_request_id', launch_request_id,
-          'status', status,
-          'updated_at', updated_at,
-          'ended_at', ended_at,
-          'started_at', started_at,
-          'pid', pid,
-          'process_status', process_status
-        )
-         FROM (
-           SELECT wr.run_id, wr.launch_request_id, wr.status, wr.updated_at, wr.ended_at, wr.started_at,
-                  wp.pid, wp.process_status
-             FROM worker_runs wr
-             LEFT JOIN LATERAL (
-               SELECT wp_latest.pid, wp_latest.process_status
-                 FROM worker_processes wp_latest
-                WHERE wp_latest.launch_request_id = wr.launch_request_id
-                ORDER BY COALESCE(wp_latest.updated_at::text, wp_latest.exited_at::text, wp_latest.started_at::text, wp_latest.created_at::text, '') DESC,
-                         COALESCE(wp_latest.started_at::text, wp_latest.created_at::text, '') DESC,
-                         wp_latest.worker_process_id DESC
-                LIMIT 1
-             ) wp ON true
-            WHERE wr.launch_request_id = :'lrq'
-            ORDER BY COALESCE(wr.updated_at::text, wr.ended_at::text, wr.started_at::text, '') DESC,
-                     COALESCE(wr.ended_at::text, wr.started_at::text, '') DESC,
-                     COALESCE(wr.started_at::text, '') DESC,
-                     wr.run_id DESC,
-                     wr.launch_request_id DESC
-            LIMIT 1
-         ) latest_worker_run`,
-      {
-        spawnSyncImpl,
-        psqlVars: [['lrq', normalizedLaunchRequestId]],
-      },
-    );
-  } else {
-    return unsupportedBackend(resolution.target);
-  }
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  if (!row) {
-    return {
-      ok: false,
-      reason: 'missing-worker-run-row',
-      launchRequestId: normalizedLaunchRequestId,
-      target: queried.target,
-    };
-  }
-  return { ok: true, row, target: queried.target };
+function workerSelector(args) {
+  return {observation:'workers', launch_request_id:args.launchRequestId,
+    worker_run_id:args.workerRunId, limit:100};
+}
+export function readLatestWorkerRunStatusFromLedger(args = {}) {
+  if (!normalizeText(args.launchRequestId)) return {ok:false,reason:'missing-launch-request-id'};
+  return readWorkerObservationSync(workerSelector(args), args);
+}
+export async function readLatestWorkerRunStatusFromLedgerAsync(args = {}) {
+  if (!normalizeText(args.launchRequestId)) return {ok:false,reason:'missing-launch-request-id'};
+  return readWorkerObservation(workerSelector(args), args);
 }
 
 // The SDK transports producer-owned launch identity and retry evidence.
@@ -1272,372 +1106,39 @@ function* readBuildCompletionProducerEvidenceSteps({
   return { ok: true, row, target: queried.target };
 }
 
-function readWorkerRunUsageFromPostgres(target, {
-  workerRunId = null,
-  launchRequestId = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  // The live postgres ledger carries the current worker_runs schema, so the
-  // guardrail column always exists here (unlike historical sqlite ledgers,
-  // which the sqlite path probes for). Select the fixed column set, matching
-  // the sibling postgres readers in this file.
-  const jsonSelect = (whereClause, psqlVars) => queryPostgresRows(
-    target,
-    `SELECT json_build_object(
-        'run_id', run_id,
-        'launch_request_id', launch_request_id,
-        'session_id', session_id,
-        'token_usage_input', token_usage_input,
-        'token_usage_output', token_usage_output,
-        'token_usage_guardrail', token_usage_guardrail,
-        'token_usage_cost_usd', token_usage_cost_usd,
-        'token_usage_source', token_usage_source,
-        'started_at', started_at,
-        'ended_at', ended_at,
-        'updated_at', updated_at,
-        'total_cache_read_tokens', total_cache_read_tokens,
-        'total_cache_write_tokens', total_cache_write_tokens
-      )
-       FROM (
-         SELECT wr.run_id, wr.launch_request_id, wr.session_id,
-                wr.token_usage_input, wr.token_usage_output, wr.token_usage_guardrail,
-                wr.token_usage_cost_usd, wr.token_usage_source,
-                wr.started_at, wr.ended_at, wr.updated_at,
-                rs.total_cache_read_tokens, rs.total_cache_write_tokens
-           FROM worker_runs wr
-           LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-          WHERE ${whereClause}
-          ORDER BY COALESCE(wr.updated_at::text, wr.ended_at::text, wr.started_at::text, '') DESC,
-                   wr.run_id DESC
-          LIMIT 1
-       ) worker_run_usage`,
-    { spawnSyncImpl, psqlVars },
-  );
-  if (workerRunId) {
-    const queried = jsonSelect(`wr.run_id = :'worker_run_id'`, [['worker_run_id', String(workerRunId)]]);
-    if (!queried.ok) return queried;
-    const [row] = queried.rows;
-    if (row) return { ok: true, row, target: queried.target };
-  }
-  const normalizedLaunchRequestId = normalizeText(launchRequestId);
-  if (!normalizedLaunchRequestId) return { ok: false, reason: 'missing-worker-run-selector', target };
-  const queried = jsonSelect(`wr.launch_request_id = :'launch_request_id'`, [['launch_request_id', normalizedLaunchRequestId]]);
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-worker-run-row', target: queried.target };
+export function readWorkerRunUsageFromLedger(args = {}) {
+  if (!args.workerRunId && !normalizeText(args.launchRequestId)) return {ok:false,reason:'missing-worker-run-selector'};
+  return readWorkerObservationSync(workerSelector(args), args);
 }
-
-export function readWorkerRunUsageFromLedger({
-  workerRunId = null,
-  launchRequestId = null,
-  ledgerTarget = null,
-  ledgerDbPath = null,
-  env = process.env,
-  rootDir = process.cwd(),
-  hqRoot = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  const resolution = resolveSessionLedgerReadTarget({
-    ledgerTarget,
-    ledgerDbPath,
-    requiredTables: ['worker_runs'],
-    env,
-    rootDir,
-    hqRoot,
-  });
-  if (!resolution.ok) return resolution;
-  if (resolution.target.backend === 'postgres') {
-    return readWorkerRunUsageFromPostgres(resolution.target, { workerRunId, launchRequestId, spawnSyncImpl });
-  }
-  if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-  const guardrailColumn = sqliteTableHasColumn(resolution.target, 'worker_runs', 'token_usage_guardrail');
-  if (!guardrailColumn.ok) return guardrailColumn;
-  const guardrailColumnSql = guardrailColumn.exists
-    ? 'wr.token_usage_guardrail'
-    : 'NULL AS token_usage_guardrail';
-  if (workerRunId) {
-    const queried = querySqliteRows(
-      resolution.target,
-      `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
-              wr.token_usage_input, wr.token_usage_output,
-              ${guardrailColumnSql},
-              wr.token_usage_cost_usd, wr.token_usage_source,
-              wr.started_at, wr.ended_at, wr.updated_at,
-              rs.total_cache_read_tokens, rs.total_cache_write_tokens
-         FROM worker_runs wr
-         LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-        WHERE wr.run_id = @workerRunId
-        ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC, wr.rowid DESC
-        LIMIT 1`,
-      { workerRunId },
-    );
-    if (!queried.ok) return queried;
-    const [row] = queried.rows;
-    if (row) return { ok: true, row, target: queried.target };
-  }
-  const normalizedLaunchRequestId = normalizeText(launchRequestId);
-  if (!normalizedLaunchRequestId) return { ok: false, reason: 'missing-worker-run-selector', target: resolution.target };
-  const queried = querySqliteRows(
-    resolution.target,
-    `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
-            wr.token_usage_input, wr.token_usage_output,
-            ${guardrailColumnSql},
-            wr.token_usage_cost_usd, wr.token_usage_source,
-            wr.started_at, wr.ended_at, wr.updated_at,
-            rs.total_cache_read_tokens, rs.total_cache_write_tokens
-       FROM worker_runs wr
-       LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
-      WHERE wr.launch_request_id = @launchRequestId
-      ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC, wr.rowid DESC
-      LIMIT 1`,
-    { launchRequestId: normalizedLaunchRequestId },
-  );
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-worker-run-row', target: queried.target };
-}
-
-function readReviewerSessionUsageFromPostgres(target, {
-  adapterSessionKey = null,
-  sessionKeys = [],
-  workspacePath = null,
-  startedAt = null,
-  endedAt = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  // started_at / ended_at are TIMESTAMPTZ on the postgres backend, so the
-  // window bounds compare as timestamps (never `COALESCE(col, '')`, which is a
-  // hard error against a TIMESTAMPTZ column). NULL handling mirrors the sqlite
-  // COALESCE(..., '') sentinel: a NULL started_at still satisfies the upper
-  // bound, and a row with both timestamps NULL fails the lower bound.
-  const windowClauses = [];
-  const windowVars = [];
-  if (endedAt) {
-    windowClauses.push(`(started_at IS NULL OR started_at <= :'window_end'::timestamptz)`);
-    windowVars.push(['window_end', endedAt]);
-  }
-  if (startedAt) {
-    windowClauses.push(`COALESCE(ended_at, started_at) >= :'window_start'::timestamptz`);
-    windowVars.push(['window_start', startedAt]);
-  }
-  const windowSql = windowClauses.length ? `AND ${windowClauses.join(' AND ')}` : '';
-  const jsonSelect = (whereClause, psqlVars) => queryPostgresRows(
-    target,
-    `SELECT json_build_object(
-        'session_id', session_id,
-        'adapter_session_key', adapter_session_key,
-        'total_input_tokens', total_input_tokens,
-        'total_output_tokens', total_output_tokens,
-        'total_cache_read_tokens', total_cache_read_tokens,
-        'total_cache_write_tokens', total_cache_write_tokens,
-        'total_cost_usd', total_cost_usd,
-        'source_path', source_path,
-        'started_at', started_at,
-        'ended_at', ended_at,
-        'updated_at', updated_at
-      )
-       FROM (
-         SELECT session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-                source_path, started_at, ended_at, ended_at AS updated_at
-           FROM runtime_sessions
-          WHERE ${whereClause}
-            ${windowSql}
-          ORDER BY COALESCE(ended_at::text, started_at::text, '') DESC,
-                   session_id DESC
-          LIMIT 1
-       ) runtime_session_usage`,
-    { spawnSyncImpl, psqlVars },
-  );
-  const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
-  if (keys.length > 0) {
-    const keyPlaceholders = keys.map((_, idx) => `:'key${idx}'`).join(', ');
-    const keyVars = keys.map((key, idx) => [`key${idx}`, key]);
-    const queried = jsonSelect(`adapter_session_key IN (${keyPlaceholders})`, [...keyVars, ...windowVars]);
-    if (!queried.ok) return queried;
-    const [row] = queried.rows;
-    if (row) return { ok: true, row, target: queried.target };
-  }
-  const normalizedWorkspacePath = normalizeText(workspacePath);
-  if (!normalizedWorkspacePath) return { ok: false, reason: 'missing-runtime-session-selector', target };
-  const queried = jsonSelect(`source_path = :'workspace_path'`, [['workspace_path', normalizedWorkspacePath], ...windowVars]);
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-runtime-session-row', target: queried.target };
-}
-
-export function readReviewerSessionUsageFromLedger({
-  adapterSessionKey = null,
-  sessionKeys = [],
-  workspacePath = null,
-  startedAt = null,
-  endedAt = null,
-  ledgerTarget = null,
-  ledgerDbPath = null,
-  env = process.env,
-  rootDir = process.cwd(),
-  hqRoot = null,
-  spawnSyncImpl = spawnSync,
-} = {}) {
-  const resolution = resolveSessionLedgerReadTarget({
-    ledgerTarget,
-    ledgerDbPath,
-    requiredTables: ['runtime_sessions'],
-    env,
-    rootDir,
-    hqRoot,
-  });
-  if (!resolution.ok) return resolution;
-  if (resolution.target.backend === 'postgres') {
-    return readReviewerSessionUsageFromPostgres(resolution.target, {
-      adapterSessionKey,
-      sessionKeys,
-      workspacePath,
-      startedAt,
-      endedAt,
-      spawnSyncImpl,
-    });
-  }
-  if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-
-  const params = {};
-  const window = [];
-  if (endedAt) {
-    params.windowEnd = endedAt;
-    window.push(`COALESCE(started_at, '') <= @windowEnd`);
-  }
-  if (startedAt) {
-    params.windowStart = startedAt;
-    window.push(`COALESCE(ended_at, started_at, '') >= @windowStart`);
-  }
-  const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
-
-  if (keys.length > 0) {
-    keys.forEach((key, idx) => { params[`key${idx}`] = key; });
-    const queried = querySqliteRows(
-      resolution.target,
-      `SELECT session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-              total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-              source_path, started_at, ended_at, ended_at AS updated_at
-         FROM runtime_sessions
-        WHERE adapter_session_key IN (${keys.map((_, idx) => `@key${idx}`).join(', ')})
-          ${window.length ? `AND ${window.join(' AND ')}` : ''}
-        ORDER BY COALESCE(ended_at, started_at, '') DESC, rowid DESC
-        LIMIT 1`,
-      params,
-    );
-    if (!queried.ok) return queried;
-    const [row] = queried.rows;
-    if (row) return { ok: true, row, target: queried.target };
-  }
-
-  const normalizedWorkspacePath = normalizeText(workspacePath);
-  if (!normalizedWorkspacePath) return { ok: false, reason: 'missing-runtime-session-selector', target: resolution.target };
-  const queried = querySqliteRows(
-    resolution.target,
-    `SELECT session_id, adapter_session_key, total_input_tokens, total_output_tokens,
-            total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
-            source_path, started_at, ended_at, ended_at AS updated_at
-       FROM runtime_sessions
-      WHERE source_path = @workspacePath
-        ${window.length ? `AND ${window.join(' AND ')}` : ''}
-      ORDER BY COALESCE(ended_at, started_at, '') DESC, rowid DESC
-      LIMIT 1`,
-    { workspacePath: normalizedWorkspacePath, ...params },
-  );
-  if (!queried.ok) return queried;
-  const [row] = queried.rows;
-  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-runtime-session-row', target: queried.target };
+export function readReviewerSessionUsageFromLedger(args = {}) {
+  const keys = [...new Set([args.adapterSessionKey, ...(args.sessionKeys ?? [])].filter(Boolean))];
+  if (!keys.length) return {ok:false,reason:'missing-runtime-session-selector'};
+  const result = readWorkerObservationSync({observation:'sessions',session_keys:keys,limit:100}, args);
+  if (!result.ok) return result;
+  const rows = result.rows.filter(row => (!args.endedAt || !row.started_at || Date.parse(row.started_at) <= Date.parse(args.endedAt))
+    && (!args.startedAt || Date.parse(row.ended_at || row.started_at || '') >= Date.parse(args.startedAt)));
+  return rows.length ? {...result,rows,row:rows[0]} : {ok:false,reason:'worker-observation-unavailable'};
 }
 
 // ROUTEPROV-01: latest PR build completion -> LRQ -> actual launch identity.
 // Builder identity survives follow-up commits; review/retrigger guards still
 // bind to the current head independently.
 // These reads never touch PgBouncer session settings or mutate the ledger.
-export function readPrBuilderProvenance(args) { return runLedgerStepsSync(readPrBuilderProvenanceSteps(args)); }
-export function readPrBuilderProvenanceAsync(args = {}) { return runLedgerStepsAsync(readPrBuilderProvenanceSteps(args), args); }
-
-function* readPrBuilderProvenanceSteps({
-  repo, prNumber, env = process.env, rootDir = null,
-  ledgerTarget = null, spawnSyncImpl = spawnSync, sleepSyncImpl = sleepSync,
-} = {}) {
-  const normalizedRepo = normalizeText(repo);
-  const numericPrNumber = Number(prNumber);
-  if (!normalizedRepo || !Number.isInteger(numericPrNumber) || numericPrNumber <= 0) {
-    return { ok: false, reason: 'missing-pr-identity' };
-  }
-  const resolution = resolveSessionLedgerReadTarget({ ledgerTarget, env, rootDir,
-    requiredTables: ['build_completions', 'launch_requests', 'worker_runs'],
-  });
-  if (!resolution.ok) return resolution;
-  if (resolution.target.backend === 'sqlite') {
-    const queried = querySqliteRows(resolution.target, `
-      SELECT lr.launch_request_id AS launchRequestId,
-             lr.worker_class AS workerClass,
-             COALESCE(
-               NULLIF(json_extract(lr.request_payload_json, '$.actualHarness'), ''),
-               NULLIF(json_extract(lr.request_payload_json, '$.workerSpec.harness'), ''),
-               NULLIF((
-                 SELECT json_extract(wr.metadata_json, '$.actualHarness')
-                 FROM worker_runs wr
-                 WHERE wr.launch_request_id = lr.launch_request_id
-                 ORDER BY wr.created_at DESC, wr.run_id DESC LIMIT 1
-               ), ''),
-               NULLIF(lr.worker_class, '')
-             ) AS actualHarness
-      FROM build_completions bc
-      JOIN launch_requests lr ON lr.launch_request_id = bc.launch_request_id
-      WHERE bc.repo = @repo AND bc.pr_number = @prNumber
-      ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1`,
-    { repo: normalizedRepo, prNumber: numericPrNumber });
-    if (!queried.ok) return queried;
-    return queried.rows.length
-      ? { ok: true, ...queried.rows[0] }
-      : { ok: false, reason: 'missing-builder-provenance' };
-  }
-  if (resolution.target.backend !== 'postgres') return unsupportedBackend(resolution.target);
-  const target = { ...resolution.target };
-  try {
-    const url = new URL(target.dsn);
-    url.hostname = '127.0.0.1';
-    url.port = '5432';
-    target.dsn = url.toString();
-  } catch {
-    // databaseName-only and libpq keyword/value targets are valid too. The
-    // transaction-scoped READ ONLY guard is safe through PgBouncer.
-    console.warn('[builder-routing] direct ledger DSN unavailable; using configured Postgres target');
-  }
-  const queried = yield* queryPostgresRowsWithRetrySteps(target, `
-    SELECT json_build_object(
-      'launchRequestId', lr.launch_request_id,
-      'workerClass', lr.worker_class,
-      'actualHarness', COALESCE(
-        NULLIF(lr.request_payload_json::jsonb->>'actualHarness', ''),
-        NULLIF(lr.request_payload_json::jsonb->'workerSpec'->>'harness', ''),
-        NULLIF(wr.metadata_json::jsonb->>'actualHarness', ''),
-        NULLIF(lr.worker_class, '')
-      )
-    )
-    FROM build_completions bc
-    JOIN launch_requests lr ON lr.launch_request_id = bc.launch_request_id
-    LEFT JOIN LATERAL (
-      SELECT metadata_json FROM worker_runs
-      WHERE launch_request_id = lr.launch_request_id
-      ORDER BY created_at DESC, run_id DESC LIMIT 1
-    ) wr ON true
-    WHERE bc.repo = :'repo' AND bc.pr_number = :'pr_number'::integer
-    ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1`, {
-    spawnSyncImpl,
-    sleepSyncImpl,
-    readOnly: true,
-    psqlVars: [['repo', normalizedRepo], ['pr_number', String(numericPrNumber)]],
-  });
-  // A failed query cannot establish that provenance is absent. Defer claims
-  // until a later tick rather than permanently assigning the title route.
-  if (!queried.ok) return { ...queried, deferClaim: true };
-  return queried.rows.length
-    ? { ok: true, ...queried.rows[0] }
-    : { ok: false, reason: 'missing-builder-provenance' };
+function builderSelector(args) {
+  return {observation:'provenance',repo:args.repo,pr_number:Number(args.prNumber),builder_identity:true,limit:100};
+}
+function builderResult(result) {
+  return result.ok ? {ok:true,launchRequestId:result.row.launch_request_id,
+    workerClass:result.row.worker_class,actualHarness:result.row.actual_harness}
+    : {...result,deferClaim:true};
+}
+export function readPrBuilderProvenance(args = {}) {
+  if (!normalizeText(args.repo) || !Number.isInteger(Number(args.prNumber)) || Number(args.prNumber)<=0) return {ok:false,reason:'missing-pr-identity'};
+  return builderResult(readWorkerObservationSync(builderSelector(args), args));
+}
+export async function readPrBuilderProvenanceAsync(args = {}) {
+  if (!normalizeText(args.repo) || !Number.isInteger(Number(args.prNumber)) || Number(args.prNumber)<=0) return {ok:false,reason:'missing-pr-identity'};
+  return builderResult(await readWorkerObservation(builderSelector(args), args));
 }
 
 // One set of query/validation rules, two execution modes. CLI consumers keep

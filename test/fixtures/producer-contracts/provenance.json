@@ -256,12 +256,12 @@
       "version": "0.4.0"
     },
     "dispatchLookupSdk": {
-      "version": "0.8.0",
-      "file": "vendor/agent-os-app-sdk-0.8.0.tgz",
-      "sha256": "4fd689c6e80cb9b620a3715ed9fe9474425d42fb00637193939f6b1a69b16a2e",
-      "integrity": "sha512-4VBLxqzsiwykQnMRN8PgCmRyu7hww8xFj83rKRBKb8DnlE+/3gDoalahCyb679e0/auAAGeYKPy0zFaSSJgVuQ==",
-      "releaseRevision": "387fb06d5d8835e320f49388a2ebdf67f2249945",
-      "releaseStatus": "merged"
+      "version": "0.9.0",
+      "file": "vendor/agent-os-app-sdk-0.9.0.tgz",
+      "sha256": "cea36899300700eb6f087a4f1f36d62156305e96ca23455229ca483372c6501f",
+      "integrity": "sha512-BNJBUCxs0RUMYKqzwyp0h/DY4wdRtkDBYIr+LA0xKMUsD/7PxM13F76DmTtqAvY7F05KqEgvKLnT2pgt+QdsvQ==",
+      "releaseRevision": "591a2ba9b0edcf24ffbb9dfd06cbcbe8017a7aac",
+      "releaseStatus": "paired-review-pending"
     }
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

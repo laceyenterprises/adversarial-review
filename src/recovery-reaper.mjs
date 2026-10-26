@@ -770,7 +770,7 @@ export async function reapStaleCloserLeases({
     if (!Number.isFinite(nowMs) || !Number.isFinite(stampMs)
       || nowMs - stampMs < loadAwareTimeoutMs(AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, { maxMs: Infinity })) continue;
     try { launchStatusProbes.set(lease.lrqId, await readLaunchRequestStatusImpl({
-      launchRequestId: lease.lrqId, rootDir, includeRetryChain: true,
+      launchRequestId: lease.lrqId, rootDir, env, includeRetryChain: true,
     })); } catch { launchStatusProbes.set(lease.lrqId, null); }
   }
   const unresolvedIntentLeasePaths = new Set();

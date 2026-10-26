@@ -7,7 +7,7 @@ import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { inspectCiBootstrap } from '../src/ci-recovery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1332,26 +1332,19 @@ test('resolveDaemonWorkerIdentityForPr keeps the current-head fast path when the
 // `repo`/`prRepo`. The resolver must match the full form exactly against the
 // live GitHub rollup, keep legacy short-form records fail-closed, and never
 // cross-match a same-name fork.
-async function resolveIdentityFromProvenanceRecord({ record, expectedRepo, prNumber, currentBranch }) {
-  const rootDir = tempRoot();
-  try {
-    const workerDir = join(rootDir, 'workers', 'provenance-under-test');
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(join(workerDir, 'launch-provenance.json'), JSON.stringify(record));
-    return await resolveDaemonWorkerIdentityForPr({
-      repo: expectedRepo,
-      prNumber,
-      currentHeadSha: 'live-head-after-remediation',
-      currentBranch,
-      hqRoot: rootDir,
-      rootDir,
-      env: { HQ_ROOT: rootDir },
-      consumeHeadAttestations: false,
-      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
-    });
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
+function provenanceSession(records) {
+  return {dispatchLookup:async()=>({schema_version:1,observation:'provenance',status:'found',
+    complete:true,next_offset:null,scope_complete:false,mutation_authority:false,
+    // Negative policy fixtures may deliberately contain mismatched identities.
+    items:records.map(record=>({launch_request_id:record.launchRequestId,worker_class:record.workerClass,
+      repo:record.prRepoFullName || record.repoFullName || record.prRepo || record.repo,
+      branch:record.branch,head_sha:record.prHeadSha,pr_number:record.prNumber}))})};
+}
+async function resolveIdentityFromProvenanceRecord({record,expectedRepo,prNumber,currentBranch}) {
+  return resolveDaemonWorkerIdentityForPr({repo:expectedRepo,prNumber,currentBranch,
+    currentHeadSha:'live-head-after-remediation',env:{},dispatchSession:provenanceSession([record]),
+    consumeHeadAttestations:false,
+    readBuildCompletionSignalForPrImpl:()=>({ok:false,reason:'missing-build-completion-signal'})});
 }
 
 test('AMA identity fallback resolves via owner-qualified prRepoFullName against the full rollup repo', async () => {
@@ -1774,14 +1767,12 @@ test('daemon clean merge defers when the live PR head moved after the tick snaps
   }
 });
 
-test('daemon clean merge resolves worker identity from HQ launch provenance when build completion is absent', async () => {
+test('daemon clean merge resolves worker identity from public provenance when build completion is absent', async () => {
   const rootDir = tempRoot();
   try {
     const workerDir = join(rootDir, 'workers', 'claude-code-hcc-02-14a16b9d');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         repo: 'acme/repo',
         prRepo: 'acme/repo',
         prNumber: 3464,
@@ -1789,28 +1780,22 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
         launchRequestId: 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26',
         workerClass: 'claude-code',
         prHeadSha: 'superseded-worker-head',
-      }),
-    );
+      };
     const collisionDir = join(rootDir, 'workers', 'cross-org-collision');
     mkdirSync(collisionDir, { recursive: true });
     const collisionPath = join(collisionDir, 'launch-provenance.json');
-    writeFileSync(
-      collisionPath,
-      JSON.stringify({
+    const collisionRecord = {
         prRepo: 'acme/repo',
         prNumber: 9999,
         branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
         launchRequestId: 'lrq_wrong_cross_org_identity',
         workerClass: 'codex',
-      }),
-    );
-    const now = new Date();
-    utimesSync(join(workerDir, 'launch-provenance.json'), new Date(now.getTime() - 10_000), new Date(now.getTime() - 10_000));
-    utimesSync(collisionPath, now, now);
+      };
 
     let mergeAttempted = false;
     let capturedIdentity = null;
     const result = await runDaemonCleanMergeAttempt({
+      dispatchSession:provenanceSession([collisionRecord,publicRecord]),
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1869,27 +1854,25 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
   }
 });
 
-test('daemon clean merge launch provenance skips missing candidate files without aborting lookup', async () => {
+test('daemon clean merge accepts public provenance without worker candidate files', async () => {
   const rootDir = tempRoot();
   try {
     const staleWorkerDir = join(rootDir, 'workers', 'stale-cleanup-race');
     mkdirSync(staleWorkerDir, { recursive: true });
     const workerDir = join(rootDir, 'workers', 'codex-valid-provenance');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         prRepo: 'acme/repo',
         prNumber: 1572,
         branch: 'codex-valid-provenance/LAC-1572',
         launchRequestId: 'lrq_valid_after_missing_candidates',
         workerClass: 'codex',
         prHeadSha: 'live-head',
-      }),
-    );
+      };
 
     let capturedIdentity = null;
     const result = await runDaemonCleanMergeAttempt({
+      dispatchSession:provenanceSession([publicRecord]),
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1953,18 +1936,16 @@ test('resolveDaemonWorkerIdentityForPr rejects short-form launch provenance beca
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shw-05');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         repo: 'agent-os',
         prRepo: 'agent-os',
         branch: 'codex-shw-05/SHW-05',
         launchRequestId: 'lrq_fdf9602a-60d2-4c5f-af77-bbb7bb6db2ab',
         workerClass: 'codex',
         prHeadSha: 'head-at-dispatch',
-      }),
-    );
+      };
     const identity = await resolveDaemonWorkerIdentityForPr({
+      dispatchSession:provenanceSession([publicRecord]),
       repo: 'laceyenterprises/agent-os',
       prNumber: 4011,
       currentHeadSha: 'live-head-after-remediation',
@@ -1993,16 +1974,14 @@ test('resolveDaemonWorkerIdentityForPr still fails closed for a PR whose live br
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shw-05');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         repo: 'agent-os',
         branch: 'codex-shw-05/SHW-05',
         launchRequestId: 'lrq_dispatched_worker',
         workerClass: 'codex',
-      }),
-    );
+      };
     const identity = await resolveDaemonWorkerIdentityForPr({
+      dispatchSession:provenanceSession([publicRecord]),
       repo: 'laceyenterprises/agent-os',
       prNumber: 4012,
       currentHeadSha: 'live-head',
@@ -2026,17 +2005,15 @@ test('resolveDaemonWorkerIdentityForPr skips a launch-provenance record explicit
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shw-05');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         repo: 'agent-os',
         branch: 'codex-shw-05/SHW-05',
         prNumber: 9999,
         launchRequestId: 'lrq_other_pr',
         workerClass: 'codex',
-      }),
-    );
+      };
     const identity = await resolveDaemonWorkerIdentityForPr({
+      dispatchSession:provenanceSession([publicRecord]),
       repo: 'laceyenterprises/agent-os',
       prNumber: 4011,
       currentHeadSha: 'live-head',
@@ -2061,16 +2038,14 @@ test('resolveDaemonWorkerIdentityForPr launch provenance requires exact owner/na
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shared-branch');
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'launch-provenance.json'),
-      JSON.stringify({
+    const publicRecord = {
         repo: 'attacker/agent-os',
         branch: 'codex-shared/SHARED',
         launchRequestId: 'lrq_fork_spoof',
         workerClass: 'codex',
-      }),
-    );
+      };
     const identity = await resolveDaemonWorkerIdentityForPr({
+      dispatchSession:provenanceSession([publicRecord]),
       repo: 'laceyenterprises/agent-os',
       prNumber: 4011,
       currentHeadSha: 'live-head',

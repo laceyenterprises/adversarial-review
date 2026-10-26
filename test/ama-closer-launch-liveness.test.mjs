@@ -113,7 +113,7 @@ test('LEASELIVE-01: periodic reaper probes only leases at the terminal reclaim a
       assert.equal(calls.length, probe ? 1 : 0, JSON.stringify({ clock, timestamps }));
       assert.equal(result.released, probe ? 1 : 0);
       if (probe) assert.deepEqual(calls[0], {
-        launchRequestId: 'synthetic-launch', rootDir, includeRetryChain: true,
+        launchRequestId: 'synthetic-launch', rootDir, env: process.env, includeRetryChain: true,
       });
     }
   }

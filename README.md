@@ -3311,7 +3311,7 @@ repository's remediation diff.
 ### Public launch observations
 
 Launch status, retry descendants, capacity snapshots, exact idempotency receipts
-and legacy ticket-window observations use the pinned SDK 0.8.0 dispatch lookup.
+and legacy ticket-window observations use the pinned SDK 0.9.0 dispatch lookup.
 The OS authorizes every row using app receipts or explicit operator-owned
 project/repository grants. Unavailable reads retain ownership holds; they never
 fall back to SQLite, psql or OS files. Existing blocked-decision, cancellation,
@@ -3352,3 +3352,25 @@ Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
 verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
 routing and existing smoke promises are unchanged; post-deploy observation uses
 natural flags and receipts, with no forced stall or alert delivery test.
+
+Worker, process, session accounting and daemon/builder provenance now use SDK
+0.9.0 through the same authorized lookup. The consumer collects bounded pages
+and keeps ownership on failed, malformed, incomplete or grant-filtered empty
+reads. Process identities and start timestamps are evidence; the OS process and
+lease owners retain mutation authority. Session totals require every linked
+launch to belong to the app grant, and unavailable usage stays unknown. Zero
+cost remains zero. No worker-directory scan or ledger backend selection is used
+by daemon identity or these usage readers.
+
+The paired producer release must merge and deploy before the consumer is
+activated. Install the pinned dependency with `npm ci`; retain the existing
+reader activation flag and provision exact project/repository grants through
+normal operator deployment. No new configuration key or automatic restart is
+introduced. Existing lifecycle states, transitions, current-head verdict checks,
+merged/closed terminal handling and smoke promises are unchanged. Session usage
+without an authorized launch link remains unavailable; workspace paths cannot
+supply ownership. Run the offline consumer regressions with:
+
+```bash
+node test/run-tests.mjs worker-observation-client.test.mjs reviewer-pass-tokens.test.mjs recovery-reaper.test.mjs remorphan-01.test.mjs daemon-worker-identity-ledger-target.test.mjs
+```

@@ -1527,3 +1527,13 @@ for (const legacy of ['exact-head-review-required', 'stale-review-head']) {
     assert.equal(result.hammerStop.predicate, 'primary-change-reverted');
   });
 }
+
+test('CIBLOCKINFRA-01 infrastructure stop classification rejects mixed and unproven CI failures', () => {
+  const badChecks = [{ name: 'unit', conclusion: 'FAILURE', steps: [] }];
+  const stop = { reason: 'github-gate-not-green', githubGate: { reasons: ['ci-not-green'], badChecks } };
+  assert.equal(isInfrastructureStop(stop), true);
+  assert.equal(isInfrastructureStop({ ...stop, reasons: ['primary-change-reverted'] }), false);
+  assert.equal(isInfrastructureStop({ ...stop, githubGate: { reasons: ['ci-not-green'],
+    badChecks: [...badChecks, { name: 'lint', conclusion: 'FAILURE', steps: [{ conclusion: 'failure' }] }] } }), false);
+  assert.equal(isInfrastructureStop({ reason: 'ci-not-green' }), false);
+});

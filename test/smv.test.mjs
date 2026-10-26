@@ -8,7 +8,11 @@ import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contr
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
+<<<<<<< HEAD
 const GRAPH_HASH = 'edc1a0743199a9e833bb14b91a21d53e0984c6806c2a688aba118f2f5e364060'; // Independent reviewed snapshot; not generated at test time.
+=======
+const GRAPH_HASH = '4980ba976ce51b6f9e6b2d49bf4f078a3fc7e02f5abcd508d38efc1c0616b9b8'; // Independent reviewed snapshot; not generated at test time.
+>>>>>>> 0ee15394 (CIBLOCKINFRA-01: treat never-started Actions CI as infrastructure (SPEC: none))
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
   assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));

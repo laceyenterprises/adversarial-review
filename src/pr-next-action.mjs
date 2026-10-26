@@ -1,3 +1,4 @@
+import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
 // ── NXA-02: one shared next action per open PR ───────────────────────────────
 //
 // `nextAction(snapshot)` is pure and total. It reads one frozen NXA-01 pass
@@ -98,13 +99,16 @@ function checksFacts(checks) {
     conclusion = rollup ? (classifyCheckRollup(rollup, { requiredContexts,
       excludeContexts: Array.isArray(value.excludeContexts) ? value.excludeContexts : null }) || 'PENDING') : null;
   }
-  const state = runnerless ? 'FAILURE'
+  const rows = Array.isArray(value.rollup) ? value.rollup
+    : Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : null;
+  const infrastructurePending = rollupInfrastructureEvidencePending(rows, { excludeContexts: value.excludeContexts });
+  const infrastructureOnly = rows ? rollupInfrastructureOnly(rows, { excludeContexts: value.excludeContexts })
+    : value.infrastructureOnly === true;
+  const state = infrastructureOnly || infrastructurePending ? 'PENDING' : runnerless ? 'FAILURE'
     : !conclusion ? 'UNKNOWN'
       : conclusion === 'SUCCESS' || conclusion === 'PENDING' ? conclusion : 'FAILURE';
-  const rows = Array.isArray(value.rollup) ? value.rollup
-    : Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : [];
-  const transitions = rows.flatMap(row => [row?.startedAt, row?.completedAt].map(timeMs)).filter(ms => ms !== null);
-  return { state, runnerless, conclusion, progressMs: transitions.length ? Math.max(...transitions) : null };
+  const transitions = (rows || []).flatMap(row => [row?.startedAt, row?.completedAt].map(timeMs)).filter(ms => ms !== null);
+  return { state, runnerless, infrastructureOnly, infrastructurePending, conclusion, progressMs: transitions.length ? Math.max(...transitions) : null };
 }
 
 function reviewFacts(reviews, head, policy, labels) {
@@ -416,6 +420,8 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
       deadlineKind: 'recovery', queue: 'reconcile',
       refs: [stop ? `stop:${text(stop.fingerprint) || 'unfingerprinted'}` : `label:${automatedHold.name}:automation`] };
   }
+  if (checks.infrastructureOnly || checks.infrastructurePending) return { row: 'R11-pending', action: 'wait-for-CI', actor: 'ci',
+    reason: checks.infrastructureOnly ? 'ci-infrastructure' : 'ci-infrastructure-evidence-pending', deadlineKind: 'observer', queue: 'observe' };
   const cap = plain(policy?.hammerCap);
   if (!daemonAfterSupersededStop && (cap?.lifetimeExhausted === true
     || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head))))) {

@@ -1,5 +1,39 @@
 # RUNBOOK — AMA closure pipeline
 
+
+## Actions billing/quota blocks (CIBLOCKINFRA-01)
+
+A failed Actions job that executed zero steps, or has GitHub's billing/quota
+not-started annotation, is infrastructure. The shared classifier reuses job
+steps or performs at most one bounded job-page read per inspection. No
+configuration or label is added; required checks still must become green to
+merge.
+
+During a block, remediation records `ciInfrastructureWait`, preserves its
+artifacts and round, and probes every five minutes. At one hour it visibly
+parks while retaining bounded probes. It does not stop as no-progress or
+final CI red. When checks execute again it requeues the same refunded round.
+The watcher defers reviewer admission rather than spending another round or
+handing infrastructure red to a hammer.
+
+Deployment automatically re-evaluates failed/stopped remediation records and
+hammer CI stops using fresh open-PR/current-head evidence. Every recorded
+failure must be infrastructure-only, and every failed check must have a
+successful replacement before an old stop releases. Recovery clears the
+stop, refunds the round or positively identified dispatch charge once, and
+retains `checks-executed-again` audit evidence. Mixed, real, unreadable,
+unrelated or skipped-only failures do not qualify. No manual runtime edits or
+blanket stop resets are required.
+
+After deployment, verify synthetically that zero-step red records an
+uncharged wait and no hammer hold/page; successful replacements record
+`ci-infrastructure-refund` / `ci-infrastructure-recovered` once. Confirm
+an executed failing step and mixed refusal remain charged/held. See the
+[queue](data-model/follow-up-jobs.md#actions-infrastructure-waits-ciblockinfra-01),
+[hold](data-model/hammer-stop-hold.md#actions-infrastructure-recovery-ciblockinfra-01)
+and [retry ledger](data-model/hammer-retry-cap.md#actions-infrastructure-refunds-ciblockinfra-01)
+contracts for evidence fields and retention.
+
 ## Review evidence and fixer disputes (REVIEWEVIDENCE-01)
 
 Blocking PR findings require a resolvable head file/line and explicit input or

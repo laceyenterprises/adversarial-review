@@ -1,5 +1,41 @@
 # Data Model - Follow-Up Remediation Jobs
 
+
+## Actions infrastructure waits (CIBLOCKINFRA-01)
+
+The shared `src/ci-infrastructure.mjs` classifier requires failed jobs with
+zero executed steps or an Actions billing/quota not-started annotation.
+Missing evidence stays unknown. Readers reuse attached job steps; otherwise
+one three-second, 100-job page per inspection can supply exact-job/head steps.
+
+An exited worker observing only these failures keeps its existing
+`in_progress` job and artifacts, without a completed round or transient retry
+charge. `ciInfrastructureWait` records `reason`, `headSha`,
+`failedChecks`, `firstObservedAt`, `deadline`, `nextProbeAt`, `evidencePending` and `parked`.
+Probes run at five-minute intervals; after one hour the visible wait is parked
+and subsequent probes remain bounded. Pending/unreadable evidence cannot
+complete or stop the job. Ordinary terminal/moved-head lifecycle gates remain.
+
+Once checks execute again, `in_progress -> pending` reuses the same round:
+`currentRound` decreases by one, retry budget stays unchanged, and
+`retryHistory[].retryMetadata` records `code: ci-infrastructure-refund`,
+`reason: checks-executed-again`, head and prior failures. The current head
+becomes the retry revision. No-progress and final-CI stop paths cannot charge
+this wait.
+
+Closure inspects existing failed/stopped CI records before
+budget decisions. Only all-infrastructure recorded failures on the current head,
+with successful replacements for every named failure, permit
+`failed/stopped -> pending`, one refunded round and cleared stop/failure.
+The retry history retains the old stop, failure and step evidence. Missing,
+mixed, real, skipped-only, unrelated or moved-head evidence never releases a
+stop. Historical missing steps can use the same bounded reader; narrative
+alone is insufficient. Recovery examines at most 20 records per bucket for each selected subject.
+Multiple workflows reuse an executor-scoped, 512-entry exact-head/job cache;
+one missing workflow page is read per observation. A tentative wait records
+`evidencePending` until all failures are proven. If later evidence shows an
+executed failure, normal completion resumes with its round still charged.
+
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 
 Validated replies are retained at `remediationReply.payload` and on the current

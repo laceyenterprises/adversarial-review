@@ -310,6 +310,7 @@
     },
     {
       "id": "follow-up-jobs",
+      "ciInfrastructureWait": { "fields": ["reason", "headSha", "failedChecks", "firstObservedAt", "deadline", "nextProbeAt", "parked", "evidencePending"], "probeMs": 300000, "parkAfterMs": 3600000, "refundCode": "ci-infrastructure-refund", "refundReason": "checks-executed-again" },
       "simplicityNote": "Optional advisory section text or null; normalization preserves existing non-null notes and otherwise derives from reviewBody; excluded from findings, gates and round accounting (REVIEWSIMPLE-01)",
       "hammerSimplicitySnapshot": "review.simplicityNote is capped at 1200 UTF-8 bytes; review.simplicityNoteTruncated is a boolean (false when absent). Fetch the full review if it or review.findingsTruncated is true.",
       "simplicityNoteApplied": "Optional reply observation; boolean or null in completion and remediationPlan.rounds[].completion. Unknown never creates a validation failure or retry.",
@@ -724,6 +725,7 @@
     },
     {
       "id": "hammer-retry-cap",
+      "ciInfrastructureRefund": "dispatchCharges[key].ciInfrastructureRefund = { reason: checks-executed-again, stopKey, refundedAt }; exact-charge per-budget credits survive series resets",
       "title": "Hammer Retry Cap Ledger",
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
@@ -821,6 +823,7 @@
     },
     {
       "id": "hammer-stop-hold",
+      "ciInfrastructureRelease": "All recorded CI failures require shared zero-step or billing/quota evidence; fresh open/current-head successful replacements release with ci-infrastructure-recovered and credit exact infrastructure dispatch charges once. Real/mixed failures remain held.",
       "title": "Hammer Stop Hold",
       "path": "docs/data-model/hammer-stop-hold.md",
       "store": "data/follow-up-jobs/hammer-stop-hold/<repo-slug>-pr-<number>.json",
@@ -838,7 +841,7 @@
       "infrastructureRelease": "Only all-infrastructure holds retire with infrastructure-stop; cleanup without a current stop returns none. Packaging stops and deferrals preserve earlier deterministic refusals until success; packaging-only audit history reasserts an unreleased persisted refusal without writing or paging when inputs are unchanged, including ownerless recovery; changed inputs record release and the new baseline. Closer preflight evaluates cleanup without audit history. Unknown or transient predicates prevent pure infrastructure classification. Mixed reasons retain the deterministic refusal with packaging reasons stripped. Released infrastructure holds return none without rewriting state. Release write failures log and preserve the in-memory decision.",
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
       "baseline": "Comparable terminal audit head/base/mergeability readings, with mergeability trimmed and uppercased as for live metadata; other inputs, including the canonical closer review fingerprint, come from first observation or prior release, never synthetic eligibility-trace review fields. Review-required predicates additionally accept exact-head posted_at strictly after the terminal timestamp, including before first observation; this receipt requires a matching local posted row, so live bodies alone cannot provide posting-time release before SQLite reconciliation",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "review", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared", "infrastructure-stop", "ci-infrastructure-recovered"]
     },
     {
       "id": "ama-closer-leases",
@@ -1043,6 +1046,7 @@
     },
     {
       "id": "ama-automated-recovery",
+      "ciInfrastructureRecovery": ["reason", "stopKey", "refundedAt", "attempts", "event"],
       "title": "AMA Automated Recovery",
       "path": "docs/data-model/ama-automated-recovery.md",
       "store": "data/follow-up-jobs/ama-automated-recovery/<sha256>.{json,lock}",

@@ -1,3 +1,5 @@
+import { refundCiInfrastructureHammerStops } from './ci-infrastructure-refund.mjs';
+import { CI_INFRASTRUCTURE_STOP_REASONS, infrastructureOnlyFailures, recordedCiFailures, checksExecutedAgain, enrichCiInfrastructureEvidence } from '../ci-infrastructure.mjs';
 import { observeClosureResult } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
@@ -91,7 +93,10 @@ const INFRASTRUCTURE_STOP_REASONS = new Set([
 export function isInfrastructureStop(stop) {
   const reasons = [...stopReasons(stop), ...(stop?.refusal?.reasons || []),
     ...[stop?.predicate, stop?.reason].filter(Boolean)];
-  return reasons.length > 0 && reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason));
+  if (!reasons.length) return false;
+  if (reasons.every(reason => INFRASTRUCTURE_STOP_REASONS.has(reason))) return true;
+  return reasons.every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason))
+    && infrastructureOnlyFailures(recordedCiFailures(stop));
 }
 
 const DETERMINISTIC_STOP_REASONS = new Set([
@@ -121,6 +126,7 @@ function stable(value) {
 }
 
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
+  if (isInfrastructureStop(attempt)) return null;
   const reasons = stopReasons(attempt).filter(reason => !INFRASTRUCTURE_STOP_REASONS.has(reason));
   if (DETERMINISTIC_STOP_REASONS.has(attempt.reason) && !reasons.includes(attempt.reason)) reasons.push(attempt.reason);
   reasons.sort();
@@ -285,6 +291,7 @@ export function readHammerStopForHead({
     // hold-only runs without handing back any genuine code-work attempt.
     refundStops: terminal.filter(item => STOP_OUTCOMES.has(item.outcome)).map(item => ({
       auditHead: item.fileHead,
+      ciInfrastructureOnly: isInfrastructureStop(item.attempt) && infrastructureOnlyFailures(recordedCiFailures(item.attempt)),
       launchRequestId: item.launchRequestId,
       noExecution: item.attempt?.noExecution === true || item.attempt?.workerState === 'never-spawned'
         || item.attempt?.executionStarted === false,
@@ -292,6 +299,7 @@ export function readHammerStopForHead({
       recordedAt: item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || null,
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || ''}`,
     })),
+    failedChecks: recordedCiFailures(attempt),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     reasons: stopReasons(attempt),
     refusal: deterministicRefusal(attempt, { repo, prNumber, headSha }),
@@ -417,8 +425,49 @@ export async function evaluateHammerStopHold({
     state.currentHead = headSha;
     writeHoldState(rootDir, repo, prNumber, state);
   }
-  const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
+  // Keep one detached audit snapshot while enriching its selected CI evidence.
+  // Re-run ordinary selection afterwards so an infrastructure stop cannot hide
+  // an earlier real refusal whose history was already read on this pass.
+  const auditSnapshots = new Map();
+  const readSnapshot = (...args) => {
+    const key = JSON.stringify(args);
+    if (!auditSnapshots.has(key)) auditSnapshots.set(key, structuredClone(readAuditImpl(...args)));
+    return auditSnapshots.get(key);
+  };
+  const readStop = () => readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha,
+    readAuditImpl: readSnapshot, logger });
+  let stop = readStop();
+  if (stop?.failedChecks?.length && !isInfrastructureStop(stop)
+    && [...stop.reasons, stop.predicate].every(reason => CI_INFRASTRUCTURE_STOP_REASONS.has(reason))) {
+    const failedChecks = await enrichCiInfrastructureEvidence({ rollup: stop.failedChecks, repo, headSha, execFileImpl });
+    stop.failedChecks.forEach((check, index) => {
+      if (check && typeof check === 'object') Object.assign(check, failedChecks[index]);
+    });
+    stop = readStop();
+  }
   const prior = state.heads[headSha];
+  // CIBLOCKINFRA-01: zero-step CI is not a deterministic refusal. Retain the
+  // audit while blocked; green current-head evidence retires the old stop and
+  // credits only its infrastructure charges, once.
+  if (isInfrastructureStop(stop) && infrastructureOnlyFailures(recordedCiFailures(stop))
+    && (!prior?.refusal || prior.releasedAt || isInfrastructureStop(prior) || prior.stopKey === stop.stopKey)) {
+    const open = prMetadata?.isOpen === true || String(prMetadata?.state || '').toUpperCase() === 'OPEN';
+    if (!open || prMetadata?.isOpen === false || prMetadata.headSha !== headSha
+      || !checksExecutedAgain(prMetadata.statusCheckRollup, stop.failedChecks)
+      || classifyCheckRollup(prMetadata.statusCheckRollup, {
+        requiredContexts: requiredCheckContexts,
+        excludeContexts: new Set(excludeContexts.map(ctx => String(ctx).trim().toLowerCase())),
+      }) !== 'SUCCESS') return { action: 'none', infrastructureStop: stop };
+    refundCiInfrastructureHammerStops(rootDir, { repo, prNumber }, stop, { now });
+    const changed = ['ci-infrastructure-recovered'];
+    if (prior?.stopKey !== stop.stopKey || !prior.releasedAt) {
+      persist({ stopKey: stop.stopKey, predicate: stop.predicate, failedChecks: stop.failedChecks,
+        releasedAt: now, releasedBy: changed, paged: false });
+      logger?.log?.(JSON.stringify({ event: 'ama_closer.ci_infrastructure_stop_released',
+        repo, prNumber, headSha, reason: 'checks-executed-again', stopKey: stop.stopKey }));
+    }
+    return { action: 'release', hammerStop: stop, infrastructureStop: stop, changed };
+  }
   // STOPHOLDINFRA-01: packaging failures say nothing about the PR. Retire old
   // infrastructure holds once, without paging or refunding attempts. An incoming
   // packaging failure cannot release an unrelated refusal. Ordinary gates,

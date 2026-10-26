@@ -1,5 +1,20 @@
 # Data Model - Hammer Retry Cap Ledger
 
+
+## Actions infrastructure refunds (CIBLOCKINFRA-01)
+
+After successful current-head replacement checks, only an audited all-
+infrastructure CI launch with a matching `dispatchCharges` entry is refunded.
+The existing `refundedBudgets` credits prevent double refunds across readers
+and restarts. PR and target counts require matching charge scope; target
+credit also requires the same target epoch. Lifetime credit remains attached
+to the exact launch. Unverifiable legacy charges are not credited.
+
+`dispatchCharges[key].ciInfrastructureRefund` records
+`{ reason: 'checks-executed-again', stopKey, refundedAt }`. These charge
+receipts survive series resets. Suppression is recomputed from the remaining
+charges; real failures retain their budget cost.
+
 **Owner:** AMA hammer dispatch retry and redrive caps
 **Store:** `data/follow-up-jobs/hammer-retry-cap/`
 **Source of truth:** `src/ama/hammer-retry-cap.mjs`

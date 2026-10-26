@@ -1,3 +1,4 @@
+import { enrichCiInfrastructureEvidence } from './ci-infrastructure.mjs';
 import { observePostedReviewHead, withPostedReviewReadCache } from './posted-review-read-cache.mjs';
 import { fetchMergeAgentCandidateSnapshot, settleCandidateSnapshotReads } from './merge-agent-candidate-snapshot.mjs';
 import { cachedStackedBaseDefaultBranch, guardStackedBase } from './ama/stacked-base.mjs';
@@ -106,7 +107,10 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
   const [stackedBaseHold, resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent, branchProtection] =
     results.map(result => result.value);
   const checksCfg = loadConfigCached({ env });
-  const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup, { env, cfg: checksCfg });
+  const statusCheckRollup = String(parsed.state).toUpperCase() === 'OPEN' && !parsed.mergedAt
+    ? await enrichCiInfrastructureEvidence({ rollup: parsed.statusCheckRollup, repo, headSha: parsed.headRefOid,
+      execFileImpl, env, signal }) : parsed.statusCheckRollup;
+  const checkSummary = summarizeExternalChecks(statusCheckRollup, { env, cfg: checksCfg });
   let recovering = false;
   let ciBootstrap = { mode: null };
   if (reviewClean && autonomousMergeExecutionEnabled && rootDir && String(parsed.state).toUpperCase() === 'OPEN') {
@@ -114,7 +118,7 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
       recovering = await recoverCancelledChecksImpl({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
         ...checkSummary, execFileImpl, env, signal });
       ciBootstrap = await inspectCiBootstrapImpl({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
-        baseBranch: parsed.baseRefName, rollup: parsed.statusCheckRollup,
+        baseBranch: parsed.baseRefName, rollup: statusCheckRollup,
         ownContext: resolveGateStatusContext(env), execFileImpl, env, signal,
         requiredContexts: resolveRequiredCheckContextsFromCfg(checksCfg) });
     } catch (error) {
@@ -135,9 +139,9 @@ async function fetchMergeAgentCandidateWithinReadCache(repo, prNumber, {
     isDraft: typeof parsed.isDraft === 'boolean' ? parsed.isDraft : null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     mergeStateStatus: parsed.mergeStateStatus || null,
-    checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(parsed.statusCheckRollup, { env, cfg: checksCfg }),
+    checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(statusCheckRollup, { env, cfg: checksCfg }),
     ciBootstrap,
-    statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
+    statusCheckRollup: Array.isArray(statusCheckRollup) ? statusCheckRollup : [],
     branchProtection,
     labels,
     title: String(parsed.title || ''),

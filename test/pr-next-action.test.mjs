@@ -673,3 +673,25 @@ test('legacy closure owners adapt to owned workflows faithfully', () => {
     ['operator-hold', 'operator', 'operator-decision-required']);
   assert.equal(fromLegacyNoProgressLane({ lane: 'slow' }), null);
 });
+
+test('CIBLOCKINFRA-01 infrastructure CI observes instead of consuming final remediation or hammer caps', () => {
+  const decision = nextAction(snap({
+    checks: { conclusion: 'FAILURE', rollup: [{ name: 'unit', conclusion: 'FAILURE', steps: [] }] },
+    remediation: { roundsLeft: false },
+    policy: { hammerCap: { lifetimeExhausted: true } },
+  }));
+  assert.deepEqual(pick(decision), ['wait-for-CI', 'ci', 'ci-infrastructure']);
+  assert.equal(decision.queue.intent, 'observe');
+  const realStop = nextAction(snap({
+    checks: { conclusion: 'FAILURE', rollup: [{ name: 'unit', conclusion: 'FAILURE', steps: [] }] },
+    controls: { stop: STOP },
+  }));
+  assert.equal(realStop.reason, 'automated-stop');
+});
+
+test('CIBLOCKINFRA-01 current green evidence supersedes old infrastructure flags', () => {
+  const decision = nextAction(snap({
+    checks: { conclusion: 'SUCCESS', infrastructureOnly: true, rollup: [{ name: 'unit', conclusion: 'SUCCESS' }] },
+  }));
+  assert.equal(decision.action, 'daemon-merge');
+});

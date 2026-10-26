@@ -1075,6 +1075,39 @@ if (scenario === 'clean') {
     refusedWakeTerminal: true, livePendingLeasePreserved: true, legacyLedgerSettlement: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
+  const { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, recoverInfrastructureCiStops } =
+    await import('../../src/remediation-ci-infrastructure.mjs');
+  const { isInfrastructureStop } = await import('../../src/ama/hammer-stop-hold.mjs');
+  const ciRoot = join(rootDir, 'ci-infrastructure');
+  const infraFailure = { name: 'synthetic-ci', state: 'FAILURE', steps: [] };
+  const infraGate = { state: 'infrastructure', headSha, failedChecks: [infraFailure] };
+  const greenGate = { state: 'green', headSha, rollup: [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }] };
+  const ciJob = buildFollowUpJob({ repo, prNumber: 51, revisionRef: headSha, reviewBody: '## Verdict\nRequest changes' });
+  ciJob.status = 'in_progress';
+  ciJob.remediationPlan.currentRound = 1;
+  ciJob.remediationWorker = { state: 'completed', model: 'codex' };
+  const ciPath = join(ciRoot, 'data/follow-up-jobs/in-progress', ciJob.jobId + '.json');
+  mkdirSync(dirname(ciPath), { recursive: true });
+  writeFollowUpJob(ciPath, ciJob);
+  const ciWait = holdRemediationForCiInfrastructure({ rootDir: ciRoot, jobPath: ciPath,
+    ciGate: infraGate, now: '2026-01-01T00:00:00Z' });
+  assert.equal(ciWait.action, 'active');
+  assert.equal(isInfrastructureStop({ reason: 'ci-not-green', failedChecks: [infraFailure] }), true);
+  assert.equal(isInfrastructureStop({ reason: 'ci-not-green',
+    failedChecks: [{ ...infraFailure, steps: [{ conclusion: 'failure' }] }] }), false);
+  const ciResume = await resumeCiInfrastructureRound({ rootDir: ciRoot, jobPath: ciPath,
+    ciGate: greenGate, now: '2026-01-01T00:05:00Z' });
+  assert.equal(ciResume.job.remediationPlan.currentRound, 0);
+  for (const status of ['failed', 'stopped']) {
+    const recoveryRoot = join(ciRoot, status);
+    const stopped = { ...ciJob, status, failure: { code: 'ci-failed', ciGate: infraGate },
+      remediationPlan: { ...ciJob.remediationPlan, stop: { code: 'ci-failed', reason: 'Synthetic CI failure.' } } };
+    const stoppedPath = join(recoveryRoot, 'data/follow-up-jobs', status, stopped.jobId + '.json');
+    mkdirSync(dirname(stoppedPath), { recursive: true }); writeFollowUpJob(stoppedPath, stopped);
+    assert.equal((await recoverInfrastructureCiStops({ rootDir: recoveryRoot, repo, prNumber: 51,
+      headSha, ciGate: greenGate, now: '2026-01-01T00:05:00Z' })).length, 1);
+  }
+
   const { loadAwareTimeoutMs, loadAwareTimeoutSeconds, MAX_TIMER_DELAY_MS } = await import('../../src/load-aware-timeout.mjs');
   const { buildSafePollOnce, computeWorkloadAwarePollDeadlineMs, MAX_POLL_DEADLINE_MS } = await import('../../src/watcher-poll-guard.mjs');
   const loaded = { enabled: true, maxMultiplier: 5, loadAvg1m: 3, cpuCount: 1, cpuBusyPercent: 100 };
@@ -1200,7 +1233,7 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
+  evidence = { ciInfrastructureWaitUncharged: true, ciInfrastructureStopRecovered: true, realCiFailureRetained: true, packagingPreservesRefusal: true, ownerlessRefusalFenced: true, refusalPages,
     fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
     exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');

@@ -1,3 +1,5 @@
+import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
+import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { deriveNextActionSnapshot, hasLiveRemediationJob, nextAction } from './pr-next-action.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -984,6 +986,12 @@ async function dispatchAmaClosureFor({
   if (candidate?.stackedBaseHold) return withAmaDispatchMetadata(candidate.stackedBaseHold, { amaEnabled: true });
 
   throwIfAborted(signal);
+  if (candidate?.headSha && String(candidate.prState).toLowerCase() === 'open') {
+    const summary = summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig });
+    await recoverInfrastructureCiStops({ rootDir, repo: repoPath, prNumber, headSha: candidate.headSha,
+      ciGate: { ...summary, rollup: candidate.statusCheckRollup, headSha: candidate.headSha,
+        state: summary.conclusion === 'SUCCESS' ? 'green' : 'pending' }, now: new Date(now()).toISOString(), execFileImpl: execFileAsync });
+  }
   // AMA "final hammer" signal: the review cycle is EXHAUSTED once the PR has
   // consumed its full remediation round budget. At that point the adversarial
   // verdict can loop on `Request changes` forever, so AMA must land the PR
@@ -1558,12 +1566,19 @@ async function dispatchAmaClosureFor({
       { ...closerLeaseLivenessOptions, now: now(), logger });
     if (abandoned) handoffLease = abandoned;
   }
+  let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
+    prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
+  if (isInfrastructureStop(recordedStop) || recordedStop?.failedChecks?.length) {
+    const evaluatedStop = await evaluateHammerStopHold({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber,
+      headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, prMetadata,
+      excludeContexts: [requiredGateContext], requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
+      logger, now: new Date(now()).toISOString() });
+    recordedStop = evaluatedStop.infrastructureStop || recordedStop;
+  }
   const ownerCap = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, { repo: repoPath, prNumber }), {
     jobKey: reviewState.headSha, headSha: currentPrHeadSha,
     lifetimeDispatchCeiling: cfg.hammerLifetimeDispatchCeiling,
   });
-  const recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
-    prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
   const releasedStop = recordedStop && readHammerStopHoldForHead({ rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, stopKey: recordedStop.stopKey })?.releasedAt;
   const recordedTerminalReview = headHasValidatedHamTerminalRemediationImpl({ hqRoot: resolveHqRoot(env),

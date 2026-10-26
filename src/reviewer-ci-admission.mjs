@@ -142,6 +142,8 @@ async function guardRereviewCiBeforeReviewer({
     return { proceed: false, reason: 'ci-head-moved', ciGate };
   }
 
+  if (state === 'infrastructure') return { proceed: false, reason: 'ci-infrastructure', ciGate };
+
   if (state === 'green') {
     return { proceed: true, reason: 'ci-green', ciGate };
   }

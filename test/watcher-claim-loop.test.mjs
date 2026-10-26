@@ -2299,7 +2299,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
     const line = run.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
     assert.ok(line, output);
     const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
-    assert.match(output, /reviewer spawn SUPPRESSED for laceyenterprises\/adversarial-review#101: closer-commit-trailer/);
+    assert.match(output, /auto-refresh SUPPRESSED.*#101:.*closer-commit-trailer/);
     assert.equal(summary.reviewerSpawns.some((spawn) => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), false, output);
     assert.equal(summary.rows['101'].review_status, 'posted', output);
     assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-reviewed-101', output);
@@ -4475,3 +4475,89 @@ test('OSG arm admission fallback preserves watcher claim identity through settle
     assert.ok(/osg-reviewer reason=(runtime-unsupported|account-changed|error-account-unavailable)/.test(output), output.split('\n').filter(line => line.includes('osg')).join('\n'));
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+
+for (const [status, reason] of [['pending', 'hammer-validated-head'], ['posted', 'closer-commit-trailer']]) {
+  test(`HAMVALIDORPHAN-01 ${status} hammer head reaches closure in the same poll`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hammer-owner-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      const postedUrl = fileUrl('src', 'posted-review-row.mjs');
+      const orchestrationUrl = fileUrl('src', 'ama-closure-orchestration.mjs');
+      const postedSource = `export * from ${JSON.stringify(postedUrl + '?actual')};
+        import assert from 'node:assert/strict';
+        import { maybeDispatchAmaClosureFor } from ${JSON.stringify(orchestrationUrl)};
+        export async function handlePostedReviewRow(input) {
+          if (input.prNumber !== 101) return { outcome: 'fixture-other-row' };
+          globalThis.hammerHandoffs ||= [];
+          globalThis.hammerHandoffs.push(input.existing);
+          const result = await maybeDispatchAmaClosureFor({
+            rootDir: ${JSON.stringify(tmp)}, repoPath: input.repoPath, prNumber: input.prNumber,
+            reviewStateRow: { ...input.existing, review_body: ${JSON.stringify('## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only')} },
+            dispatchJob: {}, candidate: { headSha: 'sha-happy-101', prState: 'OPEN', riskClass: 'low',
+              mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', branchProtection: { requiredContexts: [] },
+              statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+            currentRevisionRef: 'sha-happy-101', labelNames: [],
+            loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true,
+              branchProtection: { required: false } }), getOrchestrationMode: () => 'native' }),
+            fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === 'reviewed-fixture'
+              ? [${JSON.stringify('## Verdict\nComment only')}] : [],
+            proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false,
+              reviewedHead: 'reviewed-fixture', currentHead: 'sha-happy-101' }),
+            resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true, reason: ${JSON.stringify(reason)} }),
+            fetchHeadCloserVerifiedCommitImpl: async () => null,
+            resolveHamTerminalRemediationEvidenceImpl: async () => null,
+            headHasValidatedHamTerminalRemediationImpl: () => false,
+            fetchMergedProtectiveDependentsImpl: async () => [],
+            fetchProtectivePredecessorStateImpl: async () => null,
+            requestEligibleHammerWakeImpl: ({ shared }) => {
+              if (shared.decision.action === 'hammer') globalThis.hammerWakes = (globalThis.hammerWakes || 0) + 1;
+            },
+            runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'validation-required' }),
+            maybeDispatchAmaCloserImpl: async payload => {
+              assert.equal(payload.dispatchContext.targetRemediationSha, 'sha-happy-101');
+              assert.equal(payload.reviewState.headSha, 'reviewed-fixture');
+              globalThis.hammerDispatches = (globalThis.hammerDispatches || 0) + 1;
+              return { dispatched: true, launchRequestId: 'fixture-successor' };
+            }, logger: { log() {}, warn() {} },
+          });
+          assert.equal(result.dispatched, true, JSON.stringify(result));
+          return { outcome: 'ama-dispatched', amaClosureResult: result };
+        }`;
+      let loader = buildLoaderSource().replace("export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }",
+        "export function buildAdversarialGateSnapshot(_root, { reviewRow } = {}) { return globalThis.hammerFixtureArmed ? { reviewedHeadSha: reviewRow?.reviewer_head_sha, settledReview: { verdict: 'comment-only', remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 }, labels: [] } : { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }")
+        .replace("return async () => ({ suppressed: false, reason: 'fixture' });",
+        `return async () => globalThis.hammerFixtureArmed ? ({ suppressed: true, reason: '${reason}' }) : ({ suppressed: false });`);
+      loader = loader.replace('export async function resolve',
+        `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:hammer-posted');\nexport async function resolve`)
+        .replace('export async function load(url, context, nextLoad) {',
+          `export async function load(url, context, nextLoad) {\nif (url === 'fixture:hammer-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };`);
+      writeFileSync(loaderPath, loader);
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+        db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+          started_at,ended_at,status,head_sha,gh_comment_id,body_md,body_captured_at)
+          VALUES (?,101,50,'claude','rereview',?,?,'completed','reviewed-fixture','fixture-review',?,?)\`)
+          .run(row.repo, new Date().toISOString(), new Date().toISOString(), '## Verdict\\nComment only', new Date().toISOString());
+        db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha=?,revision_ref='sha-happy-101',
+          rereview_requested_at=?,rereview_reason='auto-refresh: posted review on stale head',
+          reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
+          .run(${JSON.stringify(status)}, ${JSON.stringify(status === 'posted' ? 'reviewed-fixture' : 'failed-attempt-head')}, new Date().toISOString());
+        globalThis.hammerFixtureArmed = true;
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        await pollOnce(octokit, pollOptions);
+        assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+        assert.ok(globalThis.hammerHandoffs.length > 0);
+        assert.ok(globalThis.hammerWakes > 0, 'suppression wakes the hammer');
+        assert.equal(globalThis.hammerWakes, globalThis.hammerDispatches, 'each handoff invokes the existing closer');
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);
+        assert.ok(globalThis.hammerHandoffs.every(row => row.reviewer_head_sha === 'reviewed-fixture'));
+      ` }));
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}

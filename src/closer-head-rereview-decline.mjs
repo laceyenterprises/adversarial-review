@@ -100,3 +100,20 @@ export function declineSuppressedAmaRecoveryRereview({
   }
   return { declined, reviewedHeadSha };
 }
+
+// Restore any queued automatic review of a hammer-owned head, including an
+// auto-refresh. The delivered pass supplies the original verdict identity;
+// a failed reviewer attempt or the queued live revision cannot replace it.
+export function restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow, reviewedHeadSha,
+  headSha, now = new Date().toISOString() } = {}) {
+  if (!reviewedHeadSha || !['pending', 'pending-upstream', 'ci-blocked'].includes(reviewRow?.review_status)) return false;
+  return db.prepare(`UPDATE reviewed_prs SET review_status='posted', reviewer_head_sha=?,
+    posted_at=COALESCE(posted_at, ?), rereview_requested_at=NULL, rereview_reason=?,
+    failed_at=NULL, failure_message=NULL, reviewer_lease_expires_at=NULL
+    WHERE repo=? AND pr_number=? AND pr_state='open' AND review_status=?
+      AND rereview_requested_at IS ? AND rereview_reason IS ? AND revision_ref IS ?
+      AND reviewer_head_sha IS ?`)
+    .run(reviewedHeadSha, now, closerHeadRereviewDeclinedReason(headSha), repoPath, prNumber,
+      reviewRow.review_status, reviewRow.rereview_requested_at ?? null, reviewRow.rereview_reason ?? null,
+      reviewRow.revision_ref ?? null, reviewRow.reviewer_head_sha ?? null).changes === 1;
+}

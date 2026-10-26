@@ -392,10 +392,11 @@ test('AMA closure passes watcher-recorded trailer-only head evidence to eligibil
       },
     });
 
-    assert.equal(result.reason, 'handed-to-review');
-    assert.equal(result.nextAction.action, 'review');
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.nextAction.action, 'hammer');
     assert.equal(result.nextAction.head, currentHead);
-    assert.equal(seenOptions, null, 'trailers alone do not dispatch a hammer');
+    assert.ok(seenOptions, 'ownership permits resuming Hammer, subject to eligibility');
+    assert.equal(result.closerAuthoredStale.carryForward, false, 'ownership does not certify the stale verdict');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 

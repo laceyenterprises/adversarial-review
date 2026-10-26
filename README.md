@@ -1,5 +1,14 @@
 # Adversarial Review
 
+HAMVALIDORPHAN-01: automatic review queues cannot orphan a hammer-validated
+head. The watcher restores its last delivered review and evaluates ordinary
+closure in the same poll. Shared rescue classification retains hammer ownership;
+existing validation, leases, retry limits and escalation remain authoritative.
+See the [recovery contract](docs/RUNBOOK-ama-closure.md#hammer-head-without-a-live-closer-hamvalidorphan-01).
+Offline regressions cover queued recovery and crashed-worker retry exhaustion;
+read-only observation after normal deployment remains pending. Existing smoke
+promises are unchanged.
+
 LAC-2094: finite CLI result entrypoints allow pending stdout/stderr writes to
 finish before exiting. Merge-lease `status`/`list` preserve the complete JSON
 document and retained attempts on pipes, including slow consumers. See the
@@ -2108,6 +2117,9 @@ stateDiagram-v2
     s5 --> s0: review-row.31 recovered post cannot settle its reviewed head; no charge
     s6 --> s0: review-row.32 recovered post cannot match its claim; no charge
     s2 --> s2: review-row.33 defer rereview request while claim is in flight
+    s0 --> s4: review-row.34 automatic hammer-owned-head request restored to delivered review identity with request CAS
+    s1 --> s4: review-row.35 automatic hammer-owned-head request restored to delivered review identity with request CAS
+    s3 --> s4: review-row.36 automatic hammer-owned-head request restored for closure CI evaluation with request CAS
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]

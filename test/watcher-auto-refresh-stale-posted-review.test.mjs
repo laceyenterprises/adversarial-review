@@ -1760,3 +1760,32 @@ test('system exact-head recovery does not authorize terminal closer override', (
   assert.equal(isExplicitOperatorReviewRetrigger({ rereview_requested_at: '2026-10-04T14:00:00Z',
     rereview_reason: 'system-held-head-review: recovery' }), false);
 });
+
+
+test('HAMVALIDORPHAN-01 queued suppression restores the delivered verdict and refuses raced requests', async () => {
+  const { restoreHammerOwnedReview } = await import('../src/closer-head-rereview-decline.mjs');
+  const { hammerHeadOwnership } = await import('../src/hammer-head-ownership.mjs');
+  const rootDir = makeTempRoot();
+  try {
+    const repo = 'example/fixture';
+    const db = setupPostedRow(rootDir, { repo, prNumber: 42, reviewerHeadSha: 'reviewed' });
+    for (const status of ['pending', 'pending-upstream', 'ci-blocked']) {
+      db.prepare(`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='failed-attempt',
+        revision_ref='hammer-head',rereview_requested_at='2026-01-01T00:00:00Z',rereview_reason='auto-refresh'`)
+        .run(status);
+      const row = readRow(db, repo, 42);
+      assert.equal(restoreHammerOwnedReview({ db, repoPath: repo, prNumber: 42, reviewRow: row,
+        reviewedHeadSha: 'reviewed', headSha: 'hammer-head' }), true);
+      assert.equal(readRow(db, repo, 42).reviewer_head_sha, 'reviewed');
+      assert.equal(readRow(db, repo, 42).review_status, 'posted');
+      assert.equal(restoreHammerOwnedReview({ db, repoPath: repo, prNumber: 42, reviewRow: row,
+        reviewedHeadSha: 'reviewed', headSha: 'hammer-head' }), false);
+      db.prepare(`UPDATE reviewed_prs SET review_status=?,rereview_reason='retrigger-review: operator'`).run(status);
+      assert.equal(restoreHammerOwnedReview({ db, repoPath: repo, prNumber: 42, reviewRow: row,
+        reviewedHeadSha: 'reviewed', headSha: 'hammer-head' }), false);
+    }
+    assert.equal(hammerHeadOwnership({ suppressed: true, reason: 'hammer-validated-head', headSha: 'old' }, 'new'), null);
+    assert.equal(hammerHeadOwnership({ suppressed: true, reason: 'closer-author-login' }, 'new'), null);
+    db.close();
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

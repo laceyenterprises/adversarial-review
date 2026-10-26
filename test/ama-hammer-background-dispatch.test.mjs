@@ -1024,7 +1024,7 @@ test('unvalidated closer without a review handoff reaches bounded watchdog recov
   assert.equal(result.orphanRecovery.disposition, 'exhausted');
 });
 
-test('rebased closer head without an App attestation cannot arm HAM resume', async t => {
+test('HAMVALIDORPHAN-01 trailer without an App attestation admits validation but cannot certify a verdict', async t => {
   const { args, payloads } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.reviewStateRow.reviewer = 'unknown-model';
@@ -1035,8 +1035,9 @@ test('rebased closer head without an App attestation cannot arm HAM resume', asy
   args.fetchLatestHeadReviewBodiesImpl = () => assert.fail('no authoritative reviewer to fetch');
   args.resolveHamTerminalRemediationEvidenceImpl = () => assert.fail('no authority to certify this head');
   const result = await maybeDispatchAmaClosureFor(args);
-  assert.equal(payloads.length, 0);
-  assert.equal(result.nextAction.action, 'review');
+  assert.equal(payloads.length, 1);
+  assert.equal(result.nextAction.action, 'hammer');
+  assert.equal(payloads[0].options.hamTerminalRemediation, undefined);
 });
 
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {
@@ -1048,8 +1049,8 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
     assert.equal(wakes[0].headSha, 'H1');
     assert.equal(['hammer', 'daemon-merge'].includes(wakes[0].shared.decision.action)
       && wakes[0].shared.decision.actor !== 'closure-recovery',
-    ['green', 'red', 'red-and-pending', 'pending-conflict'].includes(scenario));
-    const expectedDispatch = ['green', 'red', 'red-and-pending', 'pending-conflict'].includes(scenario);
+    ['green', 'red', 'red-and-pending', 'pending-conflict', 'blocking'].includes(scenario));
+    const expectedDispatch = ['green', 'red', 'red-and-pending', 'pending-conflict', 'blocking'].includes(scenario);
     assert.equal(payloads.length, expectedDispatch ? 1 : 0);
     if (!expectedDispatch && scenario !== 'pending') {
       assert.ok(['review', 'remediate', 'wait-for-CI'].includes(result.nextAction.action));
@@ -1638,3 +1639,25 @@ test('CLOSERINTENTRECON-01 orchestration carries an older live pending lease to 
   assert.equal(f.record().state, 'dispatching');
   assert.equal(f.reads(), 0, 'no receipt query for a live submitter within its deadline');
 });
+
+for (const reason of ['hammer-validated-head', 'closer-commit-trailer']) {
+  test(`HAMVALIDORPHAN-01 ownerless ${reason} wakes and dispatches without carrying a stale verdict`, async t => {
+    const { args, wakes, payloads } = closerResumeFixture('worker');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.resolveHeadCloserCommitSuppressionImpl = async () => ({ suppressed: true, reason, headSha: 'H1' });
+    args.headHasValidatedHamTerminalRemediationImpl = () => false;
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(result.nextAction.action, 'hammer');
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].shared.decision.reason, 'hammer-owned-head');
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].dispatchContext.targetRemediationSha, 'H1');
+    assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
+    assert.equal(payloads[0].options.hamTerminalRemediation, undefined);
+    const probe = await maybeDispatchAmaClosureFor({ ...args, probeCloserAuthoredStale: true });
+    assert.equal(probe.closerAuthoredStale.decision, 'hammer-resume');
+    assert.equal(probe.closerAuthoredStale.carryForward, false);
+    assert.equal(wakes.length, 1, 'rescue probe does not dispatch or wake');
+    assert.equal(payloads.length, 1);
+  });
+}

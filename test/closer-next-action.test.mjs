@@ -747,3 +747,36 @@ test('CLOSERSTOPTRANSIENT-01 transient stops never project a permanent automated
   assert.equal(observed.snapshot.observations.controls.value.stop.deterministic, false);
   assert.notEqual(observed.decision.reason, 'automated-stop');
 });
+
+for (const reason of ['hammer-validated-head', 'closer-commit-trailer']) {
+  test(`HAMVALIDORPHAN-01 ${reason} retains bounded hammer ownership and rescue agrees`, async () => {
+    const { default: classify } = await import('../src/merge-agent-rescue-classifier.mjs');
+    const input = { reviewState: { ...clean, headSha: OLD }, currentHead: HEAD,
+      hammerHead: { headSha: HEAD, reason }, lease: null, roundsLeft: true, checks: 'SUCCESS' };
+    const shared = await resolveClosureNextAction({ input, passSnapshot: base({
+      launches: { closer: { headSha: HEAD, launchRequestId: 'fixture-crashed',
+        status: 'failed', outcome: 'no-merge', retryable: true, attempt: 1 } },
+    }), candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true, observedAt: AT });
+    assert.deepEqual(tuple(shared.decision), ['hammer', 'hammer', 'retry-no-merge']);
+    assert.equal(shared.decision.attempt, 2);
+    assert.equal(classify({ sharedNextAction: shared, headSha: HEAD }).decision, 'hammer-eligible');
+    assert.equal(hasHammerDispatchIntent(shared, identity), true);
+    assert.equal(shared.snapshot.observations.progress.value.terminalReview, undefined,
+      'ownership cannot certify terminal validation or carry a stale verdict');
+    const exhausted = reviseClosureNextAction(shared, { policy: {
+      ...shared.snapshot.observations.policy.value, hammerCap: { headSha: HEAD, retryExhausted: true },
+    } });
+    assert.equal(exhausted.decision.reason, 'retry-exhausted');
+    assert.equal(hasHammerDispatchIntent(exhausted, identity), false);
+    const live = reviseClosureNextAction(shared, { launches: { closer: {
+      headSha: HEAD, launchRequestId: 'fixture-live', status: 'running',
+    } } });
+    assert.equal(live.decision.reason, 'live-owner');
+    assert.equal(hasHammerDispatchIntent(live, identity), false);
+    const foreign = reviseClosureNextAction(shared, { progress: { hammerHead: { headSha: OTHER, reason } },
+      launches: { closer: null } });
+    assert.equal(foreign.decision.action, 'review');
+    assert.equal(classify({ sharedNextAction: foreign, headSha: HEAD }).decision, 'rereview-eligible');
+  });
+}

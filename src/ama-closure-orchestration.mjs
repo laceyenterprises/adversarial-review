@@ -1,3 +1,4 @@
+import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { infrastructureOnlyFailures } from './ci-infrastructure.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mjs';
@@ -1383,9 +1384,32 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
 
+  // Resolve dispatch ownership independently of the stronger carry-forward
+  // proof. Rescue's read-only probe and the watcher consume this same fact.
+  const recordedTerminalReview = headHasValidatedHamTerminalRemediationImpl({ hqRoot: resolveHqRoot(env),
+    repo: repoPath, prNumber, headSha: currentPrHeadSha });
+  let ownedHeadSuppression = null;
+  if (recordedTerminalReview) {
+    ownedHeadSuppression = { suppressed: true, reason: 'hammer-validated-head', headSha: currentPrHeadSha };
+  } else if (originalReviewedHead && originalReviewedHead !== currentPrHeadSha) {
+    try {
+      ownedHeadSuppression = await runCoexistenceOperation('hammer-head-ownership',
+        () => cachedSuppression({ repoPath, prNumber, headSha: currentPrHeadSha, logger }),
+        { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
+      logger?.warn?.(`Hammer head ownership proof failed: ${error.message || error}`);
+    }
+  }
+  const hammerHead = !closerHeadHasLiveReview && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
+    && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))
+    ? hammerHeadOwnership(ownedHeadSuppression, currentPrHeadSha) : null;
+
   // STALECLOSER-03: the ONE closer-authored-stale rule. A live review on the
   // closer head (which reset `closerOnlyHeadDelta` above) supersedes it.
   const closerAuthoredStale = closerAuthoredStaleEligible({
+    hammerHead,
     headProof: closerOnlyHeadDelta || closerHeadProof?.proven !== true
       ? closerHeadProof
       : { ...closerHeadProof, proven: false, reason: 'closer-head-reviewed' },
@@ -1600,12 +1624,10 @@ async function dispatchAmaClosureFor({
   });
   const releasedStop = recordedStop && readHammerStopHoldForHead({ rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, stopKey: recordedStop.stopKey })?.releasedAt;
-  const recordedTerminalReview = headHasValidatedHamTerminalRemediationImpl({ hqRoot: resolveHqRoot(env),
-    repo: repoPath, prNumber, headSha: currentPrHeadSha });
   const closureOwnerInput = { hammerStop: recordedStop && (!recordedStop.refusal || !releasedStop) && !isInfrastructureStop(recordedStop) ? recordedStop : null,
     ...(recordedTerminalReview ? { terminalReview: { validated: true,
       headSha: currentPrHeadSha, reviewedHeadSha: reviewState.headSha } } : {}),
-    rootDir, reviewState, currentHead: currentPrHeadSha, strictMode, closerAuthoredStale,
+    rootDir, reviewState, currentHead: currentPrHeadSha, strictMode, closerAuthoredStale, hammerHead,
     operatorLogins: cfg?.operatorLogins, operatorLabelActorEnforcement: cfg?.operatorLabelActorEnforcement,
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
@@ -1951,7 +1973,7 @@ async function dispatchAmaClosureFor({
       // A HAM rebase can break the chain to the reviewed SHA. Its exact-head
       // ground-truth certificate below remains authoritative independently.
       allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview
-        && (closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0);
+        && (Boolean(hammerHead) || closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0);
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'

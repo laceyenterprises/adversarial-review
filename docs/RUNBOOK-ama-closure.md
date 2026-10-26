@@ -1,3 +1,21 @@
+## Controller dispatch-read activation (DOGREADSFLAG-02)
+
+New closers require both the reviewed Agent OS adapter activation policy and
+this controller revision. Before spawn, the adapter records and explicitly
+passes `ADVERSARIAL_DISPATCH_READS_ENABLED="1"` for the hammer class family.
+The controller reads the existing own-LRQ `env-contract.json`, validates its
+launch identity and uses its activation value for launch reads. A later worker
+export cannot enable a missing/disabled record or disable an enabled one.
+Missing, malformed or foreign records refuse startup. The strict string check,
+SDK/HCP reader and grants are unchanged.
+
+The tracked watcher/follow-up service environment activates those services;
+it does not deliver closer payload activation. Runtime-owner acceptance after
+normal deployment must retain the new launch's recorded value, loaded adapter
+and controller revisions and successful own-launch read. Offline synthetic
+spawn evidence does not establish live recovery. No live restart, forced
+launch, ledger mutation or new smoke step is authorized by this change.
+
 # RUNBOOK — AMA closure pipeline
 
 ## Worker pool policy conflicts (ITPPOOLCONFLICT-01)

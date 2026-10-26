@@ -3333,8 +3333,12 @@ See [the reader contract](docs/producer-contract-readers.md#dispatch-lookup).
 
 Dispatch lookup requires exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1`; code
 defaults off in environments without it. The tracked watcher and follow-up
-service templates now carry the flag so hammer controllers inherit activation
-for their mandatory own-launch HCP read. That read uses the provisioned worker
+service templates carry the flag for those services. DOGREADSFLAG-02 delivers
+closer activation separately through the Agent OS adapter's recorded launch
+environment, across payload environment clearing. The controller checks the
+record's own launch identity and uses its activation value for every mandatory
+own-launch HCP read, ignoring later worker exports. Missing, malformed or
+foreign records refuse startup; absent or non-`"1"` values remain disabled. That read uses the provisioned worker
 token and needs no app grants; grants remain a separate operator step for
 app-scoped lookups. Without grants, key, ticket and receipt lookups return
 not-found, mapped to `dispatch absence scope unproven`, and retain ownership

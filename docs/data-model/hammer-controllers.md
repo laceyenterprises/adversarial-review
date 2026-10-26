@@ -3,6 +3,17 @@
 **Owner:** versioned closer controller (`src/ama/hammer-controller.mjs`)
 **Source of truth:** `src/ama/hammer-controller.mjs`
 **Store:** `<HAM_RUN_DIR>/controller-<uuid>.json`, mode 0600
+
+Before any dispatch read, the controller loads
+`<HQ_ROOT>/dispatch/<own-lrq>/env-contract.json` and requires
+`launchProvenance.launchRequestId` to match its unambiguous launch identity.
+It replaces any caller-exported `ADVERSARIAL_DISPATCH_READS_ENABLED` with the
+value in that adapter-owned record. Missing, malformed or foreign records
+refuse startup; absent or non-string/non-`"1"` activation remains disabled by
+the unchanged reader. This file supplies environment provenance only: launch
+status still comes exclusively from the SDK/HCP own-launch read. The Agent OS
+adapter records and explicitly delivers `"1"` for reviewed hammer classes
+before spawn. No controller registration fields or lifecycle states change.
 **Entrypoint:** `bin/hammer-controller.mjs run <script> [args...]`
 
 Each invocation creates an independent registration before releasing its Bash

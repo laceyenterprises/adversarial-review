@@ -12,6 +12,7 @@ import { inspectMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
 import { nativeControllerIdentity } from '../controller-process-census.mjs';
+import { resolveHqRoot } from '../hq-root.mjs';
 
 // A slow or failed ledger read is not a cancellation. Only a readable terminal,
 // parked or foreign row stops a round at once; reads that fail stop it only
@@ -39,6 +40,18 @@ export function controllerLaunchId(env) {
     throw new Error('hammer controller requires one unambiguous HQ launch identity');
   }
   return ids[0];
+}
+
+// Activation belongs to the adapter's launch record, not a later shell export.
+// This is environment provenance only; launch status still uses the SDK reader.
+export function controllerLaunchEnvironment(env) {
+  const launchRequestId = controllerLaunchId(env);
+  const contract = JSON.parse(readFileSync(join(resolveHqRoot(env), 'dispatch',
+    launchRequestId, 'env-contract.json'), 'utf8'));
+  if (contract.launchProvenance?.launchRequestId !== launchRequestId) {
+    throw new Error('hammer controller launch environment identity unconfirmed');
+  }
+  return { ...env, ADVERSARIAL_DISPATCH_READS_ENABLED: contract.ADVERSARIAL_DISPATCH_READS_ENABLED };
 }
 
 export function assertHammerController(env = process.env, { readGroupImpl = currentProcessGroupId } = {}) {
@@ -179,6 +192,7 @@ export async function runHammerController(script, args = [], {
   if (!env.HAM_RUN_DIR || !env.HAM_ROOT_DIR || !env.HAM_REPO || !/^[1-9]\d*$/.test(env.HAM_PR_NUMBER || '')) {
     throw new Error('source inputs.sh before starting the hammer controller');
   }
+  env = controllerLaunchEnvironment(env);
   // Reads abandoned at exit must not hold the process open until they time out.
   const closing = new AbortController();
   const launchReads = { failures: 0, firstFailureAt: null, lastError: null, source: null };

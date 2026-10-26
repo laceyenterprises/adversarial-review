@@ -5218,14 +5218,19 @@ function validateDictPresentKeysOnly(
       },
     );
   }
-  if (schema.__strict_always) tolerateUnknown = false;
+  if (schema.__strict_always) {
+    tolerateUnknown = false;
+    if (Object.keys(doc).some(key => key.startsWith('__'))) {
+      throw new AgentOSConfigError(`${keyPath}: unknown policy key`, { key: keyPath, source });
+    }
+  }
   const allowed = schema.__keys || {};
   const extraSchema = schema.__extra_keys_schema || null;
   const strict = schema.__strict !== false;
 
   if (strict) {
     for (const rawKey of Object.keys(doc)) {
-      if (!(rawKey in allowed)) {
+      if (!(schema.__strict_always ? Object.hasOwn(allowed, rawKey) : rawKey in allowed)) {
         const lineSrc = annotateLine(source, lineMap, rawKey);
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
@@ -5271,7 +5276,7 @@ function validateDictPresentKeysOnly(
 
   const out = schema.__default_when_present ? structuredClone(buildDefaultsDict(schema)) : {};
   for (const [childKey, raw] of Object.entries(doc)) {
-    if (!(childKey in allowed)) {
+    if (!(schema.__strict_always ? Object.hasOwn(allowed, childKey) : childKey in allowed)) {
       // Non-strict dicts are extension points. If they provide an
       // __extra_keys_schema, arbitrary child keys are validated against it
       // (keyed maps such as apps.<app-id>); otherwise pass subtrees through

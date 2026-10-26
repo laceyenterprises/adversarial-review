@@ -232,6 +232,15 @@ receipt promotes it; unreadable or ambiguous evidence preserves the wait.
 Live submitters within the deadline retain ownership. Query budgets, absence
 rules, operator settlement and retry charging are unchanged.
 
+Admission treats an unreadable current-head lease as held (`lease-unreadable`)
+and logs a warning; confirmed terminal PRs still stop dispatch. A failed intent
+reconciliation in the recovery reaper warns and leaves that lease excluded from
+age-only release while processing other leases. Successful absence recovery
+returns the persisted terminal/deferred lease snapshot, including its updated
+timestamp, rather than the pending discovery snapshot. Closure rekeys a live
+older-head lease before reading the current-head handoff lease. These guards
+change no durable states, transitions or existing smoke promises.
+
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 

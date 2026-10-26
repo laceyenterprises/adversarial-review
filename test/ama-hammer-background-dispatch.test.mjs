@@ -5,7 +5,7 @@ import { bindClosureNextAction, readClosureNextAction, reviseClosureNextAction }
 import './helpers/load-aware-timeout-fixture.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
-import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1613,3 +1613,28 @@ for (const rekeyed of [false, true]) {
     });
   }
 }
+
+test('CLOSERINTENTRECON-01 orchestration carries an older live pending lease to the current head before reconciliation', async t => {
+  const args = closureArgs({
+    now: () => Date.parse(intentEarly),
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: true }),
+    observeClosureWaitImpl: async () => ({ retryAfterMs: 1000, exhausted: false }),
+    maybeDispatchAmaCloserImpl: async () => assert.fail('a live submitter must retain ownership'),
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  const f = seedCloserIntent(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber, headSha: oldHead },
+    { scenario: 'live' });
+  args.preReceiptIntentOptions = f.options;
+  args.closerLeaseLivenessOptions = { isProcessAlive: () => true, captureProcessImpl: f.options.captureProcessImpl };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.recoveryWait, true);
+  assert.equal(result.dispatched, false);
+  assert.equal(f.lease(), null, 'the old head is rekeyed before handoffLease is read');
+  const current = readAmaCloserLease(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+  assert.equal(current.status, 'pending');
+  assert.equal(current.rekeyedFromHeadSha, oldHead);
+  assert.equal(f.record().state, 'dispatching');
+  assert.equal(f.reads(), 0, 'no receipt query for a live submitter within its deadline');
+});

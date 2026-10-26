@@ -1436,8 +1436,37 @@ for (const rekeyed of [false, true]) {
       assert.equal(f.lease().status, ['absent', 'early-absent'].includes(scenario) ? 'terminal'
         : scenario === 'receipt' ? 'dispatched' : 'pending');
       assert.equal(f.record().retryCount, ['absent', 'early-absent'].includes(scenario) ? 1 : 2);
+      if (['absent', 'early-absent'].includes(scenario)) {
+        assert.equal(result.leases.length, 1);
+        const { _path, ...returnedLease } = result.leases[0];
+        assert.ok(_path);
+        assert.deepEqual(returnedLease, f.lease(), 'returned release evidence matches the persisted terminal lease');
+        assert.equal(returnedLease.terminalOutcome, 'deferred');
+      }
       if (scenario === 'receipt') assert.equal(f.lease().lrqId, f.receipt.launch_request_id);
       assert.equal(f.reads(), scenario === 'live' ? 0 : 1);
     });
   }
 }
+
+test('CLOSERINTENTRECON-01 reaper isolates a failed intent settlement and retains its lease', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const failed = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) });
+  const healthy = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 18, headSha: 'b'.repeat(40) });
+  const before = failed.lease();
+  const warnings = [];
+  const result = await reapStaleCloserLeases({ rootDir, now: intentExpired,
+    isProcessAlive: () => false, thresholdMs: 1, deadHolderThresholdMs: 1,
+    preReceiptIntentOptions: { ...failed.options, beforeSettlement: record => {
+      if (record.prNumber === 17) throw Object.assign(Error('synthetic settlement I/O failure'), { code: 'EIO' });
+    } },
+    logger: { warn: line => warnings.push(line), error() {}, log() {} } });
+  assert.equal(result.released, 1);
+  assert.equal(healthy.record().state, 'no-dispatch');
+  assert.equal(healthy.lease().terminalOutcome, 'deferred');
+  assert.deepEqual(failed.lease(), before, 'failed reconciliation must remain excluded from age-based release');
+  assert.equal(failed.record().state, 'dispatching');
+  assert.ok(warnings.some(line => line.includes('failed to reconcile closer intent')
+    && line.includes('pr=17') && line.includes('synthetic settlement I/O failure')));
+});

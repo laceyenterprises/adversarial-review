@@ -73,6 +73,7 @@ import {
   isReclaimableDispatchedAmaCloserLease,
   isCurrentAmaCloserLease,
   abandonedAmaCloserLeaseOutcome,
+  readAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
 import { amaCloserDispatchFilePath } from './ama/dispatch-record-read.mjs';
@@ -792,12 +793,24 @@ export async function reapStaleCloserLeases({
     const intentKey = amaCloserDispatchFilePath(rootDir, identity);
     if (reconciledIntents.has(intentKey)) continue;
     reconciledIntents.add(intentKey);
-    const recovery = await reconcileAmaCloserLeaseIntent(rootDir, lease, {
-      ...preReceiptIntentOptions, now, env, logger, host: host ?? hostname(), livePid,
-      ...(isProcessAlive ? { isProcessAlive } : {}),
-      ...(captureProcessImpl ? { captureProcessImpl } : {}),
-    });
-    if (recovery.status === 'no-launch') reconciledLeases.push(lease);
+    try {
+      const recovery = await reconcileAmaCloserLeaseIntent(rootDir, lease, {
+        ...preReceiptIntentOptions, now, env, logger, host: host ?? hostname(), livePid,
+        ...(isProcessAlive ? { isProcessAlive } : {}),
+        ...(captureProcessImpl ? { captureProcessImpl } : {}),
+      });
+      if (recovery.status === 'no-launch') {
+        const current = readAmaCloserLease(rootDir, lease);
+        if (current?.status === 'terminal' && current.terminalOutcome === 'deferred') {
+          reconciledLeases.push({ ...current, _path: lease._path });
+        }
+      }
+    } catch (error) {
+      // Keep this path fenced out of the age-only tiers, but let unrelated
+      // leases finish their recovery during this sweep.
+      logger?.warn?.(`[reaper] failed to reconcile closer intent repo=${lease.repo} pr=${lease.prNumber} `
+        + `head=${identity.headSha}: ${error?.message || error}`);
+    }
   }
   const abandonmentOptions = { now, host: host ?? hostname(), livePid,
     ...(isProcessAlive ? { isProcessAlive } : {}),

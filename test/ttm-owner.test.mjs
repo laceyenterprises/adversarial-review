@@ -225,7 +225,7 @@ test('hammer holds use existing exports and require both a computable release an
   const { tmpdir } = await import('node:os');
   const { join, dirname } = await import('node:path');
   const { amaAuditFilePath } = await import('../src/ama/audit.mjs');
-  const { readHammerStopForHead } = await import('../src/ama/hammer-stop-hold.mjs');
+  const { readHammerStopForHead, readHammerStopHoldForHead } = await import('../src/ama/hammer-stop-hold.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'ttm-hold-fixture-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
@@ -242,12 +242,15 @@ test('hammer holds use existing exports and require both a computable release an
   const read = nowIso => resolveTtmOwner(readTtmOwnerEvidence(rootDir, row, null, { hqRoot: rootDir }), nowIso);
   save({ inputs: { headSha: identity.headSha }, retryAfter: at(10) });
   assert.equal(read(START).owner, 'hold');
+  assert.equal(readHammerStopHoldForHead({ rootDir, ...identity, stopKey: stop.stopKey }).deadlineSource, 'retryAfter');
   assert.equal(resolveTtmOwner(readTtmOwnerEvidence(rootDir, { ...row, headSha: 'b'.repeat(40) },
     { head_sha: identity.headSha }, { hqRoot: rootDir }), START).owner, null,
   'a current head cannot borrow the cached head hammer hold');
   assert.match(read(at(10)).reason, /deadline expired/);
   save({ inputs: { headSha: identity.headSha } });
   assert.match(read(START).reason, /no deadline/);
+  assert.equal(read(at(20)).owner, null, 'normalization cannot renew an unanchored legacy hold');
+  assert.equal(readHammerStopHoldForHead({ rootDir, ...identity, stopKey: stop.stopKey }).deadlineSource, null);
   save({ retryAfter: at(10) });
   assert.match(read(START).reason, /no machine-checkable release condition/);
   save({ inputs: { headSha: identity.headSha }, retryAfter: at(10), releasedAt: START });

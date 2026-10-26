@@ -28,6 +28,9 @@ persistence. Each migrated store validates active holds before atomic writes.
 Legacy normalization supplies an owner, predicates and the existing owner's
 paging horizon. A versioned record missing required fields is invalid rather
 than silently repaired. Readers preserve legacy release and delivery evidence.
+The hammer-hold read projection also reports `deadlineSource` from a stored
+deadline, retry/wait time, first observation or companion merge. It is read-only
+provenance: TTM cannot claim ownership from an unanchored normalization default.
 
 Predicates are data, never executable expressions:
 

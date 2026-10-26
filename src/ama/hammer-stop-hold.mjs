@@ -211,7 +211,15 @@ export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = 
 
 export function readHammerStopHoldForHead({ rootDir, repo, prNumber, headSha, stopKey } = {}) {
   const entry = readHoldState(rootDir, repo, prNumber).heads[headSha];
-  return entry && entry.stopKey === stopKey ? normalizeHammerStopHold(entry, { repo, prNumber, headSha }) : null;
+  if (!entry || entry.stopKey !== stopKey) return null;
+  const anchors = [['deadline', entry.deadline], ['retryAfter', entry.retryAfter],
+    ['waitUntil', entry.waitUntil], ['firstObservedAt', entry.firstObservedAt],
+    ['companionMergedAt', entry.mode === 'companion' && entry.companionWait?.mergedAt]];
+  // A legacy normalization default is useful to its recovery owner, but cannot
+  // prove a future TTM ownership deadline on every new observation.
+  const deadlineSource = anchors.find(([, value]) => typeof value === 'string'
+    && Number.isFinite(Date.parse(value)))?.[0] ?? null;
+  return { ...normalizeHammerStopHold(entry, { repo, prNumber, headSha }), deadlineSource };
 }
 
 function writeHoldState(rootDir, repo, prNumber, state) {

@@ -28,7 +28,11 @@ and dispatch exports, including launches keyed to an earlier head and terminal
 launch observations. Hold readers use the existing hammer-stop exports; input
 change holds need a finite future deadline. A transient retry time and a recorded
 quota-reset time are machine-checkable deadlines. Unbounded, released or expired
-holds cannot claim ownership. Reasons name the declined lanes and hold gap.
+holds do not own the PR. The shared hammer-hold reader reports `deadlineSource`
+only when the stored record contains a deadline, retry/wait time or a stable
+observation/companion-merge timestamp. A normalization default based on the
+current read cannot establish or renew ownership of an unanchored legacy hold.
+Reasons name the declined lanes and hold gap.
 
 After more than seven minutes without an owner (one ordinary five-minute watcher
 cadence plus two minutes), the existing TTM flag store records STUCK `ownerless`.

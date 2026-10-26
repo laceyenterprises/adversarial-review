@@ -1,3 +1,4 @@
+import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
@@ -1227,6 +1228,7 @@ test('LABELGATE-01: page receipt survives restart and concurrent observations; t
   release();
   await first;
   const path = join(rootDir, 'data', 'operator-label-holds', readdirSync(join(rootDir, 'data', 'operator-label-holds'))[0]);
+  assertHoldRecord(JSON.parse(readFileSync(path, 'utf8')));
   const before = statSync(path);
   await restarted.holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; } });
   assert.equal(statSync(path).ino, before.ino, 'matching receipt avoids atomic replacement');

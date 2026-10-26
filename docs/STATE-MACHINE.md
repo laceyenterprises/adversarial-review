@@ -1111,6 +1111,15 @@ Per-head, series and lifetime caps and terminal-PR guards still apply; no
 executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
 for the vocabulary audit and migration shape.
 
+HOLDCONTRACT-01 unifies deterministic/transient hammer stops, companion waits,
+operator-label holds and stacked-base holds under a validated owner, predicate
+list, absolute deadline, escalation identifier and reason. Legacy records retain
+their paging horizons and delivery receipts. One evaluator serves existing owners
+and the poll sweep, including subjects skipped by the no-progress scheduler;
+remote evidence probes keep their existing cadence. Release precedes escalation
+and still grants no dispatch or merge authority. See the
+[shared hold contract](data-model/closer-holds.md) for predicates and writer inventory.
+
 COMPANIONFLOAT-01 gives pure companion stops a separate event wait. Closure
 recovery polls the companion PR and base submodule gitlink every five minutes;
 normal submodule float owns the update. Merge re-evaluates the wait; only a

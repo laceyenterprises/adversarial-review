@@ -4676,7 +4676,7 @@ async function maybeDispatchAmaCloserAttempt({
       });
       sharedNextAction = selectShared(evidenceStopHold.nextActionShared || sharedNextAction);
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
-        skipMergeAgent: true, recoveryWait: true, reason: evidenceStopHold.hammerStop.companionWait || evidenceStopHold.hammerStop.owner === 'closure-recovery'
+        skipMergeAgent: true, recoveryWait: true, reason: evidenceStopHold.hammerStop.companionWait || evidenceStopHold.hammerStop.awaitedEvent
           ? 'hammer-stop-awaiting-companion' : evidenceStopHold.hammerStop.deterministic === false
           ? HAMMER_TRANSIENT_STOP_HOLD_REASON : HAMMER_STOP_HOLD_REASON,
         hammerStop: evidenceStopHold.hammerStop, nextActionShared: sharedNextAction });
@@ -6712,7 +6712,7 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
     if (labelGates.length) return noAmaDispatch(await holdForOperatorLabels({ rootDir, repo, prNumber,
-      headSha: prMetadata.headSha, gates: labelGates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt }));
+      headSha: prMetadata.headSha, prMetadata, gates: labelGates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt }));
   }
 
   assertAmaAuditOwner({

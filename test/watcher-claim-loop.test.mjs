@@ -137,6 +137,7 @@ function buildLoaderSource({
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
     [fileUrl('src', 'hcp-health.mjs')]: 'fixture:hcp-health',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'ama', 'closer-hold-records.mjs')]: 'fixture:closer-hold-records',
     [fileUrl('src', 'head-closer-commit-suppression.mjs')]: 'fixture:head-closer-commit-suppression',
     [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
     [fileUrl('src', 'session-ledger-read-adapter.mjs')]: 'fixture:session-ledger-read-adapter',
@@ -342,6 +343,7 @@ export async function load(url, context, nextLoad) {
   const simpleStubs = {
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
+    'fixture:closer-hold-records': 'export async function evaluateCloserHoldsForPoll(args) { globalThis.__closerHoldPolls = (globalThis.__closerHoldPolls || 0) + 1; globalThis.__closerHoldSubjects = args.subjects; }',
     'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
     'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
@@ -4561,3 +4563,26 @@ for (const [status, reason] of [['pending', 'hammer-validated-head'], ['posted',
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+
+test('HOLDCONTRACT-01: each completed poll evaluates discovered hold subjects once', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'hold-contract-poll-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
+      assert.equal(globalThis.__closerHoldPolls, 1);
+      assert.ok(globalThis.__closerHoldSubjects.length > 0);
+      assert.ok(globalThis.__closerHoldSubjects.every(subject => subject.holdMetadata));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(globalThis.__closerHoldPolls, 2);
+    ` }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

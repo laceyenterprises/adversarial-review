@@ -1,3 +1,5 @@
+import { assertHoldRecord } from '../src/ama/hold-record.mjs';
+import { readHammerStopHoldForHead, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -55,6 +57,8 @@ test('FINALCLOSE-01: deterministic and other evidence stop predicates keep their
     const other = fixture(t, predicate);
     assert.equal((await evaluateHammerStopHold({ ...other.args, now: at(0) })).action, 'hold');
     assert.equal(other.pages.length, 1, predicate);
+    const stop = readHammerStopForHead(other.args);
+    assertHoldRecord(readHammerStopHoldForHead({ ...other.args, stopKey: stop.stopKey }));
     await evaluateHammerStopHold({ ...other.args, now: at(5 * 60_000) });
     assert.equal(other.pages.length, 1, predicate);
   }

@@ -1,3 +1,5 @@
+import { hammerStopInputs } from './hammer-stop-hold.mjs';
+import { createHoldRecord, normalizeHoldRecord, evaluateHoldRecord, writeHoldRecord, markHoldEscalated } from './hold-record.mjs';
 import { rememberCheckSteps } from '../ci-infrastructure.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -5,7 +7,6 @@ import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, un
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems, classifyCheckRollup, summarizeChecksConclusion } from '../checks-summary.mjs';
-import { writeFileAtomic } from '../atomic-write.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { parseBlockingFindingsSection } from '../kernel/review-findings.mjs';
@@ -199,9 +200,19 @@ export function sweepOperatorLabelHolds({ rootDir, repo, prNumber, headSha, clos
     } catch { /* A corrupt or concurrently replaced receipt grants no authority. */ }
   }
 }
+export function normalizeOperatorLabelHold(record, now = new Date().toISOString()) {
+  return normalizeHoldRecord(record, { holdType: 'operator-label', owner: 'operator',
+    firstObservedAt: record.alertedAt || now, deadline: record.alertedAt || now,
+    onDeadline: 'ama_closer.operator_label_required',
+    awaits: [{ kind: 'head-change', from: record.headSha },
+      ...(typeof record.checks === 'string' ? [{ kind: 'checks-change', from: record.checks }] : []),
+      { kind: 'event', name: 'operator-label-gates-cleared' }] });
+}
+
 const PAGE_LOCK_STALE_MS = Math.max(1_000, Number(process.env.OPERATOR_LABEL_PAGE_LOCK_STALE_MS) || 60_000);
 export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, gates,
-  deliverAlertImpl = deliverAlert, postCommentImpl = null, logger = console, now = new Date().toISOString() }) {
+  deliverAlertImpl = deliverAlert, postCommentImpl = null, prMetadata = null,
+  logger = console, now = new Date().toISOString() }) {
   if (!headSha || !gates.length) return null;
   sweepOperatorLabelHolds({ rootDir, repo, prNumber, headSha });
   const key = JSON.stringify([repo, prNumber, headSha]);
@@ -216,9 +227,9 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
   // retries after the bounded stale-lock window; failed transport also retries.
   let claimed = false;
   try {
-    const receiptMatches = prior => prior?.alertedAt && (!postCommentImpl || prior.commentedAt) && prior.repo === repo && prior.prNumber === prNumber
+    const receiptMatches = prior => !prior?.releasedAt && prior?.alertedAt && (!postCommentImpl || prior.commentedAt) && prior.repo === repo && prior.prNumber === prNumber
       && prior.headSha === headSha && prior.reason === reason && JSON.stringify(prior.gates) === JSON.stringify(gates);
-    try { if (receiptMatches(JSON.parse(readFileSync(path, 'utf8')))) return result; } catch { /* no matching receipt */ }
+    try { const receipt = JSON.parse(readFileSync(path, 'utf8')); if (receipt.holdVersion === 1 && receiptMatches(receipt)) return result; } catch { /* no matching receipt */ }
     mkdirSync(dir, { recursive: true });
     try {
       if (Date.now() - statSync(lockPath).mtimeMs > loadAwareTimeoutMs(PAGE_LOCK_STALE_MS)) unlinkSync(lockPath);
@@ -227,9 +238,21 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
     catch (error) { if (error.code === 'EEXIST') return result; throw error; }
     let prior;
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first observation */ }
-    if (receiptMatches(prior)) return result;
+    if (prior?.holdVersion === 1 && receiptMatches(prior)) return result;
     let alertedAt = prior?.alertedAt || null;
     let commentedAt = prior?.commentedAt || null;
+    const holdSource = postCommentImpl ? 'review' : 'checks';
+    const excludeContexts = [...adversarialOwnCheckContexts()];
+    const checks = holdSource === 'checks' && Array.isArray(prMetadata?.statusCheckRollup)
+      ? hammerStopInputs(prMetadata, { excludeContexts }).checks : undefined;
+    let record = normalizeOperatorLabelHold({ ...prior, releasedAt: undefined, releasedBy: undefined, releasedInputs: undefined,
+      repo, prNumber, headSha, reason, gates, alertedAt, commentedAt, holdSource, checks, excludeContexts }, now);
+    // Current CI observations establish a new wait after the earlier snapshot
+    // changed. Review-finding waits never borrow a checks-only release.
+    record = createHoldRecord({ ...record, awaits: [{ kind: 'head-change', from: headSha },
+      ...(typeof checks === 'string' ? [{ kind: 'checks-change', from: checks }] : []),
+      { kind: 'event', name: 'operator-label-gates-cleared' }] });
+    const evaluation = evaluateHoldRecord(record, { now, namespace: rootDir });
     if (postCommentImpl && !commentedAt) {
       try {
         const posted = await postCommentImpl({ repo, prNumber,
@@ -238,17 +261,19 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
         if (posted?.posted) commentedAt = now;
       } catch (error) { logger.warn?.(`Operator-label comment failed: ${error.message}`); }
     }
-    if (!alertedAt && !alerted.has(path)) {
+    if (evaluation.escalate && !alertedAt && !alerted.has(path)) {
       try {
         await deliverAlertImpl(`${repo} PR ${prNumber} head ${headSha}: ${gates.map(g => `${g.check} requires operator label ${g.label}`).join('; ')}. Hold the guarded changes in place. An operator must inspect the refusal and, if appropriate, apply the named label and rerun review or the named check. Remediation must not revert these changes to satisfy the gate.`, {
           event: 'ama_closer.operator_label_required', payload: { repo, prNumber, headSha, reason, gates },
         });
         if (alerted.size >= MAX_ALERTED_ENTRIES) alerted.delete(alerted.values().next().value);
+        markHoldEscalated(record, rootDir);
         alerted.add(path);
         alertedAt = now;
       } catch (error) { logger.warn?.(`Operator-label page failed: ${error.message}`); }
     }
-    writeFileAtomic(path, JSON.stringify({ repo, prNumber, headSha, reason, gates, alertedAt, commentedAt }, null, 2));
+    const receipt = createHoldRecord({ ...record, alertedAt, commentedAt });
+    writeHoldRecord(path, receipt);
   } catch (error) { logger.warn?.(`Operator-label hold persistence failed: ${error.message}`); }
   finally { if (claimed) { try { unlinkSync(lockPath); } catch { /* stale claim already removed */ } } }
   return result;

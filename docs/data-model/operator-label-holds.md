@@ -49,7 +49,7 @@ delivery. Terminal HAM hold comments use the shared GitHub outbound-body filter.
 
 `<digest>.json` uses the hexadecimal SHA-256 of
 `JSON.stringify([repo, prNumber, headSha])`. JSON writes use atomic replacement;
-there is no schema-version field.
+active receipts also carry the shared `holdVersion: 1` contract.
 
 | Field | Shape | Contract |
 |---|---|---|
@@ -94,3 +94,17 @@ superseded-head receipts when a new hold is observed, closed-PR receipts when
 closure observes the closed PR, and unrelated receipts older than 30 days.
 Active claim files are excluded from the sweep. These retention
 and claim limitations do not grant merge authority. Ordinary findings remain remediable.
+
+
+HOLDCONTRACT-01 adds `owner: operator`, `awaits` (head movement, a changed CI fingerprint for check-owned waits, or
+positively observed gate clearance), an immediate `deadline`, and the existing
+`ama_closer.operator_label_required` identifier as `onDeadline`. Legacy delivered
+receipts normalize without another page. Current writes validate the required
+fields. The poll sweep evaluates backed-off subjects and retains successful page
+receipts; clearing a receipt never certifies CI or authorizes merge. See the
+[shared closer hold contract](closer-holds.md).
+
+`holdSource` distinguishes review findings from CI refusals. Only CI waits store
+`checks` and `excludeContexts` for snapshot-change predicates. Green checks cannot
+clear a review-finding wait. A receipt reobserved after release re-arms its wait
+while preserving the same-head successful page receipt.

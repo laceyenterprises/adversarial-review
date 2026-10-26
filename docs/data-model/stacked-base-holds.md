@@ -45,3 +45,13 @@ merge admission; remediation forwards only the live base/default pair read
 during hydration, never a persisted job base. Unhydrated jobs retain the live
 read even with a cached default. The daemon and closer inline merge callbacks
 omit both fields to force a live base read immediately before merging.
+
+
+HOLDCONTRACT-01 adds the validated shared `holdVersion: 1` contract. Merged-parent
+holds name `owner: operator`, await a successful stacked-base inspection and use
+an immediate deadline with the existing retarget-comment marker as `onDeadline`.
+Read failures name `closure-recovery` and retain the one-minute retry predicate
+and deadline. Legacy readers retain comment receipts and normalize their owner
+and horizon. The poll sweep evaluates discovered open subjects without a new API
+read; the guard still owns authoritative inspection and comment delivery. See the
+[shared closer hold contract](closer-holds.md).

@@ -1,3 +1,6 @@
+import { resolveHqRoot } from './hq-root.mjs';
+import { withHoldRecordPoll } from './ama/hold-record.mjs';
+import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -1156,7 +1159,7 @@ async function refreshOrgRepos(octokit) {
 let watcherLatencyMonitor;
 async function pollOnce(octokit, options = {}) {
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)))));
+  return withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options))))));
 }
 
 async function pollOnceWithinBudget(
@@ -1192,7 +1195,7 @@ async function pollOnceWithinBudget(
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
-  const postedReviewHandlers = [];
+  const postedReviewHandlers = [], holdSubjects = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() }, reviewerQuotaPoll = beginReviewerQuotaPoll(execFileAsync);
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
@@ -1465,6 +1468,8 @@ async function pollOnceWithinBudget(
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus, cfg: loadConfigCached({ env: process.env }).getMergeAuthorityConfig() });
+    holdSubjects.push(...subjectEntries.map(entry => ({ repoPath, prNumber: entry.prNumber,
+      headSha: entry.subject?.headSha, reviewedSha: entry.current?.reviewer_head_sha, holdMetadata: entry.subject })));
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, { ...reviewContext });
       watcherHeartbeat?.markPollProgress?.();
@@ -1560,6 +1565,9 @@ async function pollOnceWithinBudget(
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
   });
   } finally {
+    try {
+      await evaluateCloserHoldsForPoll({ rootDir: ROOT, hqRoot: resolveHqRoot(), subjects: holdSubjects, deliverAlertImpl: defaultDeliverAlert, logger: console });
+    } catch (error) { console.warn('[watcher] hold evaluation failed:', error?.code || 'hold-read-error'); }
     reviewerQuotaPoll.logReads();
     try {
       await healthProbe?.finishTick?.(healthTick, {

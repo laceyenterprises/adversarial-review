@@ -1,3 +1,4 @@
+import { assertHoldRecord, createHoldRecord, normalizeHoldRecord, inputChangePredicates, changedHoldInputs, evaluateHoldRecord, markHoldEscalated, resetHoldEscalationsForTests } from './hold-record.mjs';
 import { refundCiInfrastructureHammerStops } from './ci-infrastructure-refund.mjs';
 import { CI_INFRASTRUCTURE_STOP_REASONS, infrastructureOnlyFailures, recordedCiFailures, checksExecutedAgain, enrichCiInfrastructureEvidence } from '../ci-infrastructure.mjs';
 import { observeClosureResult } from './closure-next-action.mjs';
@@ -5,7 +6,7 @@ import { createHistoryReader } from './history-reader.mjs';
 import { HISTORY_READ_ERROR_LIMIT } from './history-read-policy.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
-import { companionOnlyStop, evaluateCompanionWait } from './companion-stop-wait.mjs';
+import { companionOnlyStop, evaluateCompanionWait, COMPANION_FLOAT_WAIT_MS } from './companion-stop-wait.mjs';
 // CLOSERSTOPTRANSIENT-01: the historical input-change rule below applies only
 // to explicitly listed deterministic refusals. Other no-merge stops use a
 // durable five-minute backoff; ordinary retry and lifetime caps still apply.
@@ -123,6 +124,7 @@ const PAGED_IN_PROCESS = new Set();
 
 export function _resetHammerStopHoldPageDebounceForTests() {
   PAGED_IN_PROCESS.clear();
+  resetHoldEscalationsForTests();
 }
 const TEXT_LIMIT = 300;
 const HEADS_KEPT = 8;
@@ -190,9 +192,26 @@ function readHoldState(rootDir, repo, prNumber) {
   }
 }
 
+export function normalizeHammerStopHold(entry, { repo, prNumber, headSha, now = new Date().toISOString() } = {}) {
+  const firstObservedAt = entry.firstObservedAt || now;
+  const companion = entry.mode === 'companion';
+  const deadline = entry.waitUntil || new Date(Date.parse(companion ? entry.companionWait?.mergedAt || firstObservedAt : firstObservedAt)
+    + (companion ? COMPANION_FLOAT_WAIT_MS : entry.predicate === 'history-read-failed' ? HISTORY_READ_FAILURE_PAGE_GRACE_MS : 0)).toISOString();
+  const awaits = companion
+    ? [{ kind: 'gitlink-contains-commit', ...(entry.companionWait || {}), changed: 'companion-floated' }]
+    : entry.releasedAt && !entry.inputs && entry.releasedBy?.length
+      ? entry.releasedBy.map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) }))
+      : [...inputChangePredicates(entry.inputs),
+      ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
+      ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])];
+  return normalizeHoldRecord(entry, { holdType: 'hammer-stop', repo, prNumber, headSha,
+    firstObservedAt, owner: 'closure-recovery', deadline, awaits,
+    onDeadline: HAMMER_STOP_HOLD_PAGE_EVENT, reason: entry.predicate || 'hammer-stop' });
+}
+
 export function readHammerStopHoldForHead({ rootDir, repo, prNumber, headSha, stopKey } = {}) {
   const entry = readHoldState(rootDir, repo, prNumber).heads[headSha];
-  return entry?.stopKey === stopKey ? entry : null;
+  return entry && entry.stopKey === stopKey ? normalizeHammerStopHold(entry, { repo, prNumber, headSha }) : null;
 }
 
 function writeHoldState(rootDir, repo, prNumber, state) {
@@ -201,6 +220,7 @@ function writeHoldState(rootDir, repo, prNumber, state) {
   const heads = Object.entries(state.heads || {})
     .sort(([, a], [, b]) => String(b?.firstObservedAt || '').localeCompare(String(a?.firstObservedAt || '')))
     .slice(0, HEADS_KEPT);
+  for (const [, entry] of heads) assertHoldRecord(entry);
   writeFileAtomic(path, `${JSON.stringify({ ...state, heads: Object.fromEntries(heads) }, null, 2)}\n`);
 }
 
@@ -403,18 +423,7 @@ export function hammerStopPrIsConflicting(prMetadata) {
 // A missing current reading is not evidence of change; a newly available
 // reading does release a hold whose previous observation was unknown (null).
 export function changedHammerStopInputs(previous, current) {
-  const changed = [];
-  if (!previous || !current) return changed;
-  if (current.headSha && previous.headSha !== current.headSha) changed.push('head');
-  if (current.baseSha && previous.baseSha !== current.baseSha) changed.push('base');
-  if (current.mergeability && previous.mergeability !== current.mergeability) {
-    changed.push('mergeability');
-  }
-  if (typeof previous.checks === 'string' && typeof current.checks === 'string' && previous.checks !== current.checks) {
-    changed.push('checks');
-  }
-  if (typeof previous.review === 'string' && typeof current.review === 'string' && previous.review !== current.review) changed.push('review');
-  return changed;
+  return changedHoldInputs(previous, current);
 }
 
 /**
@@ -471,6 +480,7 @@ export async function evaluateHammerStopHold({
     });
     stop = readStop();
   }
+  for (const [head, value] of Object.entries(state.heads)) state.heads[head] = normalizeHammerStopHold(value, { repo, prNumber, headSha: head, now });
   const prior = state.heads[headSha];
   // External dependency events own this wait, before legacy transient upgrade,
   // changed-input, conflict and timer releases can widen closer admission.
@@ -522,7 +532,7 @@ export async function evaluateHammerStopHold({
     if (prior?.refusal && !prior.releasedAt && deterministicRefusal({ ...prior,
       reasons: prior.refusal.reasons }, { repo, prNumber, headSha })) {
       const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
-      const changed = changedHammerStopInputs(prior.inputs, inputs);
+      const changed = evaluateHoldRecord(prior, { namespace: rootDir, now, inputs }).changed;
       const hammerStop = { headSha, predicate: prior.predicate, deterministic: true,
         refusal: prior.refusal, since: prior.firstObservedAt, paged: Boolean(prior.pagedAt) };
       if (changed.length > 0) {
@@ -576,16 +586,23 @@ export async function evaluateHammerStopHold({
       inputs: stopBaseline(stop, prior?.releasedInputs || inputs),
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
-  let dirty = !reuseEntry || prior.stopKey !== stop.stopKey;
+  let dirty = !reuseEntry || prior.stopKey !== stop.stopKey || prior.holdVersion !== 1;
   if (!stop.refusal && !entry.retryAfter) {
     entry = { ...entry, mode: 'transient', reasons: classifiedStopReasons(stop),
       retryAfter: new Date(Date.parse(now) + HAMMER_TRANSIENT_STOP_BACKOFF_MS).toISOString() };
     dirty = true;
   }
+  entry = normalizeHammerStopHold(entry, { repo, prNumber, headSha, now });
+  // Rebuild predicates from the current stop baseline, including legacy audit inputs.
+  entry = createHoldRecord({ ...entry, excludeContexts, awaits: [...inputChangePredicates(stopBaseline(stop, entry.inputs)),
+    ...['hold-released', 'github-gate-cleared', 'primary-change-evidence', 'conflicting'].map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) })),
+    ...(entry.retryAfter ? [{ kind: 'retry-at', at: entry.retryAfter, fallback: true, changed: 'transient-stop-backoff' }] : [])] });
+  let evaluation;
   if (!entry.releasedAt) {
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
-    const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(stopBaseline(stop, entry.inputs), inputs);
+    let changed = holdReleased ? ['hold-released'] : [];
+    let inputsReadable = true;
     // HAMUNKNOWN-02: the first hold snapshot may already have recovered from
     // the hammer's transient read. Re-evaluate the named gate on this pass's
     // live metadata instead of waiting forever for another input change.
@@ -626,14 +643,16 @@ export async function evaluateHammerStopHold({
           if (answer.ok || (answer.reason === 'primary-change-reverted' && answer.missingEvidence
             && JSON.stringify(stable(answer.missingEvidence)) !== JSON.stringify(stop.refusal.missingEvidence))) changed.push('primary-change-evidence');
         } else if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
-        else if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
+        else if (stop.predicate === 'history-read-failed' && !holdReleased) { changed.splice(0); inputsReadable = false; }
       } catch (err) {
-        if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
+        if (stop.predicate === 'history-read-failed' && !holdReleased) { changed.splice(0); inputsReadable = false; }
         logger?.warn?.(`[ama-closer] hammer evidence probe failed for ${repo}#${prNumber}: ${err?.message || err}`);
       }
     }
     if (changed.length === 0 && !stop.refusal && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
-    if (changed.length === 0 && !stop.refusal && Date.parse(now) >= Date.parse(entry.retryAfter)) changed.push('transient-stop-backoff');
+    evaluation = evaluateHoldRecord(entry, { now, namespace: rootDir, inputs: holdReleased || !inputsReadable ? stopBaseline(stop, entry.inputs) : inputs,
+      events: Object.fromEntries(changed.map(name => [name, true])) });
+    changed = evaluation.changed;
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
       dirty = true;
@@ -654,6 +673,7 @@ export async function evaluateHammerStopHold({
     closingStatus: stop.closingStatus || null,
     ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
     since: entry.firstObservedAt,
+    owner: entry.owner, awaits: entry.awaits, deadline: entry.deadline, onDeadline: entry.onDeadline,
   };
   if (entry.releasedAt) {
     if (dirty) persist();
@@ -665,8 +685,7 @@ export async function evaluateHammerStopHold({
     + `reason=${recovery?.reason || 'automated-stop'} head=${headSha} `
     + `ageMs=${Math.max(0, Date.parse(now) - Date.parse(entry.firstObservedAt))}. `;
   const debounceKey = `${rootDir}\0${repo}\0${prNumber}\0${headSha}${stop.refusal ? `\0${stop.refusal.key}\0${entry.refusalGeneration}` : ''}`;
-  const pageDue = stop.predicate !== 'history-read-failed'
-    || Date.parse(now) - Date.parse(entry.firstObservedAt) >= HISTORY_READ_FAILURE_PAGE_GRACE_MS;
+  const pageDue = evaluation?.escalate;
   if (pageDue && !entry.pagedAt && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
     const text = `Adversarial-review hammer stopped without merging ${repo}#${prNumber} on head `
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
@@ -689,6 +708,7 @@ export async function evaluateHammerStopHold({
           ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
         },
       });
+      markHoldEscalated(entry, rootDir);
       entry.pagedAt = now;
       dirty = true;
       PAGED_IN_PROCESS.add(debounceKey);
@@ -705,7 +725,13 @@ export async function evaluateHammerStopHold({
 
   function persist(holdEntry = entry) {
     try {
-      writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: holdEntry } });
+      let record = normalizeHammerStopHold(holdEntry, { repo, prNumber, headSha, now });
+      const named = new Set(record.awaits.map(predicate => predicate.name || predicate.changed));
+      const releaseEvents = (holdEntry.releasedBy || []).filter(name => !named.has(name)
+        && !record.awaits.some(predicate => predicate.kind === `${name}-change`));
+      if (releaseEvents.length) record = createHoldRecord({ ...record,
+        awaits: [...record.awaits, ...releaseEvents.map(name => ({ kind: 'event', name, ...(name === 'conflicting' ? { fallback: true } : {}) }))] });
+      writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: record } });
     } catch (err) {
       logger?.error?.(JSON.stringify({
         event: 'ama_closer.hammer_stop_hold_persist_failed',

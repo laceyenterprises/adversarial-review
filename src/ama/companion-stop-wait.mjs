@@ -1,3 +1,4 @@
+import { createHoldRecord, evaluateHoldRecord, markHoldEscalated, holdEscalatedInProcess } from './hold-record.mjs';
 import { creditHammerDispatchBudgets, readHammerRetryCapLedger, updateHammerRetryCapLedger } from './hammer-retry-cap.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 
@@ -130,7 +131,7 @@ export async function evaluateCompanionWait({ rootDir, repo, prNumber, headSha, 
   const priorCompanion = companionReference(prior?.companionWait);
   const incoming = companionReference(stop.companionWait);
   const sameDependency = prior?.mode === 'companion' && (!incoming || JSON.stringify(incoming) === JSON.stringify(priorCompanion));
-  const entry = sameDependency || sameStop ? { ...prior } : { firstObservedAt: now, pagedAt: null };
+  let entry = sameDependency || sameStop ? { ...prior } : { firstObservedAt: now, pagedAt: null };
   if (prior?.mode !== 'companion') entry.pagedAt = null;
   entry.stopKey = stop.stopKey;
   entry.predicate = stop.predicate;
@@ -163,7 +164,12 @@ export async function evaluateCompanionWait({ rootDir, repo, prNumber, headSha, 
   const name = wait ? `${wait.repo} PR ${wait.prNumber} (${wait.submodulePath})` : 'unidentified companion (dependency evidence pending)';
   const closingStatus = `Automated owner: closure-recovery; awaiting ${entry.awaitedEvent} for ${name}. Normal submodule float owns the base gitlink update.`;
   entry.closingStatus = closingStatus;
-  if (!entry.probeError && wait?.state === 'merged' && wait.containsMerge === true) {
+  entry = createHoldRecord({ ...entry, holdType: 'hammer-stop', repo, prNumber, headSha,
+    reason: stop.predicate, deadline: entry.waitUntil, onDeadline: pageEvent,
+    awaits: [{ kind: 'gitlink-contains-commit', ...(companionReference(wait) || {}),
+      ...(wait?.mergeCommit ? { commit: wait.mergeCommit } : {}), changed: 'companion-floated' }] });
+  const evaluation = evaluateHoldRecord(entry, { now, namespace: rootDir, companionWait: wait, evidenceUnreadable: Boolean(entry.probeError) });
+  if (evaluation.action === 'release') {
     entry.releasedAt = sameStop && prior?.releasedAt || now;
     entry.releasedBy = ['companion-floated'];
     if (!events.companionFloatedAt) events.companionFloatedAt = now;
@@ -176,14 +182,15 @@ export async function evaluateCompanionWait({ rootDir, repo, prNumber, headSha, 
     }));
   }
   const escalation = !entry.releasedAt && (wait?.state === 'closed' ? 'companion-closed-unmerged'
-    : Date.parse(now) >= deadline ? 'companion-float-timeout' : null);
+    : evaluation.escalate ? 'companion-float-timeout' : null);
   const debounceKey = `${rootDir}\0${repo}\0${prNumber}\0${headSha}\0companion\0${name}`;
-  if (escalation && !entry.pagedAt && !pagedInProcess.has(debounceKey) && typeof deliverAlertImpl === 'function') {
+  if (escalation && !holdEscalatedInProcess(entry, rootDir) && !entry.pagedAt && !pagedInProcess.has(debounceKey) && typeof deliverAlertImpl === 'function') {
     try {
       await deliverAlertImpl(`${closingStatus} Escalation: ${escalation}; companion ${name}.`, {
         event: pageEvent, payload: { repo, prNumber, headSha, predicate: stop.predicate,
           owner: entry.owner, awaitedEvent: entry.awaitedEvent, companionWait: wait, escalation },
       });
+      markHoldEscalated(entry, rootDir);
       entry.pagedAt = now;
       pagedInProcess.add(debounceKey);
     } catch (err) { logger?.error?.(`companion wait escalation delivery failed: ${err?.code || 'delivery-error'}`); }
@@ -191,7 +198,7 @@ export async function evaluateCompanionWait({ rootDir, repo, prNumber, headSha, 
   persist(entry);
   const hammerStop = { headSha, stopKey: stop.stopKey, predicate: stop.predicate, deterministic: false,
     owner: entry.owner, awaitedEvent: entry.awaitedEvent, closingStatus, companionWait: wait,
-    since: entry.firstObservedAt, waitUntil: entry.waitUntil, paged: Boolean(entry.pagedAt) };
+    since: entry.firstObservedAt, awaits: entry.awaits, deadline: entry.deadline, onDeadline: entry.onDeadline, waitUntil: entry.waitUntil, paged: Boolean(entry.pagedAt) };
   return entry.releasedAt ? { action: 'release', hammerStop, changed: entry.releasedBy }
     : { action: 'hold', hammerStop };
 }

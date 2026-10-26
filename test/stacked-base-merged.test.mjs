@@ -1,3 +1,4 @@
+import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -50,6 +51,7 @@ test('merged parent branch holds closer dispatch, persists reason and comments o
   assert.match(f.comments[0].body, /Rebase.*trunk.*retarget/s);
   assert.equal(f.calls.filter(args => args[0] === 'dispatch' || args[1] === 'merge').length, 0);
   const file = readdirSync(join(f.rootDir, 'data', 'stacked-base-holds')).find(name => name.endsWith('.json'));
+  assertHoldRecord(JSON.parse(readFileSync(join(f.rootDir, 'data', 'stacked-base-holds', file))));
   assert.equal(JSON.parse(readFileSync(join(f.rootDir, 'data', 'stacked-base-holds', file))).reason, 'stacked-base-merged');
 });
 

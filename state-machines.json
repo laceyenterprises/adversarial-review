@@ -51,6 +51,7 @@
     "lifecycleChange": "No new persisted lifecycle states or transitions"
   },
   "hammerStopGuard": {
+    "holdContract": "HOLDCONTRACT-01: closer hold writers share holdVersion 1 with owner, awaits, deadline, onDeadline and reason. Existing readers normalize legacy horizons and receipts. The watcher evaluates skipped open subjects once per poll without new remote reads; any predicate releases before once-only deadline escalation. Existing owner probes, companion ancestry, retry caps and merge authority remain unchanged. See docs/data-model/closer-holds.md; no new lifecycle statuses or smoke action.",
     "companionRecovery": "COMPANIONFLOAT-01: mode companion owns companion merge then base-gitlink ancestry events. Five-minute polling ignores unrelated input movement. Exact pure-wait launch charges are credited once before cap selection; ordinary gates and leases decide dispatch after float. Closed-unmerged or a 24h float backstop plus 1h margin escalates once with dependency and automated owner. Generic recovery timers defer to this deadline.",
     "source": "src/ama/hammer-stop-hold.mjs",
     "consumer": "src/ama/dispatch-closer.mjs",
@@ -394,7 +395,7 @@
     "src/ama-closure-orchestration.mjs": "084a327a902dcde21814da0bc691847c009ae25b8d547a1e6598c14148df6fa7",
     "src/ama/closer-lease.mjs": "fb6b77fe46faa0f6433c4df352ee3f8827ca480369be173cd0cc4b8ae154df19",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "95404b0586860f5476ed9b655a764a261eb250b78ab7498a1f1ec7a9c9ff1c78",
+    "src/ama/dispatch-closer.mjs": "1baa64733ad33b2e7a92e9a6265fa87e7f159bf7ce76bf0206877a55239bc1db",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "2b9daa25ce7f61a615c8d35e1e92954ddffff68bebdb6e2a5a090c3e2e15392d",
     "src/follow-up-remediation.mjs": "dfb899357e34eb3256e153531b11a883c80cbbe4097ff81ffa6bbc9d81c3ac4d",

@@ -4,6 +4,7 @@ import {readLatestWorkerRunStatusFromLedger, readLatestWorkerRunStatusFromLedger
   readWorkerRunUsageFromLedger, readReviewerSessionUsageFromLedger} from '../src/session-ledger-read-adapter.mjs';
 import {resolveDaemonWorkerIdentityForPr} from '../src/daemon-worker-identity.mjs';
 import {readWorkerRunTokenUsage, readReviewerSessionTokenUsage} from '../src/reviewer-pass-tokens.mjs';
+import {readWorkerObservation, readWorkerObservationSync} from '../src/dispatch-read-client.mjs';
 
 const page = (observation, items, rest={}) => ({schema_version:1,observation,
   status:items.length?'found':'not_found',complete:true,next_offset:null,
@@ -12,6 +13,80 @@ const worker = {run_id:'run', launch_request_id:'launch',session_id:'session',st
   token_usage_input:0,token_usage_output:null,token_usage_guardrail:null,token_usage_cost_usd:0,
   total_cache_read_tokens:0,total_cache_write_tokens:null,pid:123,liveness:'unknown',
   process:{worker_process_id:'process-new',pid:123,started_at:'2026-01-02T00:00:00Z'}};
+
+test('session windows explicitly handle absent timestamps and inclusive overlap', t => {
+  const parse = Date.parse;
+  t.mock.method(Date, 'parse', value => {
+    assert.equal(typeof value, 'string');
+    assert.notEqual(value.trim(), '');
+    return parse(value);
+  });
+  const start = '2026-01-02T00:00:00Z', end = '2026-01-03T00:00:00Z';
+  const read = (row, bounds) => readReviewerSessionUsageFromLedger({
+    adapterSessionKey:'key', ...bounds,
+    workerObservationSyncImpl:()=>page('sessions',[{session_id:'session',...row}]),
+  }).ok;
+  for (const absent of [null, '', '   ']) {
+    const row = {started_at:absent, ended_at:absent};
+    assert.equal(read(row, {}), true);
+    assert.equal(read(row, {endedAt:end}), true);
+    assert.equal(read(row, {startedAt:start}), false);
+    assert.equal(read(row, {startedAt:start,endedAt:end}), false);
+    assert.equal(read({started_at:absent,ended_at:start},{startedAt:start,endedAt:end}),true);
+    assert.equal(read({started_at:start,ended_at:absent},{startedAt:start,endedAt:end}),true);
+  }
+  assert.equal(read({started_at:end,ended_at:end},{startedAt:start,endedAt:end}),true);
+  assert.equal(read({started_at:'2026-01-04T00:00:00Z'},{endedAt:end}),false);
+  assert.equal(read({started_at:'2026-01-01T00:00:00Z'},{startedAt:start}),false);
+  assert.equal(read({started_at:'invalid',ended_at:'invalid'},{startedAt:start,endedAt:end}),false);
+});
+
+test('async observations use the packaged SDK session and HTTP lookup without an injected dispatch session', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({url,body});
+    if (url === 'https://synthetic.invalid/observations/v1/register') {
+      return new Response(JSON.stringify({session_token:'synthetic-session'}));
+    }
+    assert.equal(url, 'https://synthetic.invalid/observations/v1/dispatch/lookup');
+    assert.equal(options.headers.Authorization, 'Bearer synthetic-session');
+    assert.equal(body.offset, 0);
+    return new Response(JSON.stringify(page(body.observation, [{
+      workers:worker, sessions:{session_id:'session'}, provenance:{launch_request_id:'launch'},
+    }[body.observation]])));
+  });
+  for (const observation of ['workers','sessions','provenance']) {
+    const result = await readWorkerObservation({observation,limit:100}, {
+      env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+      connectOptions:{endpoint_url:'https://synthetic.invalid/observations',bootstrap_token:'synthetic-bootstrap'},
+    });
+    assert.equal(result.ok,true);
+  }
+  assert.equal(calls[0].body.op,'register');
+  assert.deepEqual(calls.slice(1).map(call=>call.body.observation),['workers','sessions','provenance']);
+  assert.equal(calls.length,4);
+});
+
+test('provenance identity is launch-scoped across pages, matching the packaged SDK validator', async () => {
+  const provenance = {launch_request_id:'launch',head_sha:'head',completion_id:'completion'};
+  const otherHead = {...provenance,head_sha:'other',completion_id:'other'};
+  const otherLaunch = {...provenance,launch_request_id:'other-launch'};
+  for (const second of [otherHead,otherLaunch]) {
+    for (const paginated of [false,true]) {
+      const reply = selector => paginated
+        ? selector.offset === 0 ? page('provenance',[provenance],{complete:false,next_offset:1})
+          : page('provenance',[second])
+        : page('provenance',[provenance,second]);
+      const selector = {observation:'provenance',repo:'example/repo',limit:100};
+      const sync = readWorkerObservationSync(selector,{workerObservationSyncImpl:reply});
+      const asyncResult = await readWorkerObservation(selector,{dispatchSession:{dispatchLookup:async selector=>reply(selector)}});
+      assert.equal(sync.ok,second === otherLaunch);
+      assert.deepEqual(asyncResult,sync);
+      if (sync.ok) assert.deepEqual(sync.rows,[provenance,otherLaunch]);
+    }
+  }
+});
 
 test('public worker observations keep PID reuse evidence, unknown liveness and zero/null accounting', async()=>{
   const args={launchRequestId:'launch',workerRunId:'run',env:{},

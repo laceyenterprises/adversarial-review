@@ -426,6 +426,30 @@ are included in watcher latency summaries under `node`.
 ### Worker observations
 
 SDK 0.9.0 supplies `readWorkerObservations` and its synchronous HTTP bridge.
+`readWorkerObservations` validates response envelopes; it is not a session
+transport method. Async observations use `session.dispatchLookup(selector)` on
+`/v1/dispatch/lookup`, exactly as the SDK's synchronous observation bridge does.
+The observation selector chooses workers, sessions or provenance on that route.
+The SDK validator keys provenance by `launch_request_id`, not completion or
+head: duplicate launch IDs are invalid within a page and across collected pages.
+Distinct launches remain ordered even when their head/completion fields match.
+An empty `scope_complete: false` result cannot distinguish missing builder
+provenance from grant-filtered evidence, so builder routing retains `deferClaim`.
+It cannot authorize title fallback until a producer contract proves absence.
+
+Session time windows preserve the former ledger null semantics explicitly.
+A missing/blank start satisfies an upper bound; a lower bound requires a
+non-empty end timestamp or its start fallback. Rows with neither timestamp are
+included without a lower bound and excluded with one, without parsing an empty
+string. Timestamp comparisons are inclusive.
+
+The 0.9.0 artifact remains a paired candidate at producer revision
+`591a2ba9b0edcf24ffbb9dfd06cbcbe8017a7aac`; producer PR
+[`agent-os#9435`](https://github.com/laceyenterprises/agent-os/pull/9435) was still
+open at the 2026-10-26 remediation check. Keep the fixture's
+`releaseStatus: paired-review-pending` until its merged revision and artifact
+identity are verified. Runtime activation remains held for that release.
+
 Worker/run/session IDs are opaque. The adapter consumes producer ordering,
 collects up to ten pages within a bounded read budget, and treats unavailable
 scope or incomplete reads as holds. It preserves null/zero usage and strips no

@@ -1115,8 +1115,14 @@ export function readReviewerSessionUsageFromLedger(args = {}) {
   if (!keys.length) return {ok:false,reason:'missing-runtime-session-selector'};
   const result = readWorkerObservationSync({observation:'sessions',session_keys:keys,limit:100}, args);
   if (!result.ok) return result;
-  const rows = result.rows.filter(row => (!args.endedAt || !row.started_at || Date.parse(row.started_at) <= Date.parse(args.endedAt))
-    && (!args.startedAt || Date.parse(row.ended_at || row.started_at || '') >= Date.parse(args.startedAt)));
+  const rows = result.rows.filter(row => {
+    const startedAt = normalizeText(row.started_at);
+    const lastActiveAt = normalizeText(row.ended_at) || startedAt;
+    // Preserve the ledger window semantics explicitly: unknown starts satisfy
+    // the upper bound, but unknown activity cannot satisfy a lower bound.
+    return (!args.endedAt || !startedAt || Date.parse(startedAt) <= Date.parse(args.endedAt))
+      && (!args.startedAt || lastActiveAt !== null && Date.parse(lastActiveAt) >= Date.parse(args.startedAt));
+  });
   return rows.length ? {...result,rows,row:rows[0]} : {ok:false,reason:'worker-observation-unavailable'};
 }
 

@@ -4287,10 +4287,14 @@ including during rollback. `launchReadSource` records `app-sdk` on successful
 reads and null when unavailable, without credentials or paths. Generic non-launch
 ledger readers retain their separate backend-resolution rules.
 
-Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1` after the verified
-merged SDK release, producer/grants deployment and submodule `npm ci` described
-in the reader contract. Removing that flag pauses launch observations safely
-and retains ownership holds. SDK 0.8.0 empty lookups and missing snapshot rows
+Dispatch reads require exactly `ADVERSARIAL_DISPATCH_READS_ENABLED=1`. The tracked
+watcher and follow-up service templates supply it for the controller's mandatory
+own-launch HCP read, which uses its provisioned worker token and needs no app
+grants. App grants remain a separate operator step for app-scoped lookups.
+The verified merged SDK release, producer endpoint deployment and submodule
+`npm ci` prerequisites are described in the reader contract. Rollback removes
+the flag from both templates and redeploys, pausing launch observations safely
+and retaining ownership holds. SDK 0.8.0 empty lookups and missing snapshot rows
 are unavailable (`dispatch absence scope unproven`) and cannot settle intents
 or reclaim terminal leases. The pinned merged release is recorded in
 `vendor/README.md`; absence needs a coordinated producer completeness contract.

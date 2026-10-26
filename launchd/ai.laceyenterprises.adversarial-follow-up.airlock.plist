@@ -30,6 +30,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>ADVERSARIAL_DISPATCH_READS_ENABLED</key>
+        <string>1</string>
         <key>AGENT_OS_SESSION_LEDGER_DSN</key>
         <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>AGENT_OS_SESSION_LEDGER_TARGET</key>

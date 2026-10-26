@@ -3329,9 +3329,8 @@ not-found, mapped to `dispatch absence scope unproven`, and retain ownership
 holds. The runtime owner must verify the merged SDK release record, deploy the
 producer, and run `npm ci` in this submodule before normal service deployment.
 Rollback removes the flag from both templates and redeploys, safely pausing
-reads and retaining ownership holds. The SDK bytes are
-pinned to merged producer revision `387fb06d5d8835e320f49388a2ebdf67f2249945`.
-SDK 0.8.0 cannot attest global absence: empty lookups and missing rows retain
+reads and retaining ownership holds. SDK 0.9.0 is byte-verified against merged producer `f37c7489439a8b53eafecb38870f75fe9f07fa57`; runtime activation remains separate.
+SDK 0.9.0 cannot attest global absence: empty lookups and missing rows retain
 ownership instead of settling or reclaiming it. See the reader contract for the
 remaining producer completeness obligation and cancellation limits. Existing lifecycle states, transitions and smoke promises
 are unchanged. Focused offline regressions run with:
@@ -3339,19 +3338,6 @@ are unchanged. Focused offline regressions run with:
 ```bash
 node test/run-tests.mjs dispatch-read-client.test.mjs ama-pre-receipt-intent.test.mjs
 ```
-
-HOLDOWNER-01 adds observational ownership resolution to the TTM tracker. An open
-tracked PR without an actionable review, live closer/remediator, bounded
-machine-checkable hold or operator hold label becomes STUCK `ownerless` after
-seven minutes. All STUCK kinds page once per head through the durable alert
-outbox. The tracker uses the current timeline revision and resets cached review
-suppression and ownerless grace on a head change, even before a reviewer-gate
-observation. Legacy flags without stall reasons use the flag kind in alert text.
-See [the ownership data contract](docs/data-model/ttm-ownership.md).
-Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
-verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
-routing and existing smoke promises are unchanged; post-deploy observation uses
-natural flags and receipts, with no forced stall or alert delivery test.
 
 Worker, process, session accounting and daemon/builder provenance now use SDK
 0.9.0 through the same authorized lookup. The consumer collects bounded pages
@@ -3386,3 +3372,22 @@ supply ownership. Run the offline consumer regressions with:
 ```bash
 node test/run-tests.mjs worker-observation-client.test.mjs worker-observation-rollout.test.mjs watcher-claim-loop.test.mjs reviewer-pass-tokens.test.mjs recovery-reaper.test.mjs remorphan-01.test.mjs daemon-worker-identity-ledger-target.test.mjs
 ```
+
+HOLDOWNER-01 adds observational ownership resolution to the TTM tracker. An open
+tracked PR without an actionable review, live closer/remediator, bounded
+machine-checkable hold or operator hold label becomes STUCK `ownerless` after
+seven minutes. All STUCK kinds page once per head through the durable alert
+outbox. The tracker uses the current timeline revision and resets cached review
+suppression and ownerless grace on a head change, even before a reviewer-gate
+observation. Legacy flags without stall reasons use the flag kind in alert text.
+See [the ownership data contract](docs/data-model/ttm-ownership.md).
+Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
+verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
+routing and existing smoke promises are unchanged; post-deploy observation uses
+natural flags and receipts, with no forced stall or alert delivery test.
+
+Synchronous observation reads reuse an already registered SDK app session
+with matching connection identity, or an explicit existing session token. Synchronous read
+timeout changes reuse the cached session receipt; another endpoint cannot borrow
+the cached token. Cold sync reads remain unavailable until async registration.
+Partial worker accounting remains marked partial through reviewer capture.

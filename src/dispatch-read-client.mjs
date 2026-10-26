@@ -8,6 +8,9 @@ function options(args) {
   return { app_id: 'adversarial-review', mode: 'agent-os',
     ...args.connectOptions, request_timeout_ms: args.timeoutMs ?? 8000 };
 }
+function sessionKey(config) {
+  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => key !== 'request_timeout_ms')));
+}
 // The composition seam accepts a packaged SDK session (also used by offline
 // consumer fixtures); policy callers never select a ledger backend.
 export const dispatchReadTransport = {

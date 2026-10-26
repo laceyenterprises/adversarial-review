@@ -868,6 +868,7 @@ function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = nu
     costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
     source: row.token_usage_source || 'session-ledger',
     usageTag: coerceNonNegativeInt(row.token_usage_guardrail) !== null ? 'guardrail' : null,
+    ...(row.usage_partial === true ? { partial: true } : {}),
   };
 }
 

@@ -54,6 +54,7 @@ function buildLoaderSource(scenario) {
     [fileUrl('src', 'atomic-write.mjs')]: 'fixture:atomic-write',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'session-ledger-read-adapter.mjs')]: 'fixture:session-ledger-read-adapter',
     [fileUrl('src', 'head-closer-commit-suppression.mjs')]: 'fixture:head-closer-commit-suppression',
     [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
   };

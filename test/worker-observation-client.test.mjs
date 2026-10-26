@@ -4,7 +4,7 @@ import {readLatestWorkerRunStatusFromLedger, readLatestWorkerRunStatusFromLedger
   readWorkerRunUsageFromLedger, readReviewerSessionUsageFromLedger} from '../src/session-ledger-read-adapter.mjs';
 import {resolveDaemonWorkerIdentityForPr} from '../src/daemon-worker-identity.mjs';
 import {readWorkerRunTokenUsage, readReviewerSessionTokenUsage} from '../src/reviewer-pass-tokens.mjs';
-import {readWorkerObservation, readWorkerObservationSync} from '../src/dispatch-read-client.mjs';
+import {readWorkerObservation, readWorkerObservationSync, dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 
 const page = (observation, items, rest={}) => ({schema_version:1,observation,
   status:items.length?'found':'not_found',complete:true,next_offset:null,
@@ -138,6 +138,14 @@ test('public worker observations keep PID reuse evidence, unknown liveness and z
   const asyncEvidence=await readLatestWorkerRunStatusFromLedgerAsync({...args,
     dispatchSession:{dispatchLookup:async()=>page('workers',[worker])}});
   assert.deepEqual(asyncEvidence,evidence);
+});
+
+test('partial producer accounting remains partial in reviewer token capture', () => {
+  const usage = readWorkerRunTokenUsage({workerRunId:'run',env:{},
+    workerObservationSyncImpl:()=>page('workers',[{...worker,usage_partial:true,usage_known:false}])});
+  assert.equal(usage.input,0);
+  assert.equal(usage.costUSD,0);
+  assert.equal(usage.partial,true);
 });
 
 test('session observations retain zero cost, and no keys or unreadable ownership returns unavailable',()=>{

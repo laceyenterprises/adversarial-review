@@ -4569,28 +4569,6 @@ for (const [status, reason] of [['pending', 'hammer-validated-head'], ['posted',
 }
 
 
-test('HOLDCONTRACT-01: each completed poll evaluates discovered hold subjects once', () => {
-  const tmp = mkdtempSync(path.join(tmpdir(), 'hold-contract-poll-'));
-  try {
-    const loaderPath = path.join(tmp, 'loader.mjs');
-    const registerPath = path.join(tmp, 'register.mjs');
-    const runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildLoaderSource());
-    writeFileSync(registerPath, buildRegisterSource(loaderPath));
-    writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
-      assert.equal(globalThis.__closerHoldPolls, 1);
-      assert.ok(globalThis.__closerHoldSubjects.length > 0);
-      assert.ok(globalThis.__closerHoldSubjects.every(subject => subject.holdMetadata));
-      await pollOnce(octokit, pollOptions);
-      assert.equal(globalThis.__closerHoldPolls, 2);
-    ` }));
-    const result = spawnSync(process.execPath,
-      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
-      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
-    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
-  } finally { rmSync(tmp, { recursive: true, force: true }); }
-});
-
 for (const mode of ['empty', 'unsupported', 'disabled']) {
   test(`DOG-10 ${mode} observation intake claims exactly once on the title route`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-observation-intake-'));
@@ -4605,7 +4583,8 @@ for (const mode of ['empty', 'unsupported', 'disabled']) {
         export * from '${actual}';
         import {readPrBuilderProvenanceAsync as actual} from '${actual}';
         export function readPrBuilderProvenanceAsync(args) {
-          return actual({...args, env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+          return actual({...args, env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1',
+              ${mode === 'disabled' ? '' : "ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'"}},
             ${mode === 'disabled' ? '' : `dispatchSession:{dispatchLookup:async () => (${JSON.stringify(response)})},`}
           });
         }
@@ -4628,3 +4607,25 @@ for (const mode of ['empty', 'unsupported', 'disabled']) {
     } finally { rmSync(tmp,{recursive:true,force:true}); }
   });
 }
+
+test('HOLDCONTRACT-01: each completed poll evaluates discovered hold subjects once', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'hold-contract-poll-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
+      assert.equal(globalThis.__closerHoldPolls, 1);
+      assert.ok(globalThis.__closerHoldSubjects.length > 0);
+      assert.ok(globalThis.__closerHoldSubjects.every(subject => subject.holdMetadata));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(globalThis.__closerHoldPolls, 2);
+    ` }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

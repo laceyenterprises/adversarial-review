@@ -238,11 +238,6 @@
     {"name": "prototype-unknown-provider", "valid": false, "search": {"providers": {"__proto__": {}}}},
     {"name": "inherited-unknown-provider", "valid": false, "search": {"providers": {"constructor": {}}}},
     {"name": "metadata-prefix-unknown-root", "valid": false, "search": {"__upstream": "https://example.invalid/"}},
-<<<<<<< HEAD
-    {"name": "metadata-prefix-unknown-provider-field", "valid": false, "search": {"providers": {"brave": {"__upstream": "https://example.invalid/"}}}},
-    {"name": "metadata-prefix-unknown-limit-field", "valid": false, "base": "configured", "patches": [{"path": ["providers", "brave", "operation_limits", "web_search", "__unknown"], "value": {}}]},
-    {"name": "operator-selected-vault-and-field-names", "valid": true, "search": {"providers": {"brave": {"credential_ref": "op://Test Vault/Brave Search API Key/API Key"}}}}
-=======
     {"name": "operator-selected-vault-and-field-names", "valid": true, "search": {"providers": {"brave": {"credential_ref": "op://Test Vault/Brave Search API Key/API Key"}}}},
     {"name": "brave-normalized-exa-pat-excluded", "valid": false, "search": {"providers": {"brave": {"credential_ref": "op://test-vault/eXa  KB pAt/credential"}}}},
     {"name": "exa-normalized-exa-pat-excluded", "valid": false, "search": {"providers": {"exa": {"credential_ref": "op://test-vault/eXa  KB pAt/credential"}}}},
@@ -250,7 +245,8 @@
     {"name": "parallel-normalized-exa-pat-excluded", "valid": false, "search": {"providers": {"parallel": {"credential_ref": "op://test-vault/eXa  KB pAt/credential"}}}},
     {"name": "perplexity-normalized-exa-pat-excluded", "valid": false, "search": {"providers": {"perplexity": {"credential_ref": "op://test-vault/eXa  KB pAt/credential"}}}},
     {"name": "tavily-normalized-exa-pat-excluded", "valid": false, "search": {"providers": {"tavily": {"credential_ref": "op://test-vault/eXa  KB pAt/credential"}}}},
-    {"name": "brave-answers-exa-pat-excluded", "valid": false, "search": {"providers": {"brave": {"answers_credential_ref": "op://test-vault/Exa KB PAT/credential"}}}}
->>>>>>> aa9a8a7a (fix(SPE-01): replace layered limits and validate raw overlays per SPEC review)
+    {"name": "brave-answers-exa-pat-excluded", "valid": false, "search": {"providers": {"brave": {"answers_credential_ref": "op://test-vault/Exa KB PAT/credential"}}}},
+    {"name": "metadata-prefix-unknown-provider-field", "valid": false, "search": {"providers": {"brave": {"__upstream": "https://example.invalid/"}}}},
+    {"name": "metadata-prefix-unknown-limit-field", "valid": false, "base": "configured", "patches": [{"path": ["providers", "brave", "operation_limits", "web_search", "__unknown"], "value": {}}]}
   ]
 }

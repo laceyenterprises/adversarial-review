@@ -341,3 +341,19 @@ metadata, leaving original metadata and review body bytes intact. A concurrent
 body/metadata change refuses the stale update and requires a retry. These are
 local SQLite metadata changes; the companion session-ledger schema and its
 SQLite/Postgres migrations are unchanged.
+
+DOG-10 worker observations preserve `usage_partial` as token capture `partial`,
+feeding the existing partial token-usage metadata state without rewriting
+measured zero/null counts. No new store field or lifecycle state is introduced.
+
+Observation capture is staged separately through the default-off env-only
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED` gate. Disabled or inconclusive public
+reads retain unknown OS usage, never fabricated zero or a log/transcript substitute.
+The backfill CLI prepares one registered SDK session before synchronous loops;
+registration failure stops before pass writes. Programmatic synchronous callers
+must prepare the session first. No persistent field or status changes.
+
+Builder routing uses its existing `data/builder-routing/<repo>-<pr>-<head>.json`
+audit: `builder_class_inconclusive` records unavailable or successful-empty
+provenance while retaining the title-based review route. These app-owned findings
+are review intake observations, never certified worker absence or merge identity.

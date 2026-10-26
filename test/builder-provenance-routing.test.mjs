@@ -198,11 +198,11 @@ test('builder reader consumes public actual-harness provenance independently of 
 });
 for(const reply of [null, {}, {schema_version:1,observation:'provenance',status:'not_found',complete:true,
   next_offset:null,scope_complete:false,mutation_authority:false,items:[]}]) {
-  test('unavailable or grant-filtered empty provenance defers builder routing',()=>{
+  test('inconclusive public provenance permits audited title review intake',()=>{
     const provenance=readPrBuilderProvenance({repo:'example/repo',prNumber:42,env:{},
       workerObservationSyncImpl:()=>reply});
     assert.equal(provenance.ok,false);
-    assert.equal(provenance.deferClaim,true);
-    assert.equal(reconcileBuilderClass({builderClass:'codex'},provenance).deferClaim,true);
+    assert.equal(provenance.deferClaim,false);
+    assert.equal(reconcileBuilderClass({builderClass:'codex'},provenance).deferClaim,false);
   });
 }

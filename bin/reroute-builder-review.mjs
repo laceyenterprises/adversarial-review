@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
-import { readPrBuilderProvenance } from '../src/session-ledger-read-adapter.mjs';
+import { readPrBuilderProvenanceAsync } from '../src/session-ledger-read-adapter.mjs';
 import { builderClassFromTitle } from '../src/adapters/subject/github-pr/title-tagging.mjs';
 import { reconcileBuilderClass } from '../src/builder-provenance-routing.mjs';
 import { main as retriggerReview } from '../src/retrigger-review.mjs';
@@ -15,7 +15,7 @@ export async function fetchPrState(repo, pr, options = {}) {
 
 export async function main(argv, {
   fetchPr = fetchPrState,
-  readProvenance = readPrBuilderProvenance,
+  readProvenance = readPrBuilderProvenanceAsync,
   retrigger = retriggerReview,
   stdout = process.stdout,
 } = {}) {
@@ -29,7 +29,8 @@ export async function main(argv, {
   }
   const live = await fetchPr(values.repo, pr);
   if (live.state !== 'OPEN') throw new Error('refusing to reroute a terminal PR');
-  const provenance = readProvenance({ repo: values.repo, prNumber: pr, headSha: live.headRefOid, rootDir: values['root-dir'] });
+  const provenance = await readProvenance({ repo: values.repo, prNumber: pr, headSha: live.headRefOid, rootDir: values['root-dir'] });
+  if (!provenance.ok) throw new Error(`builder provenance inconclusive: ${provenance.reason}${provenance.detail ? ` (${provenance.detail})` : ''}`);
   const result = reconcileBuilderClass({ builderClass: builderClassFromTitle(live.title) }, provenance);
   if (result.finding?.name !== 'builder_class_mismatch') throw new Error('no confirmed ledger/title builder mismatch');
   stdout.write(`${JSON.stringify({ headSha: live.headRefOid, ...result.finding, apply: !!values.apply })}\n`);

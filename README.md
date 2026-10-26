@@ -3362,15 +3362,25 @@ launch to belong to the app grant, and unavailable usage stays unknown. Zero
 cost remains zero. No worker-directory scan or ledger backend selection is used
 by daemon identity or these usage readers.
 
-The paired producer release must merge and deploy before the consumer is
-activated. Install the pinned dependency with `npm ci`; retain the existing
-reader activation flag and provision exact project/repository grants through
-normal operator deployment. No new configuration key or automatic restart is
-introduced. Existing lifecycle states, transitions, current-head verdict checks,
+Producer agent-os#9435 is merged/deployed at
+`f37c7489439a8b53eafecb38870f75fe9f07fa57`; the pinned SDK 0.9.0 bytes match it.
+Observation rollout requires the separate default-off env-only
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1`, after runtime-owner verification of
+producer support, pinned install and exact project/repository grants. The already
+enabled `ADVERSARIAL_DISPATCH_READS_ENABLED=1` own-launch HCP gate remains
+independent. No template flag is changed or service restarted by this PR.
+Disabled, unsupported or empty observation reads retain title-based cross-model
+review intake with a persisted inconclusive finding, while authoritative merge
+identity, leases and OS-selected usage remain unknown. Positive head attestations
+remain usable independently; no private fallback is restored. Default PR
+provenance identifies the opener; `builder_identity:true` is distinct and allows
+later completions. Reroute awaits async provenance; cold backfill registers once
+before its synchronous reads and reports readiness failures before writes.
+See [rollout and selector details](docs/producer-contract-readers.md#worker-observations). Existing lifecycle states, transitions, current-head verdict checks,
 merged/closed terminal handling and smoke promises are unchanged. Session usage
 without an authorized launch link remains unavailable; workspace paths cannot
 supply ownership. Run the offline consumer regressions with:
 
 ```bash
-node test/run-tests.mjs worker-observation-client.test.mjs reviewer-pass-tokens.test.mjs recovery-reaper.test.mjs remorphan-01.test.mjs daemon-worker-identity-ledger-target.test.mjs
+node test/run-tests.mjs worker-observation-client.test.mjs worker-observation-rollout.test.mjs watcher-claim-loop.test.mjs reviewer-pass-tokens.test.mjs recovery-reaper.test.mjs remorphan-01.test.mjs daemon-worker-identity-ledger-target.test.mjs
 ```

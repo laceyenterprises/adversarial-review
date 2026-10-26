@@ -85,6 +85,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 
 function buildLoaderSource({
   capRouteSource = null,
+  provenanceReaderSource = null,
   discoveryHookSource = '',
   cascadeRootDir = null,
   subjectHeads = {},
@@ -347,7 +348,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
     'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
-    'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
+    'fixture:session-ledger-read-adapter': ${JSON.stringify(provenanceReaderSource ?? `export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenanceAsync({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
     'fixture:adversarial-gate-status': "export function readGateRecord() { return globalThis.__budgetGateRecord || null; } export function resolveSettledReviewVerdict() { return globalThis.__holdReleaseSettled || { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { globalThis.__holdReleaseGateProjections = (globalThis.__holdReleaseGateProjections || 0) + 1; return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
@@ -4589,3 +4590,41 @@ test('HOLDCONTRACT-01: each completed poll evaluates discovered hold subjects on
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+for (const mode of ['empty', 'unsupported', 'disabled']) {
+  test(`DOG-10 ${mode} observation intake claims exactly once on the title route`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-observation-intake-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      const actual = `${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual`;
+      const response = mode === 'empty' ? {schema_version:1,observation:'provenance',status:'not_found',
+        complete:true,next_offset:null,scope_complete:false,mutation_authority:false,items:[]} : {};
+      writeFileSync(loaderPath, buildLoaderSource({provenanceReaderSource: `
+        export * from '${actual}';
+        import {readPrBuilderProvenanceAsync as actual} from '${actual}';
+        export function readPrBuilderProvenanceAsync(args) {
+          return actual({...args, env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+            ${mode === 'disabled' ? '' : `dispatchSession:{dispatchLookup:async () => (${JSON.stringify(response)})},`}
+          });
+        }
+      `}));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({afterFirstPoll: `
+        assert.equal(claims.filter(claim => claim.prNumber === 101).length,1);
+        assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status,'posted');
+        const spawns = globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
+        assert.equal(spawns.length,1);
+        assert.notEqual(spawns[0].model,'codex');
+      `}));
+      const result = spawnSync(process.execPath,['--no-warnings','--import',pathToFileURL(registerPath).href,runnerPath],{
+        cwd:REPO_ROOT,encoding:'utf8',timeout:30000,env:fixtureEnv(installGhFixture(tmp)),
+      });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status,0,output);
+      assert.match(output,/builder_class_inconclusive/);
+      assert.doesNotMatch(output,/deferring claim until next tick/);
+    } finally { rmSync(tmp,{recursive:true,force:true}); }
+  });
+}

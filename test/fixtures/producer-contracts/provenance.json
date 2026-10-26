@@ -258,10 +258,18 @@
     "dispatchLookupSdk": {
       "version": "0.9.0",
       "file": "vendor/agent-os-app-sdk-0.9.0.tgz",
-      "sha256": "cea36899300700eb6f087a4f1f36d62156305e96ca23455229ca483372c6501f",
-      "integrity": "sha512-BNJBUCxs0RUMYKqzwyp0h/DY4wdRtkDBYIr+LA0xKMUsD/7PxM13F76DmTtqAvY7F05KqEgvKLnT2pgt+QdsvQ==",
-      "releaseRevision": "591a2ba9b0edcf24ffbb9dfd06cbcbe8017a7aac",
-      "releaseStatus": "paired-review-pending"
+      "sha256": "6882b99962cd7319ed858d0a15ee84f9384a566474359085153aef2b615f2cf9",
+      "integrity": "sha512-PU4/8PmJpVp9msDRzRA9vV2/PirelLQSJZFMt65o0s9rngsjJRqSpdRqiI2VB5Nt9Ds/1F9fUYS5HlgQsZUGUA==",
+      "releaseRevision": "f37c7489439a8b53eafecb38870f75fe9f07fa57",
+      "releaseStatus": "merged",
+      "openerProjection": {
+        "file": "test/fixtures/producer-contracts/pr-opener-projection.json",
+        "sha256": "e0b68a58132ae4b101d363eb2a95d32e566bac85123e8834dc902b85a2ed8521",
+        "definition": "test/fixtures/producer-contracts/definitions/app_worker_observations.py.txt",
+        "definitionSha256": "ef25ed998f8784ce44e79147153c26bbab2cf730076bb2d910420d98b424568b",
+        "producerRevision": "f37c7489439a8b53eafecb38870f75fe9f07fa57",
+        "capture": "Immutable producer projection executed on disposable SQLite; authorization stub permits open-launch and repair-launch only. Later remediation, superseded opener and foreign opener are simultaneous inputs. No endpoint or live state used."
+      }
     }
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

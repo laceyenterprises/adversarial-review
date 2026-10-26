@@ -9,8 +9,8 @@ export function reconcileBuilderClass(subject, provenance) {
   if (!actual) {
     return {
       subject,
-      // Missing provenance may use title routing; an unsuccessful query may
-      // not turn an infrastructure failure into a durable reviewer choice.
+      // Inconclusive public observations retain the title route for review
+      // intake only. This finding supplies no merge or ownership authority.
       deferClaim: provenance?.deferClaim === true || provenance?.reason === 'ledger-read-failed',
       finding: { name: 'builder_class_inconclusive', reason: provenance?.reason || 'unknown-builder-harness',
         ...(provenance?.detail ? { detail: provenance.detail } : {}) },

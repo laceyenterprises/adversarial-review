@@ -32,6 +32,7 @@ const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
   ['psql-not-installed', 'worker-run-lookup-failed'],
   ['dispatch-read-unavailable', 'worker-run-lookup-failed'],
   ['worker-observation-unavailable', 'worker-run-lookup-failed'],
+  ['worker-observation-inconclusive', 'worker-run-lookup-failed'],
 ]);
 
 function deriveOriginalWorkerIdFromBranch(branch) {

@@ -427,15 +427,29 @@ are included in watcher latency summaries under `node`.
 
 SDK 0.9.0 supplies `readWorkerObservations` and its synchronous HTTP bridge.
 `readWorkerObservations` validates response envelopes; it is not a session
-transport method. Async observations use `session.dispatchLookup(selector)` on
-`/v1/dispatch/lookup`, exactly as the SDK's synchronous observation bridge does.
+transport method. Async observations use the public SDK
+`readSessionDispatchLookup(selector, options)` on `/v1/dispatch/lookup`, as the
+synchronous observation bridge does. The registered session supplies its token
+and endpoint; each call supplies its remaining physical HTTP timeout. Connection
+identity excludes `request_timeout_ms`, so pagination and concurrent callers
+reuse one registration without mutating a shared session timeout. Registration,
+lookup and caller settlement are bounded; failures evict cached session evidence.
+SDK 0.9.0 has no AbortSignal API: caller abort settles promptly, while physical
+HTTP continues only within its supplied timeout.
 The observation selector chooses workers, sessions or provenance on that route.
 The SDK validator keys provenance by `launch_request_id`, not completion or
 head: duplicate launch IDs are invalid within a page and across collected pages.
 Distinct launches remain ordered even when their head/completion fields match.
 An empty `scope_complete: false` result cannot distinguish missing builder
-provenance from grant-filtered evidence, so builder routing retains `deferClaim`.
-It cannot authorize title fallback until a producer contract proves absence.
+provenance from grant-filtered evidence. A valid complete empty read is
+`worker-observation-inconclusive`, never an absence certificate. Builder review
+intake maps this to `missing-builder-provenance` with `deferClaim:false`.
+Disabled, unsupported, malformed and failed public observations likewise retain
+the existing title-based cross-model review route and persist
+`builder_class_inconclusive` in the existing per-head routing audit. This permits
+review intake only: merge identity, lease release, teardown and accounting stay
+unknown without positive authorized evidence. Explicit legacy/custom reader
+claim holds retain their existing semantics.
 
 Session time windows preserve the former ledger null semantics explicitly.
 A missing/blank start satisfies an upper bound; a lower bound requires a
@@ -443,19 +457,41 @@ non-empty end timestamp or its start fallback. Rows with neither timestamp are
 included without a lower bound and excluded with one, without parsing an empty
 string. Timestamp comparisons are inclusive.
 
-The 0.9.0 artifact remains a paired candidate at producer revision
-`591a2ba9b0edcf24ffbb9dfd06cbcbe8017a7aac`; producer PR
-[`agent-os#9435`](https://github.com/laceyenterprises/agent-os/pull/9435) was still
-open at the 2026-10-26 remediation check. Keep the fixture's
-`releaseStatus: paired-review-pending` until its merged revision and artifact
-identity are verified. Runtime activation remains held for that release.
+The 0.9.0 artifact is byte-identical to merged producer revision
+`f37c7489439a8b53eafecb38870f75fe9f07fa57` ([agent-os#9435](https://github.com/laceyenterprises/agent-os/pull/9435)).
+The fixture records the exact SHA-256/SHA-512 integrity and `releaseStatus: merged`.
+The producer is merged/deployed; artifact verification does not establish app grants.
+
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1` is a separate, default-off, env-only
+rollout gate for worker/process/session/provenance reads. It is absent from service
+templates. `ADVERSARIAL_DISPATCH_READS_ENABLED=1` remains the independent DOG-09
+own-launch HCP gate, already enabled in tracked templates. Do not roll it back to
+stage DOG-10. No shared YAML key, loader-schema change or live flag change is part
+of this work. Runtime owner verifies the deployed producer revision, SDK bytes,
+project AND repository grants and organic reads before a reviewed observation
+flag activation. Missing support/grants preserve title review intake but cannot
+supply daemon merge identity. With observations disabled, existing positive head
+attestations remain usable; otherwise daemon identity can park explicitly unknown.
+There is no authorized legacy private fallback. Roll back only the observation
+flag to disable DOG-10 reads, leaving own-launch HCP reads intact.
 
 Worker/run/session IDs are opaque. The adapter consumes producer ordering,
 collects up to ten pages within a bounded read budget, and treats unavailable
 scope or incomplete reads as holds. It preserves null/zero usage and strips no
 producer ownership requirements. Daemon identity and builder routing use the
-same public provenance projection, including separate current-head and
-head-independent build identity reads. Review/merge authority still requires
+same public endpoint with distinct producer selectors. Default PR provenance
+filters `signal_kind='pr_opened'`, excludes superseded/unauthorized rows and
+returns the latest single opener. Daemon current-head and head-independent
+retries retain that default (no `builder_identity:true`). That builder selector
+allows later completions for reviewer routing and must not identify the opener.
+The producer omits `signal_kind` from the wire; adding a consumer-only field or
+blindly enabling builder identity cannot impose opener semantics. Ambiguous PR
+pages fail closed; branch evidence must uniquely identify this PR, with a matching
+repository/branch and positive PR number. The immutable source and recorded
+SQLite projection in `test/fixtures/producer-contracts/pr-opener-projection.json`
+include simultaneous opener, later remediation, superseded and foreign records;
+`provenance.json` pins source and capture hashes. Authorization is stubbed in
+that capture and is not live grant evidence. Review/merge authority still requires
 its existing exact-head evidence; observed process success never supplies it.
 No SQL, OS config, worker-file or workspace-path fallback is permitted.
 
@@ -463,3 +499,16 @@ An explicit OS worker/run selector keeps usage unknown when the public read is
 unavailable; accounting does not fall through to a worker log or transcript.
 Local reviews without an OS worker selector retain their app-owned provider
 evidence policy. Deprecated ledger-target arguments do not select a database.
+
+Synchronous observation reads reuse an already registered SDK app session
+with matching connection identity, or an explicit existing session token. Synchronous read
+timeout changes reuse the cached session receipt; another endpoint cannot borrow
+the cached token. Cold sync reads remain unavailable until async registration.
+The reroute CLI now awaits async provenance directly and reports an inconclusive
+reason on failure. The backfill CLI calls `prepareWorkerObservationSession` once
+before entering its synchronous pass/closer/attribution loops; failed readiness
+returns an error before writes. Disabled observations are reported explicitly;
+local-only backfill can proceed, while OS-selected usage remains unknown.
+Programmatic synchronous backfill callers must also await preparation or supply
+an explicit existing session token at the observation transport boundary.
+Partial worker accounting remains marked partial through reviewer capture.

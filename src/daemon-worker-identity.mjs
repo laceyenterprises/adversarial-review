@@ -22,9 +22,16 @@ const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
 const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-failed']);
 
 async function readDaemonBuildIdentity(args) {
+  // SDK 0.9.0 / producer f37c748: PR provenance defaults to the latest live
+  // pr_opened row. builder_identity:true deliberately selects later completions
+  // for review routing and MUST NOT be used for this stable opener identity.
   const result = await readWorkerObservation({observation:'provenance',repo:args.repo,
     pr_number:Number(args.prNumber),head_sha:args.headSha || undefined,limit:100}, args);
-  return result.ok ? result : {...result,reason:result.reason || 'missing-build-completion-signal'};
+  if (!result.ok) return {...result,reason:result.reason || 'missing-build-completion-signal'};
+  if (result.rows.length !== 1) {
+    return {ok:false,reason:'unconfirmed-pr-opener-provenance'};
+  }
+  return result;
 }
 
 export async function resolveDaemonWorkerIdentityForPr({
@@ -340,9 +347,12 @@ async function readDaemonWorkerLaunchProvenanceForPr({ repo, prNumber, currentBr
   const result = await readWorkerObservation({observation:'provenance',repo,branch:currentBranch,limit:100},
     {env,rootDir,dispatchSession,timeoutMs});
   if (!result.ok) return result;
-  const row = result.rows.find(row => row.repo?.toLowerCase() === repo.toLowerCase()
-    && row.branch === currentBranch && (!row.pr_number || Number(row.pr_number) === Number(prNumber))
+  const candidates = result.rows.filter(row => row.repo?.toLowerCase() === repo.toLowerCase()
+    && row.branch === currentBranch && Number(row.pr_number) === Number(prNumber)
     && row.launch_request_id && row.worker_class);
+  // Branch evidence must identify this PR uniquely; missing PR attribution or
+  // multiple launches on a reused branch cannot choose a merge identity.
+  const row = candidates.length === 1 ? candidates[0] : null;
   return row ? {ok:true,launchRequestId:row.launch_request_id,workerClass:row.worker_class,
     headSha:row.head_sha} : {ok:false,reason:'missing-launch-provenance'};
 }

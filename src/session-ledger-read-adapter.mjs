@@ -1134,9 +1134,13 @@ function builderSelector(args) {
   return {observation:'provenance',repo:args.repo,pr_number:Number(args.prNumber),builder_identity:true,limit:100};
 }
 function builderResult(result) {
+  // Review intake may retain a valid title route even when observations are
+  // disabled, unsupported or inconclusive. This result is never merge identity
+  // or an absence certificate; authority readers retain the original failure.
   return result.ok ? {ok:true,launchRequestId:result.row.launch_request_id,
     workerClass:result.row.worker_class,actualHarness:result.row.actual_harness}
-    : {...result,deferClaim:true};
+    : {...result,reason:result.reason === 'worker-observation-inconclusive' ? 'missing-builder-provenance' : result.reason,
+      deferClaim:false};
 }
 export function readPrBuilderProvenance(args = {}) {
   if (!normalizeText(args.repo) || !Number.isInteger(Number(args.prNumber)) || Number(args.prNumber)<=0) return {ok:false,reason:'missing-pr-identity'};

@@ -14,7 +14,10 @@ export const dispatchReadTransport = {
   sdk: loadAppSdkSync,
   async lookup(selector, args = {}) {
     const env = args.env ?? process.env;
-    if (!args.dispatchSession) assertReadsEnabled(env);
+    if (!args.dispatchSession) {
+      if (selector.observation) assertObservationsEnabled(env);
+      else assertReadsEnabled(env);
+    }
     const ownId = env.HQ_LAUNCH_REQUEST_ID;
     if (!args.dispatchSession && ownId && !selector.include_retry_chain
       && selector.launch_request_ids?.length === 1 && selector.launch_request_ids[0] === ownId
@@ -23,18 +26,28 @@ export const dispatchReadTransport = {
         token:env.HCP_TOKEN || env.HCP_BEARER_TOKEN, endpoint_url:env.HCP_BASE_URL,
         request_timeout_ms:args.timeoutMs ?? 8000});
     }
-    const config = options(args);
-    const key = JSON.stringify(config);
-    if (!args.dispatchSession && cachedSession?.key !== key) {
-      cachedSession = { key, promise: dispatchReadTransport.sdk().connect(config) };
-    }
-    const session = args.dispatchSession ?? await cachedSession.promise;
-    return session.dispatchLookup(selector);
+    const deadline = Date.now() + (args.timeoutMs ?? 8000);
+    if (args.dispatchSession) return args.dispatchSession.dispatchLookup(selector);
+    const session = await registeredSession(args);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw Object.assign(new Error('dispatch lookup timed out'), {code:'ETIMEDOUT'});
+    // SDK 0.9.0 exposes a public token-based read with a per-request physical
+    // HTTP timeout. Do not mutate a shared session's timeout across callers.
+    return dispatchReadTransport.sdk().readSessionDispatchLookup(selector, {
+      session_token: session.sessionToken, endpoint_url: session.endpoint_url,
+      request_timeout_ms: remaining,
+    });
   },
   observationSync(selector, args = {}) {
-    if (!args.workerObservationSyncImpl) assertReadsEnabled(args.env ?? process.env);
+    if (!args.workerObservationSyncImpl) assertObservationsEnabled(args.env ?? process.env);
+    const config = options(args);
+    const session = cachedSession?.config && sessionKey(cachedSession.config) === sessionKey(config) ? cachedSession.session : null;
+    // Reuse the SDK session established by async reads. Never register from a
+    // synchronous accounting call or borrow a token from another endpoint.
+    const syncOptions = { ...config, session_token: config.session_token || session?.sessionToken,
+      endpoint_url: config.endpoint_url || session?.endpoint_url };
     return observeSynchronousChild('node', () =>
-      (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, options(args)));
+      (args.workerObservationSyncImpl ?? dispatchReadTransport.sdk().readWorkerObservationsSync)(selector, syncOptions));
   },
   lookupSync(selector, args = {}) {
     if (!args.dispatchLookupSyncImpl) assertReadsEnabled(args.env ?? process.env);
@@ -42,6 +55,35 @@ export const dispatchReadTransport = {
       (args.dispatchLookupSyncImpl ?? dispatchReadTransport.sdk().readDispatchLookupSync)(selector, options(args)));
   },
 };
+async function registeredSession(args) {
+  const config = options(args);
+  const key = sessionKey(config);
+  if (config.session_token) return {sessionToken:config.session_token,
+    endpoint_url:config.endpoint_url ?? (args.env ?? process.env).APP_CONTRACT_ENDPOINT_URL};
+  if (cachedSession?.key !== key) {
+    cachedSession = {key, config, promise:dispatchReadTransport.sdk().connect(config)};
+  }
+  const entry = cachedSession;
+  try {
+    const session = await entry.promise;
+    if (cachedSession === entry) entry.session = session;
+    return session;
+  } catch (error) {
+    if (cachedSession === entry) cachedSession = null;
+    throw error;
+  }
+}
+
+// Cold CLI composition roots register once before entering synchronous capture
+// loops. Failure is explicit; no sync call registers or opens private OS state.
+export async function prepareWorkerObservationSession(args = {}) {
+  try {
+    assertObservationsEnabled(args.env ?? process.env);
+    await boundedCall(() => registeredSession(args), args);
+    return {ok:true};
+  } catch (error) { cachedSession = null; return unavailable(error); }
+}
+
 export async function readDispatchLaunches(selector, args = {}) {
   try { return checked(await boundedLookup(selector, args)); }
   catch (error) {
@@ -69,10 +111,13 @@ export function launchProbe(result, launchRequestId, includeRetryChain) {
   return { ok: true, row, target: result.target, ...(includeRetryChain ? { retryChain: dispatchReadTransport.sdk().dispatchRetryDescendants(result.rows, result.retryEdges, launchRequestId) } : {}) };
 }
 
-// SDK 0.8.0 has no per-call cancellation API. Bound caller settlement across
-// registration and lookup. The SDK owns outstanding HTTP work after caller
-// cancellation; physical cancellation needs SDK support. Never switch routes.
+// Bound caller settlement across registration and lookup. SDK HTTP requests
+// also receive the remaining physical timeout. AbortSignal settlement does not
+// imply physical cancellation; SDK 0.9.0 has no AbortSignal API.
 async function boundedLookup(selector, args) {
+  return boundedCall(() => dispatchReadTransport.lookup(selector, args), args);
+}
+async function boundedCall(call, args) {
   const signal = args.signal;
   signal?.throwIfAborted();
   let timer, onAbort;
@@ -82,14 +127,15 @@ async function boundedLookup(selector, args) {
     timer = setTimeout(() => reject(Object.assign(new Error('dispatch lookup timed out'),
       { code: 'ETIMEDOUT' })), args.timeoutMs ?? 8000);
   });
-  try { return await Promise.race([dispatchReadTransport.lookup(selector, args), stopped]); }
+  try { return await Promise.race([call(), stopped]); }
   finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
 }
 function unavailable(error) {
   const transient = isTransientAppContractError(error);
   // Error messages can contain endpoint credentials or producer response data.
   return { ok: false, reason: 'dispatch-read-unavailable', transient,
-    detail: error?.code === 'DISPATCH_READ_DISABLED' ? 'dispatch lookup disabled'
+    detail: error?.code === 'WORKER_OBSERVATION_DISABLED' ? 'worker observations disabled'
+      : error?.code === 'DISPATCH_READ_DISABLED' ? 'dispatch lookup disabled'
       : error?.name === 'AbortError' ? 'dispatch lookup aborted'
       : transient ? 'transient dispatch lookup failure' : 'dispatch lookup failed' };
 }
@@ -97,6 +143,12 @@ function unavailable(error) {
 function assertReadsEnabled(env) {
   if (env.ADVERSARIAL_DISPATCH_READS_ENABLED !== '1') {
     throw Object.assign(new Error('dispatch lookup disabled'), { code: 'DISPATCH_READ_DISABLED' });
+  }
+}
+
+function assertObservationsEnabled(env) {
+  if (env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED !== '1') {
+    throw Object.assign(new Error('worker observations disabled'), {code:'WORKER_OBSERVATION_DISABLED'});
   }
 }
 
@@ -117,7 +169,7 @@ export async function readWorkerObservation(selector, args = {}) {
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
       rows.push(...evidence.rows);
-      if (reply.complete) return observationRows(rows);
+      if (reply.complete) return observationRows(rows, selector.observation);
       offset = reply.next_offset;
     }
     return {ok:false,reason:'worker-observation-unavailable'};
@@ -135,14 +187,16 @@ export function readWorkerObservationSync(selector, args = {}) {
       const evidence = checkedObservation(reply, selector, offset);
       if (!evidence.ok) return evidence;
       rows.push(...evidence.rows);
-      if (reply.complete) return observationRows(rows);
+      if (reply.complete) return observationRows(rows, selector.observation);
       offset = reply.next_offset;
     }
     return {ok:false,reason:'worker-observation-unavailable'};
-  } catch (error) { return unavailable(error); }
+  } catch (error) { cachedSession = null; return unavailable(error); }
 }
-function observationRows(rows) {
-  if (!rows.length || new Set(rows.map(row => row.run_id ?? row.session_id ?? row.launch_request_id)).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
+function observationRows(rows, observation) {
+  if (!rows.length) return {ok:false,reason:'worker-observation-inconclusive',detail:'authorized observation returned no rows'};
+  const identity = {workers:'run_id',sessions:'session_id',provenance:'launch_request_id'}[observation];
+  if (new Set(rows.map(row => row[identity])).size !== rows.length) return {ok:false,reason:'worker-observation-unavailable'};
   return {ok:true,rows,row:rows[0],target:{backend:'app-contract',source:'app-sdk'}};
 }
 function checkedObservation(reply, selector, offset) {

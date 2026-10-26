@@ -1,6 +1,6 @@
-import './helpers/worker-observation-fixture.mjs';
 // Must stay the first import: it isolates this file's state before any production module loads.
 import './helpers/rate-limit-state-isolation.mjs';
+import './helpers/worker-observation-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {

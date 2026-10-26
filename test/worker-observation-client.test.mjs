@@ -58,7 +58,7 @@ test('async observations use the packaged SDK session and HTTP lookup without an
   });
   for (const observation of ['workers','sessions','provenance']) {
     const result = await readWorkerObservation({observation,limit:100}, {
-      env:{ADVERSARIAL_DISPATCH_READS_ENABLED:'1'},
+      env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
       connectOptions:{endpoint_url:'https://synthetic.invalid/observations',bootstrap_token:'synthetic-bootstrap'},
     });
     assert.equal(result.ok,true);
@@ -66,6 +66,37 @@ test('async observations use the packaged SDK session and HTTP lookup without an
   assert.equal(calls[0].body.op,'register');
   assert.deepEqual(calls.slice(1).map(call=>call.body.observation),['workers','sessions','provenance']);
   assert.equal(calls.length,4);
+});
+
+test('sync observations reuse a registered SDK session only for matching connection options', async t => {
+  const sdk = dispatchReadTransport.sdk();
+  let registrations = 0, syncReads = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/register')) {
+      registrations++;
+      return new Response(JSON.stringify({session_token:'cached-observation-session'}));
+    }
+    return new Response(JSON.stringify(page(JSON.parse(options.body).observation,[worker])));
+  });
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({...sdk,
+    readWorkerObservationsSync(selector, options) {
+      if (!options.session_token) throw new Error('existing session_token required');
+      assert.equal(options.session_token,'cached-observation-session');
+      assert.equal(options.endpoint_url,'https://synthetic.invalid/cached-observations');
+      syncReads++;
+      return page(selector.observation,[worker]);
+    },
+  }));
+  const selector = {observation:'workers',worker_run_id:'run'};
+  const args = {env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
+    connectOptions:{endpoint_url:'https://synthetic.invalid/cached-observations',bootstrap_token:'synthetic'}};
+  assert.equal((await readWorkerObservation(selector,{...args,timeoutMs:7500})).ok,true);
+  for (let i=0;i<3;i++) assert.equal(readWorkerObservationSync(selector,args).ok,true);
+  assert.equal(registrations,1);
+  assert.equal(syncReads,3);
+  assert.equal(readWorkerObservationSync(selector,{...args,
+    connectOptions:{...args.connectOptions,endpoint_url:'https://synthetic.invalid/other'}}).ok,false);
+  assert.equal(syncReads,3);
 });
 
 test('provenance identity is launch-scoped across pages, matching the packaged SDK validator', async () => {
@@ -165,10 +196,99 @@ test('daemon branch identity reads public provenance and never scans worker file
 // Observation failures must enter the owner's existing teardown hold codes.
 test('public read failures preserve teardown-safe worker lookup classification',async()=>{
   const {lookupOriginalWorkerRunStatus}=await import('../src/merge-agent-original-worker.mjs');
-  for(const reason of ['dispatch-read-unavailable','worker-observation-unavailable']) {
+  for(const reason of ['dispatch-read-unavailable','worker-observation-unavailable','worker-observation-inconclusive']) {
     const result=await lookupOriginalWorkerRunStatus({workspace:{launchRequestId:'launch'},
       runRecord:{runId:'run'},readLatestWorkerRunStatusImpl:async()=>({ok:false,reason})});
     assert.equal(result.found,false);
     assert.equal(result.reason,'worker-run-lookup-failed');
   }
+});
+
+test('changing page and concurrent caller budgets reuse registration and keep independent physical HTTP timeouts', async t => {
+  const sdk = dispatchReadTransport.sdk();
+  let registrations = 0, clock = 1000;
+  const budgets = [];
+  t.mock.method(Date,'now',() => clock);
+  t.mock.method(dispatchReadTransport,'sdk',() => ({...sdk,
+    readSessionDispatchLookup(selector, options) {
+      budgets.push(options.request_timeout_ms);
+      return sdk.readSessionDispatchLookup(selector,options);
+    },
+  }));
+  t.mock.method(globalThis,'fetch',async (url,options) => {
+    if (url.endsWith('/register')) {
+      registrations++; clock += 7;
+      return new Response(JSON.stringify({session_token:'budget-session'}));
+    }
+    clock += 11;
+    const selector = JSON.parse(options.body);
+    return new Response(JSON.stringify(selector.offset === 0
+      ? page('workers',[worker],{complete:false,next_offset:1})
+      : page('workers',[{...worker,run_id:'older'}])));
+  });
+  const args = {env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
+    connectOptions:{endpoint_url:'https://synthetic.invalid/page-budgets',bootstrap_token:'synthetic'}};
+  assert.equal((await readWorkerObservation({observation:'workers'}, {...args,timeoutMs:8000})).ok,true);
+  assert.deepEqual(budgets,[7993,7982]);
+  budgets.length = 0;
+  const results = await Promise.all([120,800].map(timeoutMs => readWorkerObservation({observation:'workers'}, {...args,timeoutMs})));
+  assert.ok(results.every(result => result.ok));
+  assert.equal(registrations,1);
+  assert.ok(budgets.some(budget => budget <= 120));
+  assert.ok(budgets.some(budget => budget > 120 && budget <= 800));
+});
+
+test('a warm session physically aborts a shorter HTTP request and evicts failed session evidence', async t => {
+  let registrations = 0, hang = false, physicalAbort;
+  const aborted = new Promise(resolve => { physicalAbort = resolve; });
+  t.mock.method(globalThis,'fetch',async (url,options) => {
+    if (url.endsWith('/register')) {
+      registrations++;
+      return new Response(JSON.stringify({session_token:'abort-session'}));
+    }
+    if (hang) return new Promise((_,reject) => {
+      options.signal.addEventListener('abort',() => {
+        physicalAbort(); reject(new DOMException('Aborted','AbortError'));
+      },{once:true});
+    });
+    return new Response(JSON.stringify(page('workers',[worker])));
+  });
+  const selector = {observation:'workers'};
+  const args = {env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
+    connectOptions:{endpoint_url:'https://synthetic.invalid/physical-abort',bootstrap_token:'synthetic'}};
+  assert.equal((await readWorkerObservation(selector,{...args,timeoutMs:8000})).ok,true);
+  hang = true;
+  const start = performance.now();
+  assert.equal((await readWorkerObservation(selector,{...args,timeoutMs:80})).ok,false);
+  // Wait only for the SDK request's abort, with a hard test deadline. The
+  // cached 8s timeout would fail this assertion despite caller settlement.
+  let timer;
+  try { await Promise.race([aborted,new Promise((_,reject) => {
+    timer = setTimeout(() => reject(new Error('physical HTTP did not abort')),500);
+  })]); } finally { clearTimeout(timer); }
+  assert.ok(performance.now()-start < 1000);
+  assert.equal(registrations,1);
+  hang = false;
+  assert.equal((await readWorkerObservation(selector,args)).ok,true);
+  assert.equal(registrations,2);
+});
+
+
+test('cold sync observations accept an explicit public session receipt without registration', t => {
+  const sdk = dispatchReadTransport.sdk();
+  let reads = 0;
+  t.mock.method(dispatchReadTransport,'sdk',() => ({...sdk,
+    connect:() => assert.fail('explicit token must never register'),
+    readWorkerObservationsSync(selector,options) {
+      reads++;
+      assert.equal(options.session_token,'explicit-session');
+      assert.equal(options.endpoint_url,'https://synthetic.invalid/explicit');
+      return page(selector.observation,[worker]);
+    },
+  }));
+  assert.equal(readWorkerObservationSync({observation:'workers'},{
+    env:{ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED:'1'},
+    connectOptions:{endpoint_url:'https://synthetic.invalid/explicit',session_token:'explicit-session'},
+  }).ok,true);
+  assert.equal(reads,1);
 });

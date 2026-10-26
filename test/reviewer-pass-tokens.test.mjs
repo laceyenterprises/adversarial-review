@@ -1089,7 +1089,7 @@ test('backfill reviewer-pass CLI lets --ledger-target override deprecated --ledg
   assert.equal(parsed.ledgerDbDeprecated, false);
 });
 
-test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still reads the ledger', () => {
+test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still reads the ledger', async () => {
   const stdout = makeCaptureStream();
   const stderr = makeCaptureStream();
   const rootDir = tempRoot();
@@ -1114,7 +1114,7 @@ test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still read
     },
   }), 'utf8');
 
-  const rc = backfillReviewerPassesMain([
+  const rc = await backfillReviewerPassesMain([
     '--root-dir', rootDir,
     '--ledger-db', ledgerDb,
     '--dry-run',

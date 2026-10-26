@@ -1,0 +1,124 @@
+{
+  "producerRevision": "f37c7489439a8b53eafecb38870f75fe9f07fa57",
+  "sourcePath": "platform/session-ledger/src/session_ledger/canonical_views/app_worker_observations.py",
+  "sourceSha256": "ef25ed998f8784ce44e79147153c26bbab2cf730076bb2d910420d98b424568b",
+  "capture": "Immutable producer projection executed on disposable SQLite; authorization stub permits open-launch and repair-launch only. Later remediation, superseded opener and foreign opener are simultaneous inputs. No endpoint or live state used.",
+  "buildCompletions": [
+    [
+      "opener",
+      "open-launch",
+      "codex",
+      "example/repo",
+      42,
+      "original",
+      "feature",
+      "pr_opened",
+      "01",
+      null
+    ],
+    [
+      "remediation",
+      "repair-launch",
+      "claude-code",
+      "example/repo",
+      42,
+      "current",
+      "feature",
+      "build_completed",
+      "02",
+      null
+    ],
+    [
+      "superseded",
+      "open-launch",
+      "claude-code",
+      "example/repo",
+      42,
+      "original",
+      "feature",
+      "pr_opened",
+      "03",
+      "04"
+    ],
+    [
+      "foreign",
+      "foreign-launch",
+      "claude-code",
+      "example/repo",
+      42,
+      "original",
+      "feature",
+      "pr_opened",
+      "05",
+      null
+    ]
+  ],
+  "responses": {
+    "currentHead": {
+      "schema_version": 1,
+      "observation": "provenance",
+      "status": "not_found",
+      "items": [],
+      "complete": true,
+      "next_offset": null,
+      "scope_complete": false,
+      "mutation_authority": false,
+      "units": {
+        "tokens": "tokens",
+        "cost": "USD"
+      }
+    },
+    "opener": {
+      "schema_version": 1,
+      "observation": "provenance",
+      "status": "found",
+      "items": [
+        {
+          "completion_id": "opener",
+          "launch_request_id": "open-launch",
+          "worker_class": "codex",
+          "repo": "example/repo",
+          "pr_number": 42,
+          "head_sha": "original",
+          "branch": "feature",
+          "updated_at": "01",
+          "actual_harness": "codex"
+        }
+      ],
+      "complete": true,
+      "next_offset": null,
+      "scope_complete": false,
+      "mutation_authority": false,
+      "units": {
+        "tokens": "tokens",
+        "cost": "USD"
+      }
+    },
+    "builder": {
+      "schema_version": 1,
+      "observation": "provenance",
+      "status": "found",
+      "items": [
+        {
+          "completion_id": "remediation",
+          "launch_request_id": "repair-launch",
+          "worker_class": "claude-code",
+          "repo": "example/repo",
+          "pr_number": 42,
+          "head_sha": "current",
+          "branch": "feature",
+          "updated_at": "02",
+          "actual_harness": "claude-code"
+        }
+      ],
+      "complete": true,
+      "next_offset": null,
+      "scope_complete": false,
+      "mutation_authority": false,
+      "units": {
+        "tokens": "tokens",
+        "cost": "USD"
+      }
+    }
+  }
+}

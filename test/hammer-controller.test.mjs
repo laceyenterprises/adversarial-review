@@ -30,7 +30,7 @@ const publishReady = value => `const fs=require("node:fs"),p=process.env.HAM_RUN
   fs.writeFileSync(p+".tmp",JSON.stringify(${value}));fs.renameSync(p+".tmp",p);`;
 
 function recordEnvironment(dir, value = '1', launchRequestId = 'lrq_controller-test') {
-  const path = join(dir, 'dispatch', 'lrq_controller-test');
+  const path = join(dir, 'dispatch', launchRequestId);
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, 'env-contract.json'), JSON.stringify({
     launchProvenance: { launchRequestId, workerClass: 'hammer' },
@@ -282,6 +282,41 @@ for (const value of [undefined, '', '0', 'true', 1, '1']) {
     assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, value === '1' ? '0' : '1');
   });
 }
+
+for (const otherRoots of [false, true]) {
+  test(`controller uses HAM_HQ_ROOT ${otherRoots ? 'ahead of other roots' : 'without other roots'}`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'controller-root-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const launchRequestId = 'lrq_custom';
+    recordEnvironment(dir, '1', launchRequestId);
+    const env = { HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir,
+      HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: launchRequestId,
+      ADVERSARIAL_DISPATCH_READS_ENABLED: '0',
+      ...(otherRoots ? { HQ_ROOT: join(dir, 'wrong-hq'), AGENT_OS_HQ_ROOT: join(dir, 'wrong-agent-hq') } : {}) };
+    await assert.rejects(runHammerController('/does-not-run', [], {
+      env,
+      readLaunchImpl: args => {
+        assert.equal(args.hqRoot, dir);
+        assert.equal(args.env.ADVERSARIAL_DISPATCH_READS_ENABLED, '1');
+        return { ok: true, row: { launch_request_id: launchRequestId, status: 'running' } };
+      },
+      spawnImpl: () => { throw Error('spawn-reached'); },
+    }), /spawn-reached/);
+    assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, '0');
+  });
+}
+
+test('controller launch environment defaults to process.env', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'controller-default-env-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  recordEnvironment(dir, '1', 'lrq_default-env');
+  const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
+    import { controllerLaunchEnvironment } from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    console.log(controllerLaunchEnvironment().ADVERSARIAL_DISPATCH_READS_ENABLED);
+  `], { encoding: 'utf8', timeout: 10000,
+    env: { HQ_ROOT: dir, HQ_LAUNCH_REQUEST_ID: 'lrq_default-env', ADVERSARIAL_DISPATCH_READS_ENABLED: '0' } });
+  assert.equal(output.trim(), '1');
+});
 
 test('missing, malformed and foreign launch environment refuses before any dispatch read', async t => {
   const f = fixture(t, 'exit 0');

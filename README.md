@@ -3344,8 +3344,11 @@ app-scoped lookups. Without grants, key, ticket and receipt lookups return
 not-found, mapped to `dispatch absence scope unproven`, and retain ownership
 holds. The runtime owner must verify the merged SDK release record, deploy the
 producer, and run `npm ci` in this submodule before normal service deployment.
-Rollback removes the flag from both templates and redeploys, safely pausing
-reads and retaining ownership holds. The SDK bytes are
+Service rollback removes the flag from both service templates and redeploys,
+safely pausing service reads and retaining ownership holds. Closer rollback
+reverts the reviewed Agent OS adapter activation policy for new launches;
+changing service templates does not deactivate closer launch records. The SDK
+bytes are
 pinned to merged producer revision `387fb06d5d8835e320f49388a2ebdf67f2249945`.
 SDK 0.8.0 cannot attest global absence: empty lookups and missing rows retain
 ownership instead of settling or reclaiming it. See the reader contract for the

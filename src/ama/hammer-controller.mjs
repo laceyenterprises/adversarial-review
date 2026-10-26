@@ -44,9 +44,9 @@ export function controllerLaunchId(env) {
 
 // Activation belongs to the adapter's launch record, not a later shell export.
 // This is environment provenance only; launch status still uses the SDK reader.
-export function controllerLaunchEnvironment(env) {
+export function controllerLaunchEnvironment(env = process.env) {
   const launchRequestId = controllerLaunchId(env);
-  const contract = JSON.parse(readFileSync(join(resolveHqRoot(env), 'dispatch',
+  const contract = JSON.parse(readFileSync(join(env.HAM_HQ_ROOT || resolveHqRoot(env), 'dispatch',
     launchRequestId, 'env-contract.json'), 'utf8'));
   if (contract.launchProvenance?.launchRequestId !== launchRequestId) {
     throw new Error('hammer controller launch environment identity unconfirmed');

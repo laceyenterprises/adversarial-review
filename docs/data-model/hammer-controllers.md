@@ -5,8 +5,9 @@
 **Store:** `<HAM_RUN_DIR>/controller-<uuid>.json`, mode 0600
 
 Before any dispatch read, the controller loads
-`<HQ_ROOT>/dispatch/<own-lrq>/env-contract.json` and requires
-`launchProvenance.launchRequestId` to match its unambiguous launch identity.
+`<hq-root>/dispatch/<own-lrq>/env-contract.json`, resolving `HAM_HQ_ROOT`
+before the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` / home-directory fallback.
+It requires `launchProvenance.launchRequestId` to match its unambiguous launch identity.
 It replaces any caller-exported `ADVERSARIAL_DISPATCH_READS_ENABLED` with the
 value in that adapter-owned record. Missing, malformed or foreign records
 refuse startup; absent or non-string/non-`"1"` activation remains disabled by

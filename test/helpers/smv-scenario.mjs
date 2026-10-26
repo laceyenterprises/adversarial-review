@@ -446,6 +446,33 @@ if (scenario === 'clean') {
     updatedAt: new Date(leaseClock - fallbackMs).toISOString() }, { now: leaseClock }), true);
 
   const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
+  // HAMVALIDORPHAN-01: queued automatic review returns to the same closure
+  // wake policy, without treating the old verdict as current-head authority.
+  {
+    const { restoreHammerOwnedReview } = await import('../../src/closer-head-rereview-decline.mjs');
+    const { deriveNextActionSnapshot, nextAction } = await import('../../src/pr-next-action.mjs');
+    db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+      revision_ref,rereview_requested_at,rereview_reason) VALUES ('example/orphan',4242,
+      '2026-01-01','gemini','open','pending','hammer-head','2026-01-01','auto-refresh')`).run();
+    const queued = db.prepare("SELECT * FROM reviewed_prs WHERE repo='example/orphan' AND pr_number=4242").get();
+    assert.equal(restoreHammerOwnedReview({ db, repoPath: queued.repo, prNumber: 4242,
+      reviewRow: queued, reviewedHeadSha: 'reviewed', headSha: 'hammer-head' }), true);
+    const restored = db.prepare("SELECT * FROM reviewed_prs WHERE repo='example/orphan' AND pr_number=4242").get();
+    assert.equal(restored.review_status, 'posted');
+    assert.equal(restored.reviewer_head_sha, 'reviewed');
+    const snapshot = deriveNextActionSnapshot({ subjectKey: 'example/orphan#4242', head: 'hammer-head',
+      observedAt: '2026-01-01T00:00:00Z', observations: {
+        pr: { state: 'OPEN', headSha: 'hammer-head', mergeable: 'MERGEABLE', labels: [] },
+        reviews: { headSha: restored.reviewer_head_sha, verdict: 'approved' },
+        launches: { closer: null }, leases: { closer: null }, checks: { conclusion: 'SUCCESS' },
+        remediation: { roundsLeft: false }, policy: { autonomousMergeExecutionEnabled: true },
+        progress: { hammerHead: { headSha: 'hammer-head', reason: 'hammer-validated-head' } },
+      } });
+    const decision = nextAction(snapshot);
+    assert.equal(decision.action, 'hammer');
+    assert.equal(decision.reason, 'hammer-owned-head');
+  }
+
   db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref)
     VALUES (?,?,'2026-01-01','gemini','pending',?)`).run(repo, prNumber, headSha);
   const claim = () => prepareMarkAttemptStarted(db).run('2026-01-01', 'synthetic-claim', headSha,

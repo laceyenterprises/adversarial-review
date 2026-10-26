@@ -171,7 +171,9 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
       ...(input.operatorLabelActorEnforcement ? { operatorLabelActorEnforcement: input.operatorLabelActorEnforcement } : {}),
       reviewCeilingReached: input.reviewCeilingReached === true, hammerCap: cap,
       ...(typeof autonomousMergeExecutionEnabled === 'boolean' ? { autonomousMergeExecutionEnabled } : {}) },
-    progress: { diffEmpty: input.diffEmpty === true, ...(closerAuthoredStale ? { closerAuthoredStale } : {}),
+    progress: { diffEmpty: input.diffEmpty === true,
+      ...((input.hammerHead || input.closerAuthoredStale?.hammerHead)
+        ? { hammerHead: pick(input.hammerHead || input.closerAuthoredStale.hammerHead, ['headSha', 'reason']) } : {}), ...(closerAuthoredStale ? { closerAuthoredStale } : {}),
       ...(input.terminalReview ? { terminalReview: pick(input.terminalReview, ['validated', 'headSha', 'reviewedHeadSha']) } : {}),
       ...(mergedReceipt ? { mergeReceipt: { merged: true, headSha: head, path: 'hammer' } } : {}) },
     ...(input.hammerStop ? { controls: {

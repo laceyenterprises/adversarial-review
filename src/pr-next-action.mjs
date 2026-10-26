@@ -1,3 +1,4 @@
+import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
 import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
 // ── NXA-02: one shared next action per open PR ───────────────────────────────
 //
@@ -525,6 +526,15 @@ function selectRow(facts, { daemonAfterSupersededStop = false } = {}) {
   // HAMATTEST-03: an explicit head-bound review decision survives the old ceiling.
   if (closerPair && closerCarry.decision === 'rereview-exact-head' && !terminalHead) {
     return { row: 'R13-review', action: 'review', actor: 'reviewer', reason: 'exact-head-review', deadlineKind: 'admission', queue: 'dispatch' };
+  }
+  // A suppressed hammer head retains its closer even when an automatic
+  // refresh lost the posted row or the attestation chain cannot carry a verdict.
+  // Live/uncertain ownership, holds and retry caps have already won above.
+  if (review.currentHeadVerdictAbsent && !carried && !handedToReview
+    && isHammerOwnedHead(progress?.hammerHead, head)) {
+    return { row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'hammer-owned-head',
+      deadlineKind: 'admission', queue: 'dispatch',
+      attempt: launchForHead && launch.attempt !== null ? launch.attempt + 1 : null };
   }
   if (review.currentHeadVerdictAbsent && !carried && policy?.reviewCeilingReached === true && !handedToReview) {
     return { row: 'R13-review', action: 'hammer', actor: 'hammer', reason: 'review-ceiling', deadlineKind: 'admission', queue: 'dispatch' };

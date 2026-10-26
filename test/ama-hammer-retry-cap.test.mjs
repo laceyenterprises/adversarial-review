@@ -4274,3 +4274,55 @@ test('RCV-08 canonical verdict after an exit refund returns only the remaining l
   assert.deepEqual(f.read().noWorkRefunds.launch.budgets,
     { head: false, pr: false, lifetime: true, transient: false });
 });
+
+
+test('HAMVALIDORPHAN-01 worker_crashed after validation resumes under the existing attempt cap and pages', async t => {
+  _resetHammerRetryCapAlertDebounceForTests();
+  const { resolveClosureNextAction } = await import('../src/ama/closure-next-action.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-validated-orphan-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pages = [];
+  let launches = 0;
+  const deps = hammerDispatchDeps({
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed', failure_class: 'worker_crashed' } }),
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: '{"status":"failed"}', stderr: '' };
+      if (args[0] !== 'dispatch') return { stdout: '{}', stderr: '' };
+      launches++;
+      return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR_NUMBER}`,
+        dispatchId: `fixture-${launches}`, launchRequestId: `fixture-launch-${launches}` }), stderr: '' };
+    },
+    deliverAlertImpl: async (...args) => { pages.push(args); },
+  });
+  const run = async minute => {
+    const args = hammerDispatchArgs(rootDir, {
+      prMetadata: { headSha: ADVANCED_HEAD, statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      dispatchContext: { targetRemediationSha: ADVANCED_HEAD, dispatchRecordHeadSha: REVIEWED_HEAD,
+        allowStaleReviewHeadHammerResume: true, liveHeadCloserAuthored: true,
+        dispatchedAt: `2026-07-06T12:${String(minute).padStart(2, '0')}:00Z` },
+    });
+    const sharedNextAction = await resolveClosureNextAction({ input: { reviewState: args.reviewState,
+      currentHead: ADVANCED_HEAD, hammerHead: { headSha: ADVANCED_HEAD, reason: 'hammer-validated-head' },
+      lease: null, roundsLeft: false, checks: 'SUCCESS' },
+      subjectKey: `${REPO}#${PR_NUMBER}`, candidate: { headSha: ADVANCED_HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+      autonomousMergeExecutionEnabled: true, observedAt: args.dispatchContext.dispatchedAt });
+    return maybeDispatchAmaCloser({ ...args, ...deps, sharedNextAction,
+      resolveHamTerminalRemediationEvidenceImpl: async () => null });
+  };
+  const first = await run(0);
+  assert.equal(first.dispatched, true, JSON.stringify(first));
+  writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'validation-complete',
+      headMatchEvidence: 'ham_terminal_remediation_validated', validatedHead: ADVANCED_HEAD,
+      eligibilityTrace: { trace: { hamTerminalRemediation: { ok: true } } } } });
+  const resumed = await run(10);
+  assert.equal(resumed.dispatched, true, JSON.stringify(resumed));
+  assert.notEqual(resumed.launchRequestId, first.launchRequestId);
+  let result = resumed;
+  for (const minute of [20, 30, 40]) result = await run(minute);
+  assert.equal(result.dispatched, false);
+  assert.match(result.reason, /(?:hammer-retry-cap-exhausted|dispatch-retry-exhausted)/);
+  assert.ok(launches <= HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
+  assert.ok(pages.length > 0, 'attempt exhaustion must use the existing escalation');
+});

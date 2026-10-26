@@ -259,7 +259,8 @@ import {
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
-import { declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
+import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
+import { restoreHammerOwnedReview, declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
 import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
@@ -1469,6 +1470,33 @@ export async function processReviewSubject(entry, ctx) {
           (ctx.warn || console.warn)(`[watcher] ceiling closeout wake drain failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
         }
       }
+      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
+        repoPath,
+        prNumber,
+        headSha: subject.headSha,
+        execFileImpl: execFileAsync,
+        logger: console,
+      });
+      // Resolve ownership before review refresh, CI admission, quota and budgets.
+      // Queued rows must reach the same posted-review closeout in this poll.
+      let hammerSuppression = null;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
+        && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
+        && (existing.review_status !== 'posted' || existing.reviewer_head_sha !== subject.headSha)
+        && !isExplicitOperatorReviewRetrigger(existing)
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
+        try {
+          hammerSuppression = await resolveHeadCloserCommitSuppression();
+          if (hammerHeadOwnership(hammerSuppression, subject.headSha)) {
+            restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
+              reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }), headSha: subject.headSha });
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+        } catch (error) {
+          console.warn(`[watcher] hammer head ownership unresolved for ${repoPath}#${prNumber}: ${error?.message || error}`);
+          return;
+        }
+      }
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
@@ -1479,15 +1507,8 @@ export async function processReviewSubject(entry, ctx) {
         hasInProgressCommentOnlyFinalRound(ROOT, {
           repo: repoPath, prNumber, reviewedHead: existing.reviewer_head_sha,
         });
-      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
-        repoPath,
-        prNumber,
-        headSha: subject.headSha,
-        execFileImpl: execFileAsync,
-        logger: console,
-      });
       let stalePostedReviewSuppression = { suppressed: false, reason: null };
-      let stalePostedReviewCloserSuppression = { suppressed: false, reason: null };
+      let stalePostedReviewCloserSuppression = hammerSuppression || { suppressed: false, reason: null };
       try {
         const recoveryMatches = !subject.terminal ? withheldHeadRecoveryCandidates(ROOT, {
           repo: repoPath, prNumber, headSha: subject.headSha, reviewRow: existing,
@@ -1514,10 +1535,10 @@ export async function processReviewSubject(entry, ctx) {
             logger: console,
           })
           : { suppressed: false, reason: null };
-        stalePostedReviewCloserSuppression =
+        stalePostedReviewCloserSuppression = hammerSuppression || (
           (postedReviewHeadMoved || needsRecoveryProbes) && !stalePostedReviewSuppression.suppressed
             ? await resolveHeadCloserCommitSuppression()
-            : { suppressed: false, reason: null };
+            : { suppressed: false, reason: null });
         if (withheldHeadRecovery && !subject.terminal && !stalePostedReviewSuppression.suppressed &&
             !stalePostedReviewCloserSuppression.suppressed) {
           const recovered = db.transaction(() => recoverWithheldFinalRoundHead({

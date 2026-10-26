@@ -1,4 +1,5 @@
 {
+  "hammerValidatedHeadOwnership": "HAMVALIDORPHAN-01: recognized current-head hammer validation or closer trailer suppresses auto-refresh. Queued automatic review rows return to posted at their latest delivered review head through a null-safe request CAS, then enter closure processing in the same poll. The shared decision and rescue retain hammer dispatch ownership without carrying a verdict. Existing live ownership, explicit review handoffs, CI waits, certified daemon authority, strict mode, leases, attempt/backoff/lifetime caps and exhaustion pages remain unchanged. Offline regressions: watcher-claim-loop, watcher-auto-refresh-stale-posted-review, ama-hammer-background-dispatch, ama-hammer-retry-cap, closer-next-action and merge-agent-rescue-classifier. Natural deployed recovery observation remains pending; existing smoke promises are unchanged.",
   "queueCutoverObservation": {"owner":"v2 finalization read-only expansion observer","states":["pending","complete"],"transitions":"Observation only: joins effective queue routing, fresh loaded writer/build/config and owner census, zero legacy writers, confirmed exact-candidate merge receipts and sourced release of every sampled remediated closer after ack and before first CI. Prior canary approval and ordered rollback/reactivation remain operator evidence. Missing organic/runtime/resource evidence stays pending; reader never activates or approves.","codeSources":["src/finalization/queue-cutover.mjs","src/finalization/queue-probe.mjs"],"validation":"test/finalization-queue-cutover.test.mjs; deployed runtime-owner cutover probe; no new smoke action"},
   "queueCloserRetirement": {"owner":"v2 finalization closer boundary","states":["remediating","acknowledged","resources-released"],"transitions":"Resolved queue route selects dedicated remediation/publication/handoff prompt without legacy merge procedures. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent worker/closer resource release and successful exit. Failed ack or release cannot complete. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Queue prompts render once after scratch allocation; missing inputs defer the unsubmitted lease with a structured refusal. Uncomposed migrated lanes refuse all closer remediation at deployment.","codeSources":["src/finalization/queue-closer.mjs","src/ama/dispatch-closer.mjs","templates/queue-closer-prompt.md"],"validation":"test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; organic resource-release observation separate from smoke"},
   "queueCanaryObservation": {"owner": "v2 finalization read-only canary observer","states": ["pending","complete"],"transitions": "Projection only: complete requires at least 20 sourced organic stored admissions of both types, all sourced isolated recovery results, ordered rollback/reactivation outcomes, current per-service writer build/config observations (including watcher and follow-up), inventory/producer/identity observations and existing shadow readiness. The latest route writer is a hint only; owner ID/generation churn does not invalidate process evidence. Malformed evidence collections remain pending. Only the explicit canary capability reads or emits private rollout evidence. Missing, stale, failed, duplicate or unknown evidence remains pending. Reading never changes route, lane, approvals or services. Operator approval is separate.","codeSources": ["src/finalization/queue-canary.mjs","src/finalization/queue-probe.mjs"],"validation": "test/finalization-queue-canary.test.mjs; runtime-owner deployed read-only canary probe; no new live smoke action"},
@@ -84,7 +85,8 @@
         "src/orphan-post-reconcile.mjs",
         "src/posted-review-head-repair.mjs",
         "src/posted-review-row.mjs",
-        "src/pollonce-phases.mjs"
+        "src/pollonce-phases.mjs",
+        "src/closer-head-rereview-decline.mjs"
       ],
       "states": [
         {"name": "pending","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
@@ -133,7 +135,10 @@
         {"id": "review-row.30","from": "posted","to": "pending","trigger": "repair empty reviewed head at matching live revision once; no charge","codeSource": "src/posted-review-head-repair.mjs"},
         {"id": "review-row.31","from": "failed","to": "pending","trigger": "recovered post cannot settle its reviewed head; no charge","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.32","from": "failed-orphan","to": "pending","trigger": "recovered post cannot match its claim; no charge","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.33","from": "reviewing","to": "reviewing","trigger": "defer rereview request while claim is in flight","codeSource": "src/review-state.mjs"}
+        {"id": "review-row.33","from": "reviewing","to": "reviewing","trigger": "defer rereview request while claim is in flight","codeSource": "src/review-state.mjs"},
+        {"id": "review-row.34","from": "pending","to": "posted","trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"},
+        {"id": "review-row.35","from": "pending-upstream","to": "posted","trigger": "automatic hammer-owned-head request restored to delivered review identity with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"},
+        {"id": "review-row.36","from": "ci-blocked","to": "posted","trigger": "automatic hammer-owned-head request restored for closure CI evaluation with request CAS","codeSource": "src/closer-head-rereview-decline.mjs"}
       ]
     },
     {
@@ -370,6 +375,7 @@
     }
   ],
   "sourceProjectionSha256": {
+    "src/closer-head-rereview-decline.mjs": "21b6becc81f55d341b989d878161c82ad25b25a1ab1e8136c8cdf264315882b8",
     "src/remediation-ci-infrastructure.mjs": "0473feae0f4eefa22a4bcd6474788963c9fa95f11a601fdd6340da1599841568",
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "da3205b6c7a40a45a790714eaec6dffc893b3c8e17a6c61410951ebb8fd24f87",
@@ -377,14 +383,14 @@
     "src/ama/pre-receipt-intent.mjs": "f78c12d791b287307441f121a782ba00e5b52e1e6ef7a1522a51443de8c5f14c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",
+    "src/pollonce-phases.mjs": "71fe10f8c2e420924e48503838faf54a22e6a63eb2726a109ccecdd5dab36247",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/acpx/index.mjs": "6debe24b7efd8a3ddf08b7e7c1dc2be5b09d2956fa7e4e2f25d9663d7490e658",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "44655e9285d71a4a2dbeffa249b04e6063a5859e7777629caf8d1344b60837c0",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "b70bec4bfe7769e073439682fe3de1311fc4a67fb3e32316aeca12802fbc965a",
     "src/adapters/reviewer-runtime/run-state.mjs": "a9ceff855698891e3e7c37d6b552d06462a70e9972f7a23c50811a254a77965d",
-    "src/ama-closure-orchestration.mjs": "47bda39b25ea61e7f7847d39a47541e348e7a924dc00fe3f9d4ad5993ae7401d",
+    "src/ama-closure-orchestration.mjs": "51c0dc10ab3cc8479045ce8e074177299a0e441f01a953ad5186fc13e7e1a383",
     "src/ama/closer-lease.mjs": "fb6b77fe46faa0f6433c4df352ee3f8827ca480369be173cd0cc4b8ae154df19",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
     "src/ama/dispatch-closer.mjs": "1baa64733ad33b2e7a92e9a6265fa87e7f159bf7ce76bf0206877a55239bc1db",

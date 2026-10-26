@@ -5959,3 +5959,28 @@ whole lane, changes one reviewed selector, bounces/verifies registered system
 services, observes exact-head receipts and slot release before CI, rehearses
 rollback/reactivation and records explicit approval. Worker publication and PR
 merge do not complete operator approval. No new smoke/check or merge authority.
+
+
+### Hammer head without a live closer (HAMVALIDORPHAN-01)
+
+A current head with hammer validation or a recognized closer trailer belongs to
+closure processing. The watcher suppresses automatic review refresh and restores
+an already queued automatic request to `posted` at the latest delivered review's
+original head. The same poll evaluates the normal closure route and emits its
+head-bound hammer wake when dispatch becomes eligible. A failed reviewer attempt
+cannot supply that original verdict identity.
+
+The shared policy and rescue probe distinguish hammer ownership from merge
+proof. A missing carry-forward chain on a recognized hammer head reports
+`hammer-resume`; the fresh closer must validate and rebuild the head-bound audit
+before any merge. A worker crash does not reset attempt or remediation budgets.
+Existing live-owner fences, holds, CI waits, backoff and retry/lifetime limits
+still apply; exhaustion follows the existing escalation. Ordinary foreign heads
+and explicit exact-head review transfers retain review behavior. Fully certified
+daemon merge authority is unchanged.
+
+Source acceptance uses disposable synthetic watcher, closure, retry-cap and
+rescue fixtures. After normal deployment, observe a naturally occurring closer
+exit after publication: the next eligible poll should retain closure ownership
+and dispatch a successor or report its bounded wait/escalation. Source validation
+performs no live rescue, restart, ledger operation or PR mutation.

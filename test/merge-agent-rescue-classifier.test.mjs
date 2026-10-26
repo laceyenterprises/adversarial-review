@@ -284,3 +284,21 @@ test('watcher smoke: remediation-eligible fixture still waits while budget remai
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+
+test('HAMVALIDORPHAN-01 rescue projects hammer ownership without granting stale-head merge permission', async () => {
+  const { deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
+  const snapshot = deriveNextActionSnapshot({ subjectKey: 'example/fixture#42', head: 'validated',
+    observedAt: '2026-01-01T00:00:00Z', observations: {
+      pr: { state: 'OPEN', headSha: 'validated', mergeable: 'MERGEABLE', labels: [] },
+      reviews: { headSha: 'reviewed', verdict: 'approved', blockingFindingState: 'known', blockingFindingCount: 0,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      checks: { conclusion: 'SUCCESS' }, launches: { closer: null }, leases: { closer: null },
+      remediation: { roundsLeft: false }, policy: { autonomousMergeExecutionEnabled: true },
+      progress: { hammerHead: { headSha: 'validated', reason: 'hammer-validated-head' } },
+    } });
+  const result = classify({ snapshot, headSha: 'validated' });
+  assert.equal(result.decision, 'hammer-eligible');
+  assert.equal(result.closureOwner.actor, 'hammer');
+  assert.equal(result.closureOwner.reason, 'hammer-owned-head');
+});

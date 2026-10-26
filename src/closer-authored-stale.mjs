@@ -1,3 +1,4 @@
+import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // STALECLOSER-03: ONE eligibility rule for a closer-authored stale head.
 //
@@ -24,6 +25,7 @@ export const CLOSER_AUTHORED_STALE_DECISIONS = Object.freeze({
   NOT_ELIGIBLE: 'not-eligible',
   REREVIEW: 'rereview-exact-head',
   NOT_APPLICABLE: 'not-applicable',
+  HAMMER_RESUME: 'hammer-resume',
 });
 const CLOSER_AUTHORED_STALE_AUDIT_SCHEMA_VERSION = 1;
 const SETTLED_SUCCESS = 'settled-success';
@@ -89,6 +91,7 @@ export async function proveCloserAuthoredStaleHead({
  */
 export function closerAuthoredStaleEligible({
   headProof,
+  hammerHead,
   verdict,
   blockingFindingState,
   blockingFindingCount,
@@ -102,6 +105,11 @@ export function closerAuthoredStaleEligible({
     anchorHead: headProof?.anchorHead || null,
     closerCommits: Array.isArray(headProof?.closerCommits) ? headProof.closerCommits : [],
   };
+  if (headProof?.proven !== true && isHammerOwnedHead(hammerHead, headSummary.currentHead)) {
+    return { eligible: false, carryForward: false, transient: false, ...headSummary,
+      decision: CLOSER_AUTHORED_STALE_DECISIONS.HAMMER_RESUME, hammerHead,
+      reasons: ['hammer-owned-head'] };
+  }
   if (headProof?.proven !== true) {
     // A live review on the closer head makes it an ordinary reviewed head.
     const notStale = ['not-stale', 'closer-head-reviewed'].includes(headProof?.reason);

@@ -1285,6 +1285,20 @@ watcher queues that review once per head immediately and records why. The
 existing pending-review transition and orphan reservation execute the decision;
 no new lifecycle states or merge authority are introduced.
 
+HAMVALIDORPHAN-01 repairs automatic review requests that have already lost the
+hammer owner. Before refresh or reviewer admission, the watcher recognizes an
+exact current-head hammer validation or closer trailer. An automatic queued row
+returns to `posted` using the latest delivered review's original head, never a
+failed attempt's head, and enters ordinary closure processing in the same poll.
+The shared next-action policy assigns an uncarried hammer head to the closer;
+rescue's provenance probe reports `hammer-resume` rather than `rereview-exact-head`.
+This is dispatch ownership only: it carries no verdict or validation authority.
+Live or uncertain ownership, explicit exact-head review handoffs, holds, CI
+waits, strict mode, and existing certified daemon authority retain precedence.
+A crashed closer resumes through existing leases, attempt keys, retry/backoff
+and lifetime caps. Exhaustion uses the existing escalation path. No new review
+or remediation round is created.
+
 HAMATTEST-03 executes that head-bound decision before coexistence returns a
 bounded closure wait, including a consumed background `not-eligible` outcome.
 The watchdog checks live/uncertain ownership before requesting review. Successful

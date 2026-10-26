@@ -2,6 +2,7 @@
 // these functions validate its inputs/results, never choose an account or lease.
 import { readFileSync } from 'node:fs';
 import { modelSubsetAllowed, validateTokenPoolDeclarations } from './config-token-pools.mjs';
+import { PoolConfigConflictError } from './pool-config-conflict.mjs';
 
 const selection = JSON.parse(readFileSync(new URL('./identity-token-selection.v1.json', import.meta.url)));
 const declarations = JSON.parse(readFileSync(new URL('./identity-token-pools.v1.json', import.meta.url)));
@@ -62,10 +63,13 @@ export function readIdentityTokenPools(oauth, { legacyGeminiHolders } = {}) {
   // Absence keeps old singleton/owner state interpretable without inventing IDs.
   if (legacyGeminiHolders !== undefined && has(pools, 'gemini-reviewer')) {
     const holders = pools['gemini-reviewer'].map(id => accounts[id].holder_user);
-    requireValue(Array.isArray(legacyGeminiHolders)
+    if (!(Array.isArray(legacyGeminiHolders)
       && holders.length === legacyGeminiHolders.length
-      && holders.every((holder, index) => holder === legacyGeminiHolders[index]),
-    'reviewer.gemini.identities', 'conflicting legacy/new declaration');
+      && holders.every((holder, index) => holder === legacyGeminiHolders[index]))) {
+      const error = new PoolConfigConflictError(['reviewer.gemini.identities'], 'legacy holder declaration');
+      error.message = 'reviewer.gemini.identities: conflicting legacy/new declaration';
+      throw error;
+    }
   }
   return frozenCopy({ token_accounts: accounts, identity_token_pools: pools });
 }

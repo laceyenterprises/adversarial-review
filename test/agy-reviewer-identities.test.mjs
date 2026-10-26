@@ -26,6 +26,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { resetPoolConfigConflictWarnings } from '../src/pool-config-conflict.mjs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -68,6 +69,7 @@ import { resolveGeminiCredentialConcurrencyForDispatchCandidates } from '../src/
 import { domainPipelineGeminiSeatCount } from '../src/reviewer-spawn-settle.mjs';
 import { reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
 import { runAgyReviewerStartupChecks } from '../src/watcher-agy-startup-preflight.mjs';
+import { loadRoleConfig } from '../src/role-config.mjs';
 
 const REVIEWER_A = 'agentos-reviewer';
 const REVIEWER_B = 'agentos-reviewer2';
@@ -241,6 +243,136 @@ function quietLog() {
   const push = (level) => (...args) => lines.push(`${level} ${args.join(' ')}`);
   return { lines, log: push('log'), info: push('info'), warn: push('warn'), error: push('error') };
 }
+
+function tokenPoolPlanFixture(t, { oauth = {}, identities, local = {} } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'agy-pool-config-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const topPath = join(root, 'config.yaml');
+  writeFileSync(topPath, JSON.stringify({ version: 1, oauth, reviewer: { gemini: {
+    runtime: 'antigravity', model: 'gemini-test', ...(identities ? { identities } : {}),
+  } } }));
+  writeFileSync(join(root, 'config.local.yaml'), JSON.stringify(local));
+  const env = { AGENT_OS_CONFIG_PATH: topPath, ADVERSARIAL_REVIEW_STATE_DIR: join(root, 'state') };
+  return {
+    topPath, env,
+    pool: (log, options = {}) => createAgyReviewerIdentityPool({
+      env, log, hqOwner: 'fixture-owner', runStateRootDir: root, ...options,
+    }),
+  };
+}
+
+test('ITPPOOLCONFLICT-02: builder-only conflicts preserve legacy holders and warn once per key across pools', t => {
+  resetPoolConfigConflictWarnings();
+  t.after(resetPoolConfigConflictWarnings);
+  const builder = { token_accounts: { 'fixture-builder': {
+    family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
+  } }, identity_token_pools: { codex: ['fixture-builder'] } };
+  const log = quietLog();
+  for (const [key, value] of [
+    ['build_pack_default_worker_class', 'codex'],
+    ['codex_worker_account_order', 'personal-first'],
+  ]) {
+    for (const identities of [['fixture-login-b', 'fixture-login-a'], undefined]) {
+      const fixture = tokenPoolPlanFixture(t, { oauth: builder, identities, local: { roles: { [key]: value } } });
+      const baseline = tokenPoolPlanFixture(t, { identities }).pool(log).plan();
+      const pool = fixture.pool(log);
+      assert.deepEqual(pool.plan(), baseline, 'holders and generation match the no-pool plan');
+      assert.deepEqual(pool.plan(), baseline, 'repeated reads retain the legacy plan');
+      assert.deepEqual(fixture.pool(log).plan(), baseline, 'another pool shares process warning deduplication');
+    }
+  }
+  assert.deepEqual(log.lines, [
+    'warn [agy-identities] pool-config-conflict: roles.build_pack_default_worker_class; inspect migration report',
+    'warn [agy-identities] pool-config-conflict: roles.codex_worker_account_order; inspect migration report',
+  ]);
+});
+
+test('ITPPOOLCONFLICT-02: invalid unrelated pools preserve legacy holders without weakening ordinary cached reads', t => {
+  for (const oauth of [
+    { token_accounts: { 'fixture-builder': {} } },
+    { token_accounts: { 'fixture-builder': {} }, identity_token_pools: { codex: ['fixture-builder'] } },
+    { identity_token_pools: { codex: ['fixture-missing'] } },
+  ]) {
+    const identities = ['fixture-login-a'];
+    const fixture = tokenPoolPlanFixture(t, { oauth, identities });
+    const ordinaryRead = () => loadRoleConfig({ env: fixture.env });
+    assert.throws(ordinaryRead, /oauth\./);
+    const log = quietLog();
+    const baseline = tokenPoolPlanFixture(t, { identities }).pool(log).plan();
+    assert.deepEqual(fixture.pool(log).plan(), baseline);
+    assert.deepEqual(fixture.pool(log, { loadTokenPools: () => oauth }).plan(), baseline,
+      'raw declarations also select the legacy path before validation');
+    assert.throws(ordinaryRead, /oauth\./, 'reviewer reads cannot populate an ordinary cache slot');
+    assert.deepEqual(log.lines, []);
+  }
+});
+
+test('ITPPOOLCONFLICT-02: adding a reviewer declaration restores full validation on the next config read', t => {
+  const identities = ['fixture-login-a'];
+  const oauth = { token_accounts: { 'fixture-builder': {} }, identity_token_pools: { codex: ['fixture-builder'] } };
+  const fixture = tokenPoolPlanFixture(t, { identities, oauth });
+  const pool = fixture.pool(quietLog());
+  assert.equal(pool.plan().identities.length, 1);
+  oauth.identity_token_pools['gemini-reviewer'] = ['fixture-agy'];
+  oauth.token_accounts['fixture-agy'] = {
+    family: 'gemini', holder_user: identities[0], concurrency: 1, allowed_models: ['gemini-test'],
+  };
+  const write = () => writeFileSync(fixture.topPath, JSON.stringify({ version: 1, oauth,
+    reviewer: { gemini: { identities, runtime: 'antigravity', model: 'gemini-test' } } }));
+  write();
+  assert.equal(pool.plan().generation, 'invalid', 'a declared reviewer pool restores validation of all declarations');
+  delete oauth.token_accounts['fixture-builder'];
+  delete oauth.identity_token_pools.codex;
+  write();
+  assert.equal(pool.plan().identities[0].tokenAccountId, 'fixture-agy');
+});
+
+test('ITPPOOLCONFLICT-02: declared reviewer pools still validate accounts, membership and legacy holder order', t => {
+  resetPoolConfigConflictWarnings();
+  t.after(resetPoolConfigConflictWarnings);
+  const identities = ['fixture-login-a', 'fixture-login-b'];
+  const accounts = Object.fromEntries(identities.map((holder_user, index) => [`fixture-agy-${index}`, {
+    family: 'gemini', holder_user, concurrency: 1, allowed_models: ['gemini-test'],
+  }]));
+  const valid = { token_accounts: accounts, identity_token_pools: { 'gemini-reviewer': Object.keys(accounts) } };
+  const log = quietLog();
+  const plan = tokenPoolPlanFixture(t, { oauth: valid, identities }).pool(log).plan();
+  assert.deepEqual(plan.identities.map(holder => holder.tokenAccountId), Object.keys(accounts));
+  for (const members of [[], null, ['fixture-missing'], ['fixture-agy-0', 'fixture-agy-0'], ['fixture-agy-1', 'fixture-agy-0']]) {
+    const fixture = tokenPoolPlanFixture(t, { identities,
+      oauth: { ...valid, identity_token_pools: { 'gemini-reviewer': members } } });
+    const pool = fixture.pool(log);
+    assert.deepEqual(pool.plan().identities, []);
+    assert.equal(pool.plan().generation, 'invalid');
+  }
+  const conflictWarnings = log.lines.filter(line => line.includes('pool-config-conflict'));
+  assert.deepEqual(conflictWarnings, [
+    'warn [agy-identities] pool-config-conflict: reviewer.gemini.identities; inspect migration report',
+  ]);
+  assert.ok(log.lines.filter(line => line.includes('holder declaration unreadable'))
+    .every(line => !line.includes('conflicting legacy/new')));
+  const conflicted = tokenPoolPlanFixture(t, { identities, oauth: {
+    token_accounts: { ...accounts, 'fixture-builder': {
+      family: 'codex', broker_provider: 'codex', allowed_models: ['gpt-6'], concurrency: 1,
+    } },
+    identity_token_pools: { ...valid.identity_token_pools, codex: ['fixture-builder'] },
+  }, local: { roles: { build_pack_default_worker_class: 'codex' } } });
+  assert.deepEqual(conflicted.pool(log).plan().identities, []);
+  assert.ok(log.lines.every(line => !line.includes('conflicting legacy/new')));
+  const invalidAccount = tokenPoolPlanFixture(t, { identities, oauth: {
+    ...valid, token_accounts: { ...accounts, 'fixture-agy-0': { ...accounts['fixture-agy-0'], concurrency: 2 } },
+  } });
+  assert.deepEqual(invalidAccount.pool(log).plan().identities, []);
+});
+
+test('ITPPOOLCONFLICT-02: malformed pool mappings fail closed rather than claiming the reviewer is undeclared', t => {
+  for (const identity_token_pools of [null, [], 'fixture-invalid']) {
+    const log = quietLog();
+    const pool = tokenPoolPlanFixture(t, { oauth: { identity_token_pools }, identities: ['fixture-login-a'] }).pool(log);
+    assert.deepEqual(pool.plan().identities, []);
+    assert.equal(pool.plan().generation, 'invalid');
+  }
+});
 
 const poolRoots = [];
 after(() => { for (const root of poolRoots) rmSync(root, { recursive: true, force: true }); });

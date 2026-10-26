@@ -21,6 +21,7 @@
 // `~/agent-os/config.yaml` on the host.
 
 import { legacyPoolOverrideConflicts, validateLegacyPoolOverrides, warnPoolConfigConflicts } from './config-token-pool-migration.mjs';
+import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
@@ -30,6 +31,7 @@ import {
   loadConfig,
   loadConfigCached,
   loadConfigForIdentityTokenPool,
+  loadGeminiReviewerConfigCached,
   resetConfigCache,
 } from './config-loader.mjs';
 
@@ -530,6 +532,30 @@ export function resolveIdentityTokenPools({ identity, ...options } = {}) {
     token_accounts: cfg.get('oauth.token_accounts', {}),
     identity_token_pools: cfg.get('oauth.identity_token_pools', {}),
   }, { legacyGeminiHolders: legacy === null ? undefined : legacy });
+}
+
+// Only a declared reviewer pool may replace the legacy holder contract.
+// Still report account-policy conflicts elsewhere without holding this lane.
+export function resolveGeminiReviewerTokenPools({ log = console, ...options } = {}) {
+  const cfg = loadRoleConfig({ loaderImpl: loadGeminiReviewerConfigCached,
+    ...options, contextKey: 'oauth.identity_token_pools' });
+  const pools = cfg.get('oauth.identity_token_pools', {});
+  const declared = Object.hasOwn(pools, 'gemini-reviewer');
+  try {
+    validateLegacyPoolOverrides(cfg);
+  } catch (error) {
+    if (!warnPoolConfigConflict(error, log) || declared) throw error;
+  }
+  if (!declared) return readIdentityTokenPools({});
+  const legacy = cfg.get('reviewer.gemini.identities', null);
+  if (legacy !== null && !Array.isArray(legacy)) {
+    throw new AgentOSConfigError('reviewer.gemini.identities: expected array or null', {
+      key: 'reviewer.gemini.identities', expected: 'array or null',
+    });
+  }
+  return readIdentityTokenPools({
+    token_accounts: cfg.get('oauth.token_accounts', {}), identity_token_pools: pools,
+  }, { legacyGeminiHolders: legacy === null ? undefined : legacy.map(String) });
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker

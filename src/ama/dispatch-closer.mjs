@@ -4334,10 +4334,23 @@ export async function maybeDispatchAmaCloser(args) {
     const terminalPr = isTerminalCloserPullRequest(args.prMetadata);
     const targetHead = args.prMetadata?.headSha || args.reviewState?.headSha
       || dispatchContext?.headSha || dispatchContext?.reviewedSha || args.headSha;
+    if (args.cfg?.enabled && (!Number.isInteger(Number(targetPrNumber)) || Number(targetPrNumber) <= 0)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'invalid-pr-number' });
+    }
     if (args.cfg?.enabled && dispatchContext?.rootDir && targetRepo && targetPrNumber) {
+      let currentLease = null;
+      try {
+        currentLease = targetHead && readAmaCloserLease(dispatchContext.rootDir,
+          { repo: targetRepo, prNumber: targetPrNumber, headSha: targetHead });
+      } catch (error) {
+        args.logger?.warn?.(`[watcher] closer lease unreadable for ${targetRepo}#${targetPrNumber}: ${error?.message || error}`);
+        if (!terminalPr) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          inFlight: true, reason: 'existing-dispatch-unknown', recovery: 'lease-unreadable' });
+      }
       for (const intent of readAmaCloserDispatchRecordsForPR(dispatchContext.rootDir,
         { repo: targetRepo, prNumber: targetPrNumber }).filter(record => isPreReceiptIntent(record)
-          && (terminalPr || !targetHead || record.headSha === targetHead))) {
+          && (terminalPr || !targetHead || record.headSha === targetHead
+            || record.headSha === currentLease?.rekeyedFromHeadSha))) {
         const recovery = await reconcilePreReceiptIntent(dispatchContext.rootDir, intent, {
           ...dispatchContext, readIntentReceiptImpl: args.readIntentReceiptImpl,
           processExecFileSyncImpl: args.processExecFileSyncImpl,
@@ -4346,6 +4359,7 @@ export async function maybeDispatchAmaCloser(args) {
           signal: args.signal, now: dispatchContext.dispatchedAt, logger: args.logger,
           deliverAlertImpl: args.deliverAlertImpl, prMetadata: args.prMetadata,
           readPullRequestStateImpl: args.readPullRequestStateImpl, execFileImpl: args.execFileImpl,
+          ...(intent.headSha === currentLease?.rekeyedFromHeadSha ? { leaseHeadSha: currentLease.headSha } : {}),
         });
         if (!terminalPr && recovery.status === 'pr-terminal') return noAmaDispatch({
           dispatched: false, reason: 'pr-not-mergeable',

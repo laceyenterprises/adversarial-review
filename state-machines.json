@@ -317,10 +317,11 @@
         "src/ama/pre-receipt-intent.mjs",
         "src/posted-review-row.mjs",
         "src/ama-closure-orchestration.mjs",
-        "src/ama/dispatch-submitter.mjs"
+        "src/ama/dispatch-submitter.mjs",
+        "src/recovery-reaper.mjs"
       ],
       "states": [
-        {"name": "dispatching","terminal": false,"exitOwner": "closer dispatcher / operator inspection","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."},
+        {"name": "dispatching","terminal": false,"exitOwner": "closure orchestration / recovery reaper / closer dispatcher / operator inspection","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "CLOSERINTENTRECON-01 invokes the existing fenced proof from closure orchestration and the recovery reaper before waiting on a dead or expired pending owner, including the intent named by rekeyedFromHeadSha. LAC-2081 bounds diagnostics by the original dispatch timeout (30 minutes without it). LEGACYINTENT-01 supplies an audited operator exit on empty successful ticket/time ledger evidence. CLOSERGATE-01 scopes unresolved ownership to its PR/head with no fleet launch capacity and one durable inspection page; CLOSERINTENT-01 supplies an exit on successful empty-key proof after the dispatch deadline or audited empty closer-ticket proof; unreadable absence evidence remains held; authoritative closed/merged PR metadata retires the intent without claiming no submission."},
         {"name": "dispatched","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
         {"name": "launch-terminal","terminal": true},
         {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher or watcher lane","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
@@ -334,7 +335,7 @@
       ],
       "transitions": [
         {"id": "hammer-dispatch.29","from": "dispatching","to": "dispatched","trigger": "recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once","codeSource": "src/ama/pre-receipt-intent.mjs"},
-        {"id": "hammer-dispatch.30","from": "dispatching","to": "no-dispatch","trigger": "fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once","codeSource": "src/ama/pre-receipt-intent.mjs"},
+        {"id": "hammer-dispatch.30","from": "dispatching","to": "no-dispatch","trigger": "closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once","codeSource": "src/ama/pre-receipt-intent.mjs"},
         {"id": "hammer-dispatch.32","from": "dispatching","to": "completed","trigger": "authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging","codeSource": "src/ama/pre-receipt-intent.mjs"},
         {"id": "hammer-dispatch.31","from": "dispatching","to": "dispatching","trigger": "unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes","codeSource": "src/ama/pre-receipt-intent.mjs"},
         {"id": "hammer-dispatch.24","from": "dispatching","to": "deferred-by-drain","trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
@@ -373,7 +374,7 @@
     "src/ama/dispatch-submitter.mjs": "c186abb1b2071524a8afd722bf10c637d1e54586f2f186b47f57be3baad9dd60",
     "src/ama/closure-next-action.mjs": "da3205b6c7a40a45a790714eaec6dffc893b3c8e17a6c61410951ebb8fd24f87",
     "src/pr-next-action.mjs": "e392a7dbaff95f97131cd62f9f4f9edf4f7e1697b61261967302ca8425c68527",
-    "src/ama/pre-receipt-intent.mjs": "7274ce1b47ccf5679c67c88e7d61f7a3dfbdb0b816b6e339a42330d80708f6ef",
+    "src/ama/pre-receipt-intent.mjs": "f78c12d791b287307441f121a782ba00e5b52e1e6ef7a1522a51443de8c5f14c",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
     "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",

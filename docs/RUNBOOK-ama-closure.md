@@ -220,6 +220,28 @@ bounded watcher, submitter and key-presence evidence, without command lines.
 empty-key query. A crash after lease deferral replays only after re-proving the
 same evidence against that unchanged deferred lease. No config key, CI gate or
 live-state repair is added.
+CLOSERINTENTRECON-01 makes closure orchestration and the recovery reaper invoke
+that same fenced reconciliation before deferring to an unresolved intent, at
+most once per named intent per pass and only for a dead/expired lease holder or
+an elapsed intent deadline. The intent is located at
+`lease.rekeyedFromHeadSha || lease.headSha`; per-PR admission also includes that
+pre-rebase head. Reconciliation validates the current rekeyed lease and compares
+its full snapshot across yielded reads before mutating it under the existing
+lease lock. Proven absence defers the current lease on that pass; a canonical
+receipt promotes it; unreadable or ambiguous evidence preserves the wait.
+Live submitters within the deadline retain ownership. Query budgets, absence
+rules, operator settlement and retry charging are unchanged.
+
+Admission treats an unreadable current-head lease as held (`lease-unreadable`)
+and logs a warning; confirmed terminal PRs still stop dispatch. A failed intent
+reconciliation in the recovery reaper warns and leaves that lease excluded from
+age-only release while processing other leases. Successful absence recovery
+returns the persisted terminal/deferred lease snapshot, including its updated
+timestamp, rather than the pending discovery snapshot. Closure rekeys a live
+older-head lease before reading the current-head handoff lease, then refreshes
+the held lease by its own identity after reconciliation. These guards
+change no durable states, transitions or existing smoke promises.
+
 Settlement defers a matching pending lease and rolls back the intent retry
 increment once; retry ledgers and merge eligibility remain authoritative.
 

@@ -1,10 +1,11 @@
+import { seedCloserIntent, intentStarted, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { matrixPair } from './helpers/next-action-matrix.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 import { bindClosureNextAction, readClosureNextAction, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
-import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_UNKNOWN_LAUNCH_RECLAIM_AGE_MS, acquireAmaCloserLease, isHeldAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1572,3 +1573,68 @@ test(`background settlement carries the executor generation through result copie
   assert.equal(executorShared.snapshot.observations.controls.value.stop.fingerprint, 'stop-07');
 });
 }
+
+for (const rekeyed of [false, true]) {
+  for (const scenario of ['absent', 'receipt', 'unreadable', 'ambiguous', 'live', 'unknown-process', 'early-absent', 'live-child']) {
+    test(`CLOSERINTENTRECON-01 orchestration ${scenario}, rekeyed=${rekeyed}`, async t => {
+      let dispatches = 0;
+      const args = closureArgs({
+        now: () => Date.parse(['live', 'unknown-process', 'early-absent', 'live-child'].includes(scenario) ? intentEarly : intentExpired),
+        resolveAmaHammerDispatchModeImpl: () => 'inline',
+        probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: true }),
+        observeClosureWaitImpl: async () => ({ retryAfterMs: 1000, exhausted: false }),
+        fetchMergedProtectiveDependentsImpl: async () => [],
+        fetchProtectivePredecessorStateImpl: async () => null,
+        maybeDispatchAmaCloserImpl: async () => { dispatches++; return { dispatched: true }; },
+      });
+      t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+      const identity = { repo: args.repoPath, prNumber: args.prNumber,
+        headSha: rekeyed ? 'b'.repeat(40) : HEAD };
+      const f = seedCloserIntent(args.rootDir, identity, { scenario, rekeyedHead: rekeyed ? HEAD : null });
+      args.preReceiptIntentOptions = f.options;
+      args.closerLeaseLivenessOptions = { isProcessAlive: () => scenario === 'live' ? true : false };
+      const result = await maybeDispatchAmaClosureFor(args);
+      if (['absent', 'early-absent'].includes(scenario)) {
+        assert.equal(f.record().state, 'no-dispatch');
+        assert.equal(f.record().retryCount, 1);
+        assert.equal(f.lease().status, 'terminal');
+        assert.equal(f.lease().terminalOutcome, 'deferred');
+        assert.equal(dispatches, 1, 'ordinary admission resumes in the same pass');
+      } else {
+        assert.equal(result.recoveryWait, true);
+        assert.equal(dispatches, 0);
+        assert.equal(f.lease().status, scenario === 'receipt' ? 'dispatched' : 'pending');
+        assert.equal(f.record().state, scenario === 'receipt' ? 'dispatched' : 'dispatching');
+        assert.equal(f.record().retryCount, 2);
+        if (scenario === 'receipt') assert.equal(f.lease().lrqId, f.receipt.launch_request_id);
+      }
+      assert.equal(f.reads(), scenario === 'live' ? 0 : 1, 'one receipt lookup per invocation');
+      assert.equal(f.record().lastAttemptedAt, intentStarted);
+    });
+  }
+}
+
+test('CLOSERINTENTRECON-01 orchestration carries an older live pending lease to the current head before reconciliation', async t => {
+  const args = closureArgs({
+    now: () => Date.parse(intentEarly),
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    probeClosureOwnershipImpl: async () => ({ owned: true, uncertain: true }),
+    observeClosureWaitImpl: async () => ({ retryAfterMs: 1000, exhausted: false }),
+    maybeDispatchAmaCloserImpl: async () => assert.fail('a live submitter must retain ownership'),
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const oldHead = 'b'.repeat(40);
+  const f = seedCloserIntent(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber, headSha: oldHead },
+    { scenario: 'live' });
+  args.preReceiptIntentOptions = f.options;
+  args.closerLeaseLivenessOptions = { isProcessAlive: () => true, captureProcessImpl: f.options.captureProcessImpl };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.recoveryWait, true);
+  assert.equal(result.dispatched, false);
+  assert.equal(f.lease(), null, 'the old head is rekeyed before handoffLease is read');
+  const current = readAmaCloserLease(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+  assert.equal(current.status, 'pending');
+  assert.equal(current.rekeyedFromHeadSha, oldHead);
+  assert.equal(f.record().state, 'dispatching');
+  assert.equal(f.reads(), 0, 'no receipt query for a live submitter within its deadline');
+});

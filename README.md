@@ -1643,6 +1643,28 @@ alone cannot establish an unreviewed CI-repair head. LAC-2081 supersedes wake-re
 same-PR/head exclusion until receipt or successful absence proof. CLOSERGATE-01 excludes all pre-receipt
 intents from global launch admission and capacity; keyless legacy records retain
 stale/orphan active-record escapes, and terminal PR metadata bypasses holds.
+CLOSERINTENTRECON-01 makes closure orchestration and the recovery reaper invoke
+that same fenced reconciliation before deferring to an unresolved intent, at
+most once per named intent per pass and only for a dead/expired lease holder or
+an elapsed intent deadline. The intent is located at
+`lease.rekeyedFromHeadSha || lease.headSha`; per-PR admission also includes that
+pre-rebase head. Reconciliation validates the current rekeyed lease and compares
+its full snapshot across yielded reads before mutating it under the existing
+lease lock. Proven absence defers the current lease on that pass; a canonical
+receipt promotes it; unreadable or ambiguous evidence preserves the wait.
+Live submitters within the deadline retain ownership. Query budgets, absence
+rules, operator settlement and retry charging are unchanged.
+
+Admission treats an unreadable current-head lease as held (`lease-unreadable`)
+and logs a warning; confirmed terminal PRs still stop dispatch. A failed intent
+reconciliation in the recovery reaper warns and leaves that lease excluded from
+age-only release while processing other leases. Successful absence recovery
+returns the persisted terminal/deferred lease snapshot, including its updated
+timestamp, rather than the pending discovery snapshot. Closure rekeys a live
+older-head lease before reading the current-head handoff lease, then refreshes
+the held lease by its own identity after reconciliation. These guards
+change no durable states, transitions or existing smoke promises.
+
 Native per-PR snapshots and bounded live directory/CLI PR reads retire confirmed
 closed/merged intents as `completed` (`pr-terminal`) without changing leases or
 retry budgets. Terminal state discovered during reconciliation stops downstream
@@ -2236,7 +2258,7 @@ stateDiagram-v2
     state "no-dispatch" as s9
     state "completed" as s10
     s0 --> s1: hammer-dispatch.29 recover one canonical receipt by exact attempt key, AMA ticket and repository even with unreadable PR state; preserve retry charge once
-    s0 --> s9: hammer-dispatch.30 fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
+    s0 --> s9: hammer-dispatch.30 closure orchestration, recovery reaper and per-PR admission reconcile the named intent including a rekeyed lease; fenced prepared attempt with dead matching owner and absent key, submitting attempt with dead watcher and submitter plus absent process key then empty ledger key, expired successful empty-key query, or successful empty ticket/time query (legacy automatic or keyed audited) proves no launch; defer lease and refund intent retry once
     s0 --> s10: hammer-dispatch.32 authoritative closed/merged PR state retires intent as pr-terminal under fence; preserve lease and budgets; unreadable PR state permits exact-key receipt recovery but otherwise holds without paging
     s0 --> s0: hammer-dispatch.31 unprovable launch absence: fixed inspection deadline pages once; retain only own PR/head ownership with no fleet launch admission or capacity; legacy active listings retain stale/orphan escapes
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease

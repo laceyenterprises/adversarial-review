@@ -1,3 +1,4 @@
+import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import { abandonAmaCloserLease } from '../src/ama/abandoned-closer-lease.mjs';
 import assert from 'node:assert/strict';
@@ -448,4 +449,16 @@ test('CLOSERLEASEDEAD-01 a replacement launch installed during the identity prob
   assert.equal(abandoned, null);
   assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_replacement');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
+
+for (const rekeyed of [false, true]) test(`CLOSERINTENTRECON-01 age-only abandonment defers to intent proof, rekeyed=${rekeyed}`, t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const f = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) },
+    { rekeyedHead: rekeyed ? 'b'.repeat(40) : null });
+  const before = f.lease();
+  assert.equal(abandonAmaCloserLease(rootDir, before, { now: intentExpired, isProcessAlive: () => false,
+    logger: { warn() {} } }), null);
+  assert.deepEqual(f.lease(), before);
+  assert.equal(f.record().state, 'dispatching');
 });

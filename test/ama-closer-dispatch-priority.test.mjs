@@ -1,3 +1,4 @@
+import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +18,7 @@ import {
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
-import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, amaCloserLeaseFilePath, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { readAmaAuditEntry, appendAmaAuditAttempt } from '../src/ama/audit.mjs';
@@ -3030,5 +3031,48 @@ for (const finalHammer of [false, true]) {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     assert.equal(ledger.lifetimeAttemptCount, 2);
     assert.equal(ledger.attemptCount, finalHammer ? 2 : 1);
+  });
+}
+
+test('CLOSERINTENTRECON-01 admission fences the pre-rebase intent named by the current lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'intent-admission-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const f = seedCloserIntent(rootDir, { repo: 'fixture/project', prNumber: 17, headSha: 'a'.repeat(40) }, { rekeyedHead: 'b'.repeat(40), scenario: 'unreadable' });
+  const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+    dispatchContext: { rootDir, ...f.currentIdentity, dispatchedAt: intentExpired },
+    prMetadata: { isOpen: true, headSha: f.currentIdentity.headSha }, ...f.options,
+    execFileImpl: () => assert.fail('unresolved old-head intent must stop downstream dispatch'),
+    logger: { warn() {} } });
+  assert.equal(result.reason, 'existing-dispatch-unknown');
+  assert.equal(f.reads(), 1);
+  assert.equal(f.record().state, 'dispatching');
+  assert.equal(f.lease().status, 'pending');
+});
+
+for (const terminalPr of [false, true]) {
+  test(`CLOSERINTENTRECON-01 admission handles an unreadable current lease, terminal=${terminalPr}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'intent-unreadable-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'fixture/project', prNumber: 17, headSha: HEAD };
+    const f = seedCloserIntent(rootDir, identity);
+    const path = amaCloserLeaseFilePath(rootDir, identity);
+    writeFileSync(path, '{broken-json');
+    const warnings = [];
+    const result = await maybeDispatchAmaCloser({ cfg: { enabled: true },
+      dispatchContext: { rootDir, ...identity, dispatchedAt: intentExpired },
+      prMetadata: { isOpen: !terminalPr, headSha: HEAD }, ...f.options,
+      execFileImpl: () => assert.fail('unreadable ownership must not launch a worker'),
+      logger: { warn: line => warnings.push(line) } });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, terminalPr ? 'pr-not-mergeable' : 'existing-dispatch-unknown');
+    if (!terminalPr) {
+      assert.equal(result.recovery, 'lease-unreadable');
+      assert.equal(result.inFlight, true);
+      assert.equal(result.skipMergeAgent, true);
+    }
+    assert.equal(f.reads(), 0);
+    assert.equal(f.record().state, 'dispatching');
+    assert.equal(readFileSync(path, 'utf8'), '{broken-json');
+    assert.ok(warnings.some(line => line.includes('closer lease unreadable') && line.includes('fixture/project#17')));
   });
 }

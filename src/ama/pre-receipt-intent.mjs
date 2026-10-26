@@ -7,8 +7,8 @@ import { dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync, readLaunchRequestsForTicketSinceAsync } from '../session-ledger-read-adapter.mjs';
-import { amaCloserDispatchFilePath } from './dispatch-record-read.mjs';
-import { readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from './closer-lease.mjs';
+import { amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+import { abandonedAmaCloserLeaseOutcome, readAmaCloserLease, isAmaCloserPidAlive, updateAmaCloserLease, deleteAmaCloserLeaseIfCurrent } from './closer-lease.mjs';
 import { recordHammerRetryDispatch } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
@@ -105,6 +105,32 @@ function queryEvidence(query, probe) {
     launchRequestIds: rows?.map(row => row?.launch_request_id).filter(id => typeof id === 'string') || [] };
 }
 
+function intentDeadline(record, now) {
+  const prior = record.preReceiptReconciliation;
+  const firstObservedAt = Number.isFinite(Date.parse(prior?.firstObservedAt)) ? prior.firstObservedAt : now;
+  const started = Date.parse(record.lastAttemptedAt);
+  const timeout = Number(record.dispatchTimeoutMs);
+  const deadlineAt = (Number.isFinite(Date.parse(prior?.deadlineAt)) && prior.deadlineAt) || new Date(Number.isFinite(started) && timeout > 0
+    ? started + Math.min(timeout, 2 ** 31 - 1) : Date.parse(firstObservedAt) + 30 * 60_000).toISOString();
+  return { firstObservedAt, deadlineAt, deadlinePassed: Date.parse(now) >= Date.parse(deadlineAt) };
+}
+
+// Lease owners must invoke the proof owner before deferring to it. Read only
+// the named intent; callers bound this to one attempt per PR/head per pass.
+export async function reconcileAmaCloserLeaseIntent(rootDir, lease, options = {}) {
+  if (!lease || !['pending', 'dispatched'].includes(lease.status)) return { status: 'unchanged' };
+  const identity = { ...lease, headSha: lease.rekeyedFromHeadSha || lease.headSha };
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  if (!isPreReceiptIntent(record)) return { status: 'unchanged' };
+  const now = new Date(options.now ?? Date.now()).toISOString();
+  if (!intentDeadline(record, now).deadlinePassed && !abandonedAmaCloserLeaseOutcome(lease, { ...options,
+    isProcessAlive: options.isProcessAlive || (pid => isAmaCloserPidAlive(pid, options.processKillImpl)),
+  })) {
+    return { status: 'held', reason: 'submitter-within-deadline' };
+  }
+  return reconcilePreReceiptIntent(rootDir, identity, { ...options, now, leaseHeadSha: lease.headSha });
+}
+
 export async function reconcilePreReceiptIntent(rootDir, identity, options = {}) {
   const release = tryAcquireCloserIntentLock(rootDir, identity);
   if (!release) return { status: 'held', reason: 'intent-lock-held' };
@@ -116,10 +142,14 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     if (record.repo !== identity.repo || Number(record.prNumber) !== Number(identity.prNumber)
       || record.headSha !== identity.headSha) return { status: 'held', reason: 'intent-identity-mismatch' };
     const legacy = !record.dispatchIdempotencyKey;
-    const leaseIdentity = { ...record, headSha: record.targetRemediationSha || record.headSha };
+    const leaseIdentity = { ...record, headSha: options.leaseHeadSha || record.targetRemediationSha || record.headSha };
     let lease;
     try { lease = readAmaCloserLease(rootDir, leaseIdentity); }
     catch { return { status: 'held', reason: 'lease-unreadable' }; }
+    if (options.leaseHeadSha && options.leaseHeadSha !== (record.targetRemediationSha || record.headSha)
+      && (!lease || lease.rekeyedFromHeadSha !== record.headSha)) {
+      return { status: 'held', reason: 'lease-identity-mismatch' };
+    }
     const now = options.now || new Date().toISOString();
     let pr;
     try {
@@ -153,12 +183,8 @@ export async function reconcilePreReceiptIntent(rootDir, identity, options = {})
     const foreignLease = lease && !matchingPendingLease && !(matchingLease && localDead)
       && !settledNoLaunch && !promotedLease;
     const prior = record.preReceiptReconciliation;
-    const firstObservedAt = Number.isFinite(Date.parse(prior?.firstObservedAt)) ? prior.firstObservedAt : now;
+    const { firstObservedAt, deadlineAt, deadlinePassed } = intentDeadline(record, now);
     const started = Date.parse(record.lastAttemptedAt);
-    const timeout = Number(record.dispatchTimeoutMs);
-    const deadlineAt = (Number.isFinite(Date.parse(prior?.deadlineAt)) && prior.deadlineAt) || new Date(Number.isFinite(started) && timeout > 0
-      ? started + Math.min(timeout, 2 ** 31 - 1) : Date.parse(firstObservedAt) + 30 * 60_000).toISOString();
-    const deadlinePassed = Date.parse(now) >= Date.parse(deadlineAt);
     // Re-prove absence after a crash between lease deferral and intent write.
     const canProbeSubmitter = matchingPendingLease || (settledNoLaunch
       && (!lease.holderHost || lease.holderHost === hostname()));

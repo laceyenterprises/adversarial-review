@@ -32,3 +32,11 @@ function fixture(selector, args) {
 }
 mock.method(dispatchReadTransport,'lookup',async(selector,args)=>fixture(selector,args));
 mock.method(dispatchReadTransport,'lookupSync',(selector,args)=>fixture(selector,args));
+
+// Policy-only tests may supply authoritative synthetic absence through the
+// owner's explicit read seam. SDK transport tests must use the real consumer,
+// which refuses grant-scoped empty replies as absence evidence.
+export async function readPolicyDispatchRows(selector, args) {
+  const reply = await fixture(selector, args);
+  return { ok: true, rows: reply.items, target: { backend: 'synthetic-policy', source: 'fixture' } };
+}

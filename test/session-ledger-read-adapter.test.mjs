@@ -475,7 +475,7 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       assert.match(sql, /LEFT JOIN LATERAL/);
       assert.match(sql, /wp_latest\.pid/);
       assert.match(sql, /ORDER BY COALESCE\(wr\.updated_at::text, wr\.ended_at::text, wr\.started_at::text, ''\) DESC/);
-      assert.equal(options.timeout, 30_000);
+      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
       assert.equal(options.killSignal, 'SIGKILL');
       return {
         status: 0,
@@ -828,7 +828,7 @@ test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postg
       assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
       assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
       assert.match(sql, /'token_usage_guardrail', token_usage_guardrail/);
-      assert.equal(options.timeout, 30_000);
+      assert.ok(options.timeout >= 30_000 && options.timeout <= 600_000, 'load-aware timeout retains the nominal floor and configured multiplier cap');
       return {
         status: 0,
         stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'

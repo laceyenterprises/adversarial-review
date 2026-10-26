@@ -3268,10 +3268,11 @@ Dispatch lookup activation defaults off (`ADVERSARIAL_DISPATCH_READS_ENABLED=1`
 is required in each deployed reader environment). The runtime owner must verify
 the merged SDK release record, deploy the producer and complete grants, and run
 `npm ci` in this submodule before enabling it through normal service deployment.
-Removing the flag safely pauses reads and holds ownership. SDK 0.8.0 cannot prove
-global absence under partial grants; the candidate's merged release revision is
-still unverified. See the reader contract for these remaining producer obligations
-and cancellation limits. Existing lifecycle states, transitions and smoke promises
+Removing the flag safely pauses reads and holds ownership. The SDK bytes are
+pinned to merged producer revision `387fb06d5d8835e320f49388a2ebdf67f2249945`.
+SDK 0.8.0 cannot attest global absence: empty lookups and missing rows retain
+ownership instead of settling or reclaiming it. See the reader contract for the
+remaining producer completeness obligation and cancellation limits. Existing lifecycle states, transitions and smoke promises
 are unchanged. Focused offline regressions run with:
 
 ```bash

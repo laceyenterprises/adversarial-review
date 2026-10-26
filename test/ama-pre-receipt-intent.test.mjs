@@ -1,4 +1,4 @@
-import './helpers/dispatch-read-fixture.mjs';
+import { readPolicyDispatchRows } from './helpers/dispatch-read-fixture.mjs';
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,6 +42,10 @@ function fixture(t, patch = {}, lease = true) {
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };
+  // These owner-policy fixtures supply authoritative synthetic absence through
+  // explicit owner seams; grant-scoped SDK behavior is tested separately.
+  options.readIntentReceiptImpl = args => readPolicyDispatchRows({ idempotency_key: args.idempotencyKey }, { ...options, ...args });
+  options.readLegacyIntentLaunchesImpl = args => readPolicyDispatchRows({ ticket_ref: args.ticketRef, requested_at_or_after: args.requestedAtOrAfter }, { ...options, ...args });
   // Older fixtures do not claim process-scan evidence. Pin unknown explicitly.
   options.processExecFileSyncImpl = () => { throw Error('synthetic process scan unavailable'); };
   return { rootDir, options, record,
@@ -332,7 +336,7 @@ for (const lease of [true, false]) test(`legacy empty ticket/time query settles 
   assert.deepEqual(f.read().preReceiptReconciliation.query, {
     kind: 'launch-requests-for-ticket-since', ticketRef: 'AMA-PR-8',
     requestedAtOrAfter: started, limit: 1, ok: true, rowCount: 0,
-    backend: 'app-contract', source: 'app-sdk', reason: null, detail: null,
+    backend: 'synthetic-policy', source: 'fixture', reason: null, detail: null,
     timeoutMs: f.read().preReceiptReconciliation.query.timeoutMs,
     attempts: [{ ok: true, reason: null, detail: null }], launchRequestIds: [],
   });
@@ -493,8 +497,9 @@ test('legacy intent passes the whole ticket window through the SDK', async () =>
       assert.deepEqual(selector, {ticket_ref: "AMA-PR-8'fixture", requested_at_or_after: new Date(started).toISOString()});
       return {schema_version:1,status:'not_found',complete:true,roots:[],items:[],retry_edges:[]};
     } } });
-  assert.equal(r.ok, true);
-  assert.deepEqual(r.rows, []);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'dispatch-read-unavailable');
+  assert.equal(r.detail, 'dispatch absence scope unproven');
 });
 
 
@@ -1102,15 +1107,34 @@ test('SDK transient classification reaches receipt-owner retries with safe persi
   let calls = 0;
   const delays = [];
   const result = await f.reconcile({
+    readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
     dispatchSession: { dispatchLookup: async () => {
       if (++calls === 1) throw Object.assign(new Error('secret endpoint token'), { code: 'ECONNRESET' });
       return { schema_version: 1, status: 'not_found', complete: true, roots: [], items: [], retry_edges: [] };
     } },
     delayAsyncImpl: async ms => delays.push(ms),
   });
-  assert.equal(result.status, 'no-launch');
+  assert.equal(result.status, 'unknown');
+  assert.equal(f.read().state, 'dispatching');
+  assert.equal(f.read().retryCount, 2);
+  assert.equal(readAmaCloserLease(f.rootDir, identity).status, 'pending');
   assert.equal(calls, 2);
   assert.deepEqual(delays, [100]);
   assert.equal(result.evidence.attempts[0].detail, 'transient dispatch lookup failure');
   assert.doesNotMatch(JSON.stringify(f.read().preReceiptReconciliation), /secret endpoint token/);
+});
+
+test('grant-scoped SDK emptiness cannot settle keyed or legacy ownership', async t => {
+  for (const legacy of [false, true]) {
+    const f = fixture(t, legacy ? { dispatchIdempotencyKey: null } : {});
+    const before = readAmaCloserLease(f.rootDir, identity);
+    const result = await f.reconcile({
+      readIntentReceiptImpl: readLaunchRequestByIdempotencyKeyAsync,
+      readLegacyIntentLaunchesImpl: readLaunchRequestsForTicketSinceAsync,
+    });
+    assert.equal(result.status, 'unknown');
+    assert.equal(f.read().state, 'dispatching');
+    assert.equal(f.read().retryCount, 2);
+    assert.deepEqual(readAmaCloserLease(f.rootDir, identity), before);
+  }
 });

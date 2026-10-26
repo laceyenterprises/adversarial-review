@@ -4273,7 +4273,11 @@ ledger readers retain their separate backend-resolution rules.
 Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1` after the verified
 merged SDK release, producer/grants deployment and submodule `npm ci` described
 in the reader contract. Removing that flag pauses launch observations safely
-and retains ownership holds. A caller abort stops waiting; SDK 0.8.0 still owns
+and retains ownership holds. SDK 0.8.0 empty lookups and missing snapshot rows
+are unavailable (`dispatch absence scope unproven`) and cannot settle intents
+or reclaim terminal leases. The pinned merged release is recorded in
+`vendor/README.md`; absence needs a coordinated producer completeness contract.
+A caller abort stops waiting; SDK 0.8.0 still owns
 outstanding HTTP work until its own transport completes.
 
 During cancellation the shell defers its trap release. Only after confirmed

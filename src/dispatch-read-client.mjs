@@ -51,13 +51,16 @@ export function readDispatchLaunchesSync(selector, args = {}) {
 function checked(result) {
   const evidence = dispatchReadTransport.sdk().readDispatchLookupResult(result);
   if (!evidence.available) return {ok:false,reason:evidence.reason};
+  // A grant-filtered reply cannot certify absence outside that grant. Retain
+  // ownership until the producer can attest complete authorization scope.
+  if (!evidence.found) return unprovenAbsence();
   return { ok: true, rows: result.items, roots: result.roots, retryEdges: result.retry_edges,
     target: { backend: 'app-contract', source: 'app-sdk' } };
 }
 export function launchProbe(result, launchRequestId, includeRetryChain) {
   if (!result.ok) return result;
   const row = result.rows.find(row => row.launch_request_id === launchRequestId);
-  if (!row) return { ok: false, reason: 'missing-launch-request-row', launchRequestId };
+  if (!row) return { ...unprovenAbsence(), launchRequestId };
   return { ok: true, row, target: result.target, ...(includeRetryChain ? { retryChain: dispatchReadTransport.sdk().dispatchRetryDescendants(result.rows, result.retryEdges, launchRequestId) } : {}) };
 }
 
@@ -90,4 +93,8 @@ function assertReadsEnabled(env) {
   if (env.ADVERSARIAL_DISPATCH_READS_ENABLED !== '1') {
     throw Object.assign(new Error('dispatch lookup disabled'), { code: 'DISPATCH_READ_DISABLED' });
   }
+}
+
+function unprovenAbsence() {
+  return { ok: false, reason: 'dispatch-read-unavailable', detail: 'dispatch absence scope unproven' };
 }

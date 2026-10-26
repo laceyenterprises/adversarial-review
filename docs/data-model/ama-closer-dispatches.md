@@ -177,20 +177,14 @@ does not adopt unkeyed rows. Earlier launches, including a retained predecessor
 LRQ, do not prevent settlement. An invalid attempt timestamp, failed/unreadable
 query, or malformed/null launch timestamp cannot prove absence.
 
-A successful empty query settles `state: no-dispatch`,
-`reason: legacy-no-launch-proven`, clears launch IDs, refunds the intent retry
-increment once, and terminalizes a matching pending lease as `deferred`.
-Reconciliation resumes after a crash between lease and intent persistence.
-Missing leases are preserved; replaced owners or leases with launch receipts remain
-held. A matching pending legacy lease can settle even if its original watcher
-PID is still alive: the app-scoped ticket query supplies the evidence.
-This is a grant-scoped observation, not an unfiltered canonical ledger read.
-Provision every relevant project and owner-qualified repository before enabling
-`ADVERSARIAL_DISPATCH_READS_ENABLED=1`; SDK 0.8.0 cannot distinguish a hidden row
-from global absence. Unidentified-row and cross-scope absence guarantees require
-a coordinated producer contract change; do not use partial grants for settlement.
-The next ordinary closer admission can proceed under the existing eligibility
-and retry rules. Keyed attempts also permit successful empty-key proof after their dispatch deadline.
+SDK 0.8.0 filters observations by grants and cannot attest global absence.
+Empty ticket or idempotency lookups therefore return unavailable with
+`dispatch absence scope unproven`; they preserve the pending lease, dispatch
+intent and charged retry. A missing launch in a positive snapshot also retains
+ownership. Positive receipts remain eligible for ordinary recovery. Complete
+grants remain a deployment prerequisite, but do not enable absence settlement.
+A coordinated producer completeness contract is required before empty reads can
+prove no launch; there is no canonical-ledger fallback.
 
 `preReceiptReconciliation.query` records the bounded query kind, ticket,
 inclusive attempt-time lower bound, limit (one row is sufficient to refuse),

@@ -391,14 +391,18 @@ fallback is restored. Source publication does not authorize service activation.
 Dispatch-only SDK exports load at read time, so an older installed SDK produces
 unavailable evidence rather than preventing daemon module linking.
 
-The current candidate lacks a verified merged release revision; see
-`vendor/README.md`. SDK 0.8.0 `not_found` is scoped to the authenticated grants,
-not an independent global absence proof. Its envelope has no authorization
-completeness field. A coordinated producer change must distinguish unauthorized
-or incomplete scope before partial grants can safely support absence settlement.
-The consumer retains the existing SDK absence mapping in this round; full grant
-coverage remains an operator prerequisite. `--ledger-target` is now rejected by
-the settlement CLI so it cannot misrepresent which source was queried.
+The SDK release is pinned to merged producer revision
+`387fb06d5d8835e320f49388a2ebdf67f2249945`; see `vendor/README.md`.
+SDK 0.8.0 `not_found` is scoped to authenticated grants, and its envelope
+has no authorization completeness field. The consumer therefore maps empty
+lookups and missing rows within positive snapshots to `dispatch-read-unavailable`
+with `dispatch absence scope unproven`. They never prove absence for terminal
+lease reclamation, missing-launch capacity settlement or pre-receipt settlement.
+Positive authorized launch/retry observations remain available. Even a genuinely
+missing launch retains its hold until a coordinated producer contract can prove
+complete scope; provisioned grants alone cannot enable absence settlement.
+`--ledger-target` is rejected by the settlement CLI so it cannot misrepresent
+which source was queried.
 
 Session reuse is keyed by connection settings and caller timeout (8 seconds by
 default; receipt recovery supplies its load-aware 30-second budget). Every

@@ -10,6 +10,7 @@ import { readLaunchRequestStatusFromLedger, readLaunchRequestStatusFromLedgerAsy
   readLaunchRequestSnapshotFromLedgerAsync, readLaunchRequestByIdempotencyKeyAsync,
   readLaunchRequestsForTicketSinceAsync } from '../src/session-ledger-read-adapter.mjs';
 import { createWatcherLatencyMonitor } from '../src/watcher-latency.mjs';
+import { isReclaimableTerminalAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { withLiveLaunchRetry, launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 
 // Synthetic wire examples. Real producer captures and backend scope checks
@@ -53,7 +54,7 @@ test('capacity snapshot shares one SDK read across every lease and excludes unre
   const probe = await readLaunchRequestStatusFromLedgerAsync({launchSnapshot:snapshot,launchRequestId:'root', includeRetryChain:true});
   assert.equal(probe.retryChain.length,2);
   assert.equal(calls,1);
-  assert.equal((await readLaunchRequestStatusFromLedgerAsync({launchSnapshot:snapshot,launchRequestId:'unknown'})).reason,'missing-launch-request-row');
+  assert.equal((await readLaunchRequestStatusFromLedgerAsync({launchSnapshot:snapshot,launchRequestId:'unknown'})).reason,'dispatch-read-unavailable');
 });
 test('idempotency recovery and legacy intent windows use scoped SDK selectors; lost responses do not dispatch', async () => {
   const calls=[];
@@ -63,10 +64,13 @@ test('idempotency recovery and legacy intent windows use scoped SDK selectors; l
   await readLaunchRequestsForTicketSinceAsync({ticketRef:'T-1',requestedAtOrAfter:'2026-01-01T00:00:00Z',dispatchSession});
   assert.equal(calls[2].ticket_ref,'T-1');
 });
-test('missing and foreign launch identities share one absence result',async()=>{
+test('missing and foreign launch identities cannot certify absence or reclaim terminal ownership',async()=>{
   for(const launchRequestId of ['missing','foreign']) {
     const probe=await readLaunchRequestStatusFromLedgerAsync({...options(absent),launchRequestId});
-    assert.equal(probe.reason,'missing-launch-request-row');
+    assert.equal(probe.reason,'dispatch-read-unavailable');
+    assert.equal(isReclaimableTerminalAmaCloserLease({ status: 'terminal', terminalOutcome: 'deferred', lrqId: launchRequestId }, { launchStatusProbe: probe }), false);
+    assert.equal((await readLaunchRequestByIdempotencyKeyAsync({ ...options(absent), idempotencyKey: 'key' })).ok, false);
+    assert.equal((await readLaunchRequestsForTicketSinceAsync({ ...options(absent), ticketRef: 'T-1', requestedAtOrAfter: '2026-01-01T00:00:00Z' })).ok, false);
   }
 });
 for(const invalid of [null, {}, {...capture(),complete:false}, {...capture(),status:'unavailable'}]) {
@@ -128,7 +132,7 @@ test('session budgets follow each caller; transient and authentication failures 
   let failure;
   t.mock.method(dispatchReadTransport, 'sdk', () => ({ ...sdk, connect: async config => {
     budgets.push(config.request_timeout_ms);
-    return { dispatchLookup: async () => { if (failure) throw failure; return absent; } };
+    return { dispatchLookup: async () => { if (failure) throw failure; return capture(); } };
   } }));
   const read = timeoutMs => readDispatchLaunches({}, { timeoutMs, env: { ADVERSARIAL_DISPATCH_READS_ENABLED: '1' }, connectOptions: { endpoint_url: 'synthetic://budgets' } });
   assert.equal((await read(8000)).ok, true);

@@ -258,10 +258,10 @@
     "dispatchLookupSdk": {
       "version": "0.8.0",
       "file": "vendor/agent-os-app-sdk-0.8.0.tgz",
-      "sha256": "c95d059abaae070965fe363ae90fd5f5e2e2dd67b3f45de5317e668bda2912df",
-      "integrity": "sha512-EPTEwvzXaCVNTUe6KrvYVED3T0Vc/9fB02B1tNs0G/567Fo9gCIS3VAyMPa7N41zGe0HBe0MD00SNiqRwqhldg==",
-      "releaseRevision": null,
-      "releaseStatus": "unverified; merged producer release record required before activation"
+      "sha256": "4fd689c6e80cb9b620a3715ed9fe9474425d42fb00637193939f6b1a69b16a2e",
+      "integrity": "sha512-4VBLxqzsiwykQnMRN8PgCmRyu7hww8xFj83rKRBKb8DnlE+/3gDoalahCyb679e0/auAAGeYKPy0zFaSSJgVuQ==",
+      "releaseRevision": "387fb06d5d8835e320f49388a2ebdf67f2249945",
+      "releaseStatus": "merged"
     }
   },
   "refresh": "python3 scripts/contracts/refresh.py ../agent-os",

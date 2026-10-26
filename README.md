@@ -3364,3 +3364,14 @@ Offline tracker, pipeline-health, watcher claim-loop and injected alert fixtures
 verify ownership, deadline expiry, timer resets and lost-receipt dedup. Lifecycle
 routing and existing smoke promises are unchanged; post-deploy observation uses
 natural flags and receipts, with no forced stall or alert delivery test.
+
+## Exact absence recovery (LAC-2120)
+
+The [recovery contract](docs/dispatch-absence-recovery.md) permits empty key or
+ticket evidence only with an exact, expiring operator entitlement and matching
+canonical producer proof. Ordinary filtered/partial/unreadable reads stay held.
+Existing states, locking, receipt adoption and retry accounting are unchanged.
+Focused SDK/intent tests and the producer's authenticated packaged-SDK/native
+settlement composition verify this on demand. Existing smoke promises remain
+unchanged; deployment/loaded generations and organic recovery need independent
+operator evidence. No live activation, grants or settlement are part of this PR.

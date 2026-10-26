@@ -1,4 +1,5 @@
 {
+  "dispatchAbsenceContract": "LAC-2120: exact expiring operator absence entitlement and canonical-exact-selector-absence proof permit only selector-bound empty key/ticket evidence. query.absenceProof and query.ticketQuery.absenceProof persist grant ID, selector and observed time in intent and operator audit. Filtered emptiness, malformed/unbound/partial/unreadable scope retain ownership. Existing native locks, full snapshot fences, submitter/deadline policy, receipt recovery and once-only retry refund are unchanged; no new states or smoke promises. On-demand producer HTTP -> immutable SDK 0.8/0.9 -> native settlement fixtures cover actual composition; source, loaded deployment and organic recovery are independent.",
   "version": 1,
   "entries": [
     {

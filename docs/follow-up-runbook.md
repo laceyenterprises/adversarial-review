@@ -182,10 +182,11 @@ SDK 0.8.0 filters observations by grants and cannot attest global absence.
 Empty ticket or idempotency lookups therefore return unavailable with
 `dispatch absence scope unproven`; they preserve the pending lease, dispatch
 intent and charged retry. A missing launch in a positive snapshot also retains
-ownership. Positive receipts remain eligible for ordinary recovery. Complete
+ownership. Positive receipts remain eligible for ordinary recovery. Ordinary project/repository
 grants remain a deployment prerequisite, but do not enable absence settlement.
-A coordinated producer completeness contract is required before empty reads can
-prove no launch; there is no canonical-ledger fallback.
+The LAC-2120 exact operator entitlement and selector-bound producer proof can
+qualify empty key/ticket reads; ordinary grants alone cannot. See the exact
+absence recovery contract below. There is no canonical-ledger fallback.
 
 `preReceiptReconciliation.query` records the bounded query kind, ticket,
 inclusive attempt-time lower bound, limit (one row is sufficient to refuse),
@@ -1891,3 +1892,11 @@ job's `revisionRef`, external SHAs in worker commentary cannot create publicatio
 debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.
+
+## Exact operator absence evidence (LAC-2120)
+
+See [the recovery contract](dispatch-absence-recovery.md) for the exact expiring producer
+entitlement, selector-bound proof and native audited settlement composition.
+Ordinary filtered emptiness and partial/unreadable scope stay held. Durable
+query evidence retains both absence proofs; current receipt, submitter,
+record/lease fences and once-only refund rules remain unchanged.

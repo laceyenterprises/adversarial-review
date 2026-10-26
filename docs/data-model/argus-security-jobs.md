@@ -84,7 +84,7 @@ Directory: `data/argus-security-jobs/`
 | `mergeWithheldRecovery` | object or absent | Once-only recovery marker `{headSha, reopenedAt, inputs}`. `headSha` references this job's exact head; `inputs` retains the original approved dependency evidence. Persisted before returning a completed merge-withheld job to pending, and retained across retries and later completion. |
 | `result.autoadjudication` | object or absent | Dependency-bot result metadata `{schemaVersion, decision, reason, inputs, completedAt, mergeDisposition?, mergeReasons?}`. A withheld merge records `decision: "route-for-review"`, a `merge-withheld-*` reason, and the daemon's disposition and reasons. |
 | `routedForReview` | object or absent | ARGUSDRAIN-01. Set when the dependency-bot auto-adjudicator declines to approve a bump on its own (for example semver-major): `{schemaVersion, source: "dependency-bot-autoadjudication", decision: "route-for-review", reason, inputs, routedAt}`. The job stays in `pending/` and the drain claims it without waiting out the bot-adjudication grace. Legacy completions reopened by backlog retirement also carry `requeuedFrom: "legacy-route-for-review-completion"` and `requeuedAt`. |
-| `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review of this exact `headSha`, reused within its max age so a retry or deferral does not pay for a second model call; cleared on completion or failure). |
+| `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review bound to `headSha` and `evidenceFingerprint`, with observed `baseSha` retained for audit, reused within its max age only after re-reading matching deterministic evidence; cleared on completion or failure). |
 | `priorResult` | object or absent | The `result` a job carried before it was moved back to `pending/` (a revived `superseded` retirement or a reopened legacy `route-for-review` completion), kept for the record. |
 | `revivedAt` | string or absent | ISO time the route revived a `superseded` job whose PR is open at the same head again. |
 
@@ -176,3 +176,39 @@ erDiagram
   `pending/`.
 - The files contain no secrets. They contain PR identity, exact head SHA,
   security trigger reasons, timestamps, and review result or failure metadata.
+
+## Artifact and cache binding (LAC-2117)
+
+`drain.cachedReview` additionally carries `baseSha`, `evidenceFingerprint`,
+`artifactBindings` and `verifiedArtifactSources`. The SHA-256 fingerprint covers
+contract generation 3, repo/PR/head/diff, deterministic evidence sections, rubric
+findings/results, verified entries and artifact bindings. Raw base SHA, CI,
+best-effort upstream release notes and local-checkout usage text are excluded;
+base-dependent lockfile and security facts remain bound. Each binding contains
+manifest `dir` and per-lock-entry `artifactEvidence` with base/head `record`,
+authoritative `producer` receipt (`merged`, `mergeCommit`, `baseRef`,
+`defaultBranch`), relative materialized filenames and
+`consumerSha256`/`producerSha256`. Filenames are audit references, never later
+read as durable authority. Reuse re-materializes and verifies the current facts.
+Proof requires the exact merged commit and a nonempty `baseRef` matching the
+producer repository's current default branch; the head cannot change producer
+repository. Missing/invalid inline artifacts supply no proof. Missing or older
+fingerprints, changed proof/head/artifact/rubric/security facts or age expiry
+rerun model review; base SHA, CI and best-effort context alone preserve it.
+
+New drain results retain `headSha`, `baseSha`, `evidenceFingerprint` and
+`artifactBindings`. Schema version remains 1: fields are additive, legacy
+completed results keep their prior interpretation and are not rewritten. Queue
+states and transition policy remain unchanged. These fields do not waive
+required checks, cross-model convergence or independent reserved-high findings.
+
+For explicit model `non_registry_source` / `source_protocol` claims only,
+`packagePath` identifies the lock entry and `path` the lockfile. Exact verified
+provenance changes that claim to an explanatory low; `originalFinding` retains
+its normalized source, category, severity and text, with
+`evidenceDowngradeReason` describing the factual reconciliation. Ambiguous
+claims and all other reserved categories retain their own authority. The
+visible summary derives from composed findings, never the raw model verdict.
+
+The source record contract and rollout are in
+[the provenance runbook](../RUNBOOK-argus-artifact-provenance.md).

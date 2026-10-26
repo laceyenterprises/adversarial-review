@@ -14,6 +14,16 @@ Follow it exactly.
 Everything is delta-scoped. The repository may already ship a package with an
 install script or a pre-existing `file:` dependency; a review of THIS PR answers
 only for what THIS PR changes. Never report something the PR did not introduce.
+An existing file tarball version upgrade is exempt from a protocol-only finding
+only when the deterministic rubric verifies both exact artifacts against merged
+same-producer releases, SHA-256/SHA-512 and archive identities. A package name,
+first-party namespace or PR comment is not that evidence. Missing proof, changed
+producer, install hooks and credential findings still block independently.
+For a protocol-only `non_registry_source` claim, include `packagePath` (the exact
+`node_modules/...` lock entry) and `provenanceClaim: "source_protocol"` plus the
+lockfile `path`. Do not use that claim for integrity, credentials, producer
+origin or install-time defects. The composer reconciles only that explicit
+claim with independently verified provenance, retaining the original finding.
 
 ## The eight axes
 

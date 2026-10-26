@@ -944,6 +944,16 @@
       "recordContract": {
         "primaryKey": "jobId",
         "uniqueIdentity": ["repo", "prNumber", "headSha"],
+        "artifactReviewBinding": {
+          "cachedReviewFields": ["baseSha", "evidenceFingerprint", "artifactBindings", "verifiedArtifactSources"],
+          "resultFields": ["headSha", "baseSha", "evidenceFingerprint", "artifactBindings"],
+          "sourceRecord": "vendor/argus-artifacts.json",
+          "cacheContractVersion": 3,
+          "producerReceiptFields": ["merged", "mergeCommit", "baseRef", "defaultBranch"],
+          "producerAuthority": "exact merged commit into current default branch; head producer repository matches base",
+          "fingerprintExclusions": ["baseSha", "CI", "upstream release notes", "local-checkout usage text"],
+          "legacyPolicy": "fingerprint-less and older-generation caches rerun; completed results retained"
+        },
         "lastAutoadjudicationAttempt": {
           "fields": ["schemaVersion", "decision", "reason", "inputs", "attemptedAt", "deferrals"],
           "optionalFields": ["notBefore", "mergeDisposition", "mergeReason", "mergeReasons"],

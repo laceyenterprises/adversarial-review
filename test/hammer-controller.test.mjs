@@ -41,9 +41,10 @@ function recordEnvironment(dir, value = '1', launchRequestId = 'lrq_controller-t
 function fixture(t, script, { realCensus = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   recordEnvironment(dir);
-  const env = { ...process.env, HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
+  const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
     HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_controller-test', AGENT_OS_WORKER_LRQ_ID: 'lrq_controller-test' };
   delete env.LAUNCH_REQUEST_ID;
+  for (const key of ['HAM_CONTROLLER_RECORD', 'HAM_CONTROLLER_TOKEN', 'HAM_CONTROLLER_PID', 'HAM_CONTROLLER_FD']) delete env[key];
   const bin = join(dir, 'bin'); mkdirSync(bin);
   const ps = join(dir, 'group-probe.mjs');
   writeFileSync(ps, `import {readFileSync} from 'node:fs';

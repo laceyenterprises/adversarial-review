@@ -36,7 +36,7 @@ The controller reads through the bounded SDK dispatch lookup adapter and
 producer status vocabulary every 10 seconds (`LAUNCH_POLL_MS`, never load
 scaled), one read at a time and without blocking the one-second process census.
 Each read uses the adapter's load-aware timeout and a bounded caller abort
-signal. SDK 0.8.0 may retain its HTTP request until its transport deadline after
+signal. SDK 0.9.0 may retain its HTTP request until its transport deadline after
 caller cancellation. Dispatch reads require `ADVERSARIAL_DISPATCH_READS_ENABLED=1`
 in the controller environment after the verified producer release and grants are live. A readable terminal, parked or foreign row stops at once (`launch-ended`).
 A failed read (timeout, spawn error, unreadable target) is recorded and the

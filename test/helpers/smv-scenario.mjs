@@ -709,7 +709,7 @@ if (scenario === 'clean') {
   const held = await evaluateHammerStopHold({ ...retrySubject, hqRoot: rootDir, sharedNextAction: wakeShared,
     prMetadata: { headSha }, now: new Date().toISOString(),
     readAuditImpl: () => ({ attempts: [{ head: headSha, path: 'hammer', outcome: 'failed-without-merge',
-      reason: 'synthetic-stop', startedAt: new Date().toISOString() }] }),
+      reason: 'blocking-findings-present', startedAt: new Date().toISOString() }] }),
     deliverAlertImpl: async (_text, options) => { stopPage = options; }, logger: quiet });
   assert.equal(held.action, 'hold');
   assert.equal(held.nextActionShared.decision.actor, 'closure-recovery');

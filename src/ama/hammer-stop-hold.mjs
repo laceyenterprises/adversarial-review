@@ -168,7 +168,7 @@ function stopReasons(attempt) {
   ])].sort();
 }
 
-function isLegacyReviewHandoffStop(stop) {
+export function isLegacyReviewHandoffStop(stop) {
   return LEGACY_REVIEW_HANDOFF_STOPS.has(stop?.predicate || stop?.reason)
     && stopReasons(stop).every(reason => LEGACY_REVIEW_HANDOFF_STOPS.has(reason));
 }

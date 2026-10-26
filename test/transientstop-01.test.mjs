@@ -255,7 +255,7 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
   updateAmaCloserDispatchRecord(args.rootDir, identity, () => ({ ...identity,
     workerClass: 'hammer', state: 'dispatched', launchRequestId: 'fixture-prior',
     reviewedSha: head, lastObservedStatus: 'running', dispatchedAt: at(0), lastAttemptedAt: at(0) }));
-  assert.equal((await closer()).reason, 'hammer-stop-awaiting-input-change');
+  assert.equal((await closer()).reason, 'hammer-stop-transient-backoff');
   assert.equal(pages.length, 1);
   for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
     headSha: head, fingerprint: 'unchanged-review', now: at(0), logger,

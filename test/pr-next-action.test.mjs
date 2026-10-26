@@ -64,10 +64,11 @@ test('HAMLANEWAIT-01: repeated lane-busy audits leave next action retryable; a r
     launches: { closer: { headSha: HEAD, status: 'failed', outcome: 'no-merge', retryable: true } } }));
   assert.equal(retry.row, 'R08-retry');
   assert.equal(retry.actor, 'hammer');
-  attempts.push({ outcome: 'failed-without-merge', reason: 'permanent-merge-rejection', head: HEAD,
+  attempts.push({ outcome: 'failed-without-merge', reason: 'blocking-findings-present', head: HEAD,
     startedAt: '2026-01-01T00:00:03Z', attemptPhase: 'hammer-gh-pr-merge' });
   const stop = readStop();
-  assert.equal(stop.refusal.reasons[0], 'permanent-merge-rejection');
+  assert.equal(stop.deterministic, true);
+  assert.equal(stop.refusal.reasons[0], 'blocking-findings-present');
   const held = nextAction(snap({ controls: { stop: { deterministic: true, headSha: HEAD,
     recordedAt: stop.recordedAt, fingerprint: stop.refusal.key } } }));
   assert.equal(held.row, 'R07-stop');

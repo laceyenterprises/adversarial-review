@@ -2532,7 +2532,9 @@ failures use a durable five-minute transient backoff (`hammer-stop-transient-bac
 Changed inputs may release sooner. Each new stop gets its own window, while
 repeated polls retain a released stop. Legacy transient-only holds release once
 on upgrade with `transient-stop-upgrade`; release audits name reasons and stop
-keys. Next-action carries the transient classification through both projections.
+keys. Next-action carries the transient classification through both projections. Legacy
+review-handoff stops still route to Hammer for release, without opening another
+ordinary remediation round.
 Per-head, series and lifetime caps and terminal-PR guards still apply; no
 executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
 for the vocabulary audit and migration shape.
